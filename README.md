@@ -25,7 +25,10 @@ Current features:
   (Commodities, Harvestables) only — crafted gear (weapons, armor, ship components) has real value
   that depends on crafting material quality, which UEX only ever exposes as free text a seller
   typed into a listing's title, never as structured data, making price comparison for those
-  categories fundamentally unreliable rather than just noisy
+  categories fundamentally unreliable rather than just noisy. Even within those categories, a
+  listing is only ever compared against its own reported quality tier's average (never a
+  different tier substituted in) - matched via `quality_tier` (a listing without a reported
+  quality is skipped, not guessed at)
 
 ### Multi-user support
 
