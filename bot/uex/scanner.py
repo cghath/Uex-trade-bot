@@ -21,6 +21,15 @@ from bot.uex.marketplace import parse_listing_quality, parse_uex_number
 
 SELL_OPERATION = "sell"
 
+# Verified against live data: a rarely-traded item's "30-day average" can be built from
+# just 1-2 historical listings (see build_fair_price_index's docstring) - one outlier
+# listing (a troll price, a typo, a "make me an offer" placeholder) then dominates the
+# average outright, making it useless as a "fair price" baseline. Requiring a minimum
+# sample size filters those out; 3 is small enough that a real, moderately-traded item
+# still qualifies, but large enough that a single outlier can no longer single-handedly
+# set the average.
+MIN_LISTINGS_FOR_FAIR_PRICE = 3
+
 
 @dataclass
 class FairPrice:
@@ -66,6 +75,11 @@ def build_fair_price_index(average_rows: list[dict]) -> dict[tuple[int, str, str
     legitimate market data (not scanner noise), and comparing every listing against the
     most conservative baseline available means a listing has to undercut even the
     cheapest legitimate tier to be flagged - erring toward fewer false "steal" positives.
+
+    A row whose listings_count is below MIN_LISTINGS_FOR_FAIR_PRICE is skipped entirely,
+    not just deprioritized - see that constant's comment for why a thin sample size makes
+    an average untrustworthy as a baseline, regardless of how it compares numerically to
+    other tiers.
     """
     fair_prices: dict[tuple[int, str, str], FairPrice] = {}
     for row in average_rows:
@@ -73,7 +87,10 @@ def build_fair_price_index(average_rows: list[dict]) -> dict[tuple[int, str, str
             continue
         id_item = parse_uex_number(row.get("id_item"))
         price = parse_uex_number(row.get("price_avg_month"))
+        listings_count = parse_uex_number(row.get("listings_count"))
         if id_item is None or price is None or price <= 0:
+            continue
+        if listings_count is None or listings_count < MIN_LISTINGS_FOR_FAIR_PRICE:
             continue
         currency = row.get("currency") or "UEC"
         unit = row.get("unit") or "unit"

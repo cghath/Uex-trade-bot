@@ -1,7 +1,7 @@
 """Tests for the Undervalued Scanner's pure matching logic in bot/uex/scanner.py."""
 from __future__ import annotations
 
-from bot.uex.scanner import build_fair_price_index, find_steals
+from bot.uex.scanner import MIN_LISTINGS_FOR_FAIR_PRICE, build_fair_price_index, find_steals
 
 KEY = (42, "UEC", "unit")
 
@@ -16,6 +16,7 @@ def _average_row(**overrides) -> dict:
         "quality_tier": 0,
         "currency": "UEC",
         "unit": "unit",
+        "listings_count": 5,  # comfortably above MIN_LISTINGS_FOR_FAIR_PRICE by default
         "price_avg": "1000",
         "price_avg_week": "1000",
         "price_avg_month": "1000",
@@ -70,6 +71,25 @@ def test_build_fair_price_index_keeps_currencies_and_units_separate():
     assert fair_prices[(42, "UEC", "unit")].price_avg_month == 1000.0
     assert fair_prices[(42, "WIF", "unit")].price_avg_month == 5.0
     assert fair_prices[(42, "UEC", "crate")].price_avg_month == 50.0
+
+
+def test_build_fair_price_index_excludes_rows_below_min_listings():
+    """Regression test: a real live scan flagged 'Novikov Backpack Halcyon' as 94% off -
+    its averages row had listings_count=2, with the average almost certainly dominated
+    by one outlier-priced listing. Thin-sample averages must not be trusted as a
+    baseline, however low their price_avg_month is."""
+    assert MIN_LISTINGS_FOR_FAIR_PRICE >= 2  # sanity-check the constant hasn't regressed to 1/0
+    thin = _average_row(price_avg_month="1", listings_count=MIN_LISTINGS_FOR_FAIR_PRICE - 1)
+    assert build_fair_price_index([thin]) == {}
+
+    well_supported = _average_row(price_avg_month="1000", listings_count=MIN_LISTINGS_FOR_FAIR_PRICE)
+    assert build_fair_price_index([well_supported])[KEY].price_avg_month == 1000.0
+
+
+def test_build_fair_price_index_treats_missing_listings_count_as_untrustworthy():
+    row = _average_row(price_avg_month="1")
+    del row["listings_count"]
+    assert build_fair_price_index([row]) == {}
 
 
 def test_build_fair_price_index_ignores_buy_side_rows():
