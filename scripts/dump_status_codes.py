@@ -2,9 +2,10 @@
 sell side) so we can see exactly what "Out of Stock" / "Maximum" / etc. mean, instead of
 inferring it from public docs alone.
 
-Run this from your uex-trading-bot folder with the venv active, same as the bot itself:
+Run this from the repo root with the venv active, same as the bot itself (the -m form
+keeps the repo root on the import path so `bot.*` imports resolve):
 
-    python dump_status_codes.py
+    python -m scripts.dump_status_codes
 
 It uses your existing .env (same UEX_APP_TOKEN the bot already runs with) - read-only, no
 writes, doesn't touch Discord at all. Safe to run any time, including while the bot is running.

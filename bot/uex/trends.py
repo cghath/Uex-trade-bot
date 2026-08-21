@@ -169,7 +169,7 @@ def rank_top_scored_routes(entries: list[ScoredRouteEntry], limit: int = 10) -> 
 
 # UEX's own /commodities_status defines sell-side code 7 (86-100% inventory band) as
 # "Maximum Inventory (No Demand)" - confirmed by directly querying the live endpoint
-# (see dump_status_codes.py) and cross-checked against real /commodities_prices rows: every
+# (see scripts/dump_status_codes.py) and cross-checked against real /commodities_prices rows: every
 # terminal actively paying for a commodity was sitting at the LOW end of this scale (code 1,
 # "Out of Stock (Empty)" - i.e. the terminal's own stock is depleted, so it wants to buy),
 # while terminals not buying at all showed price 0. The sell side runs in the opposite

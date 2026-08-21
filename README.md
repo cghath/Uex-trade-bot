@@ -174,22 +174,40 @@ code) so everyone's already-linked UEX accounts keep working — see "Security n
 ```
 bot/
   main.py            entrypoint, bot setup, cog loading, slash command sync
-  config.py           .env loading and validation
+  config.py          .env loading and validation
+  discord_ui.py      shared Discord UI helpers (embeds, pagination)
+  sell_list.py       pure input parsing/validation for /items-to-sell (unit tested)
   uex/
-    client.py         async UEX API 2.0 client (auth, caching, rate-limit handling)
-    trading.py         buy/sell/route ranking helpers (fallback when /commodities_routes lacks data)
-    trends.py           trade-volume + price-mover aggregation (pure functions, unit tested)
-    charts.py            matplotlib price-history chart rendering
+    client.py        async UEX API 2.0 client (auth, caching, rate-limit handling)
+    trading.py       buy/sell/route ranking helpers (fallback when /commodities_routes lacks data)
+    trends.py        trade-volume + price-mover aggregation (pure functions, unit tested)
+    charts.py        matplotlib price-history chart rendering
+    marketplace.py   Marketplace listings + 30-day rolling price averages
+    ships.py         ship data lookups
+    stock_alerts.py  terminal stock-level change detection
+    leaderboard.py   UEX leaderboard fetching
+    status.py        /commodities_status code definitions
     exceptions.py
   db/
-    database.py        SQLite schema + queries (aiosqlite)
-    crypto.py            Fernet key management for encrypting per-user secret keys
+    database.py      SQLite schema + queries (aiosqlite)
+    crypto.py        Fernet key management for encrypting per-user secret keys
   cogs/
-    account.py           /link-uex-account (modal), /unlink-uex-account, /uex-account-status
-    prices.py            /price, /best-route
+    account.py            /link-uex-account (modal), /unlink-uex-account, /uex-account-status
+    prices.py             /price, /best-route
     alerts.py             /alert-add, /alert-list, /alert-remove + background poller
     trades.py             /trade-log-add, /trade-log, /uex-trades
-    trends.py              /trending, /movers, /commodity-history + background trending refresh
+    trends.py             /trending, /movers, /commodity-history + background trending refresh
+    marketplace.py        /marketplace-average and Marketplace lookups
+    marketplace_alerts.py Marketplace listing alerts + background poller
+    sell_list.py          /items-to-sell, /items-to-sell-list, /items-to-sell-remove
+    stock_alerts.py       terminal stock alerts + background poller
+    ships.py              ship info commands
+    digest.py             scheduled guild digest posts
+    diagnostics.py        bot health/diagnostic commands
+    help.py               /help
+scripts/
+  dump_status_codes.py    one-off diagnostic: dump UEX /commodities_status code definitions
+tests/                    pytest suite (pure-logic helpers)
 ```
 
 ## Rate limits & caching
