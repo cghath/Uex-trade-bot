@@ -32,6 +32,7 @@ INITIAL_COGS = (
     "bot.cogs.ships",
     "bot.cogs.digest",
     "bot.cogs.diagnostics",
+    "bot.cogs.scanner",
     "bot.cogs.help",
 )
 

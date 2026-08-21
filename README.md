@@ -18,6 +18,10 @@ Current features:
 - `/link-uex-account`, `/unlink-uex-account`, `/uex-account-status` — each Discord user links their
   own UEX account privately (via a Discord modal, never a visible slash command option)
 - `/uex-trades` — pulls the *caller's own* logged trade history straight from UEX, using their linked account
+- `/set-scanner-channel`, `/scanner-status`, `/scan-now` — the Undervalued Scanner: finds UEX
+  Marketplace sell listings priced well below their item's own 30-day average (a "steal"; how far
+  below is configurable via `SCANNER_STEAL_THRESHOLD`, default 20%) and posts proactive alerts to
+  your chosen channel (checked every 15 min), or scan on demand
 
 ### Multi-user support
 
@@ -183,6 +187,7 @@ bot/
     trends.py        trade-volume + price-mover aggregation (pure functions, unit tested)
     charts.py        matplotlib price-history chart rendering
     marketplace.py   Marketplace listings + 30-day rolling price averages
+    scanner.py       Undervalued Scanner matching logic (pure functions, unit tested)
     ships.py         ship data lookups
     stock_alerts.py  terminal stock-level change detection
     leaderboard.py   UEX leaderboard fetching
@@ -199,6 +204,7 @@ bot/
     trends.py             /trending, /movers, /commodity-history + background trending refresh
     marketplace.py        /marketplace-average and Marketplace lookups
     marketplace_alerts.py Marketplace listing alerts + background poller
+    scanner.py             /set-scanner-channel, /scanner-status, /scan-now + background poller
     sell_list.py          /items-to-sell, /items-to-sell-list, /items-to-sell-remove
     stock_alerts.py       terminal stock alerts + background poller
     ships.py              ship info commands
