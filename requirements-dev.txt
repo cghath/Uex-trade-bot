@@ -1,0 +1,3 @@
+# Dev/test-only dependencies - not needed to run the bot on the Pi.
+# Usage: pip install -r requirements-dev.txt && python -m pytest
+pytest>=8.0
