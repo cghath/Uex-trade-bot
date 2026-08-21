@@ -21,6 +21,8 @@ the entry. It's a post-save prompt rather than a third per-item command option b
 """
 from __future__ import annotations
 
+import logging
+
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -29,7 +31,9 @@ from bot.cogs.marketplace import QUALITY_TIER_LABELS, traded_item_autocomplete
 from bot.discord_ui import send_alert_remove_picker
 from bot.sell_list import QUALITY_STEPS, pair_sell_list_inputs, quality_to_tier
 from bot.uex.exceptions import UexApiError
-from bot.uex.marketplace import find_item_id_by_name
+from bot.uex.marketplace import extract_quality_item_ids, find_item_id_by_name
+
+logger = logging.getLogger("uexbot.sell_list")
 
 # An asking price of at least 1 aUEC; Discord enforces the floor client-side via Range.
 AskingPrice = app_commands.Range[float, 1]
@@ -174,20 +178,23 @@ class SellList(commands.Cog):
 
         await interaction.response.defer(ephemeral=True)
 
-        # Best-effort catalog id resolution (for future joins against UEX price data) -
-        # a name that doesn't resolve is still stored as typed, just without an id.
+        # Best-effort catalog id resolution - a name that doesn't resolve is still stored
+        # as typed, just without an id. The traded-items index is checked FIRST: the
+        # autocomplete suggested its item_name values verbatim, so it's the lookup that
+        # can't miss on spelling, while the /items catalog (the fallback, for items the
+        # index hasn't seen) may spell the same item differently.
         try:
             items = await self.bot.uex.get_items()
         except UexApiError:
             items = []
-        payload = [
-            {
-                "item_name": entry.item_name,
-                "asking_price": entry.asking_price,
-                "id_item": find_item_id_by_name(items, entry.item_name),
-            }
-            for entry in entries
-        ]
+        payload = []
+        for entry in entries:
+            id_item = await self.bot.db.get_index_item_id(entry.item_name)
+            if id_item is None:
+                id_item = find_item_id_by_name(items, entry.item_name)
+            payload.append(
+                {"item_name": entry.item_name, "asking_price": entry.asking_price, "id_item": id_item}
+            )
 
         added, updated = await self.bot.db.upsert_sell_list_items(interaction.user.id, payload)
         price_by_name = {entry.item_name: entry.asking_price for entry in entries}
@@ -213,13 +220,29 @@ class SellList(commands.Cog):
             "/items-to-sell-list to view · /items-to-sell-remove to remove"
         )
 
-        # Items known to have an in-game quality (per the index's has_quality flag, learned
-        # hourly from /marketplace_prices_averages_all) get a quality picker attached to the
-        # confirmation - only those items, so quality-less gear never prompts. An item that
-        # didn't resolve to a catalog id, or isn't in the index yet, just isn't asked.
-        flagged_ids = await self.bot.db.get_quality_flagged_item_ids(
-            [p["id_item"] for p in payload if p["id_item"] is not None]
-        )
+        # Items known to have an in-game quality get a quality picker attached to the
+        # confirmation - only those, so quality-less gear never prompts. Two-step check:
+        # the index's has_quality flag first (free), then a live /marketplace_prices_averages
+        # lookup for any resolved id the flag doesn't cover - one call for all of them
+        # (id_item takes up to 10 comma-separated ids, exactly this command's slot cap),
+        # cached an hour client-side. The live path is what makes the prompt work right
+        # after a deploy, before the hourly snapshot has ever flagged anything; whatever it
+        # learns is sticky-marked so the next check is free again.
+        resolved_ids = [p["id_item"] for p in payload if p["id_item"] is not None]
+        flagged_ids = await self.bot.db.get_quality_flagged_item_ids(resolved_ids)
+        unflagged_ids = [id_item for id_item in resolved_ids if id_item not in flagged_ids]
+        if unflagged_ids:
+            try:
+                average_rows = await self.bot.uex.get_marketplace_prices_averages(
+                    id_item=",".join(str(id_item) for id_item in unflagged_ids)
+                )
+            except UexApiError as exc:
+                logger.warning("Live quality check failed for ids %s: %s", unflagged_ids, exc)
+                average_rows = []
+            live_quality_ids = extract_quality_item_ids(average_rows)
+            if live_quality_ids:
+                await self.bot.db.mark_items_have_quality(sorted(live_quality_ids))
+                flagged_ids |= live_quality_ids
         quality_items = [p["item_name"] for p in payload if p["id_item"] in flagged_ids]
 
         if not quality_items:

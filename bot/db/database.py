@@ -549,6 +549,27 @@ class Database:
             )
             await db.commit()
 
+    async def get_index_item_id(self, item_name: str) -> int | None:
+        """Resolve a name to a catalog id via the traded-items index itself. This is the
+        authoritative reverse lookup for anything the autocomplete suggested, since those
+        suggestions ARE this table's item_name values verbatim - whereas the /items catalog
+        can spell the same item differently and miss. Case-insensitive."""
+        async with self.connect() as db:
+            cursor = await db.execute(
+                "SELECT id_item FROM marketplace_item_activity WHERE item_name = ? COLLATE NOCASE",
+                (item_name,),
+            )
+            row = await cursor.fetchone()
+            return row["id_item"] if row else None
+
+    async def count_quality_flagged_items(self) -> int:
+        async with self.connect() as db:
+            cursor = await db.execute(
+                "SELECT COUNT(*) AS c FROM marketplace_item_activity WHERE has_quality = 1"
+            )
+            row = await cursor.fetchone()
+            return row["c"] if row else 0
+
     async def get_quality_flagged_item_ids(self, id_items: list[int]) -> set[int]:
         """Which of these catalog ids are known quality-bearing items. Callers pass the
         handful of ids from one /items-to-sell submission, not bulk lists."""

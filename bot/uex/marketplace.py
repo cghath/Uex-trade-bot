@@ -192,6 +192,10 @@ def extract_quality_item_ids(average_rows: list[dict]) -> set[int]:
     Marketplace endpoints string-type numbers (see parse_uex_number)."""
     ids: set[int] = set()
     for row in average_rows:
+        if not isinstance(row, dict):
+            # An unexpected payload shape (the _all variant is undocumented territory) must
+            # degrade to "no flags learned", never crash the hourly snapshot loop.
+            continue
         id_item = parse_uex_number(row.get("id_item"))
         tier = parse_uex_number(row.get("quality_tier"))
         if id_item is None or tier is None:

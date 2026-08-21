@@ -57,6 +57,12 @@ def test_items_with_real_tiers_are_flagged_and_tier_zero_is_not():
     assert extract_quality_item_ids(rows) == {2, 3}
 
 
+def test_extract_tolerates_non_dict_rows():
+    # A surprise payload shape (e.g. a dict iterated into string keys) must yield no
+    # flags, not an AttributeError that would kill the hourly snapshot loop.
+    assert extract_quality_item_ids(["status", 42, None, {"id_item": 5, "quality_tier": 3}]) == {5}
+
+
 # -- persistence --------------------------------------------------------------
 
 
@@ -88,6 +94,22 @@ def test_quality_flags_are_sticky_and_queryable(tmp_path):
         # Flagging an id with no index row is a quiet no-op, not an error.
         await db.mark_items_have_quality([999])
         assert await db.get_quality_flagged_item_ids([999]) == set()
+
+        assert await db.count_quality_flagged_items() == 1
+
+    asyncio.run(run())
+
+
+def test_index_name_to_id_lookup_is_case_insensitive(tmp_path):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await db.upsert_marketplace_item_activity(
+            [{"id_item": 10, "item_name": "Laranite Raw", "negotiations_count": 1, "listings_count": 1}]
+        )
+        assert await db.get_index_item_id("laranite raw") == 10
+        assert await db.get_index_item_id("Laranite Raw") == 10
+        assert await db.get_index_item_id("No Such Item") is None
 
     asyncio.run(run())
 

@@ -251,16 +251,20 @@ class Marketplace(commands.Cog):
         # Second half of the snapshot: learn which indexed items have an in-game quality at
         # all, from the bulk averages dump (rows are per quality_tier - any tier >= 1 row
         # means the item is quality-bearing). Runs after the activity upsert so items new in
-        # this very snapshot get flagged in the same pass. Failure here degrades gracefully:
-        # the flag just stays stale until the next hourly run.
+        # this very snapshot get flagged in the same pass. Any failure here - API error or a
+        # surprise in the undocumented _all payload shape - must degrade to "flags stay
+        # stale until the next hourly run", never kill this task loop (an uncaught exception
+        # would stop ALL future snapshots, autocomplete index included).
+        quality_ids: set[int] = set()
         try:
             average_rows = await self.bot.uex.get_marketplace_prices_averages_all()
+            quality_ids = extract_quality_item_ids(average_rows)
+            if quality_ids:
+                await self.bot.db.mark_items_have_quality(sorted(quality_ids))
         except UexApiError as exc:
             logger.warning("Failed to refresh marketplace quality flags: %s", exc)
-            average_rows = []
-        quality_ids = extract_quality_item_ids(average_rows)
-        if quality_ids:
-            await self.bot.db.mark_items_have_quality(sorted(quality_ids))
+        except Exception:
+            logger.exception("Unexpected error refreshing marketplace quality flags")
 
         total = await self.bot.db.count_marketplace_item_activity()
         logger.info(
@@ -285,10 +289,13 @@ class Marketplace(commands.Cog):
                 ephemeral=True,
             )
             return
+        quality_count = await self.bot.db.count_quality_flagged_items()
         await interaction.response.send_message(
             f"Tracking **{count}** Marketplace items observed in UEX's trending activity so far "
             f"(grows over time - UEX only exposes ~100 at once, refreshed every {ITEM_ACTIVITY_SNAPSHOT_HOURS}h). "
-            "This powers autocomplete on /marketplace-search, /marketplace-alert-add, and /marketplace-post.",
+            f"**{quality_count}** of them are known to have an in-game quality (ores etc) - that's what "
+            "makes /items-to-sell offer a quality picker. "
+            "This index powers autocomplete on /marketplace-search, /marketplace-alert-add, and /marketplace-post.",
             ephemeral=True,
         )
 
