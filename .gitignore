@@ -1,0 +1,16 @@
+# Secrets & local config — never commit (.env holds the Discord/UEX tokens)
+.env
+
+# Runtime data: SQLite DB and the Fernet encryption key. Sensitive — keep local only.
+data/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+.venv/
+venv/
+
+# Tool caches
+.pytest_cache/
