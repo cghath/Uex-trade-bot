@@ -167,6 +167,25 @@ CREATE TABLE IF NOT EXISTS stock_alert_terminal_state (
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (alert_id, id_terminal)
 );
+
+-- Undervalued Scanner: one implicit watch per user (not multiple named alerts like
+-- marketplace_alerts) - the single channel where that user wants proactive "steal"
+-- notifications posted. Setting a new channel just replaces the old one.
+CREATE TABLE IF NOT EXISTS user_scanner_channel (
+    user_id INTEGER PRIMARY KEY,
+    channel_id INTEGER NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Per-user dedup for scanner notifications, so a listing that's still a "steal" on the
+-- next poll doesn't notify the same user again. Keyed on user_id directly (not an
+-- alert_id like marketplace_alert_seen_listings) since there's only one watch per user.
+CREATE TABLE IF NOT EXISTS scanner_seen_listings (
+    user_id INTEGER NOT NULL,
+    listing_id INTEGER NOT NULL,
+    seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (user_id, listing_id)
+);
 """
 
 
@@ -704,5 +723,50 @@ class Database:
                        last_seen_scu = excluded.last_seen_scu,
                        updated_at = datetime('now')""",
                 (alert_id, id_terminal, int(was_available), last_seen_scu),
+            )
+            await db.commit()
+
+    # -- undervalued scanner ---------------------------------------------------
+
+    async def set_scanner_channel(self, user_id: int, channel_id: int) -> None:
+        async with self.connect() as db:
+            await db.execute(
+                """INSERT INTO user_scanner_channel (user_id, channel_id, updated_at)
+                   VALUES (?, ?, datetime('now'))
+                   ON CONFLICT(user_id) DO UPDATE SET
+                       channel_id = excluded.channel_id,
+                       updated_at = datetime('now')""",
+                (user_id, channel_id),
+            )
+            await db.commit()
+
+    async def get_scanner_channel(self, user_id: int) -> int | None:
+        async with self.connect() as db:
+            cursor = await db.execute(
+                "SELECT channel_id FROM user_scanner_channel WHERE user_id = ?", (user_id,)
+            )
+            row = await cursor.fetchone()
+            return row["channel_id"] if row else None
+
+    async def list_scanner_watchers(self) -> list[dict[str, Any]]:
+        """Every user with a scanner channel configured - polled by the background loop."""
+        async with self.connect() as db:
+            cursor = await db.execute("SELECT user_id, channel_id FROM user_scanner_channel")
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    async def get_seen_scanner_listing_ids(self, user_id: int) -> set[int]:
+        async with self.connect() as db:
+            cursor = await db.execute(
+                "SELECT listing_id FROM scanner_seen_listings WHERE user_id = ?", (user_id,)
+            )
+            rows = await cursor.fetchall()
+            return {row["listing_id"] for row in rows}
+
+    async def mark_scanner_listing_seen(self, user_id: int, listing_id: int) -> None:
+        async with self.connect() as db:
+            await db.execute(
+                "INSERT OR IGNORE INTO scanner_seen_listings (user_id, listing_id) VALUES (?, ?)",
+                (user_id, listing_id),
             )
             await db.commit()

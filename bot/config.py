@@ -23,6 +23,7 @@ class Config:
     uex_app_token: str
     uex_secret_key: str | None
     database_path: Path
+    scanner_steal_threshold: float
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -49,12 +50,21 @@ class Config:
         if not db_path.is_absolute():
             db_path = _PROJECT_ROOT / db_path
 
+        # Undervalued Scanner (bot/cogs/scanner.py): how far below an item's 30-day average
+        # a sell listing must be priced to count as a "steal", e.g. 0.20 = 20% off.
+        threshold_raw = os.getenv("SCANNER_STEAL_THRESHOLD", "0.20").strip()
+        try:
+            scanner_steal_threshold = float(threshold_raw)
+        except ValueError:
+            raise ConfigError(f"SCANNER_STEAL_THRESHOLD must be a number (e.g. 0.20), got '{threshold_raw}'.")
+
         return cls(
             discord_bot_token=token,
             discord_dev_guild_id=guild_id,
             uex_app_token=uex_app_token,
             uex_secret_key=secret_key,
             database_path=db_path,
+            scanner_steal_threshold=scanner_steal_threshold,
         )
 
 
