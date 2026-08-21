@@ -12,6 +12,12 @@ offering an unusually *high* price would be the mirror case - a good deal for a 
 not what this feature is about), and averages are themselves operation-scoped rows (see
 bot/uex/marketplace.py: parse_marketplace_average_rows) - mixing sides would compare a
 sell price against a buy-side average or vice versa, never a meaningful comparison.
+
+Also scoped to a small allowlist of Marketplace categories (see
+ALLOWED_MARKETPLACE_CATEGORY_IDS below) - most categories are player-crafted gear whose
+real value depends on crafting material quality that UEX doesn't track anywhere in a
+structured, comparable way, making price comparison for them fundamentally unreliable,
+not just noisy.
 """
 from __future__ import annotations
 
@@ -29,6 +35,26 @@ SELL_OPERATION = "sell"
 # still qualifies, but large enough that a single outlier can no longer single-handedly
 # set the average.
 MIN_LISTINGS_FOR_FAIR_PRICE = 3
+
+# Verified against live data: most Marketplace categories (weapons, armor, ship
+# components) are player-crafted, and the crafting material's quality meaningfully
+# changes an item's real stats (damage %, armor mitigation, etc.) - but that quality is
+# only ever communicated as free text in a listing's title/description ("Q970",
+# "-44% dmg", "CRAFTED"), never a structured field UEX exposes. Neither
+# /marketplace_listings' own `quality` field nor the averages' `quality_tier` capture
+# it, and UEX's /items catalog doesn't even carry entries for most of these items to
+# fall back on (checked directly - see the diagnostic history in PR discussion). So a
+# "30-day average" for a craftable item is silently blended from whatever mix of
+# crafted-and-boosted vs. stock listings happened to sell, making ANY price comparison
+# for that category unreliable - not just noisy, structurally meaningless.
+#
+# Raw materials (id_category 36 "Commodities", 87 "Harvestables") don't have this
+# problem: they're fungible, unmodified-by-players, and their existing quality_tier
+# (verified for ore - see bot/cogs/marketplace.py: QUALITY_TIER_CHOICES) is a real,
+# structured signal. Scanning is scoped to just these two categories rather than
+# guessing at which other categories might also be safe - easy to extend later once a
+# specific category is verified the same way.
+ALLOWED_MARKETPLACE_CATEGORY_IDS = {36, 87}  # Commodities, Harvestables
 
 
 @dataclass
@@ -108,11 +134,15 @@ def find_steals(
     returning every listing priced at least `threshold` (e.g. 0.20 = 20%) below its
     item's fair price in the SAME currency and unit - sorted by discount, steepest
     first. A listing with no averages row for its exact (id_item, currency, unit) is
-    skipped rather than guessed at.
+    skipped rather than guessed at, as is any listing outside
+    ALLOWED_MARKETPLACE_CATEGORY_IDS (see that constant for why) - including one
+    missing id_category entirely, since an unknown category can't be verified safe.
     """
     steals: list[StealEntry] = []
     for listing in listings:
         if (listing.get("operation") or "").strip().lower() != SELL_OPERATION:
+            continue
+        if listing.get("id_category") not in ALLOWED_MARKETPLACE_CATEGORY_IDS:
             continue
         id_item = listing.get("id_item")
         if id_item is None:

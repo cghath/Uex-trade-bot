@@ -1,7 +1,14 @@
 """Tests for the Undervalued Scanner's pure matching logic in bot/uex/scanner.py."""
 from __future__ import annotations
 
-from bot.uex.scanner import MIN_LISTINGS_FOR_FAIR_PRICE, build_fair_price_index, find_steals
+from bot.uex.scanner import (
+    ALLOWED_MARKETPLACE_CATEGORY_IDS,
+    MIN_LISTINGS_FOR_FAIR_PRICE,
+    build_fair_price_index,
+    find_steals,
+)
+
+COMMODITIES_CATEGORY_ID = 36  # a real id from ALLOWED_MARKETPLACE_CATEGORY_IDS
 
 KEY = (42, "UEC", "unit")
 
@@ -30,6 +37,7 @@ def _listing(**overrides) -> dict:
     row = {
         "id": 1,
         "id_item": 42,
+        "id_category": COMMODITIES_CATEGORY_ID,
         "operation": "sell",
         "title": "Selling Laranite",
         "price": "1000",
@@ -158,6 +166,29 @@ def test_find_steals_does_not_match_across_units():
     fair_prices = build_fair_price_index([_average_row(price_avg_month="50", unit="crate")])
     listings = [_listing(price="1", unit="unit")]
     assert find_steals(listings, fair_prices, threshold=0.20) == []
+
+
+def test_find_steals_excludes_listings_outside_allowed_categories():
+    """Regression test: crafted gear (weapons, armor, ship components) has real stat
+    variance driven by crafting material quality that UEX never exposes as structured
+    data - only free text ("Q970", "-44% dmg") a seller happened to type. Comparing
+    those against a pooled average is unreliable regardless of price/currency/unit
+    matching correctly, so only a small allowlist of raw-material categories (verified
+    safe - see ALLOWED_MARKETPLACE_CATEGORY_IDS) is ever considered."""
+    assert COMMODITIES_CATEGORY_ID in ALLOWED_MARKETPLACE_CATEGORY_IDS  # sanity-check the fixture
+    disallowed_category_id = max(ALLOWED_MARKETPLACE_CATEGORY_IDS) + 1000  # guaranteed not allowlisted
+    fair_prices = build_fair_price_index([_average_row(price_avg_month="1000")])
+    listings = [_listing(price="500", id_category=disallowed_category_id)]  # 50% off, would otherwise flag
+    assert find_steals(listings, fair_prices, threshold=0.20) == []
+
+
+def test_find_steals_excludes_listings_with_missing_category():
+    """A listing with no id_category at all can't be verified safe, so it's excluded
+    the same as an explicitly disallowed one - not given the benefit of the doubt."""
+    fair_prices = build_fair_price_index([_average_row(price_avg_month="1000")])
+    listing = _listing(price="500")
+    del listing["id_category"]
+    assert find_steals([listing], fair_prices, threshold=0.20) == []
 
 
 def test_find_steals_skips_listings_with_no_averages_data():
