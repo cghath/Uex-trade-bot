@@ -1,3 +1,4 @@
+# Hi
 """Entrypoint: python -m bot.main"""
 from __future__ import annotations
 
