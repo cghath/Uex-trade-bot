@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from bot.uex.scanner import build_fair_price_index, find_steals
 
+KEY = (42, "UEC", "unit")
+
 
 def _average_row(**overrides) -> dict:
     """A /marketplace_prices_averages_all row (numeric fields as JSON strings, per UEX's
@@ -12,6 +14,8 @@ def _average_row(**overrides) -> dict:
         "item_name": "Laranite Raw",
         "operation": "sell",
         "quality_tier": 0,
+        "currency": "UEC",
+        "unit": "unit",
         "price_avg": "1000",
         "price_avg_week": "1000",
         "price_avg_month": "1000",
@@ -29,6 +33,7 @@ def _listing(**overrides) -> dict:
         "title": "Selling Laranite",
         "price": "1000",
         "currency": "UEC",
+        "unit": "unit",
         "user_username": "trader_joe",
         "quality": None,
     }
@@ -46,8 +51,25 @@ def test_build_fair_price_index_picks_lowest_tier_average():
         _average_row(price_avg_month="1500", quality_tier=7),
     ]
     fair_prices = build_fair_price_index(rows)
-    assert fair_prices[42].price_avg_month == 900.0
-    assert fair_prices[42].item_name == "Laranite Raw"
+    assert fair_prices[KEY].price_avg_month == 900.0
+    assert fair_prices[KEY].item_name == "Laranite Raw"
+
+
+def test_build_fair_price_index_keeps_currencies_and_units_separate():
+    """Regression test: an item priced in UEC and also (separately) in WIF, or per-unit
+    vs per-crate, must never have their averages conflated - taking the "lowest" across
+    unrelated currencies/units produced wildly wrong "steal" discounts in manual testing
+    (a live scan flagged ~115 listings, most at 90-100% off, before this was keyed on
+    currency/unit)."""
+    rows = [
+        _average_row(price_avg_month="1000", currency="UEC", unit="unit"),
+        _average_row(price_avg_month="5", currency="WIF", unit="unit"),
+        _average_row(price_avg_month="50", currency="UEC", unit="crate"),
+    ]
+    fair_prices = build_fair_price_index(rows)
+    assert fair_prices[(42, "UEC", "unit")].price_avg_month == 1000.0
+    assert fair_prices[(42, "WIF", "unit")].price_avg_month == 5.0
+    assert fair_prices[(42, "UEC", "crate")].price_avg_month == 50.0
 
 
 def test_build_fair_price_index_ignores_buy_side_rows():
@@ -70,8 +92,8 @@ def test_build_fair_price_index_keeps_items_separate():
         _average_row(id_item=2, item_name="Laranite Raw", price_avg_month="800"),
     ]
     fair_prices = build_fair_price_index(rows)
-    assert fair_prices[1].price_avg_month == 2000.0
-    assert fair_prices[2].price_avg_month == 800.0
+    assert fair_prices[(1, "UEC", "unit")].price_avg_month == 2000.0
+    assert fair_prices[(2, "UEC", "unit")].price_avg_month == 800.0
 
 
 # --- find_steals ---
@@ -97,6 +119,24 @@ def test_find_steals_excludes_listing_below_threshold():
 def test_find_steals_ignores_buy_side_listings():
     fair_prices = build_fair_price_index([_average_row(price_avg_month="1000")])
     listings = [_listing(operation="buy", price="100")]
+    assert find_steals(listings, fair_prices, threshold=0.20) == []
+
+
+def test_find_steals_does_not_match_across_currencies():
+    """Regression test for the currency-conflation bug (see
+    test_build_fair_price_index_keeps_currencies_and_units_separate). Only a UEC-priced
+    average exists for this item - a WIF-priced listing of the same item must not fall
+    back to it, even though 5 WIF looks like a massive "discount" against 1000 UEC."""
+    fair_prices = build_fair_price_index([_average_row(price_avg_month="1000", currency="UEC")])
+    listings = [_listing(price="5", currency="WIF")]
+    assert find_steals(listings, fair_prices, threshold=0.20) == []
+
+
+def test_find_steals_does_not_match_across_units():
+    """Only a per-crate average exists for this item - a listing priced per unit must
+    not fall back to it, even though 1 looks like a massive "discount" against 50."""
+    fair_prices = build_fair_price_index([_average_row(price_avg_month="50", unit="crate")])
+    listings = [_listing(price="1", unit="unit")]
     assert find_steals(listings, fair_prices, threshold=0.20) == []
 
 
