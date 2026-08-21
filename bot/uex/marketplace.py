@@ -122,6 +122,67 @@ def compute_marketplace_movers(rows: list[dict], limit: int = 5) -> tuple[list[M
     return gainers, losers
 
 
+# Display order for average-price tables: sell listings (what sellers ask) before buy
+# listings (what buyers offer); anything unexpected sorts last rather than crashing.
+_OPERATION_SORT_ORDER = {"sell": 0, "buy": 1}
+
+
+@dataclass
+class MarketplaceAverageEntry:
+    item_name: str
+    quality_tier: int | None
+    operation: str
+    currency: str
+    unit: str
+    listings_count: int
+    price_avg: float | None
+    price_avg_week: float | None
+    price_avg_month: float | None
+
+
+def parse_marketplace_average_rows(rows: list[dict]) -> list[MarketplaceAverageEntry]:
+    """Coerce raw /marketplace_prices_averages rows (one per item x quality tier x operation
+    x currency x unit combo) into typed entries, ready to display. All numeric fields go
+    through parse_uex_number since Marketplace endpoints send numbers as JSON strings (see
+    parse_uex_number's docstring); quality_tier 0 is a real tier (Q0), so unlike
+    parse_listing_quality it is preserved, not treated as unset. A row where none of the
+    three averages parse has nothing to show and is dropped. Output is sorted for display:
+    sell side before buy side, then quality tier ascending (rows without a tier last), then
+    currency, then unit - so the cheapest-to-describe grouping (operation) is contiguous.
+    """
+    entries: list[MarketplaceAverageEntry] = []
+    for row in rows:
+        price_avg = parse_uex_number(row.get("price_avg"))
+        price_avg_week = parse_uex_number(row.get("price_avg_week"))
+        price_avg_month = parse_uex_number(row.get("price_avg_month"))
+        if price_avg is None and price_avg_week is None and price_avg_month is None:
+            continue
+        tier = parse_uex_number(row.get("quality_tier"))
+        listings_count = parse_uex_number(row.get("listings_count"))
+        entries.append(
+            MarketplaceAverageEntry(
+                item_name=row.get("item_name") or "",
+                quality_tier=int(tier) if tier is not None else None,
+                operation=(row.get("operation") or "").strip().lower(),
+                currency=row.get("currency") or "UEC",
+                unit=row.get("unit") or "unit",
+                listings_count=int(listings_count) if listings_count is not None else 0,
+                price_avg=price_avg,
+                price_avg_week=price_avg_week,
+                price_avg_month=price_avg_month,
+            )
+        )
+    entries.sort(
+        key=lambda e: (
+            _OPERATION_SORT_ORDER.get(e.operation, len(_OPERATION_SORT_ORDER)),
+            e.quality_tier if e.quality_tier is not None else float("inf"),
+            e.currency,
+            e.unit,
+        )
+    )
+    return entries
+
+
 def extract_item_activity(trend_rows: list[dict]) -> list[dict]:
     """Distill /marketplace_trends rows down to just what the accumulating traded-items index
     (bot/db/database.py: marketplace_item_activity) needs to store. A row missing id_item or

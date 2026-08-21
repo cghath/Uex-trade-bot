@@ -21,9 +21,9 @@ CATEGORIES: list[tuple[str, list[str]]] = [
     ("Price Alerts", ["alert-add", "alert-list", "alert-remove"]),
     ("Trade Log & Leaderboard", ["trade-log-add", "trade-log", "uex-trades", "leaderboard"]),
     ("UEX Marketplace", [
-        "marketplace-search", "marketplace-trending", "marketplace-movers", "marketplace-history",
-        "my-negotiations", "my-favorites", "marketplace-post", "marketplace-delete-listing",
-        "marketplace-index-status",
+        "marketplace-search", "marketplace-trending", "marketplace-movers", "marketplace-average",
+        "marketplace-history", "my-negotiations", "my-favorites", "marketplace-post",
+        "marketplace-delete-listing", "marketplace-index-status",
     ]),
     ("Marketplace Alerts", ["marketplace-alert-add", "marketplace-alert-list", "marketplace-alert-remove"]),
     ("Stock Alerts", ["stock-alert-add", "stock-alert-list", "stock-alert-remove"]),

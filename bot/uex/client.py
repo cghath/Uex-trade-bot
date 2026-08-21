@@ -46,6 +46,7 @@ _ENDPOINT_CACHE_TTL = {
     "vehicles": 12 * 3600,
     "commodities_status": 24 * 3600,
     "marketplace_prices_history": 3600,
+    "marketplace_prices_averages": 3600,
 }
 
 # UEX status strings that specifically mean "the secret_key is missing/wrong/not allowed",
@@ -348,6 +349,24 @@ class UexClient:
         see bot/uex/marketplace.py's QUALITY_TIER_CHOICES for the verified tier boundaries.
         """
         return await self._get("marketplace_prices_history", params=filters) or []
+
+    async def get_marketplace_prices_averages(self, **filters: Any) -> list[dict[str, Any]]:
+        """UEX's precomputed Marketplace price averages: one row per unique
+        id_item + quality_tier + operation + currency + unit combination, each carrying
+        price_avg (current, from active listings), price_avg_week (7-day rolling) and
+        price_avg_month (30-day rolling), plus listings_count. No auth required; data
+        refreshed hourly. Needs at least one of: id_item (up to 10, comma-separated),
+        id_category, item_uuid, item_name. Optional narrowing: operation ('buy'|'sell'),
+        quality_tier (0-7, same buckets as /marketplace_prices_history), currency,
+        game_version.
+
+        Two caveats worth knowing before trusting a row: UEX falls back to price_avg for
+        the week/month figures when an item doesn't have enough history yet (so identical
+        values may mean "no real 30-day baseline", not "perfectly stable price"), and this
+        is a Marketplace endpoint, so numeric fields may arrive as JSON strings - run
+        prices through bot/uex/marketplace.py's parse_uex_number, never assume floats.
+        """
+        return await self._get("marketplace_prices_averages", params=filters) or []
 
     async def get_marketplace_favorites(self, secret_key: str | None = None, **filters: Any) -> list[dict[str, Any]]:
         """The calling player's own favorited Marketplace listings (linked UEX account)."""

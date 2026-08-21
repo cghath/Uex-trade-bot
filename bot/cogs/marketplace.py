@@ -18,6 +18,7 @@ from discord.ext import commands, tasks
 from bot.uex.charts import render_price_history_chart
 from bot.uex.exceptions import UexApiError
 from bot.uex.marketplace import (
+    MarketplaceAverageEntry,
     compute_marketplace_movers,
     exclude_sold_out,
     extract_item_activity,
@@ -26,6 +27,7 @@ from bot.uex.marketplace import (
     find_item_id_by_name,
     match_traded_items,
     parse_listing_quality,
+    parse_marketplace_average_rows,
     parse_uex_number,
     rank_traded_items,
     reshape_marketplace_history_rows,
@@ -66,6 +68,12 @@ QUALITY_TIER_CHOICES = [
     app_commands.Choice(name="Q900-949", value=6),
     app_commands.Choice(name="Q950-1000", value=7),
 ]
+QUALITY_TIER_LABELS = {choice.value: choice.name for choice in QUALITY_TIER_CHOICES}
+
+# Discord embed fields cap at 1024 chars; 9 of these lines at their widest (8-digit
+# prices, longest tier label) plus the "...and N more" overflow note still fits. Most
+# items only have a handful of tier/currency combos, so the cap rarely bites at all.
+MAX_AVERAGE_LINES_PER_SIDE = 9
 
 
 async def item_name_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
@@ -394,6 +402,105 @@ class Marketplace(commands.Cog):
                 inline=False,
             )
         embed.set_footer(text="Current avg sell price vs. each item's own trailing-month average · UEX Marketplace data")
+        await interaction.followup.send(embed=embed)
+
+    @app_commands.command(
+        name="marketplace-average",
+        description="Average Marketplace prices for an item — current, 7-day and 30-day rolling — per quality tier.",
+    )
+    @app_commands.describe(
+        item="Item name, e.g. 'Laranite Raw'",
+        operation="Optional: only sell-side (what sellers ask) or buy-side (what buyers offer) averages",
+        quality_tier="Optional: only this ore-quality tier",
+    )
+    @app_commands.choices(operation=OPERATION_CHOICES, quality_tier=QUALITY_TIER_CHOICES)
+    @app_commands.autocomplete(item=traded_item_autocomplete)
+    async def marketplace_average(
+        self,
+        interaction: discord.Interaction,
+        item: str,
+        operation: app_commands.Choice[str] | None = None,
+        quality_tier: app_commands.Choice[int] | None = None,
+    ) -> None:
+        await interaction.response.defer()
+
+        # Resolve to an exact catalog id when possible; otherwise pass the raw name through -
+        # /marketplace_prices_averages accepts item_name and matches server-side, so a query
+        # that doesn't resolve locally still has a shot (unlike /marketplace_prices_history,
+        # which /marketplace-history has to resolve to an id first).
+        try:
+            items = await self.bot.uex.get_items()
+        except UexApiError:
+            items = []
+        id_item = find_item_id_by_name(items, item)
+
+        try:
+            if id_item is not None:
+                rows = await self.bot.uex.get_marketplace_prices_averages(
+                    id_item=id_item,
+                    operation=operation.value if operation is not None else None,
+                    quality_tier=quality_tier.value if quality_tier is not None else None,
+                )
+            else:
+                rows = await self.bot.uex.get_marketplace_prices_averages(
+                    item_name=item,
+                    operation=operation.value if operation is not None else None,
+                    quality_tier=quality_tier.value if quality_tier is not None else None,
+                )
+        except UexApiError as exc:
+            await interaction.followup.send(f"UEX API error: {exc}")
+            return
+
+        entries = parse_marketplace_average_rows(rows)
+        if not entries:
+            filter_notes = []
+            if operation is not None:
+                filter_notes.append(f"{operation.value}-side")
+            if quality_tier is not None:
+                filter_notes.append(f"tier {quality_tier.name}")
+            filter_text = f" ({', '.join(filter_notes)})" if filter_notes else ""
+            await interaction.followup.send(
+                f"No Marketplace average price data for '{item}'{filter_text} - averages only exist "
+                "for items with Marketplace listing activity."
+            )
+            return
+
+        display_name = entries[0].item_name or item
+        embed = discord.Embed(title=f"{display_name} — Marketplace price averages", color=discord.Color.teal())
+
+        by_operation: dict[str, list[MarketplaceAverageEntry]] = {}
+        for entry in entries:
+            by_operation.setdefault(entry.operation, []).append(entry)
+
+        def _fmt(value: float | None) -> str:
+            return f"{value:,.0f}" if value is not None else "n/a"
+
+        side_headers = {
+            "sell": "Sell listings — what sellers ask",
+            "buy": "Buy listings — what buyers offer",
+        }
+        for op, op_entries in by_operation.items():
+            lines = []
+            for entry in op_entries[:MAX_AVERAGE_LINES_PER_SIDE]:
+                tier_label = QUALITY_TIER_LABELS.get(entry.quality_tier, "No tier")
+                lines.append(
+                    f"**{tier_label}** — 30d avg **{_fmt(entry.price_avg_month)} {entry.currency}**/{entry.unit}"
+                    f" · 7d {_fmt(entry.price_avg_week)} · now {_fmt(entry.price_avg)}"
+                    f" · {entry.listings_count} listings"
+                )
+            overflow = len(op_entries) - MAX_AVERAGE_LINES_PER_SIDE
+            if overflow > 0:
+                lines.append(f"…and {overflow} more tier/currency combinations")
+            embed.add_field(
+                name=side_headers.get(op, f"{op.title()} listings" if op else "Listings"),
+                value="\n".join(lines),
+                inline=False,
+            )
+
+        footer = "UEX Marketplace rolling averages · updated hourly · 7d/30d fall back to the current average when an item has little history"
+        if quality_tier is not None:
+            footer += f" · quality tier: {quality_tier.name}"
+        embed.set_footer(text=footer)
         await interaction.followup.send(embed=embed)
 
     @app_commands.command(
