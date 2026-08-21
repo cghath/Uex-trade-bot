@@ -11,6 +11,13 @@ point is searching the bot's traded-items index (the same one /marketplace-index
 reports on), each item slot is a text option with that autocomplete attached, and up to
 ten items can be added in one submission by filling more slots. 10 pairs = 20 options,
 under Discord's 25-options-per-command cap.
+
+Quality (ores etc): items the index knows to be quality-bearing (has_quality, learned
+hourly from /marketplace_prices_averages_all) get a select menu on the save confirmation
+asking what quality the user's actual goods are, on UEX's 0-1000 scale in steps of 100.
+The raw value plus the UEX quality_tier bucket it maps to (quality_to_tier) are stored on
+the entry. It's a post-save prompt rather than a third per-item command option because
+10 x 3 = 30 options would exceed Discord's 25-per-command cap.
 """
 from __future__ import annotations
 
@@ -18,9 +25,9 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from bot.cogs.marketplace import traded_item_autocomplete
+from bot.cogs.marketplace import QUALITY_TIER_LABELS, traded_item_autocomplete
 from bot.discord_ui import send_alert_remove_picker
-from bot.sell_list import pair_sell_list_inputs
+from bot.sell_list import QUALITY_STEPS, pair_sell_list_inputs, quality_to_tier
 from bot.uex.exceptions import UexApiError
 from bot.uex.marketplace import find_item_id_by_name
 
@@ -28,6 +35,63 @@ from bot.uex.marketplace import find_item_id_by_name
 AskingPrice = app_commands.Range[float, 1]
 
 MAX_LIST_LINES = 40  # embed description cap is 4096 chars; 40 of these lines fits easily
+
+# A Discord message holds at most 5 action rows and a select menu occupies a full row, so
+# one quality-prompt message can carry pickers for at most 5 items; a submission with more
+# quality-bearing items gets the rest in follow-up messages.
+MAX_QUALITY_PICKERS_PER_MESSAGE = 5
+
+
+def _quality_note(row: dict) -> str:
+    """' (Q950)' when the entry has a quality recorded, '' otherwise."""
+    return f" (Q{row['quality']})" if row.get("quality") is not None else ""
+
+
+class QualitySelect(discord.ui.Select):
+    """One item's quality picker: UEX's 0-1000 scale in steps of 100 (plus 950, where the
+    top tier starts). Picking a value stores both the raw value and the UEX quality_tier
+    bucket it falls into (bot/sell_list.py: quality_to_tier) on the user's sell list row,
+    then disables itself so the answered state is visible at a glance."""
+
+    def __init__(self, bot: commands.Bot, item_name: str) -> None:
+        self.bot = bot
+        self.item_name = item_name
+        options = [
+            discord.SelectOption(
+                label=f"{step} · {QUALITY_TIER_LABELS[quality_to_tier(step)]}", value=str(step)
+            )
+            for step in QUALITY_STEPS
+        ]
+        super().__init__(placeholder=f"Quality for {item_name}"[:150], options=options)
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        quality = int(self.values[0])
+        tier = quality_to_tier(quality)
+        updated = await self.bot.db.set_sell_list_quality(interaction.user.id, self.item_name, quality, tier)
+        if updated:
+            self.placeholder = f"{self.item_name} — Q{quality} ({QUALITY_TIER_LABELS[tier]})"[:150]
+        else:
+            self.placeholder = f"{self.item_name} — no longer on your list"[:150]
+        self.disabled = True
+        await interaction.response.edit_message(view=self.view)
+
+
+class QualityPromptView(discord.ui.View):
+    def __init__(self, bot: commands.Bot, author_id: int, item_names: list[str]) -> None:
+        super().__init__(timeout=300)
+        self.author_id = author_id
+        for name in item_names[:MAX_QUALITY_PICKERS_PER_MESSAGE]:
+            self.add_item(QualitySelect(bot, name))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("Only the person who ran this command can use this menu.", ephemeral=True)
+            return False
+        return True
+
+    async def on_timeout(self) -> None:
+        for item in self.children:
+            item.disabled = True  # type: ignore[attr-defined]
 
 
 class SellList(commands.Cog):
@@ -148,7 +212,38 @@ class SellList(commands.Cog):
             text=f"Your sell list has {total} item{'s' if total != 1 else ''} · "
             "/items-to-sell-list to view · /items-to-sell-remove to remove"
         )
-        await interaction.followup.send(embed=embed)
+
+        # Items known to have an in-game quality (per the index's has_quality flag, learned
+        # hourly from /marketplace_prices_averages_all) get a quality picker attached to the
+        # confirmation - only those items, so quality-less gear never prompts. An item that
+        # didn't resolve to a catalog id, or isn't in the index yet, just isn't asked.
+        flagged_ids = await self.bot.db.get_quality_flagged_item_ids(
+            [p["id_item"] for p in payload if p["id_item"] is not None]
+        )
+        quality_items = [p["item_name"] for p in payload if p["id_item"] in flagged_ids]
+
+        if not quality_items:
+            await interaction.followup.send(embed=embed)
+            return
+
+        noun = "has in-game quality" if len(quality_items) == 1 else "have in-game quality"
+        embed.add_field(
+            name="Quality",
+            value=(f"**{', '.join(quality_items)}** {noun} — pick each one's quality below "
+                   "(0-1000 scale; the matching UEX tier is stored with it).")[:1024],
+            inline=False,
+        )
+        first_batch = quality_items[:MAX_QUALITY_PICKERS_PER_MESSAGE]
+        await interaction.followup.send(
+            embed=embed, view=QualityPromptView(self.bot, interaction.user.id, first_batch)
+        )
+        for start in range(MAX_QUALITY_PICKERS_PER_MESSAGE, len(quality_items), MAX_QUALITY_PICKERS_PER_MESSAGE):
+            batch = quality_items[start : start + MAX_QUALITY_PICKERS_PER_MESSAGE]
+            await interaction.followup.send(
+                "Quality for the rest:",
+                view=QualityPromptView(self.bot, interaction.user.id, batch),
+                ephemeral=True,
+            )
 
     @app_commands.command(name="items-to-sell-list", description="Show your want-to-sell list and asking prices.")
     async def items_to_sell_list(self, interaction: discord.Interaction) -> None:
@@ -159,7 +254,10 @@ class SellList(commands.Cog):
             )
             return
 
-        lines = [f"**{row['item_name']}** — asking {row['asking_price']:,.0f} aUEC" for row in rows[:MAX_LIST_LINES]]
+        lines = [
+            f"**{row['item_name']}**{_quality_note(row)} — asking {row['asking_price']:,.0f} aUEC"
+            for row in rows[:MAX_LIST_LINES]
+        ]
         if len(rows) > MAX_LIST_LINES:
             lines.append(f"…and {len(rows) - MAX_LIST_LINES} more")
         embed = discord.Embed(
@@ -177,7 +275,7 @@ class SellList(commands.Cog):
             {
                 "id": row["id"],
                 "label": row["item_name"],
-                "description": f"asking {row['asking_price']:,.0f} aUEC",
+                "description": f"asking {row['asking_price']:,.0f} aUEC{_quality_note(row)}",
             }
             for row in rows
         ]

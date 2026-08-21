@@ -183,6 +183,24 @@ def parse_marketplace_average_rows(rows: list[dict]) -> list[MarketplaceAverageE
     return entries
 
 
+def extract_quality_item_ids(average_rows: list[dict]) -> set[int]:
+    """From /marketplace_prices_averages(_all) rows, the id_items that have been observed
+    listed at a real quality tier (quality_tier >= 1) - the signal that an item has an
+    in-game quality at all. Tier 0 means "Q0 / no quality set", so an item whose rows are
+    all tier 0 is NOT counted: plenty of quality-less items (weapons, armor) only ever
+    appear there. Both id_item and quality_tier go through defensive coercion since
+    Marketplace endpoints string-type numbers (see parse_uex_number)."""
+    ids: set[int] = set()
+    for row in average_rows:
+        id_item = parse_uex_number(row.get("id_item"))
+        tier = parse_uex_number(row.get("quality_tier"))
+        if id_item is None or tier is None:
+            continue
+        if tier >= 1:
+            ids.add(int(id_item))
+    return ids
+
+
 def extract_item_activity(trend_rows: list[dict]) -> list[dict]:
     """Distill /marketplace_trends rows down to just what the accumulating traded-items index
     (bot/db/database.py: marketplace_item_activity) needs to store. A row missing id_item or

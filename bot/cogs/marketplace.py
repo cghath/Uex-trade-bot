@@ -22,6 +22,7 @@ from bot.uex.marketplace import (
     compute_marketplace_movers,
     exclude_sold_out,
     extract_item_activity,
+    extract_quality_item_ids,
     filter_listings_by_keyword,
     filter_listings_by_quality,
     find_item_id_by_name,
@@ -246,8 +247,26 @@ class Marketplace(commands.Cog):
         if not activity:
             return
         await self.bot.db.upsert_marketplace_item_activity(activity)
+
+        # Second half of the snapshot: learn which indexed items have an in-game quality at
+        # all, from the bulk averages dump (rows are per quality_tier - any tier >= 1 row
+        # means the item is quality-bearing). Runs after the activity upsert so items new in
+        # this very snapshot get flagged in the same pass. Failure here degrades gracefully:
+        # the flag just stays stale until the next hourly run.
+        try:
+            average_rows = await self.bot.uex.get_marketplace_prices_averages_all()
+        except UexApiError as exc:
+            logger.warning("Failed to refresh marketplace quality flags: %s", exc)
+            average_rows = []
+        quality_ids = extract_quality_item_ids(average_rows)
+        if quality_ids:
+            await self.bot.db.mark_items_have_quality(sorted(quality_ids))
+
         total = await self.bot.db.count_marketplace_item_activity()
-        logger.info("Marketplace item activity snapshot: %d items updated, %d total tracked", len(activity), total)
+        logger.info(
+            "Marketplace item activity snapshot: %d items updated, %d total tracked, %d quality-bearing seen",
+            len(activity), total, len(quality_ids),
+        )
 
     @snapshot_item_activity.before_loop
     async def before_snapshot_item_activity(self) -> None:

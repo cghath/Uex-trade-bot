@@ -47,6 +47,7 @@ _ENDPOINT_CACHE_TTL = {
     "commodities_status": 24 * 3600,
     "marketplace_prices_history": 3600,
     "marketplace_prices_averages": 3600,
+    "marketplace_prices_averages_all": 3600,
 }
 
 # UEX status strings that specifically mean "the secret_key is missing/wrong/not allowed",
@@ -367,6 +368,16 @@ class UexClient:
         prices through bot/uex/marketplace.py's parse_uex_number, never assume floats.
         """
         return await self._get("marketplace_prices_averages", params=filters) or []
+
+    async def get_marketplace_prices_averages_all(self, **filters: Any) -> list[dict[str, Any]]:
+        """The full dump variant of /marketplace_prices_averages: every item's average-price
+        rows in one call, no filters required. Same per-row shape (one row per item x
+        quality_tier x operation x currency x unit). Used by the hourly Marketplace snapshot
+        to learn which items trade at real quality tiers (>= 1) at all - the catalog and
+        /marketplace_trends carry no quality information, so this is the one bulk signal for
+        "does this item have an in-game quality".
+        """
+        return await self._get("marketplace_prices_averages_all", params=filters) or []
 
     async def get_marketplace_favorites(self, secret_key: str | None = None, **filters: Any) -> list[dict[str, Any]]:
         """The calling player's own favorited Marketplace listings (linked UEX account)."""
