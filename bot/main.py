@@ -27,6 +27,7 @@ INITIAL_COGS = (
     "bot.cogs.trends",
     "bot.cogs.marketplace",
     "bot.cogs.marketplace_alerts",
+    "bot.cogs.sell_list",
     "bot.cogs.stock_alerts",
     "bot.cogs.ships",
     "bot.cogs.digest",

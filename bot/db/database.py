@@ -101,6 +101,26 @@ CREATE TABLE IF NOT EXISTS marketplace_item_activity (
     last_seen TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Per-user "want to sell" list (/items-to-sell): items a member wants to offload, each
+-- with the asking price in aUEC they'd sell at. item_name is COLLATE NOCASE so 'gold' and
+-- 'Gold' can't coexist as separate rows for one user - re-adding an item updates its
+-- asking price instead of duplicating it. id_item is the UEX catalog id when the typed
+-- name resolved to one at add time (nullable - a freeform name is still allowed), stored
+-- so future features can join against UEX price data (e.g. /marketplace_prices_averages)
+-- without re-resolving a possibly-ambiguous name later.
+CREATE TABLE IF NOT EXISTS user_sell_list (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    item_name TEXT NOT NULL COLLATE NOCASE,
+    id_item INTEGER,
+    asking_price REAL NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (user_id, item_name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_sell_list_user ON user_sell_list (user_id);
+
 -- Commodity restock watches: unlike price_alerts (one-shot), these are persistent - a
 -- background poller checks /commodities_prices across every terminal and notifies whenever
 -- one flips from no-stock to has-stock. ship_query is optional (falls back to the watcher's
@@ -504,6 +524,54 @@ class Database:
             cursor = await db.execute("SELECT COUNT(*) AS c FROM marketplace_item_activity")
             row = await cursor.fetchone()
             return row["c"] if row else 0
+
+    # -- per-user want-to-sell list (/items-to-sell) ---------------------------
+
+    async def upsert_sell_list_items(
+        self, user_id: int, entries: list[dict[str, Any]]
+    ) -> tuple[list[str], list[str]]:
+        """Insert-or-update sell list entries for one user. Each entry needs item_name and
+        asking_price, plus an optional id_item (kept from the existing row when a re-add
+        couldn't resolve one, via COALESCE - a freeform rename shouldn't erase a good id).
+        Returns (added_names, updated_names) so the command can say which happened per item
+        - classified against the user's rows before the write, matching the table's
+        case-insensitive uniqueness."""
+        async with self.connect() as db:
+            cursor = await db.execute(
+                "SELECT item_name FROM user_sell_list WHERE user_id = ?", (user_id,)
+            )
+            rows = await cursor.fetchall()
+            existing = {row["item_name"].lower() for row in rows}
+            added = [e["item_name"] for e in entries if e["item_name"].lower() not in existing]
+            updated = [e["item_name"] for e in entries if e["item_name"].lower() in existing]
+            await db.executemany(
+                """INSERT INTO user_sell_list (user_id, item_name, id_item, asking_price, updated_at)
+                   VALUES (?, ?, ?, ?, datetime('now'))
+                   ON CONFLICT(user_id, item_name) DO UPDATE SET
+                       asking_price = excluded.asking_price,
+                       id_item = COALESCE(excluded.id_item, user_sell_list.id_item),
+                       updated_at = datetime('now')""",
+                [(user_id, e["item_name"], e.get("id_item"), e["asking_price"]) for e in entries],
+            )
+            await db.commit()
+            return added, updated
+
+    async def list_user_sell_list(self, user_id: int) -> list[dict[str, Any]]:
+        async with self.connect() as db:
+            cursor = await db.execute(
+                "SELECT * FROM user_sell_list WHERE user_id = ? ORDER BY item_name COLLATE NOCASE",
+                (user_id,),
+            )
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    async def remove_sell_list_item(self, entry_id: int, user_id: int) -> bool:
+        async with self.connect() as db:
+            cursor = await db.execute(
+                "DELETE FROM user_sell_list WHERE id = ? AND user_id = ?", (entry_id, user_id)
+            )
+            await db.commit()
+            return cursor.rowcount > 0
 
     # -- commodity restock (stock) alerts ------------------------------------
     # Persistent watches, like marketplace alerts - see stock_alert_terminal_state above for
