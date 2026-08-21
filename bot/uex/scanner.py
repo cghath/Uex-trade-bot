@@ -18,22 +18,30 @@ ALLOWED_MARKETPLACE_CATEGORY_IDS below) - most categories are player-crafted gea
 real value depends on crafting material quality that UEX doesn't track anywhere in a
 structured, comparable way, making price comparison for them fundamentally unreliable,
 not just noisy.
+
+Within the allowed raw-material categories, quality genuinely drives price (verified
+against live data: a single commodity's 30-day average ranged from ~150K to over 200M
+UEC across its quality_tier rows) - and unlike crafted gear, these listings reliably DO
+report a real 0-1000 `quality` value (parse_listing_quality). So every match here is
+tier-specific: a listing's own quality is converted to UEX's quality_tier bucket
+(bot/sell_list.py: quality_to_tier) and compared ONLY against that exact tier's average,
+never a different tier substituted in because it happened to have more sample data.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 
+from bot.sell_list import quality_to_tier
 from bot.uex.marketplace import parse_listing_quality, parse_uex_number
 
 SELL_OPERATION = "sell"
 
-# Verified against live data: a rarely-traded item's "30-day average" can be built from
-# just 1-2 historical listings (see build_fair_price_index's docstring) - one outlier
-# listing (a troll price, a typo, a "make me an offer" placeholder) then dominates the
-# average outright, making it useless as a "fair price" baseline. Requiring a minimum
-# sample size filters those out; 3 is small enough that a real, moderately-traded item
-# still qualifies, but large enough that a single outlier can no longer single-handedly
-# set the average.
+# Verified against live data: a rarely-traded item/quality-tier combo's "30-day average"
+# can be built from just 1-2 historical listings - one outlier listing (a troll price, a
+# typo, a "make me an offer" placeholder) then dominates the average outright, making it
+# useless as a "fair price" baseline. Requiring a minimum sample size filters those out;
+# 3 is small enough that a real, moderately-traded item/tier still qualifies, but large
+# enough that a single outlier can no longer single-handedly set the average.
 MIN_LISTINGS_FOR_FAIR_PRICE = 3
 
 # Verified against live data: most Marketplace categories (weapons, armor, ship
@@ -49,11 +57,11 @@ MIN_LISTINGS_FOR_FAIR_PRICE = 3
 # for that category unreliable - not just noisy, structurally meaningless.
 #
 # Raw materials (id_category 36 "Commodities", 87 "Harvestables") don't have this
-# problem: they're fungible, unmodified-by-players, and their existing quality_tier
-# (verified for ore - see bot/cogs/marketplace.py: QUALITY_TIER_CHOICES) is a real,
-# structured signal. Scanning is scoped to just these two categories rather than
-# guessing at which other categories might also be safe - easy to extend later once a
-# specific category is verified the same way.
+# problem: they're fungible, unmodified-by-players, and (unlike gear) reliably report a
+# real quality value the averages' quality_tier can be matched against. Scanning is
+# scoped to just these two categories rather than guessing at which other categories
+# might also be safe - easy to extend later once a specific category is verified the
+# same way.
 ALLOWED_MARKETPLACE_CATEGORY_IDS = {36, 87}  # Commodities, Harvestables
 
 
@@ -76,51 +84,48 @@ class StealEntry:
     quality: float | None
 
 
-def _price_key(id_item: int, currency: str, unit: str) -> tuple[int, str, str]:
-    return (id_item, currency.strip().upper(), unit.strip().lower())
+def _price_key(id_item: int, quality_tier: int, currency: str, unit: str) -> tuple[int, int, str, str]:
+    return (id_item, quality_tier, currency.strip().upper(), unit.strip().lower())
 
 
-def build_fair_price_index(average_rows: list[dict]) -> dict[tuple[int, str, str], FairPrice]:
-    """From /marketplace_prices_averages_all rows, build {(id_item, currency, unit):
-    FairPrice} using each item's 30-day rolling sell-side average as the "steal" baseline.
+def build_fair_price_index(average_rows: list[dict]) -> dict[tuple[int, int, str, str], FairPrice]:
+    """From /marketplace_prices_averages_all rows, build {(id_item, quality_tier,
+    currency, unit): FairPrice} using each item/tier's 30-day rolling sell-side average
+    as the "steal" baseline.
 
-    Keyed on currency and unit, not just id_item: UEX returns a separate averages row per
+    Keyed on quality_tier as well as currency and unit: verified against live data that
+    quality_tier genuinely drives price for raw materials (one commodity's 30-day
+    average ranged from ~150K to 200M+ UEC across its tiers), so a listing must be
+    compared against ITS OWN tier's average, never a different one. Currency/unit
+    matter for the same "apples to apples" reason - UEX returns a separate row per
     id_item x quality_tier x operation x currency x unit combination (see
-    bot/uex/marketplace.py: parse_marketplace_average_rows) - an item can have both a
-    UEC-priced row and a WIF/MGS-priced row, or a "per unit" row alongside a "per
-    crate"/"per scu" row. Comparing a listing's price against an average from a different
-    currency or unit isn't a real discount, just mismatched numbers that happen to differ
-    by orders of magnitude - keying on all three keeps the comparison apples-to-apples.
+    bot/uex/marketplace.py: parse_marketplace_average_rows), and an item can have a
+    UEC-priced row alongside a WIF/MGS one, or a "per unit" row alongside a "per
+    crate"/"per scu" one.
 
-    An item can still have several rows sharing one (currency, unit) pair (one per
-    quality_tier), but a Marketplace listing itself almost never reports a comparable
-    quality value (see parse_listing_quality's docstring - most listings never set one),
-    so there's no reliable way to match a specific listing to a specific tier's average.
-    Rather than guess, this takes the LOWEST price_avg_month across those tiers as the
-    fair baseline: the cheapest quality tier still selling at that price is real,
-    legitimate market data (not scanner noise), and comparing every listing against the
-    most conservative baseline available means a listing has to undercut even the
-    cheapest legitimate tier to be flagged - erring toward fewer false "steal" positives.
-
-    A row whose listings_count is below MIN_LISTINGS_FOR_FAIR_PRICE is skipped entirely,
-    not just deprioritized - see that constant's comment for why a thin sample size makes
-    an average untrustworthy as a baseline, regardless of how it compares numerically to
-    other tiers.
+    A row whose listings_count is below MIN_LISTINGS_FOR_FAIR_PRICE is skipped
+    entirely - see that constant's comment for why a thin sample size makes an average
+    untrustworthy as a baseline. This is now safe to do per-tier (rather than falling
+    back to some other tier that happens to have more data) precisely because
+    find_steals matches on the listing's own tier - see that function's docstring for
+    why substituting a different tier's average produced real false positives in
+    manual testing.
     """
-    fair_prices: dict[tuple[int, str, str], FairPrice] = {}
+    fair_prices: dict[tuple[int, int, str, str], FairPrice] = {}
     for row in average_rows:
         if (row.get("operation") or "").strip().lower() != SELL_OPERATION:
             continue
         id_item = parse_uex_number(row.get("id_item"))
+        quality_tier = parse_uex_number(row.get("quality_tier"))
         price = parse_uex_number(row.get("price_avg_month"))
         listings_count = parse_uex_number(row.get("listings_count"))
-        if id_item is None or price is None or price <= 0:
+        if id_item is None or quality_tier is None or price is None or price <= 0:
             continue
         if listings_count is None or listings_count < MIN_LISTINGS_FOR_FAIR_PRICE:
             continue
         currency = row.get("currency") or "UEC"
         unit = row.get("unit") or "unit"
-        key = _price_key(int(id_item), currency, unit)
+        key = _price_key(int(id_item), int(quality_tier), currency, unit)
         current = fair_prices.get(key)
         if current is None or price < current.price_avg_month:
             fair_prices[key] = FairPrice(item_name=row.get("item_name") or "Unknown item", price_avg_month=price)
@@ -128,15 +133,24 @@ def build_fair_price_index(average_rows: list[dict]) -> dict[tuple[int, str, str
 
 
 def find_steals(
-    listings: list[dict], fair_prices: dict[tuple[int, str, str], FairPrice], threshold: float
+    listings: list[dict], fair_prices: dict[tuple[int, int, str, str], FairPrice], threshold: float
 ) -> list[StealEntry]:
     """Compare live sell listings against `fair_prices` (see build_fair_price_index),
     returning every listing priced at least `threshold` (e.g. 0.20 = 20%) below its
-    item's fair price in the SAME currency and unit - sorted by discount, steepest
-    first. A listing with no averages row for its exact (id_item, currency, unit) is
-    skipped rather than guessed at, as is any listing outside
-    ALLOWED_MARKETPLACE_CATEGORY_IDS (see that constant for why) - including one
-    missing id_category entirely, since an unknown category can't be verified safe.
+    OWN quality tier's fair price in the same currency and unit - sorted by discount,
+    steepest first.
+
+    A listing with no reported quality is skipped, not compared against some other
+    tier's average - confirmed against a real flagged listing ("322-776 Savrilium
+    bulk", quality 322 -> tier 1) that a prior version of this function wrongly flagged
+    at 93% off: the only average row that passed MIN_LISTINGS_FOR_FAIR_PRICE for that
+    item/currency/unit happened to be quality_tier 5 (a materially more expensive
+    tier), so the listing was compared against a price band it was never actually
+    part of. Matching strictly on the listing's own tier - and skipping when that
+    exact tier has no averages row, rather than substituting a different one - is what
+    fixes that. Also skipped: any listing outside ALLOWED_MARKETPLACE_CATEGORY_IDS
+    (see that constant for why), including one missing id_category entirely, since an
+    unknown category can't be verified safe.
     """
     steals: list[StealEntry] = []
     for listing in listings:
@@ -148,9 +162,14 @@ def find_steals(
         if id_item is None:
             continue
 
+        quality = parse_listing_quality(listing.get("quality"))
+        if quality is None:
+            continue
+        quality_tier = quality_to_tier(quality)
+
         currency = listing.get("currency") or "UEC"
         unit = listing.get("unit") or "unit"
-        key = _price_key(id_item, currency, unit)
+        key = _price_key(id_item, quality_tier, currency, unit)
         fair = fair_prices.get(key)
         if fair is None:
             continue
@@ -177,7 +196,7 @@ def find_steals(
                 discount_pct=round(discount * 100, 1),
                 currency=currency,
                 seller=listing.get("user_username") or listing.get("user_name") or "unknown seller",
-                quality=parse_listing_quality(listing.get("quality")),
+                quality=quality,
             )
         )
 
