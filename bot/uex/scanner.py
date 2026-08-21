@@ -41,21 +41,33 @@ class StealEntry:
     quality: float | None
 
 
-def build_fair_price_index(average_rows: list[dict]) -> dict[int, FairPrice]:
-    """From /marketplace_prices_averages_all rows, build {id_item: FairPrice} using each
-    item's 30-day rolling sell-side average as the "steal" baseline.
+def _price_key(id_item: int, currency: str, unit: str) -> tuple[int, str, str]:
+    return (id_item, currency.strip().upper(), unit.strip().lower())
 
-    An item can have several rows (one per quality_tier/currency/unit combo), but a
-    Marketplace listing itself almost never reports a comparable quality value (see
-    parse_listing_quality's docstring - most listings never set one), so there's no
-    reliable way to match a specific listing to a specific tier's average. Rather than
-    guess, this takes the LOWEST price_avg_month across an item's tiers as the fair
-    baseline: the cheapest quality tier still selling at that price is real, legitimate
-    market data (not scanner noise), and comparing every listing against the most
-    conservative baseline available means a listing has to undercut even the cheapest
-    legitimate tier to be flagged - erring toward fewer false "steal" positives, not more.
+
+def build_fair_price_index(average_rows: list[dict]) -> dict[tuple[int, str, str], FairPrice]:
+    """From /marketplace_prices_averages_all rows, build {(id_item, currency, unit):
+    FairPrice} using each item's 30-day rolling sell-side average as the "steal" baseline.
+
+    Keyed on currency and unit, not just id_item: UEX returns a separate averages row per
+    id_item x quality_tier x operation x currency x unit combination (see
+    bot/uex/marketplace.py: parse_marketplace_average_rows) - an item can have both a
+    UEC-priced row and a WIF/MGS-priced row, or a "per unit" row alongside a "per
+    crate"/"per scu" row. Comparing a listing's price against an average from a different
+    currency or unit isn't a real discount, just mismatched numbers that happen to differ
+    by orders of magnitude - keying on all three keeps the comparison apples-to-apples.
+
+    An item can still have several rows sharing one (currency, unit) pair (one per
+    quality_tier), but a Marketplace listing itself almost never reports a comparable
+    quality value (see parse_listing_quality's docstring - most listings never set one),
+    so there's no reliable way to match a specific listing to a specific tier's average.
+    Rather than guess, this takes the LOWEST price_avg_month across those tiers as the
+    fair baseline: the cheapest quality tier still selling at that price is real,
+    legitimate market data (not scanner noise), and comparing every listing against the
+    most conservative baseline available means a listing has to undercut even the
+    cheapest legitimate tier to be flagged - erring toward fewer false "steal" positives.
     """
-    fair_prices: dict[int, FairPrice] = {}
+    fair_prices: dict[tuple[int, str, str], FairPrice] = {}
     for row in average_rows:
         if (row.get("operation") or "").strip().lower() != SELL_OPERATION:
             continue
@@ -63,30 +75,40 @@ def build_fair_price_index(average_rows: list[dict]) -> dict[int, FairPrice]:
         price = parse_uex_number(row.get("price_avg_month"))
         if id_item is None or price is None or price <= 0:
             continue
-        id_item = int(id_item)
-        current = fair_prices.get(id_item)
+        currency = row.get("currency") or "UEC"
+        unit = row.get("unit") or "unit"
+        key = _price_key(int(id_item), currency, unit)
+        current = fair_prices.get(key)
         if current is None or price < current.price_avg_month:
-            fair_prices[id_item] = FairPrice(item_name=row.get("item_name") or "Unknown item", price_avg_month=price)
+            fair_prices[key] = FairPrice(item_name=row.get("item_name") or "Unknown item", price_avg_month=price)
     return fair_prices
 
 
-def find_steals(listings: list[dict], fair_prices: dict[int, FairPrice], threshold: float) -> list[StealEntry]:
+def find_steals(
+    listings: list[dict], fair_prices: dict[tuple[int, str, str], FairPrice], threshold: float
+) -> list[StealEntry]:
     """Compare live sell listings against `fair_prices` (see build_fair_price_index),
     returning every listing priced at least `threshold` (e.g. 0.20 = 20%) below its
-    item's fair price - sorted by discount, steepest first. A listing whose id_item
-    isn't in `fair_prices` (no averages data for that item yet) is skipped rather than
-    guessed at.
+    item's fair price in the SAME currency and unit - sorted by discount, steepest
+    first. A listing with no averages row for its exact (id_item, currency, unit) is
+    skipped rather than guessed at.
     """
     steals: list[StealEntry] = []
     for listing in listings:
         if (listing.get("operation") or "").strip().lower() != SELL_OPERATION:
             continue
         id_item = listing.get("id_item")
-        if id_item is None or id_item not in fair_prices:
+        if id_item is None:
+            continue
+
+        currency = listing.get("currency") or "UEC"
+        unit = listing.get("unit") or "unit"
+        key = _price_key(id_item, currency, unit)
+        fair = fair_prices.get(key)
+        if fair is None:
             continue
 
         listing_price = parse_uex_number(listing.get("price"))
-        fair = fair_prices[id_item]
         if listing_price is None or listing_price <= 0:
             continue
 
@@ -106,7 +128,7 @@ def find_steals(listings: list[dict], fair_prices: dict[int, FairPrice], thresho
                 listing_price=listing_price,
                 fair_price=fair.price_avg_month,
                 discount_pct=round(discount * 100, 1),
-                currency=listing.get("currency") or "UEC",
+                currency=currency,
                 seller=listing.get("user_username") or listing.get("user_name") or "unknown seller",
                 quality=parse_listing_quality(listing.get("quality")),
             )
