@@ -14,3 +14,13 @@ venv/
 
 # Tool caches
 .pytest_cache/
+
+# Local investigation notes and one-off UEX API captures. Keep these on the
+# developer machine; reusable diagnostic tools belong in scripts/ instead.
+/CLAUDE.local.md
+/diagnose.py
+/categories.txt
+/dump.txt
+/itemstats.txt
+/savrilium.txt
+/stileron.txt
