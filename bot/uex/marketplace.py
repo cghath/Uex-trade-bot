@@ -201,6 +201,42 @@ def extract_quality_item_ids(average_rows: list[dict]) -> set[int]:
     return ids
 
 
+def extract_tier_stats(average_rows: list[dict]) -> list[dict]:
+    """Distill /marketplace_prices_averages_all rows into what marketplace_item_tier_stats
+    (bot/db/database.py) stores per (item, quality_tier, operation, currency, unit) combo -
+    the endpoint's own documented uniqueness, and the table's primary key. Unlike
+    parse_marketplace_average_rows (display: drops rows with no parsable price), a row here
+    is kept as long as its identity is intact - even price-less, its existence is the
+    signal that the tier sub-item trades at all, which get_known_quality_tiers relies on.
+    Tier 0 is a real tier (Q0) and is kept; rows missing id_item, quality_tier, item_name,
+    or operation have no usable identity and are dropped. Numbers are coerced via
+    parse_uex_number since Marketplace endpoints string-type them."""
+    result = []
+    for row in average_rows:
+        id_item = parse_uex_number(row.get("id_item"))
+        tier = parse_uex_number(row.get("quality_tier"))
+        item_name = row.get("item_name")
+        operation = (row.get("operation") or "").strip().lower()
+        if id_item is None or tier is None or not item_name or not operation:
+            continue
+        listings_count = parse_uex_number(row.get("listings_count"))
+        result.append(
+            {
+                "id_item": int(id_item),
+                "item_name": item_name,
+                "quality_tier": int(tier),
+                "operation": operation,
+                "currency": row.get("currency") or "UEC",
+                "unit": row.get("unit") or "unit",
+                "listings_count": int(listings_count) if listings_count is not None else 0,
+                "price_avg": parse_uex_number(row.get("price_avg")),
+                "price_avg_week": parse_uex_number(row.get("price_avg_week")),
+                "price_avg_month": parse_uex_number(row.get("price_avg_month")),
+            }
+        )
+    return result
+
+
 def extract_item_activity(trend_rows: list[dict]) -> list[dict]:
     """Distill /marketplace_trends rows down to just what the accumulating traded-items index
     (bot/db/database.py: marketplace_item_activity) needs to store. A row missing id_item or

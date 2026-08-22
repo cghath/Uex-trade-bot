@@ -23,6 +23,7 @@ from bot.uex.marketplace import (
     exclude_sold_out,
     extract_item_activity,
     extract_quality_item_ids,
+    extract_tier_stats,
     filter_listings_by_keyword,
     filter_listings_by_quality,
     find_item_id_by_name,
@@ -262,10 +263,20 @@ class Marketplace(commands.Cog):
         if quality_ids:
             await self.bot.db.mark_items_have_quality(sorted(quality_ids))
 
+        # Third half of the same dump: keep the per-tier "sub-item" stats table current.
+        # Each averages row is one (item, quality_tier, operation, currency, unit) combo,
+        # which is exactly a row of marketplace_item_tier_stats - so per-tier prices and
+        # listing counts accumulate from data this task was already fetching anyway.
+        tier_stats = extract_tier_stats(average_rows)
+        if tier_stats:
+            await self.bot.db.upsert_marketplace_tier_stats(tier_stats)
+
         total = await self.bot.db.count_marketplace_item_activity()
+        tier_combos, tier_items = await self.bot.db.count_marketplace_tier_stats()
         logger.info(
-            "Marketplace item activity snapshot: %d items updated, %d total tracked, %d quality-bearing seen",
-            len(activity), total, len(quality_ids),
+            "Marketplace item activity snapshot: %d items updated, %d total tracked, "
+            "%d quality-bearing seen, %d tier combos across %d quality-bearing items",
+            len(activity), total, len(quality_ids), tier_combos, tier_items,
         )
 
     @snapshot_item_activity.before_loop
@@ -285,10 +296,18 @@ class Marketplace(commands.Cog):
                 ephemeral=True,
             )
             return
+        tier_combos, tier_items = await self.bot.db.count_marketplace_tier_stats()
+        tier_note = (
+            f"\nAlso tracking **{tier_combos}** per-quality-tier price rows"
+            f" across **{tier_items}** quality-bearing items."
+            if tier_combos
+            else ""
+        )
         await interaction.response.send_message(
             f"Tracking **{count}** Marketplace items observed in UEX's trending activity so far "
             f"(grows over time - UEX only exposes ~100 at once, refreshed every {ITEM_ACTIVITY_SNAPSHOT_HOURS}h). "
-            "This powers autocomplete on /marketplace-search, /marketplace-alert-add, and /marketplace-post.",
+            "This powers autocomplete on /marketplace-search, /marketplace-alert-add, and /marketplace-post."
+            f"{tier_note}",
             ephemeral=True,
         )
 

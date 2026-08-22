@@ -107,6 +107,32 @@ CREATE TABLE IF NOT EXISTS marketplace_item_activity (
     last_seen TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Per-tier "sub-item" stats for Marketplace items, accumulated from the same hourly
+-- /marketplace_prices_averages_all snapshot that feeds has_quality above. UEX documents
+-- that dump as one row per unique id_item x quality_tier x operation x currency x unit
+-- combination, and that combination is this table's primary key - so each quality tier of
+-- an item is effectively its own row ("Laranite Raw Q6 sell in UEC per scu"), with its own
+-- listing count and price averages. Tier 0 (Q0 / no quality set) is a real tier and is
+-- stored too - quality-less items live entirely at tier 0. Like marketplace_item_activity,
+-- rows accumulate: the dump only covers combos with activity in UEX's rolling window, so a
+-- combo absent from the current snapshot keeps its last-known values instead of being
+-- deleted; first_seen/last_seen bracket when it was actually observed.
+CREATE TABLE IF NOT EXISTS marketplace_item_tier_stats (
+    id_item INTEGER NOT NULL,
+    item_name TEXT NOT NULL,
+    quality_tier INTEGER NOT NULL,
+    operation TEXT NOT NULL,
+    currency TEXT NOT NULL,
+    unit TEXT NOT NULL,
+    listings_count INTEGER NOT NULL DEFAULT 0,
+    price_avg REAL,
+    price_avg_week REAL,
+    price_avg_month REAL,
+    first_seen TEXT NOT NULL DEFAULT (datetime('now')),
+    last_seen TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (id_item, quality_tier, operation, currency, unit)
+);
+
 -- Per-user "want to sell" list (/items-to-sell): items a member wants to offload, each
 -- with the asking price in aUEC they'd sell at. item_name is COLLATE NOCASE so 'gold' and
 -- 'Gold' can't coexist as separate rows for one user - re-adding an item updates its
@@ -582,6 +608,90 @@ class Database:
             )
             rows = await cursor.fetchall()
             return {row["id_item"] for row in rows}
+
+    # -- per-tier Marketplace item stats ("sub-items") ------------------------
+
+    async def upsert_marketplace_tier_stats(self, rows: list[dict[str, Any]]) -> None:
+        """Merge a fresh /marketplace_prices_averages_all snapshot into the per-tier stats
+        table. Same merge semantics as upsert_marketplace_item_activity: each row's stats
+        are UEX's own point-in-time averages, so a re-observed (item, tier, operation,
+        currency, unit) combo is overwritten with the latest values - only first_seen
+        survives updates. Rows are pre-coerced by extract_tier_stats (bot/uex/marketplace.py),
+        which guarantees id_item/quality_tier are ints and prices are floats or None."""
+        if not rows:
+            return
+        async with self.connect() as db:
+            await db.executemany(
+                """INSERT INTO marketplace_item_tier_stats
+                   (id_item, item_name, quality_tier, operation, currency, unit,
+                    listings_count, price_avg, price_avg_week, price_avg_month, last_seen)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                   ON CONFLICT(id_item, quality_tier, operation, currency, unit) DO UPDATE SET
+                       item_name = excluded.item_name,
+                       listings_count = excluded.listings_count,
+                       price_avg = excluded.price_avg,
+                       price_avg_week = excluded.price_avg_week,
+                       price_avg_month = excluded.price_avg_month,
+                       last_seen = datetime('now')""",
+                [
+                    (
+                        r["id_item"], r["item_name"], r["quality_tier"], r["operation"],
+                        r["currency"], r["unit"], r["listings_count"],
+                        r.get("price_avg"), r.get("price_avg_week"), r.get("price_avg_month"),
+                    )
+                    for r in rows
+                ],
+            )
+            await db.commit()
+
+    async def get_item_tier_stats(self, id_item: int) -> list[dict[str, Any]]:
+        """Every accumulated per-tier row for one item - each row is one of the item's
+        "sub-items" (a tier x operation x currency x unit combo), ordered sell before buy
+        then tier ascending to match how the averages command displays live data."""
+        async with self.connect() as db:
+            cursor = await db.execute(
+                """SELECT * FROM marketplace_item_tier_stats WHERE id_item = ?
+                   ORDER BY CASE operation WHEN 'sell' THEN 0 WHEN 'buy' THEN 1 ELSE 2 END,
+                            quality_tier, currency, unit""",
+                (id_item,),
+            )
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    async def get_known_quality_tiers(self, id_items: list[int]) -> dict[int, set[int]]:
+        """{id_item: {tiers}} of the *real* quality tiers (>= 1, so excluding Q0/no-quality)
+        each of these items has ever been observed trading at - i.e. which of the 8 possible
+        tier sub-items actually exist in the wild for the item. An id with no tier >= 1 rows
+        is simply absent from the result, matching how get_quality_flagged_item_ids treats
+        the boolean flag."""
+        ids = [id_item for id_item in id_items if id_item is not None]
+        if not ids:
+            return {}
+        placeholders = ",".join("?" for _ in ids)
+        async with self.connect() as db:
+            cursor = await db.execute(
+                f"""SELECT DISTINCT id_item, quality_tier FROM marketplace_item_tier_stats
+                    WHERE quality_tier >= 1 AND id_item IN ({placeholders})""",
+                ids,
+            )
+            rows = await cursor.fetchall()
+            result: dict[int, set[int]] = {}
+            for row in rows:
+                result.setdefault(row["id_item"], set()).add(row["quality_tier"])
+            return result
+
+    async def count_marketplace_tier_stats(self) -> tuple[int, int]:
+        """(total accumulated tier-combo rows, distinct items with at least one real tier
+        >= 1) - the second number is how many items the index knows as quality-bearing via
+        actual per-tier data, for the /marketplace-index-status readout."""
+        async with self.connect() as db:
+            cursor = await db.execute(
+                """SELECT COUNT(*) AS combos,
+                          COUNT(DISTINCT CASE WHEN quality_tier >= 1 THEN id_item END) AS quality_items
+                   FROM marketplace_item_tier_stats"""
+            )
+            row = await cursor.fetchone()
+            return (row["combos"], row["quality_items"]) if row else (0, 0)
 
     async def count_marketplace_item_activity(self) -> int:
         async with self.connect() as db:
