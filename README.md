@@ -189,7 +189,6 @@ bot/
   main.py            entrypoint, bot setup, cog loading, slash command sync
   config.py          .env loading and validation
   discord_ui.py      shared Discord UI helpers (embeds, pagination)
-  sell_list.py       pure input parsing/validation for /items-to-sell (unit tested)
   uex/
     client.py        async UEX API 2.0 client (auth, caching, rate-limit handling)
     trading.py       buy/sell/route ranking helpers (fallback when /commodities_routes lacks data)
@@ -214,7 +213,6 @@ bot/
     marketplace.py        /marketplace-average and Marketplace lookups
     marketplace_alerts.py Marketplace listing alerts + background poller
     scanner.py             /set-scanner-channel, /scanner-status, /scan-now + background poller
-    sell_list.py          /items-to-sell, /items-to-sell-list, /items-to-sell-remove
     stock_alerts.py       terminal stock alerts + background poller
     ships.py              ship info commands
     digest.py             scheduled guild digest posts

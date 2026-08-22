@@ -22,7 +22,7 @@ from bot.uex.marketplace import (
     compute_marketplace_movers,
     exclude_sold_out,
     extract_item_activity,
-    extract_quality_item_ids,
+    extract_tier_stats,
     filter_listings_by_keyword,
     filter_listings_by_quality,
     find_item_id_by_name,
@@ -248,24 +248,28 @@ class Marketplace(commands.Cog):
             return
         await self.bot.db.upsert_marketplace_item_activity(activity)
 
-        # Second half of the snapshot: learn which indexed items have an in-game quality at
-        # all, from the bulk averages dump (rows are per quality_tier - any tier >= 1 row
-        # means the item is quality-bearing). Runs after the activity upsert so items new in
-        # this very snapshot get flagged in the same pass. Failure here degrades gracefully:
-        # the flag just stays stale until the next hourly run.
+        # Second half of the snapshot: keep the per-tier "sub-item" stats table current
+        # from the bulk averages dump. Each averages row is one (item, quality_tier,
+        # operation, currency, unit) combo, which is exactly a row of
+        # marketplace_item_tier_stats - per-tier prices, listing counts, and the "which
+        # tiers does this item trade at" signal all accumulate from this one fetch.
+        # Failure here degrades gracefully: tier stats just stay stale until the next
+        # hourly run.
         try:
             average_rows = await self.bot.uex.get_marketplace_prices_averages_all()
         except UexApiError as exc:
-            logger.warning("Failed to refresh marketplace quality flags: %s", exc)
+            logger.warning("Failed to refresh marketplace tier stats: %s", exc)
             average_rows = []
-        quality_ids = extract_quality_item_ids(average_rows)
-        if quality_ids:
-            await self.bot.db.mark_items_have_quality(sorted(quality_ids))
+        tier_stats = extract_tier_stats(average_rows)
+        if tier_stats:
+            await self.bot.db.upsert_marketplace_tier_stats(tier_stats)
 
         total = await self.bot.db.count_marketplace_item_activity()
+        tier_combos, tier_items = await self.bot.db.count_marketplace_tier_stats()
         logger.info(
-            "Marketplace item activity snapshot: %d items updated, %d total tracked, %d quality-bearing seen",
-            len(activity), total, len(quality_ids),
+            "Marketplace item activity snapshot: %d items updated, %d total tracked, "
+            "%d tier combos across %d quality-bearing items",
+            len(activity), total, tier_combos, tier_items,
         )
 
     @snapshot_item_activity.before_loop
@@ -285,10 +289,18 @@ class Marketplace(commands.Cog):
                 ephemeral=True,
             )
             return
+        tier_combos, tier_items = await self.bot.db.count_marketplace_tier_stats()
+        tier_note = (
+            f"\nAlso tracking **{tier_combos}** per-quality-tier price rows"
+            f" across **{tier_items}** quality-bearing items."
+            if tier_combos
+            else ""
+        )
         await interaction.response.send_message(
             f"Tracking **{count}** Marketplace items observed in UEX's trending activity so far "
             f"(grows over time - UEX only exposes ~100 at once, refreshed every {ITEM_ACTIVITY_SNAPSHOT_HOURS}h). "
-            "This powers autocomplete on /marketplace-search, /marketplace-alert-add, and /marketplace-post.",
+            "This powers autocomplete on /marketplace-search, /marketplace-alert-add, and /marketplace-post."
+            f"{tier_note}",
             ephemeral=True,
         )
 

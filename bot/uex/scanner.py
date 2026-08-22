@@ -24,15 +24,14 @@ against live data: a single commodity's 30-day average ranged from ~150K to over
 UEC across its quality_tier rows) - and unlike crafted gear, these listings reliably DO
 report a real 0-1000 `quality` value (parse_listing_quality). So every match here is
 tier-specific: a listing's own quality is converted to UEX's quality_tier bucket
-(bot/sell_list.py: quality_to_tier) and compared ONLY against that exact tier's average,
+(bot/uex/marketplace.py: quality_to_tier) and compared ONLY against that exact tier's average,
 never a different tier substituted in because it happened to have more sample data.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from bot.sell_list import quality_to_tier
-from bot.uex.marketplace import parse_listing_quality, parse_uex_number
+from bot.uex.marketplace import parse_listing_quality, parse_uex_number, quality_to_tier
 
 SELL_OPERATION = "sell"
 

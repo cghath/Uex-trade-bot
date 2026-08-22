@@ -75,6 +75,30 @@ def parse_listing_quality(raw: Any) -> float | None:
     return value if value is not None and value > 0 else None
 
 
+def quality_to_tier(quality: float) -> int:
+    """Map a raw 0-1000 quality value onto UEX's quality_tier int, using the exact
+    (uneven) buckets /marketplace_prices_averages and /marketplace_prices_history
+    document: 0 = Q0, 1 = Q1-499, 2 = Q500-599, 3 = Q600-699, 4 = Q700-799,
+    5 = Q800-899, 6 = Q900-949, 7 = Q950-1000. Out-of-range input is clamped rather
+    than raised on - callers feed values that already came from UEX itself, so anything
+    else is defensive."""
+    if quality <= 0:
+        return 0
+    if quality <= 499:
+        return 1
+    if quality <= 599:
+        return 2
+    if quality <= 699:
+        return 3
+    if quality <= 799:
+        return 4
+    if quality <= 899:
+        return 5
+    if quality <= 949:
+        return 6
+    return 7
+
+
 @dataclass
 class MarketplaceMoverEntry:
     item_name: str
@@ -183,22 +207,40 @@ def parse_marketplace_average_rows(rows: list[dict]) -> list[MarketplaceAverageE
     return entries
 
 
-def extract_quality_item_ids(average_rows: list[dict]) -> set[int]:
-    """From /marketplace_prices_averages(_all) rows, the id_items that have been observed
-    listed at a real quality tier (quality_tier >= 1) - the signal that an item has an
-    in-game quality at all. Tier 0 means "Q0 / no quality set", so an item whose rows are
-    all tier 0 is NOT counted: plenty of quality-less items (weapons, armor) only ever
-    appear there. Both id_item and quality_tier go through defensive coercion since
-    Marketplace endpoints string-type numbers (see parse_uex_number)."""
-    ids: set[int] = set()
+def extract_tier_stats(average_rows: list[dict]) -> list[dict]:
+    """Distill /marketplace_prices_averages_all rows into what marketplace_item_tier_stats
+    (bot/db/database.py) stores per (item, quality_tier, operation, currency, unit) combo -
+    the endpoint's own documented uniqueness, and the table's primary key. Unlike
+    parse_marketplace_average_rows (display: drops rows with no parsable price), a row here
+    is kept as long as its identity is intact - even price-less, its existence is the
+    signal that the tier sub-item trades at all, which get_known_quality_tiers relies on.
+    Tier 0 is a real tier (Q0) and is kept; rows missing id_item, quality_tier, item_name,
+    or operation have no usable identity and are dropped. Numbers are coerced via
+    parse_uex_number since Marketplace endpoints string-type them."""
+    result = []
     for row in average_rows:
         id_item = parse_uex_number(row.get("id_item"))
         tier = parse_uex_number(row.get("quality_tier"))
-        if id_item is None or tier is None:
+        item_name = row.get("item_name")
+        operation = (row.get("operation") or "").strip().lower()
+        if id_item is None or tier is None or not item_name or not operation:
             continue
-        if tier >= 1:
-            ids.add(int(id_item))
-    return ids
+        listings_count = parse_uex_number(row.get("listings_count"))
+        result.append(
+            {
+                "id_item": int(id_item),
+                "item_name": item_name,
+                "quality_tier": int(tier),
+                "operation": operation,
+                "currency": row.get("currency") or "UEC",
+                "unit": row.get("unit") or "unit",
+                "listings_count": int(listings_count) if listings_count is not None else 0,
+                "price_avg": parse_uex_number(row.get("price_avg")),
+                "price_avg_week": parse_uex_number(row.get("price_avg_week")),
+                "price_avg_month": parse_uex_number(row.get("price_avg_month")),
+            }
+        )
+    return result
 
 
 def extract_item_activity(trend_rows: list[dict]) -> list[dict]:
