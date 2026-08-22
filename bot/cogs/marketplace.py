@@ -248,6 +248,14 @@ class Marketplace(commands.Cog):
             return
         await self.bot.db.upsert_marketplace_item_activity(activity)
 
+        # Keep the liquidity leaderboard in step with the same trends snapshot that
+        # feeds the Marketplace activity index. Do not make a separate UEX request.
+        try:
+            liquidity_count = await self.bot.db.update_liquidity_scores(activity)
+            logger.info("Liquidity scores refreshed: %d items", liquidity_count)
+        except Exception:
+            logger.exception("Failed to refresh liquidity scores")
+
         # Second half of the snapshot: learn which indexed items have an in-game quality at
         # all, from the bulk averages dump (rows are per quality_tier - any tier >= 1 row
         # means the item is quality-bearing). Runs after the activity upsert so items new in

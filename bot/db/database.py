@@ -526,24 +526,25 @@ class Database:
 
     # -- liquidity scores -------------------------------------------------------
 
-    async def update_liquidity_scores(self) -> int:
+    async def update_liquidity_scores(self, activity_rows: list[dict[str, Any]]) -> int:
+        """Store liquidity scores from one already-fetched Marketplace trends snapshot.
+
+        Fetching belongs to the Marketplace cog so the activity index and leaderboard use
+        the same hourly UEX response instead of making a second API call.
         """
-        Calculates and updates the liquidity scores for all items in the marketplace.
-        A score is derived from the ratio of negotiations to listings, weighted by
-        recent activity.
-        """
-        rows = await uex.get_marketplace_trends()
-        if not rows:
+        if not activity_rows:
             return 0
-        
+
         count = 0
         async with self.connect() as db:
-            for row in rows:
-                # Logic for calculating score:
-                # We want to identify items with high negotiation activity relative to listings.
-                # This is a placeholder for the actual calculation logic.
-                # For now, we'll just set a dummy score based on negotiations_count.
-                score = row.get("negotiations_count", 0) * 10
+            for row in activity_rows:
+                item_name = row.get("item_name")
+                if not item_name:
+                    continue
+
+                # This remains the deliberately simple first-pass score. The pipeline needs
+                # to be proven with live data before the scoring model is revisited.
+                score = float(row.get("negotiations_count") or 0) * 10
                 
                 await db.execute(
                     """INSERT INTO liquidity_scores (item_name, score, last_updated)
@@ -551,7 +552,7 @@ class Database:
                        ON CONFLICT(item_name) DO UPDATE SET
                            score = excluded.score,
                            last_updated = datetime('now')""",
-                    (row.get("item_name"), score)
+                    (item_name, score)
                 )
                 count += 1
             await db.commit()
