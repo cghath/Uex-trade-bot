@@ -1,4 +1,5 @@
 # Hi
+# Hi
 """Entrypoint: python -m bot.main"""
 from __future__ import annotations
 
@@ -31,14 +32,16 @@ INITIAL_COGS = (
     "bot.cogs.ships",
     "bot.cogs.digest",
     "bot.cogs.diagnostics",
-    "bot.cogs.scanner",
     "bot.cogs.help",
+    "bot.cogs.scanner",
+    "bot.cogs.liquidity",
 )
 
 
 class UexBot(commands.Bot):
     def __init__(self, config: Config) -> None:
         intents = discord.Intents.default()
+        intents.message_content = True
         super().__init__(command_prefix="!uex-unused-", intents=intents)
         self.config = config
 
@@ -59,15 +62,20 @@ class UexBot(commands.Bot):
         await self.db.init()
 
         for extension in INITIAL_COGS:
-            await self.load_extension(extension)
-            logger.info("Loaded extension %s", extension)
+            try:
+                await self.load_extension(extension)
+                logger.info("Loaded extension %s", extension)
+            except Exception as e:
+                logger.error("Failed to load extension %s: %s", extension, e)
 
         if self.config.discord_dev_guild_id:
             guild = discord.Object(id=self.config.discord_dev_guild_id)
             self.tree.copy_global_to(guild=guild)
+            # Sync to the specific dev guild for immediate availability
             synced = await self.tree.sync(guild=guild)
             logger.info("Synced %d commands to dev guild %s", len(synced), guild.id)
         else:
+            # Fallback to global sync if no dev guild is provided
             synced = await self.tree.sync()
             logger.info("Synced %d global commands", len(synced))
 
@@ -78,6 +86,29 @@ class UexBot(commands.Bot):
     async def on_ready(self) -> None:
         logger.info("Logged in as %s (id=%s)", self.user, self.user.id if self.user else "?")
 
+    @commands.command()
+    @commands.is_owner()
+    async def sync(self, ctx: commands.Context, spec: str | None = None) -> None:
+        """Syncs slash commands on demand.
+        Usage:
+          !sync        -> Syncs commands to the CURRENT guild instantly
+          !sync global -> Syncs commands globally (takes up to 1 hour)
+          !sync clear  -> Clears commands from the current guild
+        """
+        if spec == "global":
+            synced = await self.tree.sync()
+            await ctx.send(f"🌍 Synced {len(synced)} commands globally.")
+        elif spec == "clear":
+            self.tree.clear_commands(guild=ctx.guild)
+            synced = await self.tree.sync(guild=ctx.guild)
+            await ctx.send("🧹 Cleared all commands from this guild.")
+        else:
+            guild = discord.Object(id=ctx.guild.id)
+            self.tree.copy_global_to(guild=guild)
+            synced = await self.tree.sync(guild=guild)
+            await ctx.send(
+                f"✅ Synced {len(synced)} commands instantly to **{ctx.guild.name}**."
+            )
 
 async def run() -> None:
     config = Config.from_env()

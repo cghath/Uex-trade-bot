@@ -12,6 +12,8 @@ from typing import Any, AsyncIterator
 import aiosqlite
 from cryptography.fernet import Fernet, InvalidToken
 
+from bot.uex.marketplace import compute_liquidity_score
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS price_alerts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -85,6 +87,36 @@ CREATE TABLE IF NOT EXISTS guild_digest_config (
     last_posted_date TEXT,
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS liquidity_scores (
+    item_name TEXT PRIMARY KEY,
+    id_item INTEGER,
+    score REAL NOT NULL,
+    negotiations_success INTEGER NOT NULL DEFAULT 0,
+    negotiations_open INTEGER NOT NULL DEFAULT 0,
+    listings_count INTEGER NOT NULL DEFAULT 0,
+    listings_count_sell INTEGER NOT NULL DEFAULT 0,
+    listings_count_buy INTEGER NOT NULL DEFAULT 0,
+    last_updated TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- One current score is useful for /liquidity-rank; hourly snapshots make the change over
+-- time visible to /liquidity-trends. The hour bucket also prevents bot restarts from
+-- creating duplicate points for the same item in one refresh window.
+CREATE TABLE IF NOT EXISTS liquidity_score_snapshots (
+    id_item INTEGER NOT NULL,
+    item_name TEXT NOT NULL,
+    score REAL NOT NULL,
+    negotiations_success INTEGER NOT NULL,
+    negotiations_open INTEGER NOT NULL,
+    listings_count INTEGER NOT NULL,
+    listings_count_sell INTEGER NOT NULL,
+    listings_count_buy INTEGER NOT NULL,
+    recorded_hour TEXT NOT NULL,
+    PRIMARY KEY (id_item, recorded_hour)
+);
+CREATE INDEX IF NOT EXISTS idx_liquidity_snapshots_item_time
+    ON liquidity_score_snapshots (id_item, recorded_hour);
 
 -- Accumulating index of Marketplace items the bot has actually observed being traded, built
 -- by periodically snapshotting /marketplace_trends (which only ever exposes ~100 items live
@@ -211,6 +243,14 @@ class Database:
             # their actual existing behavior (channel post, ping the creator) exactly, so
             # nothing changes for anyone's already-running watches.
             "ALTER TABLE stock_alerts ADD COLUMN scope TEXT NOT NULL DEFAULT 'global'",
+            "ALTER TABLE liquidity_scores ADD COLUMN id_item INTEGER",
+            "ALTER TABLE liquidity_scores ADD COLUMN negotiations_success INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE liquidity_scores ADD COLUMN negotiations_open INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE liquidity_scores ADD COLUMN listings_count INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE liquidity_scores ADD COLUMN listings_count_sell INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE liquidity_scores ADD COLUMN listings_count_buy INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE liquidity_score_snapshots ADD COLUMN listings_count_sell INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE liquidity_score_snapshots ADD COLUMN listings_count_buy INTEGER NOT NULL DEFAULT 0",
         ]
         for statement in migrations:
             try:
@@ -509,7 +549,151 @@ class Database:
                 "UPDATE guild_digest_config SET last_posted_date = ? WHERE guild_id = ?",
                 (date_str, guild_id),
             )
+
+    # -- liquidity scores -------------------------------------------------------
+
+    async def update_liquidity_scores(self, activity_rows: list[dict[str, Any]]) -> int:
+        """Store liquidity scores from one already-fetched Marketplace trends snapshot.
+
+        Fetching belongs to the Marketplace cog so the activity index and leaderboard use
+        the same hourly UEX response instead of making a second API call.
+        """
+        if not activity_rows:
+            return 0
+
+        count = 0
+        async with self.connect() as db:
+            for row in activity_rows:
+                item_name = row.get("item_name")
+                id_item = row.get("id_item")
+                if not item_name or id_item is None:
+                    continue
+
+                score = compute_liquidity_score(row)
+                successful = int(float(row.get("negotiations_success") or 0))
+                open_negotiations = int(float(row.get("negotiations_open") or 0))
+                listings_count = int(float(row.get("listings_count") or 0))
+                sell_listings = int(float(row.get("listings_count_sell") or 0))
+                buy_listings = int(float(row.get("listings_count_buy") or 0))
+                
+                await db.execute(
+                    """INSERT INTO liquidity_scores
+                       (item_name, id_item, score, negotiations_success, negotiations_open, listings_count, listings_count_sell, listings_count_buy, last_updated)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                       ON CONFLICT(item_name) DO UPDATE SET
+                           id_item = excluded.id_item,
+                           score = excluded.score,
+                           negotiations_success = excluded.negotiations_success,
+                           negotiations_open = excluded.negotiations_open,
+                           listings_count = excluded.listings_count,
+                           listings_count_sell = excluded.listings_count_sell,
+                           listings_count_buy = excluded.listings_count_buy,
+                           last_updated = datetime('now')""",
+                    (item_name, id_item, score, successful, open_negotiations, listings_count, sell_listings, buy_listings),
+                )
+                await db.execute(
+                    """INSERT INTO liquidity_score_snapshots
+                       (id_item, item_name, score, negotiations_success, negotiations_open, listings_count, listings_count_sell, listings_count_buy, recorded_hour)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%d %H:00:00', 'now'))
+                       ON CONFLICT(id_item, recorded_hour) DO UPDATE SET
+                           item_name = excluded.item_name,
+                           score = excluded.score,
+                           negotiations_success = excluded.negotiations_success,
+                           negotiations_open = excluded.negotiations_open,
+                           listings_count = excluded.listings_count,
+                           listings_count_sell = excluded.listings_count_sell,
+                           listings_count_buy = excluded.listings_count_buy""",
+                    (id_item, item_name, score, successful, open_negotiations, listings_count, sell_listings, buy_listings),
+                )
+                count += 1
             await db.commit()
+        return count
+
+    async def seed_test_liquidity(self) -> None:
+        """Seeds dummy data for testing the liquidity rank command."""
+        async with self.connect() as db:
+            # Dummy items with varying scores
+            test_items = [
+                ("Gold", 5000),
+                ("Silver", 3500),
+                ("Copper", 2000),
+                ("Iron", 1500),
+                ("Tin", 1200),
+                ("Lead", 800),
+                ("Zinc", 700),
+                ("Nickel", 600),
+                ("Aluminum", 400),
+                ("Titanium", 200)
+            ]
+            for name, score in test_items:
+                await db.execute(
+                    """INSERT INTO liquidity_scores (item_name, score, last_updated)
+                       VALUES (?, ?, datetime('now'))
+                       ON CONFLICT(item_name) DO UPDATE SET
+                           score = excluded.score,
+                           last_updated = datetime('now')""",
+                    (name, score)
+                )
+            await db.commit()
+            logger.info("Seeded dummy liquidity data for testing.")
+
+
+    async def get_top_liquidity_items(self, limit: int = 10) -> list[dict[str, Any]]:
+        """Returns the top N items with the highest liquidity scores."""
+        async with self.connect() as db:
+            cursor = await db.execute(
+                "SELECT * FROM liquidity_scores ORDER BY score DESC LIMIT ?",
+                (limit,)
+            )
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    async def get_liquidity_history(self, item_name: str, hours: int = 24 * 7) -> list[dict[str, Any]]:
+        """Return one tracked item's hourly liquidity snapshots, oldest first."""
+        async with self.connect() as db:
+            cursor = await db.execute(
+                """SELECT * FROM liquidity_score_snapshots
+                   WHERE item_name = ? COLLATE NOCASE AND recorded_hour >= datetime('now', ?)
+                   ORDER BY recorded_hour ASC""",
+                (item_name, f"-{hours} hours"),
+            )
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    async def find_liquidity_items(self, query: str, limit: int = 25) -> list[dict[str, Any]]:
+        """Autocomplete-ready current liquidity items, ordered by score."""
+        async with self.connect() as db:
+            cursor = await db.execute(
+                """SELECT item_name, id_item FROM liquidity_scores
+                   WHERE item_name LIKE ? COLLATE NOCASE
+                   ORDER BY score DESC LIMIT ?""",
+                (f"%{query}%", limit),
+            )
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    async def get_liquidity_movers(self, hours: int = 24, limit: int = 10) -> list[dict[str, Any]]:
+        """Largest score changes over the available history within the requested window."""
+        async with self.connect() as db:
+            cursor = await db.execute(
+                """WITH windowed AS (
+                       SELECT * FROM liquidity_score_snapshots
+                       WHERE recorded_hour >= datetime('now', ?)
+                   ), bounds AS (
+                       SELECT id_item, MIN(recorded_hour) AS first_hour, MAX(recorded_hour) AS last_hour
+                       FROM windowed GROUP BY id_item HAVING COUNT(*) >= 2
+                   )
+                   SELECT latest.item_name, latest.id_item, earliest.score AS previous_score,
+                          latest.score AS current_score, latest.score - earliest.score AS score_change,
+                          earliest.recorded_hour AS first_hour, latest.recorded_hour AS last_hour
+                   FROM bounds
+                   JOIN windowed AS earliest ON earliest.id_item = bounds.id_item AND earliest.recorded_hour = bounds.first_hour
+                   JOIN windowed AS latest ON latest.id_item = bounds.id_item AND latest.recorded_hour = bounds.last_hour
+                   ORDER BY ABS(latest.score - earliest.score) DESC LIMIT ?""",
+                (f"-{hours} hours", limit),
+            )
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
 
     # -- accumulating Marketplace traded-items index --------------------------
 

@@ -51,6 +51,16 @@ went through several real correctness bugs found only by testing against live da
    turned out to be a threshold-calibration issue, not a bug.
 6. **`CONTRIBUTING.md` / `CLAUDE.md` added**, distilling the local model's mistakes into a
    checklist so the next offloaded task doesn't repeat them.
+7. **Marketplace liquidity tools completed** and merged into **`TestBranch`**: the Marketplace
+   trends refresh now saves the same live activity snapshot for a leaderboard instead of
+   making another UEX request. `/liquidity-rank` presents a seller-focused **Sellability
+   Rating (0-100)** with a direct UEX Marketplace link for every item. It uses completed
+   deals, open negotiations at half weight, active sell listings as competing supply, and
+   a modest active-buy-posting bonus. A three-listing supply cushion prevents one-listing
+   items from dominating the rank. `/liquidity-trends [item]` charts an item's hourly
+   rating history; without an item it will show the biggest 24-hour movers once enough
+   snapshots have accumulated. The implementation was live-tested in Discord and has 83
+   passing automated tests.
 
 ## How the scanner's matching logic evolved (read before touching `bot/uex/scanner.py`)
 
@@ -179,3 +189,8 @@ guessed at.
 - The user mentioned possibly creating a separate branch for a local model to work on
   independently - `CONTRIBUTING.md` exists specifically so that work starts from a better
   footing.
+- **Liquidity feature:** current work is on `TestBranch`, not `main`. Its
+  score is deliberately an indicator, not a predicted percentage chance of sale. It is
+  bounded to 0-100 so users can interpret it at a glance. The history/movers view needs
+  at least two hourly Marketplace snapshots before it can show a comparison.
+

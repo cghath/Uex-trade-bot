@@ -255,6 +255,14 @@ class Marketplace(commands.Cog):
         # tiers does this item trade at" signal all accumulate from this one fetch.
         # Failure here degrades gracefully: tier stats just stay stale until the next
         # hourly run.
+        # Keep the liquidity leaderboard in step with the same trends snapshot that
+        # feeds the Marketplace activity index. Do not make a separate UEX request.
+        try:
+            liquidity_count = await self.bot.db.update_liquidity_scores(activity)
+            logger.info("Liquidity scores refreshed: %d items", liquidity_count)
+        except Exception:
+            logger.exception("Failed to refresh liquidity scores")
+
         try:
             average_rows = await self.bot.uex.get_marketplace_prices_averages_all()
         except UexApiError as exc:
