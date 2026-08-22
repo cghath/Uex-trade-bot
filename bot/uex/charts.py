@@ -145,3 +145,45 @@ def render_price_history_chart(
     plt.close(fig)
     buffer.seek(0)
     return buffer
+
+
+def render_liquidity_history_chart(*, item_name: str, history_rows: list[dict]) -> io.BytesIO | None:
+    """Build a score-over-time chart from the bot's own hourly liquidity snapshots."""
+    points = []
+    for row in history_rows:
+        try:
+            when = datetime.fromisoformat(row["recorded_hour"]).replace(tzinfo=timezone.utc)
+            score = float(row["score"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        points.append((when, score))
+    if len(points) < 2:
+        return None
+
+    points.sort(key=lambda point: point[0])
+    times, scores = zip(*points)
+    fig, ax = plt.subplots(figsize=(9, 5), dpi=100)
+    fig.patch.set_facecolor(_SURFACE)
+    ax.set_facecolor(_SURFACE)
+    ax.grid(True, color=_GRIDLINE, linewidth=1, linestyle="-", zorder=0)
+    ax.set_axisbelow(True)
+    ax.plot(times, scores, color=_SELL_COLOR, linewidth=2, solid_joinstyle="round", zorder=3)
+    ax.scatter([times[-1]], [scores[-1]], s=64, color=_SELL_COLOR, edgecolors=_SURFACE, linewidths=2, zorder=4)
+    ax.annotate(f"{scores[-1]:,.0f}", (times[-1], scores[-1]), color=_INK_PRIMARY,
+                fontsize=9, xytext=(8, 0), textcoords="offset points", va="center")
+    ax.set_title(f"{item_name} — Liquidity score", color=_INK_PRIMARY, fontsize=13, loc="left", pad=12)
+    ax.set_ylabel("Weighted demand per 100 listings", color=_INK_SECONDARY, fontsize=10)
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"{x:,.0f}"))
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %d"))
+    fig.autofmt_xdate(rotation=0, ha="center")
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+    ax.spines["bottom"].set_visible(True)
+    ax.spines["bottom"].set_color(_BASELINE)
+    ax.tick_params(colors=_INK_MUTED, labelsize=9)
+    fig.tight_layout()
+    buffer = io.BytesIO()
+    fig.savefig(buffer, format="png", facecolor=_SURFACE)
+    plt.close(fig)
+    buffer.seek(0)
+    return buffer

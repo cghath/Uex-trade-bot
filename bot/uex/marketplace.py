@@ -5,6 +5,11 @@ from dataclasses import dataclass
 from typing import Any
 
 
+def marketplace_item_url(id_item: int) -> str:
+    """Canonical UEX Marketplace page for one catalog item."""
+    return f"https://uexcorp.space/marketplace/home/?id_item={id_item}&mode=list"
+
+
 def find_item_id_by_name(items: list[dict], query: str) -> int | None:
     """Resolve a typed query to a single catalog item's id, if there's an unambiguous match.
 
@@ -219,10 +224,56 @@ def extract_item_activity(trend_rows: list[dict]) -> list[dict]:
                 "id_item": id_item,
                 "item_name": item_name,
                 "negotiations_count": row.get("negotiations_count") or 0,
+                "negotiations_open": row.get("negotiations_open") or 0,
+                "negotiations_success": row.get("negotiations_success") or 0,
                 "listings_count": row.get("total_listings_count") or 0,
+                "listings_count_sell": row.get("listings_count_sell") or 0,
+                "listings_count_buy": row.get("listings_count_buy") or 0,
             }
         )
     return result
+
+
+def compute_liquidity_score(activity: dict) -> float:
+    """Return a bounded 0-100 sellability rating for one Marketplace item.
+
+    Completed negotiations are the strongest signal that an item actually sells. Open
+    negotiations represent live interest, but may not complete, so they receive half
+    weight. Dividing this demand signal by the number of active listings prevents raw
+    volume alone from making heavily supplied items look more liquid than they are.
+    For a seller, the relevant supply is competing *sell* listings, rather than buy
+    postings. Active buy postings are a direct, but weaker and shorter-lived, sign of
+    demand, so each adds the weight of two completed negotiations.
+
+    A three-listing supply cushion keeps a single listing from producing a misleading
+    outlier. The final saturation step makes the rating easy to read: it always falls
+    between 0 and 100, but is an indicator of sellability rather than a literal chance
+    of a sale. Older snapshots without a sell-side count fall back to total listings.
+    """
+    sell_listings = activity.get("listings_count_sell")
+    listings = float(sell_listings if sell_listings is not None else activity.get("listings_count") or 0)
+    if listings <= 0:
+        return 0.0
+
+    successful = activity.get("negotiations_success")
+    open_negotiations = activity.get("negotiations_open")
+    if successful is None and open_negotiations is None:
+        # Preserve a useful score if UEX ever omits the detailed fields but continues
+        # to provide its aggregate negotiation count.
+        successful = activity.get("negotiations_count") or 0
+        open_negotiations = 0
+
+    buy_postings = float(activity.get("listings_count_buy") or 0)
+    weighted_demand = (
+        float(successful or 0)
+        + (float(open_negotiations or 0) * 0.5)
+        + (buy_postings * 2)
+    )
+    if weighted_demand <= 0:
+        return 0.0
+
+    adjusted_supply = listings + 3
+    return round(100 * weighted_demand / (weighted_demand + (adjusted_supply * 3)), 2)
 
 
 def rank_traded_items(activity_rows: list[dict], limit: int = 1000) -> list[dict]:
