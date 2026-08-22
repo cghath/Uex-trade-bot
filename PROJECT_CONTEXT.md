@@ -126,18 +126,16 @@ guessed at.
 
 ## Current state / what's pending
 
-- **Flagged to the user, not yet resolved: PR #10 on `TestBranch` came from an
-  unfamiliar GitHub account (`jcocja-commits`, not the repo owner `cghath`).** It
-  deleted the entire `/items-to-sell` feature (`bot/cogs/sell_list.py`,
-  `bot/sell_list.py`, `user_sell_list` table - a real, previously-shipped feature, not
-  just a refactor) and replaced it with a `marketplace_item_tier_stats` table, moving
-  `quality_to_tier()` into `bot/uex/marketplace.py`. It correctly updated
-  `bot/uex/scanner.py`'s import to match the new location (verified: all 68 tests pass,
-  including all 22 scanner tests - nothing is actually broken). So this wasn't a
-  careless or malicious change technically - but it's still unclear who this account is
-  and whether removing `/items-to-sell` was intended. Confirm with the user before
-  assuming this account should have push access, and before assuming the sell-list
-  removal was wanted.
+- **Resolved: PR #10** on `TestBranch` came from `jcocja-commits`, a collaborator the
+  user added (confirmed) - not an unexpected account. It deleted the entire
+  `/items-to-sell` feature (`bot/cogs/sell_list.py`, `bot/sell_list.py`,
+  `user_sell_list` table) and replaced it with a `marketplace_item_tier_stats` table,
+  moving `quality_to_tier()` into `bot/uex/marketplace.py` - intentional (confirmed by
+  the user), not a mistake. It correctly updated `bot/uex/scanner.py`'s import to match
+  the new location (verified: all 68 tests pass, including all 22 scanner tests).
+  `bot/uex/scanner.py` currently imports `quality_to_tier` from `bot.uex.marketplace`,
+  not `bot.sell_list` - if you're reading older PR descriptions in this repo's history
+  that reference `bot/sell_list.py`, that file no longer exists.
 - All scanner work (PRs adding the feature and its four fixes, plus the threshold change)
   lives on `TestBranch`, not yet merged to `main`. Confirm with the user before assuming
   it's in production.
