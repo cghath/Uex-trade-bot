@@ -71,6 +71,7 @@ class UexBot(commands.Bot):
 
         if self.config.discord_dev_guild_id:
             guild = discord.Object(id=self.config.discord_dev_guild_id)
+            self.tree.copy_global_to(guild=guild)
             # Sync to the specific dev guild for immediate availability
             synced = await self.tree.sync(guild=guild)
             logger.info("Synced %d commands to dev guild %s", len(synced), guild.id)
