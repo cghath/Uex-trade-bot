@@ -26,7 +26,6 @@ CATEGORIES: list[tuple[str, list[str]]] = [
         "marketplace-delete-listing", "marketplace-index-status",
     ]),
     ("Marketplace Alerts", ["marketplace-alert-add", "marketplace-alert-list", "marketplace-alert-remove"]),
-    ("Your Sell List", ["items-to-sell", "items-to-sell-list", "items-to-sell-remove"]),
     ("Stock Alerts", ["stock-alert-add", "stock-alert-list", "stock-alert-remove"]),
     ("Daily Digest", ["digest-now", "set-digest-channel", "digest-disable"]),
     ("Account Linking", ["link-uex-account", "unlink-uex-account", "uex-account-status"]),

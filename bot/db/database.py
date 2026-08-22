@@ -91,24 +91,19 @@ CREATE TABLE IF NOT EXISTS guild_digest_config (
 -- at once) and merging in whatever's new. Grows past that ~100 ceiling over time as UEX's own
 -- top-100 window rotates through different items across polls. Powers autocomplete on the
 -- Marketplace commands so suggestions are scoped to things people actually trade, not the
--- full multi-thousand-item catalog.
--- has_quality: 1 once the item has ever been observed listed at a real quality tier
--- (quality_tier >= 1 on /marketplace_prices_averages_all - see the snapshot task in
--- bot/cogs/marketplace.py). Sticky: an ore doesn't stop being an ore, so it's set and
--- never cleared. Powers the "ask for quality only when the item has one" behavior on
--- /items-to-sell.
+-- full multi-thousand-item catalog. (Whether an item is quality-bearing, and at which
+-- tiers, lives in marketplace_item_tier_stats below - a tier >= 1 row there is the signal.)
 CREATE TABLE IF NOT EXISTS marketplace_item_activity (
     id_item INTEGER PRIMARY KEY,
     item_name TEXT NOT NULL,
     negotiations_count INTEGER NOT NULL DEFAULT 0,
     listings_count INTEGER NOT NULL DEFAULT 0,
-    has_quality INTEGER NOT NULL DEFAULT 0,
     first_seen TEXT NOT NULL DEFAULT (datetime('now')),
     last_seen TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- Per-tier "sub-item" stats for Marketplace items, accumulated from the same hourly
--- /marketplace_prices_averages_all snapshot that feeds has_quality above. UEX documents
+-- Per-tier "sub-item" stats for Marketplace items, accumulated from the hourly
+-- /marketplace_prices_averages_all snapshot (bot/cogs/marketplace.py). UEX documents
 -- that dump as one row per unique id_item x quality_tier x operation x currency x unit
 -- combination, and that combination is this table's primary key - so each quality tier of
 -- an item is effectively its own row ("Laranite Raw Q6 sell in UEC per scu"), with its own
@@ -132,32 +127,6 @@ CREATE TABLE IF NOT EXISTS marketplace_item_tier_stats (
     last_seen TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (id_item, quality_tier, operation, currency, unit)
 );
-
--- Per-user "want to sell" list (/items-to-sell): items a member wants to offload, each
--- with the asking price in aUEC they'd sell at. item_name is COLLATE NOCASE so 'gold' and
--- 'Gold' can't coexist as separate rows for one user - re-adding an item updates its
--- asking price instead of duplicating it. id_item is the UEX catalog id when the typed
--- name resolved to one at add time (nullable - a freeform name is still allowed), stored
--- so future features can join against UEX price data (e.g. /marketplace_prices_averages)
--- without re-resolving a possibly-ambiguous name later.
--- quality/quality_tier: for items that have an in-game quality (ores etc), the raw
--- 0-1000 value the user picked and the UEX quality_tier bucket (0-7) it falls into
--- (bot/sell_list.py: quality_to_tier). Both NULL for quality-less items or when the
--- user hasn't answered the quality prompt.
-CREATE TABLE IF NOT EXISTS user_sell_list (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    item_name TEXT NOT NULL COLLATE NOCASE,
-    id_item INTEGER,
-    asking_price REAL NOT NULL,
-    quality INTEGER,
-    quality_tier INTEGER,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-    UNIQUE (user_id, item_name)
-);
-
-CREATE INDEX IF NOT EXISTS idx_user_sell_list_user ON user_sell_list (user_id);
 
 -- Commodity restock watches: unlike price_alerts (one-shot), these are persistent - a
 -- background poller checks /commodities_prices across every terminal and notifies whenever
@@ -242,9 +211,6 @@ class Database:
             # their actual existing behavior (channel post, ping the creator) exactly, so
             # nothing changes for anyone's already-running watches.
             "ALTER TABLE stock_alerts ADD COLUMN scope TEXT NOT NULL DEFAULT 'global'",
-            "ALTER TABLE marketplace_item_activity ADD COLUMN has_quality INTEGER NOT NULL DEFAULT 0",
-            "ALTER TABLE user_sell_list ADD COLUMN quality INTEGER",
-            "ALTER TABLE user_sell_list ADD COLUMN quality_tier INTEGER",
         ]
         for statement in migrations:
             try:
@@ -579,36 +545,6 @@ class Database:
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
 
-    async def mark_items_have_quality(self, id_items: list[int]) -> None:
-        """Sticky-flag index items as quality-bearing (observed at quality_tier >= 1 on
-        /marketplace_prices_averages_all). Only ever sets the flag, never clears it - an
-        item that traded at a real tier once has a quality, full stop. An id not (yet) in
-        the index is a no-op here; it gets flagged on a later snapshot once the activity
-        upsert has created its row."""
-        if not id_items:
-            return
-        async with self.connect() as db:
-            await db.executemany(
-                "UPDATE marketplace_item_activity SET has_quality = 1 WHERE id_item = ?",
-                [(id_item,) for id_item in id_items],
-            )
-            await db.commit()
-
-    async def get_quality_flagged_item_ids(self, id_items: list[int]) -> set[int]:
-        """Which of these catalog ids are known quality-bearing items. Callers pass the
-        handful of ids from one /items-to-sell submission, not bulk lists."""
-        ids = [id_item for id_item in id_items if id_item is not None]
-        if not ids:
-            return set()
-        placeholders = ",".join("?" for _ in ids)
-        async with self.connect() as db:
-            cursor = await db.execute(
-                f"SELECT id_item FROM marketplace_item_activity WHERE has_quality = 1 AND id_item IN ({placeholders})",
-                ids,
-            )
-            rows = await cursor.fetchall()
-            return {row["id_item"] for row in rows}
-
     # -- per-tier Marketplace item stats ("sub-items") ------------------------
 
     async def upsert_marketplace_tier_stats(self, rows: list[dict[str, Any]]) -> None:
@@ -662,8 +598,8 @@ class Database:
         """{id_item: {tiers}} of the *real* quality tiers (>= 1, so excluding Q0/no-quality)
         each of these items has ever been observed trading at - i.e. which of the 8 possible
         tier sub-items actually exist in the wild for the item. An id with no tier >= 1 rows
-        is simply absent from the result, matching how get_quality_flagged_item_ids treats
-        the boolean flag."""
+        is simply absent from the result - "no real tiers" and "unknown item" read the same,
+        both meaning the item isn't known to be quality-bearing."""
         ids = [id_item for id_item in id_items if id_item is not None]
         if not ids:
             return {}
@@ -698,68 +634,6 @@ class Database:
             cursor = await db.execute("SELECT COUNT(*) AS c FROM marketplace_item_activity")
             row = await cursor.fetchone()
             return row["c"] if row else 0
-
-    # -- per-user want-to-sell list (/items-to-sell) ---------------------------
-
-    async def upsert_sell_list_items(
-        self, user_id: int, entries: list[dict[str, Any]]
-    ) -> tuple[list[str], list[str]]:
-        """Insert-or-update sell list entries for one user. Each entry needs item_name and
-        asking_price, plus an optional id_item (kept from the existing row when a re-add
-        couldn't resolve one, via COALESCE - a freeform rename shouldn't erase a good id).
-        Returns (added_names, updated_names) so the command can say which happened per item
-        - classified against the user's rows before the write, matching the table's
-        case-insensitive uniqueness."""
-        async with self.connect() as db:
-            cursor = await db.execute(
-                "SELECT item_name FROM user_sell_list WHERE user_id = ?", (user_id,)
-            )
-            rows = await cursor.fetchall()
-            existing = {row["item_name"].lower() for row in rows}
-            added = [e["item_name"] for e in entries if e["item_name"].lower() not in existing]
-            updated = [e["item_name"] for e in entries if e["item_name"].lower() in existing]
-            await db.executemany(
-                """INSERT INTO user_sell_list (user_id, item_name, id_item, asking_price, updated_at)
-                   VALUES (?, ?, ?, ?, datetime('now'))
-                   ON CONFLICT(user_id, item_name) DO UPDATE SET
-                       asking_price = excluded.asking_price,
-                       id_item = COALESCE(excluded.id_item, user_sell_list.id_item),
-                       updated_at = datetime('now')""",
-                [(user_id, e["item_name"], e.get("id_item"), e["asking_price"]) for e in entries],
-            )
-            await db.commit()
-            return added, updated
-
-    async def list_user_sell_list(self, user_id: int) -> list[dict[str, Any]]:
-        async with self.connect() as db:
-            cursor = await db.execute(
-                "SELECT * FROM user_sell_list WHERE user_id = ? ORDER BY item_name COLLATE NOCASE",
-                (user_id,),
-            )
-            rows = await cursor.fetchall()
-            return [dict(row) for row in rows]
-
-    async def set_sell_list_quality(self, user_id: int, item_name: str, quality: int, quality_tier: int) -> bool:
-        """Record the quality the user picked for one of their sell list entries (raw 0-1000
-        value plus the UEX tier bucket it maps to). Matches item_name case-insensitively via
-        the column's NOCASE collation. Returns False if the entry no longer exists (e.g.
-        removed between the save and answering the quality prompt)."""
-        async with self.connect() as db:
-            cursor = await db.execute(
-                """UPDATE user_sell_list SET quality = ?, quality_tier = ?, updated_at = datetime('now')
-                   WHERE user_id = ? AND item_name = ?""",
-                (quality, quality_tier, user_id, item_name),
-            )
-            await db.commit()
-            return cursor.rowcount > 0
-
-    async def remove_sell_list_item(self, entry_id: int, user_id: int) -> bool:
-        async with self.connect() as db:
-            cursor = await db.execute(
-                "DELETE FROM user_sell_list WHERE id = ? AND user_id = ?", (entry_id, user_id)
-            )
-            await db.commit()
-            return cursor.rowcount > 0
 
     # -- commodity restock (stock) alerts ------------------------------------
     # Persistent watches, like marketplace alerts - see stock_alert_terminal_state above for

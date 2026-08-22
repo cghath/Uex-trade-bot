@@ -75,6 +75,30 @@ def parse_listing_quality(raw: Any) -> float | None:
     return value if value is not None and value > 0 else None
 
 
+def quality_to_tier(quality: float) -> int:
+    """Map a raw 0-1000 quality value onto UEX's quality_tier int, using the exact
+    (uneven) buckets /marketplace_prices_averages and /marketplace_prices_history
+    document: 0 = Q0, 1 = Q1-499, 2 = Q500-599, 3 = Q600-699, 4 = Q700-799,
+    5 = Q800-899, 6 = Q900-949, 7 = Q950-1000. Out-of-range input is clamped rather
+    than raised on - callers feed values that already came from UEX itself, so anything
+    else is defensive."""
+    if quality <= 0:
+        return 0
+    if quality <= 499:
+        return 1
+    if quality <= 599:
+        return 2
+    if quality <= 699:
+        return 3
+    if quality <= 799:
+        return 4
+    if quality <= 899:
+        return 5
+    if quality <= 949:
+        return 6
+    return 7
+
+
 @dataclass
 class MarketplaceMoverEntry:
     item_name: str
@@ -181,24 +205,6 @@ def parse_marketplace_average_rows(rows: list[dict]) -> list[MarketplaceAverageE
         )
     )
     return entries
-
-
-def extract_quality_item_ids(average_rows: list[dict]) -> set[int]:
-    """From /marketplace_prices_averages(_all) rows, the id_items that have been observed
-    listed at a real quality tier (quality_tier >= 1) - the signal that an item has an
-    in-game quality at all. Tier 0 means "Q0 / no quality set", so an item whose rows are
-    all tier 0 is NOT counted: plenty of quality-less items (weapons, armor) only ever
-    appear there. Both id_item and quality_tier go through defensive coercion since
-    Marketplace endpoints string-type numbers (see parse_uex_number)."""
-    ids: set[int] = set()
-    for row in average_rows:
-        id_item = parse_uex_number(row.get("id_item"))
-        tier = parse_uex_number(row.get("quality_tier"))
-        if id_item is None or tier is None:
-            continue
-        if tier >= 1:
-            ids.add(int(id_item))
-    return ids
 
 
 def extract_tier_stats(average_rows: list[dict]) -> list[dict]:

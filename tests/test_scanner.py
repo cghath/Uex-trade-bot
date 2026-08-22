@@ -1,7 +1,7 @@
 """Tests for the Undervalued Scanner's pure matching logic in bot/uex/scanner.py."""
 from __future__ import annotations
 
-from bot.sell_list import quality_to_tier
+from bot.uex.marketplace import quality_to_tier
 from bot.uex.scanner import (
     ALLOWED_MARKETPLACE_CATEGORY_IDS,
     MIN_LISTINGS_FOR_FAIR_PRICE,
@@ -10,7 +10,7 @@ from bot.uex.scanner import (
 )
 
 COMMODITIES_CATEGORY_ID = 36  # a real id from ALLOWED_MARKETPLACE_CATEGORY_IDS
-QUALITY = 850  # -> tier 5, per bot/sell_list.py: quality_to_tier
+QUALITY = 850  # -> tier 5, per bot/uex/marketplace.py: quality_to_tier
 TIER = quality_to_tier(QUALITY)
 KEY = (42, TIER, "UEC", "unit")
 
