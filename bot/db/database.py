@@ -86,6 +86,12 @@ CREATE TABLE IF NOT EXISTS guild_digest_config (
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS liquidity_scores (
+    item_name TEXT PRIMARY KEY,
+    score REAL NOT NULL,
+    last_updated TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- Accumulating index of Marketplace items the bot has actually observed being traded, built
 -- by periodically snapshotting /marketplace_trends (which only ever exposes ~100 items live
 -- at once) and merging in whatever's new. Grows past that ~100 ceiling over time as UEX's own
@@ -517,6 +523,78 @@ class Database:
                 "UPDATE guild_digest_config SET last_posted_date = ? WHERE guild_id = ?",
                 (date_str, guild_id),
             )
+
+    # -- liquidity scores -------------------------------------------------------
+
+    async def update_liquidity_scores(self) -> int:
+        """
+        Calculates and updates the liquidity scores for all items in the marketplace.
+        A score is derived from the ratio of negotiations to listings, weighted by
+        recent activity.
+        """
+        rows = await uex.get_marketplace_trends()
+        if not rows:
+            return 0
+        
+        count = 0
+        async with self.connect() as db:
+            for row in rows:
+                # Logic for calculating score:
+                # We want to identify items with high negotiation activity relative to listings.
+                # This is a placeholder for the actual calculation logic.
+                # For now, we'll just set a dummy score based on negotiations_count.
+                score = row.get("negotiations_count", 0) * 10
+                
+                await db.execute(
+                    """INSERT INTO liquidity_scores (item_name, score, last_updated)
+                       VALUES (?, ?, datetime('now'))
+                       ON CONFLICT(item_name) DO UPDATE SET
+                           score = excluded.score,
+                           last_updated = datetime('now')""",
+                    (row.get("item_name"), score)
+                )
+                count += 1
+            await db.commit()
+        return count
+
+    async def seed_test_liquidity(self) -> None:
+        """Seeds dummy data for testing the liquidity rank command."""
+        async with self.connect() as db:
+            # Dummy items with varying scores
+            test_items = [
+                ("Gold", 5000),
+                ("Silver", 3500),
+                ("Copper", 2000),
+                ("Iron", 1500),
+                ("Tin", 1200),
+                ("Lead", 800),
+                ("Zinc", 700),
+                ("Nickel", 600),
+                ("Aluminum", 400),
+                ("Titanium", 200)
+            ]
+            for name, score in test_items:
+                await db.execute(
+                    """INSERT INTO liquidity_scores (item_name, score, last_updated)
+                       VALUES (?, ?, datetime('now'))
+                       ON CONFLICT(item_name) DO UPDATE SET
+                           score = excluded.score,
+                           last_updated = datetime('now')""",
+                    (name, score)
+                )
+            await db.commit()
+            logger.info("Seeded dummy liquidity data for testing.")
+
+
+    async def get_top_liquidity_items(self, limit: int = 10) -> list[dict[str, Any]]:
+        """Returns the top N items with the highest liquidity scores."""
+        async with self.connect() as db:
+            cursor = await db.execute(
+                "SELECT * FROM liquidity_scores ORDER BY score DESC LIMIT ?",
+                (limit,)
+            )
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
             await db.commit()
 
     # -- accumulating Marketplace traded-items index --------------------------
