@@ -112,11 +112,16 @@ Before writing up a root cause or claiming something works:
   and clean imports are necessary, not sufficient — this bot's tests only cover pure logic,
   not Discord registration.
 - If you're unsure what a UEX API field actually means (quality, quality_tier, pricing
-  units, anything with ambiguous semantics), check the live docs at
-  https://uexcorp.space/api/documentation/ before assuming — a wrong assumption here
-  produced several rounds of a real bug (the Undervalued Scanner's early "steal" detection
-  was wrong for days because of an unverified assumption about how `quality_tier` buckets
-  map to raw quality values, until someone actually pulled the field-level docs).
+  units, anything with ambiguous semantics), check `docs/UEX_API_2.0_reference.md` (a full
+  scrape of every endpoint, kept in this repo so it's available offline) before assuming —
+  a wrong assumption here produced several rounds of a real bug (the Undervalued Scanner's
+  early "steal" detection was wrong for days because of an unverified assumption about how
+  `quality_tier` buckets map to raw quality values, until someone actually pulled the
+  field-level docs). If that file is stale, the live docs are at
+  https://uexcorp.space/api/documentation/ — but even the live docs aren't infallible: one
+  field (`marketplace_listings.quality`, documented as 0-100) has been observed returning
+  values up to 1000 in real data. When the docs and real observed data disagree, trust the
+  data.
 
 ## Pre-flight checklist for any new feature
 

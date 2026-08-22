@@ -73,6 +73,15 @@ boundaries, the 30-day/per-unit definition of `price_avg_month`, and the
 result still looks implausible, **check the threshold and the data first, not the
 matching code** - it's doc-verified correct as of this writing.
 
+## Full API reference
+
+`docs/UEX_API_2.0_reference.md` is a complete, machine-readable dump of every documented
+endpoint (89 total - request params, response fields, types, cache TTLs) scraped
+2026-08-22. Check it before guessing at a field's meaning or writing another
+`diagnose.py` round-trip to find out - most of what's below was cross-checked against it.
+It's also not infallible (see the `quality` field note below) - real observed data still
+wins when the two disagree.
+
 ## Useful UEX API facts learned along the way (not all documented obviously)
 
 - Marketplace endpoints return numeric fields as **JSON strings**, not real numbers (e.g.
@@ -86,15 +95,29 @@ matching code** - it's doc-verified correct as of this writing.
   e.g. 60% for Ore Sales, 25% for Commodities, 100% for Items - as *normal, expected* price
   variance, not anomalies. Any future "is this discount real" feature should be calibrated
   against this table, not an arbitrary guess.
-- `get_marketplace_listings(operation=...)` returns on the order of ~500 rows in practice
-  (the client's docstring claim of a 100-row cap without `id_item` appears outdated) - and
-  the exact set returned isn't a stable, complete snapshot; a specific known-active listing
-  can be absent from one pull and present in the next. Don't assume a single call sees
-  "everything currently listed."
+- `get_marketplace_listings(operation=...)` returns on the order of ~500 rows in practice.
+  Per `docs/UEX_API_2.0_reference.md`, the endpoint is documented as capped at 100 rows by
+  default, only unlocked to 1,000 when **both** `id_item` and `operation` are supplied
+  together - the scanner currently calls it with `operation` alone, so it likely isn't
+  getting full coverage. This is a plausible explanation for something observed
+  independently: the exact set of listings returned isn't stable, and a specific
+  known-active listing can be absent from one pull and present in the next. Not fixed yet -
+  would mean restructuring the scanner's fetch (e.g. per-category or per-item calls) to
+  unlock the higher limit; flagged as a "worth revisiting" item, not done unprompted.
+- `/marketplace_listings`'s documented `quality` field says `string|null // 0-100` in the
+  API reference - **this appears to be wrong or stale**. Every real listing pulled during
+  this project showed values well above 100 (322, 636, 947, 972, 1000), consistent with
+  `/marketplace_prices_history`'s explicitly documented `quality int // 0-1000` and with
+  `quality_tier`'s own 0-1000-based boundaries. The scanner's code treats it as 0-1000 and
+  that matches every real observation - trust the data over that one doc line if they ever
+  seem to disagree again.
 - `/items` (the reference catalog) doesn't have entries for most Marketplace-only gear
   (weapons, armor, backpacks) - verified directly by searching for two different flagged
   items and getting zero matches both times. It's mainly scoped to commodities and a
   narrower set of standard goods.
+- `marketplace_averages` / `marketplace_averages_all` (no "prices" in the name) are
+  **deprecated** UEX endpoints, being phased out - don't use them. The scanner already
+  correctly uses `marketplace_prices_averages_all`, the non-deprecated replacement.
 - This sandbox's network policy blocks direct calls to `uexcorp.space`/`api.uexcorp.uk`.
   Live-data investigation in this project happened via short-lived diagnostic scripts (see
   below) run on the user's own machine, which does have access.
@@ -149,6 +172,10 @@ guessed at.
 - `MIN_LISTINGS_FOR_FAIR_PRICE` (currently 3) and `SCANNER_STEAL_THRESHOLD` (currently
   0.65) are both tuning knobs, not settled constants - revisit if live results still look
   off after the threshold change.
+- `bot/cogs/scanner.py` fetches `get_marketplace_listings(operation="sell")` without
+  `id_item`, which per `docs/UEX_API_2.0_reference.md` means it's likely capped at 100
+  rows server-side rather than unlocking the documented 1,000-row limit (needs `id_item`
+  *and* `operation` together) - not fixed, see the API-facts note above for detail.
 - The user mentioned possibly creating a separate branch for a local model to work on
   independently - `CONTRIBUTING.md` exists specifically so that work starts from a better
   footing.
