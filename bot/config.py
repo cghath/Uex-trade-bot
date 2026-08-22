@@ -51,12 +51,17 @@ class Config:
             db_path = _PROJECT_ROOT / db_path
 
         # Undervalued Scanner (bot/cogs/scanner.py): how far below an item's 30-day average
-        # a sell listing must be priced to count as a "steal", e.g. 0.20 = 20% off.
-        threshold_raw = os.getenv("SCANNER_STEAL_THRESHOLD", "0.20").strip()
+        # a sell listing must be priced to count as a "steal", e.g. 0.65 = 65% off. UEX's own
+        # API docs (Pricing Parameters table) document a 60% "variation tolerance" for Ore
+        # Sales as normal, expected price variance - not an anomaly. Defaulting below that
+        # (e.g. the previous 0.20) mostly just flags routine market noise; 0.65 sits above
+        # UEX's own documented normal-variance band, so a flagged listing is priced outside
+        # what UEX itself would consider ordinary.
+        threshold_raw = os.getenv("SCANNER_STEAL_THRESHOLD", "0.65").strip()
         try:
             scanner_steal_threshold = float(threshold_raw)
         except ValueError:
-            raise ConfigError(f"SCANNER_STEAL_THRESHOLD must be a number (e.g. 0.20), got '{threshold_raw}'.")
+            raise ConfigError(f"SCANNER_STEAL_THRESHOLD must be a number (e.g. 0.65), got '{threshold_raw}'.")
 
         return cls(
             discord_bot_token=token,

@@ -20,7 +20,9 @@ Current features:
 - `/uex-trades` — pulls the *caller's own* logged trade history straight from UEX, using their linked account
 - `/set-scanner-channel`, `/scanner-status`, `/scan-now` — the Undervalued Scanner: finds UEX
   Marketplace sell listings priced well below their item's own 30-day average (a "steal"; how far
-  below is configurable via `SCANNER_STEAL_THRESHOLD`, default 20%) and posts proactive alerts to
+  below is configurable via `SCANNER_STEAL_THRESHOLD`, default 65% — UEX's own API docs list a 60%
+  "variation tolerance" for Ore Sales as normal price variance, so the default sits just above that
+  rather than flagging routine market noise) and posts proactive alerts to
   your chosen channel (checked every 15 min), or scan on demand. Scoped to raw-material categories
   (Commodities, Harvestables) only — crafted gear (weapons, armor, ship components) has real value
   that depends on crafting material quality, which UEX only ever exposes as free text a seller
