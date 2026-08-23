@@ -195,7 +195,7 @@ CREATE TABLE IF NOT EXISTS stock_alert_terminal_state (
     PRIMARY KEY (alert_id, id_terminal)
 );
 
--- Undervalued Scanner: one implicit watch per user (not multiple named alerts like
+-- Raw Materials Deal Scanner: one implicit watch per user (not multiple named alerts like
 -- marketplace_alerts) - the single channel where that user wants proactive "steal"
 -- notifications posted. Setting a new channel just replaces the old one.
 CREATE TABLE IF NOT EXISTS user_scanner_channel (
@@ -204,7 +204,7 @@ CREATE TABLE IF NOT EXISTS user_scanner_channel (
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- Per-user dedup for scanner notifications, so a listing that's still a "steal" on the
+-- Per-user dedup for scanner notifications, so a listing that's still a qualifying deal on the
 -- next poll doesn't notify the same user again. Keyed on user_id directly (not an
 -- alert_id like marketplace_alert_seen_listings) since there's only one watch per user.
 CREATE TABLE IF NOT EXISTS scanner_seen_listings (

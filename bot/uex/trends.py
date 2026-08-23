@@ -185,7 +185,7 @@ def select_best_in_stock_route(
 ) -> ScoredRouteEntry | None:
     """Like select_best_available_route, but stricter: also requires the DESTINATION side to
     have real, currently-live sell-side demand, not just the origin having real buy-side stock.
-    /top-scored-routes only checked the buy side, which meant a route could rank highly and
+    The default /top-routes view only checks the buy side, which means a route can rank highly and
     still be practically dead - great buy-side stock but the destination has UEX's own
     explicit "no demand" status. price_destination > 0 and scu_destination > 0 rule out a
     terminal that doesn't buy the commodity at all; status_destination not being

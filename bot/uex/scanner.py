@@ -1,4 +1,4 @@
-"""Pure matching logic for the Undervalued Scanner: comparing live Marketplace sell
+"""Pure matching logic for the Raw Materials Deal Scanner: comparing live Marketplace sell
 listings against UEX's own precomputed price averages to find listings priced well
 below their item's "fair" average - a steal for whoever buys it.
 

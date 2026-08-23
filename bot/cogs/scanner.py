@@ -1,6 +1,6 @@
-"""Undervalued Scanner: proactively finds UEX Marketplace sell listings priced well
-below their item's own 30-day average ("steals"), and notifies each user who's set a
-scanner channel with /set-scanner-channel.
+"""Raw Materials Deal Scanner: proactively finds quality-matched raw-material Marketplace
+sell listings priced well below their own 30-day average, and notifies each user who has
+set a scanner channel with /set-scanner-channel.
 
 Persistent, like marketplace_alerts.py and stock_alerts.py (not one-shot) - there's no
 "remove" command because there's nothing to remove, just one channel per user; setting a
@@ -42,34 +42,42 @@ class Scanner(commands.Cog):
 
     @app_commands.command(
         name="set-scanner-channel",
-        description="Set the channel where I'll post Undervalued Scanner steal alerts for you.",
+        description="Set the channel for quality-matched raw-material deal alerts.",
     )
     @app_commands.describe(channel="The channel to post steal alerts in")
     async def set_scanner_channel(self, interaction: discord.Interaction, channel: discord.TextChannel) -> None:
         await self.bot.db.set_scanner_channel(interaction.user.id, channel.id)
         await interaction.response.send_message(
-            f"Scanner alerts will now be posted in {channel.mention} (checked every "
+            f"Raw-material deal alerts will now be posted in {channel.mention} (checked every "
             f"{POLL_INTERVAL_MINUTES} min, threshold {self.bot.config.scanner_steal_threshold:.0%} off "
-            "the 30-day average). Run /set-scanner-channel again anytime to change it.",
+            "the quality-matched 30-day average). Run /set-scanner-channel again anytime to change it.",
             ephemeral=True,
         )
 
-    @app_commands.command(name="scanner-status", description="Check whether the Undervalued Scanner is set up for you.")
+    @app_commands.command(
+        name="scanner-status",
+        description="Check your Raw Materials Deal Scanner alerts and their quality-matched scope.",
+    )
     async def scanner_status(self, interaction: discord.Interaction) -> None:
         channel_id = await self.bot.db.get_scanner_channel(interaction.user.id)
         if channel_id is None:
             await interaction.response.send_message(
-                "Scanner not set up yet. Run /set-scanner-channel to start getting proactive steal alerts.",
+                "Raw Materials Deal Scanner not set up yet. Run /set-scanner-channel to start getting "
+                "quality-matched material deal alerts.",
                 ephemeral=True,
             )
             return
         await interaction.response.send_message(
-            f"Scanner active: alerts post to <#{channel_id}>, checked every {POLL_INTERVAL_MINUTES} min "
-            f"for sell listings at least {self.bot.config.scanner_steal_threshold:.0%} below their 30-day average.",
+            f"Raw Materials Deal Scanner active: alerts post to <#{channel_id}>, checked every "
+            f"{POLL_INTERVAL_MINUTES} min for Commodities and Harvestables with reported quality, at least "
+            f"{self.bot.config.scanner_steal_threshold:.0%} below their quality-matched 30-day average.",
             ephemeral=True,
         )
 
-    @app_commands.command(name="scan-now", description="Manually scan the Marketplace for undervalued sell listings right now.")
+    @app_commands.command(
+        name="scan-now",
+        description="Scan raw-material sell listings with reported quality for underpriced deals now.",
+    )
     async def scan_now(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True)
         try:
@@ -80,12 +88,16 @@ class Scanner(commands.Cog):
 
         if not steals:
             await interaction.followup.send(
-                f"No sell listings currently at least {self.bot.config.scanner_steal_threshold:.0%} "
-                "below their 30-day average."
+                f"No quality-matched Commodities or Harvestables are currently at least "
+                f"{self.bot.config.scanner_steal_threshold:.0%} below their 30-day average."
             )
             return
 
-        embed = discord.Embed(title="Undervalued Scanner — manual scan", color=discord.Color.green())
+        embed = discord.Embed(title="Raw Materials Deal Scanner", color=discord.Color.green())
+        embed.description = (
+            "Quality-matched Commodities and Harvestables only · "
+            "crafted gear is excluded because its modifiers are not structured in UEX data."
+        )
         for steal in steals[:5]:
             embed.add_field(
                 name=f"{steal.item_name} — {steal.listing_title}"[:256],
@@ -145,12 +157,12 @@ class Scanner(commands.Cog):
         return find_steals(listings, fair_prices, self.bot.config.scanner_steal_threshold)
 
     async def _notify(self, channel: discord.abc.Messageable, user_id: int, steal: StealEntry) -> None:
-        embed = discord.Embed(title="Undervalued item found!", color=discord.Color.green())
+        embed = discord.Embed(title="Raw-material deal found!", color=discord.Color.green())
         embed.description = f"**{steal.item_name}** — {steal.listing_title}"
         embed.add_field(name="Listing price", value=f"{steal.listing_price:,.0f} {steal.currency}")
         embed.add_field(name="30-day average", value=f"{steal.fair_price:,.0f} {steal.currency}")
         embed.add_field(name="Discount", value=f"{steal.discount_pct:.0f}%")
-        embed.set_footer(text=f"by {steal.seller} · Undervalued Scanner")
+        embed.set_footer(text=f"by {steal.seller} · Raw Materials Deal Scanner · quality-matched 30-day average")
         try:
             await channel.send(content=f"<@{user_id}>", embed=embed)
         except discord.HTTPException as exc:

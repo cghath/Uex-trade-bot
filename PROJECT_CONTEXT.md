@@ -16,10 +16,8 @@ A Discord bot for Star Citizen trading, built on the UEX Corp API 2.0
 - **`TestBranch`** — staging. All new work targets this branch first, so it can be pulled
   down and run against a real Discord server / live UEX data before touching `main`. The
   user merges `TestBranch` → `main` manually once satisfied.
-- **`claude/trade-bot-t44ix7`** — the AI session's working branch. Once its PR into
-  `TestBranch` merges, it gets **recreated fresh from the current `TestBranch`** for the
-  next piece of work (`git fetch origin TestBranch && git checkout -B
-  claude/trade-bot-t44ix7 origin/TestBranch`), never left stacking old merged history.
+- **`Local-model-handoff`** — retained as a historical backup of the earlier local-model work.
+  New work happens directly on `TestBranch`; it is not an active development target.
 
 This split exists because early work (see below) went straight to `main`, and the user
 wanted a safer place to land less-proven changes - notably the Undervalued Scanner, which
@@ -59,8 +57,13 @@ went through several real correctness bugs found only by testing against live da
    a modest active-buy-posting bonus. A three-listing supply cushion prevents one-listing
    items from dominating the rank. `/liquidity-trends [item]` charts an item's hourly
    rating history; without an item it will show the biggest 24-hour movers once enough
-   snapshots have accumulated. The implementation was live-tested in Discord and has 83
-   passing automated tests.
+   snapshots have accumulated. The implementation was live-tested in Discord and the current
+   test suite has 78 passing automated tests.
+8. **Command and scanner polish**: `/top-scored-routes` and `/top-in-stock-routes` became one
+   `/top-routes` command with an optional strict live-availability filter. `/intro` is now a
+   compact categorized guide with emoji headings rather than a wall of repeated descriptions.
+   Marketplace Intelligence distinguishes all-item sellability from the Raw Materials Deal
+   Scanner, which is explicitly limited to quality-matched Commodities and Harvestables.
 
 ## How the scanner's matching logic evolved (read before touching `bot/uex/scanner.py`)
 
@@ -128,9 +131,8 @@ wins when the two disagree.
 - `marketplace_averages` / `marketplace_averages_all` (no "prices" in the name) are
   **deprecated** UEX endpoints, being phased out - don't use them. The scanner already
   correctly uses `marketplace_prices_averages_all`, the non-deprecated replacement.
-- This sandbox's network policy blocks direct calls to `uexcorp.space`/`api.uexcorp.uk`.
-  Live-data investigation in this project happened via short-lived diagnostic scripts (see
-  below) run on the user's own machine, which does have access.
+- Live API investigation should use the bot's configured environment or a short-lived diagnostic
+  script (see below). Some restricted development environments may block direct API access.
 
 ## The `diagnose.py` pattern
 
@@ -169,7 +171,7 @@ guessed at.
   `bot/uex/scanner.py` currently imports `quality_to_tier` from `bot.uex.marketplace`,
   not `bot.sell_list` - if you're reading older PR descriptions in this repo's history
   that reference `bot/sell_list.py`, that file no longer exists.
-- All scanner work (PRs adding the feature and its four fixes, plus the threshold change)
+- All Raw Materials Deal Scanner work (PRs adding the feature and its four fixes, plus the threshold change)
   lives on `TestBranch`, not yet merged to `main`. Confirm with the user before assuming
   it's in production.
 - `CONTRIBUTING.md`/`CLAUDE.md` PR may or may not be merged yet - check before assuming.
@@ -186,9 +188,8 @@ guessed at.
   `id_item`, which per `docs/UEX_API_2.0_reference.md` means it's likely capped at 100
   rows server-side rather than unlocking the documented 1,000-row limit (needs `id_item`
   *and* `operation` together) - not fixed, see the API-facts note above for detail.
-- The user mentioned possibly creating a separate branch for a local model to work on
-  independently - `CONTRIBUTING.md` exists specifically so that work starts from a better
-  footing.
+- `Local-model-handoff` remains available as a backup, but current development happens on
+  `TestBranch`.
 - **Liquidity feature:** current work is on `TestBranch`, not `main`. Its
   score is deliberately an indicator, not a predicted percentage chance of sale. It is
   bounded to 0-100 so users can interpret it at a glance. The history/movers view needs

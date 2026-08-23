@@ -17,38 +17,38 @@ from discord.ext import commands
 HIDDEN_COMMANDS = {"marketplace-index-status"}
 
 CATEGORIES: list[tuple[str, str, list[str]]] = [
-    ("Prices & Routes", "Terminal prices, profitable hauls, and ranked live routes.", [
+    ("💰 Prices & Routes", "Terminal prices, profitable hauls, and ranked live routes.", [
         "price", "best-route", "top-routes",
     ]),
-    ("Commodity Trends", "Trade volume, price movement, and commodity price charts.", [
+    ("📊 Commodity Trends", "Trade volume, price movement, and commodity price charts.", [
         "trending", "movers", "commodity-history",
     ]),
-    ("Ship & Cargo", "Save a ship once to calculate cargo limits and per-run profit.", [
+    ("🚀 Ship & Cargo", "Save a ship once to calculate cargo limits and per-run profit.", [
         "set-default-ship", "clear-default-ship", "my-ship",
     ]),
-    ("Alerts & Notifications", "Price targets, Marketplace matches, restocks, and DM delivery checks.", [
+    ("🔔 Alerts & Notifications", "Price targets, Marketplace matches, restocks, and DM delivery checks.", [
         "alert-add", "alert-list", "alert-remove",
         "marketplace-alert-add", "marketplace-alert-list", "marketplace-alert-remove",
         "stock-alert-add", "stock-alert-list", "stock-alert-remove", "test-dm",
     ]),
-    ("Trade Log & Leaderboard", "Your personal ledger, UEX-recorded history, and server standings.", [
+    ("🧾 Trade Log & Leaderboard", "Your personal ledger, UEX-recorded history, and server standings.", [
         "trade-log-add", "trade-log", "uex-trades", "leaderboard",
     ]),
-    ("UEX Marketplace", "Search and analyze listings, or manage your own Marketplace activity.", [
+    ("🛒 UEX Marketplace", "Search and analyze listings, or manage your own Marketplace activity.", [
         "marketplace-search", "marketplace-trending", "marketplace-movers", "marketplace-average",
         "marketplace-history", "my-negotiations", "my-favorites", "marketplace-post",
         "marketplace-delete-listing",
     ]),
-    ("Marketplace Intelligence", "Sellability rankings, rating history, and underpriced-listing scans.", [
+    ("🔥 Marketplace Intelligence", "Sellability rankings and history for all items, plus quality-matched raw-material deal scans.", [
         "liquidity-rank", "liquidity-trends", "scan-now", "scanner-status", "set-scanner-channel",
     ]),
-    ("Daily Digest", "Post a snapshot now or configure the server's scheduled digest.", [
+    ("🗓️ Daily Digest", "Post a snapshot now or configure the server's scheduled digest.", [
         "digest-now", "set-digest-channel", "digest-disable",
     ]),
-    ("Account Linking", "Connect UEX securely to use personal Marketplace and trade-history tools.", [
+    ("🔗 Account Linking", "Connect UEX securely to use personal Marketplace and trade-history tools.", [
         "link-uex-account", "unlink-uex-account", "uex-account-status",
     ]),
-    ("Help", "Return to this guide whenever you need a quick map.", ["intro"]),
+    ("❓ Help", "Return to this guide whenever you need a quick map.", ["intro"]),
 ]
 
 
@@ -58,6 +58,9 @@ class Help(commands.Cog):
 
     @app_commands.command(name="intro", description="Show what this bot can do and list every command.")
     async def intro(self, interaction: discord.Interaction) -> None:
+        # Acknowledge before assembling the guide so a busy background refresh can never
+        # let Discord's short interaction-response window expire.
+        await interaction.response.defer()
         commands_by_name = {c.name: c for c in self.bot.tree.get_commands()}
         categorized_names: set[str] = set()
 
@@ -92,7 +95,7 @@ class Help(commands.Cog):
             _add_command_fields(embed, "Other", [_format_command_list(sorted(leftover, key=lambda c: c.name))])
 
         embed.set_footer(text="Tip: commands with a text option usually support autocomplete — start typing and pick from the dropdown.")
-        await interaction.response.send_message(embed=embed)
+        await interaction.followup.send(embed=embed)
 
 
 def _format_command_list(commands: list[app_commands.Command]) -> str:

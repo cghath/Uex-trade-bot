@@ -1,4 +1,4 @@
-"""Tests for the Undervalued Scanner's pure matching logic in bot/uex/scanner.py."""
+"""Tests for the Raw Materials Deal Scanner's pure matching logic in bot/uex/scanner.py."""
 from __future__ import annotations
 
 from bot.uex.marketplace import quality_to_tier

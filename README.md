@@ -4,33 +4,23 @@ A Discord bot for Star Citizen trading, built on the [UEX Corp API 2.0](https://
 
 Current features:
 
-- `/price <commodity>` — best buy/sell terminals for a commodity right now
-- `/best-route <commodity>` — most profitable buy→sell terminal pairs, using UEX's own precomputed
-  routes (real distance in GM, ROI, profit, quality score) when available, falling back to a
-  local calculation otherwise
-- `/trending` — the commodities with the most real player-submitted trade activity in the last 15
-  days (refreshed by a background task every 45 min, served instantly from cache)
-- `/movers` — commodities whose sell price has swung furthest from its own recent average, up or down
-- `/commodity-history <commodity> [terminal]` — a price-over-time chart (PNG) for a commodity,
-  defaulting to its most actively traded terminal
-- `/alert-add`, `/alert-list`, `/alert-remove` — get pinged when a commodity crosses a target price (checked every 10 min)
-- `/trade-log-add`, `/trade-log` — a personal buy/sell ledger stored locally in SQLite
-- `/link-uex-account`, `/unlink-uex-account`, `/uex-account-status` — each Discord user links their
-  own UEX account privately (via a Discord modal, never a visible slash command option)
-- `/uex-trades` — pulls the *caller's own* logged trade history straight from UEX, using their linked account
-- `/set-scanner-channel`, `/scanner-status`, `/scan-now` — the Undervalued Scanner: finds UEX
-  Marketplace sell listings priced well below their item's own 30-day average (a "steal"; how far
-  below is configurable via `SCANNER_STEAL_THRESHOLD`, default 65% — UEX's own API docs list a 60%
-  "variation tolerance" for Ore Sales as normal price variance, so the default sits just above that
-  rather than flagging routine market noise) and posts proactive alerts to
-  your chosen channel (checked every 15 min), or scan on demand. Scoped to raw-material categories
-  (Commodities, Harvestables) only — crafted gear (weapons, armor, ship components) has real value
-  that depends on crafting material quality, which UEX only ever exposes as free text a seller
-  typed into a listing's title, never as structured data, making price comparison for those
-  categories fundamentally unreliable rather than just noisy. Even within those categories, a
-  listing is only ever compared against its own reported quality tier's average (never a
-  different tier substituted in) - matched via `quality_tier` (a listing without a reported
-  quality is skipped, not guessed at)
+- **Commodity trading** — `/price`, `/best-route`, and `/top-routes` find live terminal prices,
+  profitable runs, and ranked routes with an optional strict live-availability filter.
+- **Commodity research** — `/trending`, `/movers`, and `/commodity-history` cover player trade
+  volume, price movement, and price charts.
+- **UEX Marketplace** — search listings, review current and historical Marketplace prices, manage
+  listings/favorites/negotiations, and receive matching-listing alerts.
+- **Marketplace Intelligence** — `/liquidity-rank` and `/liquidity-trends` provide all-item
+  sellability ratings and history. `/scan-now` and its optional channel alerts run the **Raw
+  Materials Deal Scanner**: it compares only Commodities and Harvestables with a reported quality
+  against the matching 30-day quality tier, currency, and unit. Crafted gear is deliberately
+  excluded because UEX does not expose its modifiers as structured pricing data.
+- **Alerts and digest** — commodity-price alerts, terminal-restock alerts, Marketplace listing
+  alerts, and a configurable daily digest.
+- **Personal tools** — a local trade ledger, server leaderboard, saved cargo ship, and private UEX
+  account linking for personal trade, listing, favorite, and negotiation data.
+
+Run `/intro` in Discord for the complete categorized command guide.
 
 ### Multi-user support
 
@@ -195,7 +185,7 @@ bot/
     trends.py        trade-volume + price-mover aggregation (pure functions, unit tested)
     charts.py        matplotlib price-history chart rendering
     marketplace.py   Marketplace listings + 30-day rolling price averages
-    scanner.py       Undervalued Scanner matching logic (pure functions, unit tested)
+    scanner.py       Raw Materials Deal Scanner matching logic (pure functions, unit tested)
     ships.py         ship data lookups
     stock_alerts.py  terminal stock-level change detection
     leaderboard.py   UEX leaderboard fetching

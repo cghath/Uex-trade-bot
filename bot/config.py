@@ -50,7 +50,7 @@ class Config:
         if not db_path.is_absolute():
             db_path = _PROJECT_ROOT / db_path
 
-        # Undervalued Scanner (bot/cogs/scanner.py): how far below an item's 30-day average
+        # Raw Materials Deal Scanner (bot/cogs/scanner.py): how far below an item's 30-day average
         # a sell listing must be priced to count as a "steal", e.g. 0.65 = 65% off. UEX's own
         # API docs (Pricing Parameters table) document a 60% "variation tolerance" for Ore
         # Sales as normal, expected price variance - not an anomaly. Defaulting below that
