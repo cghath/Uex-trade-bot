@@ -15,6 +15,26 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
   route rankings, ship cargo math, and price/trade-volume trends.
 
 ## Backlog & Ideas
+
+### UEX Data Intelligence
+
+- [ ] **Route Confidence Rating**: Score trade routes by price freshness, player-report depth,
+  stock, demand, and price volatility so recommendations clearly communicate their reliability.
+- [ ] **Terminal Data Health**: Surface how recently each terminal was reported and warn when
+  a price or route relies on stale UEX data.
+- [ ] **Supply & Demand History**: Save periodic terminal stock and demand snapshots to reveal
+  regular sell-outs, dependable buyers, and possible restock patterns.
+- [ ] **Practical Route Checks**: Account for freight elevators, loading docks, container-size
+  limits, cargo centers, refuel/repair availability, and player-owned or monitored locations.
+- [ ] **Commodity Risk Labels**: Mark illegal, volatile, explosive, known-buggy, and other
+  operationally relevant commodity traits in route recommendations.
+- [ ] **Refinery Advisor**: Compare refinery yield bonuses, processing choices, and current
+  refined-material sale value for mining runs.
+- [ ] **Fuel-Aware Profit**: Estimate fuel costs and show route profit after fuel for the
+  user's selected ship.
+- [ ] **Marketplace Depth Analytics**: Extend sellability with buy-to-sell ratios, listing-price
+  distribution, listing turnover, and availability/source signals where UEX provides them.
+
 - [ ] **Volatility Alerts**: Notify users of sudden price swings in specific commodities.
 - [ ] **Quality Premium Analysis**: Data visualization of how much extra UEC is paid for higher quality tiers.
 - [ ] **User Dashboard**: A summary of the user's current "Portfolio" (linked accounts, current holdings, and active listings).
