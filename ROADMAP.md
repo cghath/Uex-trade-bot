@@ -13,6 +13,9 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
   unit, and a minimum sample size before alerting. Crafted gear is intentionally excluded.
 - [x] **Commodity arbitrage tools**: Current prices, best routes, route scoring, stock-aware
   route rankings, ship cargo math, and price/trade-volume trends.
+- [x] **UEX Data Collection Foundation**: The always-on Pi collector records change-only
+  terminal market states, data freshness, fuel prices, refinery yields, reference metadata,
+  and Marketplace tier changes so future intelligence features have real history to use.
 
 ## Backlog & Ideas
 

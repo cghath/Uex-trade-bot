@@ -45,6 +45,9 @@ _ENDPOINT_CACHE_TTL = {
     "marketplace_trends": 3600,
     "vehicles": 12 * 3600,
     "commodities_status": 24 * 3600,
+    "data_monitor": 3600,
+    "fuel_prices": 30 * 60,
+    "refineries_yields": 24 * 3600,
     "marketplace_prices_history": 3600,
     "marketplace_prices_averages": 3600,
     "marketplace_prices_averages_all": 3600,
@@ -307,6 +310,19 @@ class UexClient:
         if not isinstance(data, dict):
             return {"buy": [], "sell": []}
         return {"buy": data.get("buy") or [], "sell": data.get("sell") or []}
+
+    async def get_data_monitor(self, **filters: Any) -> list[dict[str, Any]]:
+        """UEX Datarunner freshness for terminal price data. Requires the bot app token and
+        reports how much terminal data is within UEX's own freshness window."""
+        return await self._get("data_monitor", params=filters) or []
+
+    async def get_fuel_prices(self, **filters: Any) -> list[dict[str, Any]]:
+        """Fuel prices by terminal. UEX accepts up to ten terminal ids in ``id_terminal``."""
+        return await self._get("fuel_prices", params=filters) or []
+
+    async def get_refineries_yields(self, **filters: Any) -> list[dict[str, Any]]:
+        """Current refinery yield bonuses by raw commodity and refinery terminal."""
+        return await self._get("refineries_yields", params=filters) or []
 
     # -- marketplace (player-to-player, separate from commodity/terminal trading) --
 

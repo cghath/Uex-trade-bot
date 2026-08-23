@@ -213,6 +213,161 @@ CREATE TABLE IF NOT EXISTS scanner_seen_listings (
     seen_at TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (user_id, listing_id)
 );
+
+-- UEX data-intelligence foundation. These tables deliberately keep one current state plus an
+-- append-only record only when a value changes. That gives future restock/route-confidence
+-- features real history without writing a complete copy of every terminal every hour.
+CREATE TABLE IF NOT EXISTS terminal_market_state (
+    id_commodity INTEGER NOT NULL,
+    id_terminal INTEGER NOT NULL,
+    commodity_name TEXT NOT NULL,
+    terminal_name TEXT NOT NULL,
+    price_buy REAL,
+    price_sell REAL,
+    scu_buy REAL,
+    scu_sell REAL,
+    status_buy INTEGER,
+    status_sell INTEGER,
+    quality INTEGER,
+    volatility_buy REAL,
+    volatility_sell REAL,
+    buy_report_count INTEGER,
+    sell_report_count INTEGER,
+    last_seen TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (id_commodity, id_terminal)
+);
+
+CREATE TABLE IF NOT EXISTS terminal_market_observations (
+    id_commodity INTEGER NOT NULL,
+    id_terminal INTEGER NOT NULL,
+    observed_at TEXT NOT NULL DEFAULT (datetime('now')),
+    commodity_name TEXT NOT NULL,
+    terminal_name TEXT NOT NULL,
+    price_buy REAL,
+    price_sell REAL,
+    scu_buy REAL,
+    scu_sell REAL,
+    status_buy INTEGER,
+    status_sell INTEGER,
+    quality INTEGER,
+    volatility_buy REAL,
+    volatility_sell REAL,
+    buy_report_count INTEGER,
+    sell_report_count INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_terminal_market_observations_lookup
+    ON terminal_market_observations (id_commodity, id_terminal, observed_at);
+
+CREATE TABLE IF NOT EXISTS terminal_data_health_state (
+    id_terminal INTEGER NOT NULL,
+    data_type TEXT NOT NULL,
+    terminal_name TEXT NOT NULL,
+    prices_total INTEGER,
+    prices_updated INTEGER,
+    prices_updated_percentage INTEGER,
+    last_update_days REAL,
+    has_recent_reports INTEGER,
+    last_seen TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (id_terminal, data_type)
+);
+
+CREATE TABLE IF NOT EXISTS terminal_data_health_observations (
+    id_terminal INTEGER NOT NULL,
+    data_type TEXT NOT NULL,
+    observed_at TEXT NOT NULL DEFAULT (datetime('now')),
+    terminal_name TEXT NOT NULL,
+    prices_total INTEGER,
+    prices_updated INTEGER,
+    prices_updated_percentage INTEGER,
+    last_update_days REAL,
+    has_recent_reports INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_terminal_data_health_observations_lookup
+    ON terminal_data_health_observations (id_terminal, data_type, observed_at);
+
+CREATE TABLE IF NOT EXISTS fuel_price_state (
+    id_commodity INTEGER NOT NULL,
+    id_terminal INTEGER NOT NULL,
+    commodity_name TEXT NOT NULL,
+    terminal_name TEXT NOT NULL,
+    price_buy REAL,
+    price_sell REAL,
+    last_seen TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (id_commodity, id_terminal)
+);
+
+CREATE TABLE IF NOT EXISTS fuel_price_observations (
+    id_commodity INTEGER NOT NULL,
+    id_terminal INTEGER NOT NULL,
+    observed_at TEXT NOT NULL DEFAULT (datetime('now')),
+    commodity_name TEXT NOT NULL,
+    terminal_name TEXT NOT NULL,
+    price_buy REAL,
+    price_sell REAL
+);
+CREATE INDEX IF NOT EXISTS idx_fuel_price_observations_lookup
+    ON fuel_price_observations (id_terminal, id_commodity, observed_at);
+
+CREATE TABLE IF NOT EXISTS terminal_reference (
+    id_terminal INTEGER PRIMARY KEY,
+    terminal_name TEXT NOT NULL,
+    terminal_type TEXT,
+    star_system_name TEXT,
+    planet_name TEXT,
+    moon_name TEXT,
+    city_name TEXT,
+    max_container_size INTEGER,
+    has_loading_dock INTEGER,
+    has_freight_elevator INTEGER,
+    is_cargo_center INTEGER,
+    is_refuel INTEGER,
+    is_repair INTEGER,
+    is_player_owned INTEGER,
+    last_seen TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS commodity_reference (
+    id_commodity INTEGER PRIMARY KEY,
+    commodity_name TEXT NOT NULL,
+    is_illegal INTEGER,
+    is_volatile_qt INTEGER,
+    is_volatile_time INTEGER,
+    is_explosive INTEGER,
+    is_buggy INTEGER,
+    is_raw INTEGER,
+    is_refined INTEGER,
+    is_mineral INTEGER,
+    is_harvestable INTEGER,
+    last_seen TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS refinery_yield_observations (
+    id_commodity INTEGER NOT NULL,
+    id_terminal INTEGER NOT NULL,
+    recorded_day TEXT NOT NULL,
+    commodity_name TEXT NOT NULL,
+    terminal_name TEXT NOT NULL,
+    yield_bonus INTEGER,
+    yield_bonus_week INTEGER,
+    yield_bonus_month INTEGER,
+    PRIMARY KEY (id_commodity, id_terminal, recorded_day)
+);
+
+CREATE TABLE IF NOT EXISTS marketplace_tier_observations (
+    id_item INTEGER NOT NULL,
+    quality_tier INTEGER NOT NULL,
+    operation TEXT NOT NULL,
+    currency TEXT NOT NULL,
+    unit TEXT NOT NULL,
+    observed_at TEXT NOT NULL DEFAULT (datetime('now')),
+    item_name TEXT NOT NULL,
+    listings_count INTEGER NOT NULL,
+    price_avg REAL,
+    price_avg_week REAL,
+    price_avg_month REAL
+);
+CREATE INDEX IF NOT EXISTS idx_marketplace_tier_observations_lookup
+    ON marketplace_tier_observations (id_item, quality_tier, operation, currency, unit, observed_at);
 """
 
 
@@ -267,6 +422,283 @@ class Database:
             yield db
         finally:
             await db.close()
+
+    # -- UEX data-intelligence snapshots -------------------------------------
+
+    @staticmethod
+    def _number(value: Any) -> float | None:
+        if value is None or value == "":
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    @classmethod
+    def _integer(cls, value: Any) -> int | None:
+        number = cls._number(value)
+        return int(number) if number is not None else None
+
+    @classmethod
+    def _flag(cls, value: Any) -> int:
+        """Normalize UEX's mixed 0/1, strings, and booleans without treating '0' as true."""
+        if isinstance(value, str) and value.strip().lower() in {"true", "yes"}:
+            return 1
+        return 1 if (cls._integer(value) or 0) != 0 else 0
+
+    async def record_terminal_market_snapshot(self, rows: list[dict[str, Any]]) -> tuple[int, int]:
+        """Store all currently known terminal commodity states, appending history only for
+        changed values. Returns ``(changed_rows, valid_rows)`` for concise collector logs."""
+        normalized: list[tuple[Any, ...]] = []
+        for row in rows:
+            id_commodity = self._integer(row.get("id_commodity"))
+            id_terminal = self._integer(row.get("id_terminal"))
+            commodity_name = row.get("commodity_name")
+            terminal_name = row.get("terminal_name")
+            if id_commodity is None or id_terminal is None or not commodity_name or not terminal_name:
+                continue
+            normalized.append(
+                (
+                    id_commodity, id_terminal, str(commodity_name), str(terminal_name),
+                    self._number(row.get("price_buy")), self._number(row.get("price_sell")),
+                    self._number(row.get("scu_buy")), self._number(row.get("scu_sell")),
+                    self._integer(row.get("status_buy")), self._integer(row.get("status_sell")),
+                    self._integer(row.get("quality")),
+                    self._number(row.get("volatility_price_buy")), self._number(row.get("volatility_price_sell")),
+                    self._integer(row.get("price_buy_users_rows") or row.get("scu_buy_users_rows")),
+                    self._integer(row.get("price_sell_users_rows") or row.get("scu_sell_users_rows")),
+                )
+            )
+        if not normalized:
+            return (0, 0)
+
+        async with self.connect() as db:
+            cursor = await db.execute(
+                """SELECT id_commodity, id_terminal, commodity_name, terminal_name, price_buy,
+                          price_sell, scu_buy, scu_sell, status_buy, status_sell, quality,
+                          volatility_buy, volatility_sell, buy_report_count, sell_report_count
+                   FROM terminal_market_state"""
+            )
+            existing = {
+                (row["id_commodity"], row["id_terminal"]): tuple(row)[2:]
+                for row in await cursor.fetchall()
+            }
+            changed = [row for row in normalized if existing.get((row[0], row[1])) != row[2:]]
+            await db.executemany(
+                """INSERT INTO terminal_market_state
+                   (id_commodity, id_terminal, commodity_name, terminal_name, price_buy, price_sell,
+                    scu_buy, scu_sell, status_buy, status_sell, quality, volatility_buy,
+                    volatility_sell, buy_report_count, sell_report_count, last_seen)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                   ON CONFLICT(id_commodity, id_terminal) DO UPDATE SET
+                       commodity_name=excluded.commodity_name, terminal_name=excluded.terminal_name,
+                       price_buy=excluded.price_buy, price_sell=excluded.price_sell, scu_buy=excluded.scu_buy,
+                       scu_sell=excluded.scu_sell, status_buy=excluded.status_buy, status_sell=excluded.status_sell,
+                       quality=excluded.quality, volatility_buy=excluded.volatility_buy,
+                       volatility_sell=excluded.volatility_sell,
+                       buy_report_count=excluded.buy_report_count, sell_report_count=excluded.sell_report_count,
+                       last_seen=datetime('now')""",
+                normalized,
+            )
+            if changed:
+                await db.executemany(
+                    """INSERT INTO terminal_market_observations
+                       (id_commodity, id_terminal, commodity_name, terminal_name, price_buy, price_sell,
+                        scu_buy, scu_sell, status_buy, status_sell, quality, volatility_buy,
+                        volatility_sell, buy_report_count, sell_report_count)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    changed,
+                )
+            await db.commit()
+        return (len(changed), len(normalized))
+
+    async def record_terminal_data_health_snapshot(self, rows: list[dict[str, Any]]) -> tuple[int, int]:
+        normalized = []
+        for row in rows:
+            id_terminal = self._integer(row.get("id_terminal"))
+            data_type = row.get("type")
+            terminal_name = row.get("terminal_name")
+            if id_terminal is None or not data_type or not terminal_name:
+                continue
+            normalized.append(
+                (
+                    id_terminal, str(data_type), str(terminal_name), self._integer(row.get("prices_total")),
+                    self._integer(row.get("prices_updated")), self._integer(row.get("prices_updated_percentage")),
+                    self._number(row.get("last_update_days")), self._flag(row.get("has_recent_reports")),
+                )
+            )
+        if not normalized:
+            return (0, 0)
+        async with self.connect() as db:
+            cursor = await db.execute(
+                """SELECT id_terminal, data_type, terminal_name, prices_total, prices_updated,
+                          prices_updated_percentage, last_update_days, has_recent_reports
+                   FROM terminal_data_health_state"""
+            )
+            existing = {(row["id_terminal"], row["data_type"]): tuple(row)[2:] for row in await cursor.fetchall()}
+            changed = [row for row in normalized if existing.get((row[0], row[1])) != row[2:]]
+            await db.executemany(
+                """INSERT INTO terminal_data_health_state
+                   (id_terminal, data_type, terminal_name, prices_total, prices_updated,
+                    prices_updated_percentage, last_update_days, has_recent_reports, last_seen)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                   ON CONFLICT(id_terminal, data_type) DO UPDATE SET
+                       terminal_name=excluded.terminal_name, prices_total=excluded.prices_total,
+                       prices_updated=excluded.prices_updated,
+                       prices_updated_percentage=excluded.prices_updated_percentage,
+                       last_update_days=excluded.last_update_days,
+                       has_recent_reports=excluded.has_recent_reports, last_seen=datetime('now')""",
+                normalized,
+            )
+            if changed:
+                await db.executemany(
+                    """INSERT INTO terminal_data_health_observations
+                       (id_terminal, data_type, terminal_name, prices_total, prices_updated,
+                        prices_updated_percentage, last_update_days, has_recent_reports)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    changed,
+                )
+            await db.commit()
+        return (len(changed), len(normalized))
+
+    async def record_fuel_price_snapshot(self, rows: list[dict[str, Any]]) -> tuple[int, int]:
+        normalized = []
+        for row in rows:
+            id_commodity = self._integer(row.get("id_commodity"))
+            id_terminal = self._integer(row.get("id_terminal"))
+            commodity_name = row.get("commodity_name")
+            terminal_name = row.get("terminal_name")
+            if id_commodity is None or id_terminal is None or not commodity_name or not terminal_name:
+                continue
+            normalized.append(
+                (id_commodity, id_terminal, str(commodity_name), str(terminal_name),
+                 self._number(row.get("price_buy")), self._number(row.get("price_sell")))
+            )
+        if not normalized:
+            return (0, 0)
+        async with self.connect() as db:
+            cursor = await db.execute(
+                "SELECT id_commodity, id_terminal, commodity_name, terminal_name, price_buy, price_sell FROM fuel_price_state"
+            )
+            existing = {(row["id_commodity"], row["id_terminal"]): tuple(row)[2:] for row in await cursor.fetchall()}
+            changed = [row for row in normalized if existing.get((row[0], row[1])) != row[2:]]
+            await db.executemany(
+                """INSERT INTO fuel_price_state
+                   (id_commodity, id_terminal, commodity_name, terminal_name, price_buy, price_sell, last_seen)
+                   VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+                   ON CONFLICT(id_commodity, id_terminal) DO UPDATE SET
+                       commodity_name=excluded.commodity_name, terminal_name=excluded.terminal_name,
+                       price_buy=excluded.price_buy, price_sell=excluded.price_sell, last_seen=datetime('now')""",
+                normalized,
+            )
+            if changed:
+                await db.executemany(
+                    """INSERT INTO fuel_price_observations
+                       (id_commodity, id_terminal, commodity_name, terminal_name, price_buy, price_sell)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    changed,
+                )
+            await db.commit()
+        return (len(changed), len(normalized))
+
+    async def upsert_terminal_reference(self, rows: list[dict[str, Any]]) -> int:
+        params = []
+        for row in rows:
+            id_terminal = self._integer(row.get("id"))
+            name = row.get("name") or row.get("terminal_name")
+            if id_terminal is None or not name:
+                continue
+            params.append(
+                (id_terminal, str(name), row.get("type"), row.get("star_system_name"), row.get("planet_name"),
+                 row.get("moon_name"), row.get("city_name"), self._integer(row.get("max_container_size")),
+                 self._flag(row.get("has_loading_dock")), self._flag(row.get("has_freight_elevator")),
+                 self._flag(row.get("is_cargo_center")), self._flag(row.get("is_refuel")), self._flag(row.get("is_repair")),
+                 self._flag(row.get("is_player_owned")))
+            )
+        if not params:
+            return 0
+        async with self.connect() as db:
+            await db.executemany(
+                """INSERT INTO terminal_reference
+                   (id_terminal, terminal_name, terminal_type, star_system_name, planet_name, moon_name, city_name,
+                    max_container_size, has_loading_dock, has_freight_elevator, is_cargo_center, is_refuel,
+                    is_repair, is_player_owned, last_seen)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                   ON CONFLICT(id_terminal) DO UPDATE SET
+                       terminal_name=excluded.terminal_name, terminal_type=excluded.terminal_type,
+                       star_system_name=excluded.star_system_name, planet_name=excluded.planet_name,
+                       moon_name=excluded.moon_name, city_name=excluded.city_name,
+                       max_container_size=excluded.max_container_size,
+                       has_loading_dock=excluded.has_loading_dock,
+                       has_freight_elevator=excluded.has_freight_elevator,
+                       is_cargo_center=excluded.is_cargo_center, is_refuel=excluded.is_refuel,
+                       is_repair=excluded.is_repair, is_player_owned=excluded.is_player_owned,
+                       last_seen=datetime('now')""",
+                params,
+            )
+            await db.commit()
+        return len(params)
+
+    async def upsert_commodity_reference(self, rows: list[dict[str, Any]]) -> int:
+        params = []
+        for row in rows:
+            id_commodity = self._integer(row.get("id"))
+            name = row.get("name")
+            if id_commodity is None or not name:
+                continue
+            params.append(
+                (id_commodity, str(name), self._flag(row.get("is_illegal")), self._flag(row.get("is_volatile_qt")),
+                 self._flag(row.get("is_volatile_time")), self._flag(row.get("is_explosive")),
+                 self._flag(row.get("is_buggy")), self._flag(row.get("is_raw")), self._flag(row.get("is_refined")),
+                 self._flag(row.get("is_mineral")), self._flag(row.get("is_harvestable"))))
+        if not params:
+            return 0
+        async with self.connect() as db:
+            await db.executemany(
+                """INSERT INTO commodity_reference
+                   (id_commodity, commodity_name, is_illegal, is_volatile_qt, is_volatile_time, is_explosive,
+                    is_buggy, is_raw, is_refined, is_mineral, is_harvestable, last_seen)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                   ON CONFLICT(id_commodity) DO UPDATE SET
+                       commodity_name=excluded.commodity_name, is_illegal=excluded.is_illegal,
+                       is_volatile_qt=excluded.is_volatile_qt, is_volatile_time=excluded.is_volatile_time,
+                       is_explosive=excluded.is_explosive, is_buggy=excluded.is_buggy,
+                       is_raw=excluded.is_raw, is_refined=excluded.is_refined,
+                       is_mineral=excluded.is_mineral, is_harvestable=excluded.is_harvestable,
+                       last_seen=datetime('now')""",
+                params,
+            )
+            await db.commit()
+        return len(params)
+
+    async def record_refinery_yield_snapshot(self, rows: list[dict[str, Any]]) -> int:
+        params = []
+        for row in rows:
+            id_commodity = self._integer(row.get("id_commodity"))
+            id_terminal = self._integer(row.get("id_terminal"))
+            name, terminal = row.get("commodity_name"), row.get("terminal_name")
+            if id_commodity is None or id_terminal is None or not name or not terminal:
+                continue
+            params.append(
+                (id_commodity, id_terminal, str(name), str(terminal), self._integer(row.get("value")),
+                 self._integer(row.get("value_week")), self._integer(row.get("value_month")))
+            )
+        if not params:
+            return 0
+        async with self.connect() as db:
+            await db.executemany(
+                """INSERT INTO refinery_yield_observations
+                   (id_commodity, id_terminal, recorded_day, commodity_name, terminal_name,
+                    yield_bonus, yield_bonus_week, yield_bonus_month)
+                   VALUES (?, ?, date('now'), ?, ?, ?, ?, ?)
+                   ON CONFLICT(id_commodity, id_terminal, recorded_day) DO UPDATE SET
+                       commodity_name=excluded.commodity_name, terminal_name=excluded.terminal_name,
+                       yield_bonus=excluded.yield_bonus, yield_bonus_week=excluded.yield_bonus_week,
+                       yield_bonus_month=excluded.yield_bonus_month""",
+                params,
+            )
+            await db.commit()
+        return len(params)
 
     # -- price alerts ---------------------------------------------------
 
@@ -712,6 +1144,20 @@ class Database:
         if not rows:
             return
         async with self.connect() as db:
+            cursor = await db.execute(
+                """SELECT id_item, quality_tier, operation, currency, unit, item_name,
+                          listings_count, price_avg, price_avg_week, price_avg_month
+                   FROM marketplace_item_tier_stats"""
+            )
+            existing = {
+                (row["id_item"], row["quality_tier"], row["operation"], row["currency"], row["unit"]): tuple(row)[5:]
+                for row in await cursor.fetchall()
+            }
+            changed = [
+                r for r in rows
+                if existing.get((r["id_item"], r["quality_tier"], r["operation"], r["currency"], r["unit"]))
+                != (r["item_name"], r["listings_count"], r.get("price_avg"), r.get("price_avg_week"), r.get("price_avg_month"))
+            ]
             await db.executemany(
                 """INSERT INTO marketplace_item_tier_stats
                    (id_item, item_name, quality_tier, operation, currency, unit,
@@ -733,6 +1179,21 @@ class Database:
                     for r in rows
                 ],
             )
+            if changed:
+                await db.executemany(
+                    """INSERT INTO marketplace_tier_observations
+                       (id_item, quality_tier, operation, currency, unit, item_name, listings_count,
+                        price_avg, price_avg_week, price_avg_month)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    [
+                        (
+                            r["id_item"], r["quality_tier"], r["operation"], r["currency"], r["unit"],
+                            r["item_name"], r["listings_count"], r.get("price_avg"),
+                            r.get("price_avg_week"), r.get("price_avg_month"),
+                        )
+                        for r in changed
+                    ],
+                )
             await db.commit()
 
     async def get_item_tier_stats(self, id_item: int) -> list[dict[str, Any]]:
