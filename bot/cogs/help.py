@@ -1,11 +1,9 @@
-"""/intro - a self-documenting command list.
+"""/intro - a compact, self-maintaining command guide.
 
-Descriptions are pulled live from each command's registered `description=`, not
-hand-copied here, so this can't silently drift out of sync as commands change.
-Only the grouping (which category each command name belongs in) is maintained by
-hand; anything not explicitly grouped still shows up under "Other" rather than
-being silently dropped, so a new command is never invisible even before someone
-remembers to categorize it.
+Discord shows a command's description and options when a player starts typing it,
+so /intro acts as a readable map rather than repeating every long description.
+Command names are still read from the live command tree, and an uncategorized
+command still appears under "Other" instead of becoming invisible.
 """
 from __future__ import annotations
 
@@ -14,26 +12,43 @@ from discord import app_commands
 from discord.ext import commands
 
 # Display order + grouping. A command name not listed here still appears, under "Other".
-CATEGORIES: list[tuple[str, list[str]]] = [
-    ("Prices & Routes", ["price", "best-route"]),
-    ("Trends & Movers", ["trending", "movers", "commodity-history", "top-scored-routes", "top-in-stock-routes"]),
-    ("Ship & Cargo", ["set-default-ship", "clear-default-ship", "my-ship"]),
-    ("Price Alerts", ["alert-add", "alert-list", "alert-remove"]),
-    ("Trade Log & Leaderboard", ["trade-log-add", "trade-log", "uex-trades", "leaderboard"]),
-    ("UEX Marketplace", [
+# These remain available as slash commands but are implementation health checks rather than
+# normal player tools, so they do not add noise to /intro.
+HIDDEN_COMMANDS = {"marketplace-index-status"}
+
+CATEGORIES: list[tuple[str, str, list[str]]] = [
+    ("Prices & Routes", "Terminal prices, profitable hauls, and ranked live routes.", [
+        "price", "best-route", "top-routes",
+    ]),
+    ("Commodity Trends", "Trade volume, price movement, and commodity price charts.", [
+        "trending", "movers", "commodity-history",
+    ]),
+    ("Ship & Cargo", "Save a ship once to calculate cargo limits and per-run profit.", [
+        "set-default-ship", "clear-default-ship", "my-ship",
+    ]),
+    ("Alerts & Notifications", "Price targets, Marketplace matches, restocks, and DM delivery checks.", [
+        "alert-add", "alert-list", "alert-remove",
+        "marketplace-alert-add", "marketplace-alert-list", "marketplace-alert-remove",
+        "stock-alert-add", "stock-alert-list", "stock-alert-remove", "test-dm",
+    ]),
+    ("Trade Log & Leaderboard", "Your personal ledger, UEX-recorded history, and server standings.", [
+        "trade-log-add", "trade-log", "uex-trades", "leaderboard",
+    ]),
+    ("UEX Marketplace", "Search and analyze listings, or manage your own Marketplace activity.", [
         "marketplace-search", "marketplace-trending", "marketplace-movers", "marketplace-average",
         "marketplace-history", "my-negotiations", "my-favorites", "marketplace-post",
-        "marketplace-delete-listing", "marketplace-index-status",
+        "marketplace-delete-listing",
     ]),
-    ("Marketplace Intelligence", [
+    ("Marketplace Intelligence", "Sellability rankings, rating history, and underpriced-listing scans.", [
         "liquidity-rank", "liquidity-trends", "scan-now", "scanner-status", "set-scanner-channel",
     ]),
-    ("Marketplace Alerts", ["marketplace-alert-add", "marketplace-alert-list", "marketplace-alert-remove"]),
-    ("Stock Alerts", ["stock-alert-add", "stock-alert-list", "stock-alert-remove"]),
-    ("Daily Digest", ["digest-now", "set-digest-channel", "digest-disable"]),
-    ("Account Linking", ["link-uex-account", "unlink-uex-account", "uex-account-status"]),
-    ("Diagnostics", ["test-dm"]),
-    ("Help", ["intro"]),
+    ("Daily Digest", "Post a snapshot now or configure the server's scheduled digest.", [
+        "digest-now", "set-digest-channel", "digest-disable",
+    ]),
+    ("Account Linking", "Connect UEX securely to use personal Marketplace and trade-history tools.", [
+        "link-uex-account", "unlink-uex-account", "uex-account-status",
+    ]),
+    ("Help", "Return to this guide whenever you need a quick map.", ["intro"]),
 ]
 
 
@@ -49,42 +64,39 @@ class Help(commands.Cog):
         embed = discord.Embed(
             title="UEX Trading Bot — Commands",
             description=(
-                "Star Citizen trading tools backed by live UEX Corp data: commodity prices and "
-                "trade routes, trend/volume tracking, price alerts, a personal trade ledger, "
-                "cargo math for your ship, and the player-to-player UEX Marketplace.\n\n"
-                "Use **Marketplace Intelligence** to find items with strong sellability, track "
-                "their rating over time, and scan for undervalued listings.\n\n"
-                "Options in *italics* are optional."
+                "Your quick map to live UEX Corp trading tools.\n\n"
+                "**Start here:** `/price` for terminal prices · `/best-route` for a haul · "
+                "`/liquidity-rank` for Marketplace sellability.\n\n"
+                "Start typing any command to see its options and autocomplete."
             ),
             color=discord.Color.blurple(),
         )
 
-        for category_name, command_names in CATEGORIES:
-            lines = []
+        for category_name, summary, command_names in CATEGORIES:
+            available_commands = []
             for name in command_names:
                 cmd = commands_by_name.get(name)
                 if cmd is None:
                     continue  # command was renamed/removed - don't show a dead entry
                 categorized_names.add(name)
-                lines.append(_format_command_line(cmd))
-            if lines:
-                _add_command_fields(embed, category_name, lines)
+                available_commands.append(cmd)
+            if available_commands:
+                value = f"{summary}\n{_format_command_list(available_commands)}"
+                _add_command_fields(embed, category_name, [value])
 
-        leftover = [c for n, c in commands_by_name.items() if n not in categorized_names]
+        leftover = [
+            c for n, c in commands_by_name.items()
+            if n not in categorized_names and n not in HIDDEN_COMMANDS
+        ]
         if leftover:
-            lines = [_format_command_line(c) for c in sorted(leftover, key=lambda c: c.name)]
-            _add_command_fields(embed, "Other", lines)
+            _add_command_fields(embed, "Other", [_format_command_list(sorted(leftover, key=lambda c: c.name))])
 
-        embed.set_footer(text="Tip: most commands with a text option support autocomplete - start typing and pick from the dropdown.")
+        embed.set_footer(text="Tip: commands with a text option usually support autocomplete — start typing and pick from the dropdown.")
         await interaction.response.send_message(embed=embed)
 
 
-def _format_command_line(cmd: app_commands.Command) -> str:
-    params = "".join(
-        f" *[{p.display_name}]*" if not p.required else f" <{p.display_name}>"
-        for p in cmd.parameters
-    )
-    return f"`/{cmd.name}{params}` — {cmd.description}"
+def _format_command_list(commands: list[app_commands.Command]) -> str:
+    return " · ".join(f"`/{cmd.name}`" for cmd in commands)
 
 
 def _add_command_fields(embed: discord.Embed, category_name: str, lines: list[str]) -> None:

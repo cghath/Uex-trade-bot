@@ -1,5 +1,5 @@
 """Trend-finding commands: most-traded commodities, price movers, price history charts, and
-top-scored trade routes across the whole catalog.
+top trade routes across the whole catalog.
 
 /trending needs one API call per tradeable commodity (UEX only exposes real trade-trip
 counts scoped to a single commodity at a time), so it's computed by a background task on
@@ -7,7 +7,7 @@ a slow interval and served from an in-memory cache - instant for users, gentle o
 120 req/min rate limit. /movers and /commodity-history are single bulk calls each and run
 on demand.
 
-/top-scored-routes has the same "needs one call per commodity" constraint, for a different
+/top-routes has the same "needs one call per commodity" constraint, for a different
 reason: /commodities_routes (UEX's own precomputed buy->sell routes, with a proprietary
 "score" field) requires at least one filter - there's no "give me every route for every
 commodity" call. Rather than run a second full-catalog scan on its own schedule, this piggybacks
@@ -52,9 +52,7 @@ def _build_route_field(
     ship_cargo_scu: float | None,
     status_lookup: dict,
 ) -> tuple[str, str]:
-    """Builds one embed field's (name, value) for a ScoredRouteEntry - shared by
-    /top-scored-routes and /top-in-stock-routes since they render identically, differing only
-    in which pre-filtered candidate list feeds them."""
+    """Build one route field for /top-routes."""
     per_unit_profit = r.price_destination - r.price_origin
     value_lines = [f"Buy {r.price_origin:.2f} / Sell {r.price_destination:.2f} (+{per_unit_profit:.2f} aUEC/unit)"]
 
@@ -156,13 +154,11 @@ class Trends(commands.Cog):
         return list(self._trending)
 
     async def _get_status_lookup(self) -> dict:
-        """Best-effort readable-label lookup for status_origin/status_destination codes, same
-        helper Prices uses for /price and /best-route. A failure here just means labels are
-        omitted from /top-scored-routes, never a hard error for the command."""
+        """Best-effort readable status labels for /top-routes."""
         try:
             status_data = await self.bot.uex.get_commodities_status()
         except UexApiError as exc:
-            logger.info("Status labels unavailable for /top-scored-routes: %s", exc)
+            logger.info("Status labels unavailable for /top-routes: %s", exc)
             return {"buy": {}, "sell": {}}
         return build_status_lookup(status_data)
 
@@ -240,14 +236,14 @@ class Trends(commands.Cog):
                     )
                 )
 
-            # Top-scored-routes gathering, independent of trending trip volume - a commodity
+            # Top-routes gathering, independent of trending trip volume - a commodity
             # can have zero recent trade trips and still have real stock and a good score.
             id_commodity = rows[0].get("id_commodity")
             if id_commodity is not None:
                 try:
                     route_rows = await self.bot.uex.get_commodities_routes(id_commodity=id_commodity)
                 except UexApiError as exc:
-                    logger.info("Skipping %s in top-scored-routes refresh: %s", name, exc)
+                    logger.info("Skipping %s in top-routes refresh: %s", name, exc)
                     route_rows = []
                 else:
                     best_route = select_best_available_route(name, id_commodity, route_rows)
@@ -271,7 +267,7 @@ class Trends(commands.Cog):
             self._top_scored_routes = ranked_routes
             self._top_scored_routes_updated_at = datetime.now(timezone.utc)
         logger.info(
-            "Top-scored-routes refresh complete: %d candidates, %d kept", len(route_candidates), len(ranked_routes)
+            "Top-routes refresh complete: %d candidates, %d kept", len(route_candidates), len(ranked_routes)
         )
 
         ranked_in_stock_routes = rank_top_scored_routes(in_stock_route_candidates, limit=TOP_IN_STOCK_ROUTES_KEEP)
@@ -279,7 +275,7 @@ class Trends(commands.Cog):
             self._top_in_stock_routes = ranked_in_stock_routes
             self._top_in_stock_routes_updated_at = datetime.now(timezone.utc)
         logger.info(
-            "Top-in-stock-routes refresh complete: %d candidates, %d kept",
+            "Strict top-routes refresh complete: %d candidates, %d kept",
             len(in_stock_route_candidates), len(ranked_in_stock_routes),
         )
 
@@ -287,10 +283,7 @@ class Trends(commands.Cog):
     async def before_refresh_trending(self) -> None:
         await self.bot.wait_until_ready()
 
-    # -- /top-scored-routes and /top-in-stock-routes: both served from cache, refreshed by
-    # the same background loop above, and rendered identically via _send_ranked_routes /
-    # _build_route_field - they differ only in which candidate list they read and their
-    # title/footer wording. -----
+    # -- /top-routes: served from one of two caches refreshed by the same background loop. --
 
     async def _send_ranked_routes(
         self,
@@ -329,16 +322,36 @@ class Trends(commands.Cog):
         embed.set_footer(text=footer)
         await interaction.followup.send(embed=embed)
 
-    @app_commands.command(
-        name="top-scored-routes",
-        description="Top-scored trade routes across every commodity, filtered to routes with real buy-side stock.",
+    @app_commands.command(name="top-routes", description="Top trade routes by UEX score, with live-stock filtering.")
+    @app_commands.describe(
+        ship="Optional: check cargo/profit for a specific ship instead of your default (/set-default-ship)",
+        strict="Require live stock at the origin and live demand at the destination (safer).",
     )
-    @app_commands.describe(ship="Optional: check cargo/profit for a specific ship instead of your default (/set-default-ship)")
     @app_commands.autocomplete(ship=ship_name_autocomplete)
-    async def top_scored_routes(self, interaction: discord.Interaction, ship: str | None = None) -> None:
-        async with self._top_scored_routes_lock:
-            entries = list(self._top_scored_routes)
-            updated_at = self._top_scored_routes_updated_at
+    async def top_routes(
+        self,
+        interaction: discord.Interaction,
+        strict: bool = False,
+        ship: str | None = None,
+    ) -> None:
+        if strict:
+            async with self._top_in_stock_routes_lock:
+                entries = list(self._top_in_stock_routes)
+                updated_at = self._top_in_stock_routes_updated_at
+            title = "Top Trade Routes — Strict Live Availability"
+            footer_note = (
+                "Ranked by UEX's route score · one route per commodity · requires real stock "
+                "at the origin and real demand at the destination right now"
+            )
+        else:
+            async with self._top_scored_routes_lock:
+                entries = list(self._top_scored_routes)
+                updated_at = self._top_scored_routes_updated_at
+            title = "Top Trade Routes"
+            footer_note = (
+                "Ranked by UEX's route score · one route per commodity · filtered to real "
+                "buy-side stock at the origin right now · use strict:True for live demand too"
+            )
 
         if not entries:
             await interaction.response.send_message(
@@ -351,39 +364,9 @@ class Trends(commands.Cog):
             entries=entries,
             updated_at=updated_at,
             ship=ship,
-            title="Top-Scored Trade Routes",
-            footer_note="Ranked by UEX's own route score · one route per commodity · filtered to real buy-side stock right now",
-            log_label="/top-scored-routes",
-        )
-
-    @app_commands.command(
-        name="top-in-stock-routes",
-        description="Top-scored trade routes with real stock AND demand on both ends right now.",
-    )
-    @app_commands.describe(ship="Optional: check cargo/profit for a specific ship instead of your default (/set-default-ship)")
-    @app_commands.autocomplete(ship=ship_name_autocomplete)
-    async def top_in_stock_routes(self, interaction: discord.Interaction, ship: str | None = None) -> None:
-        async with self._top_in_stock_routes_lock:
-            entries = list(self._top_in_stock_routes)
-            updated_at = self._top_in_stock_routes_updated_at
-
-        if not entries:
-            await interaction.response.send_message(
-                "Still gathering route data (this refreshes on a timer after startup) - try again in a few minutes."
-            )
-            return
-
-        await self._send_ranked_routes(
-            interaction,
-            entries=entries,
-            updated_at=updated_at,
-            ship=ship,
-            title="Top In-Stock Trade Routes",
-            footer_note=(
-                "Ranked by UEX's own route score · one route per commodity · requires real "
-                "stock AND demand at both ends right now, unlike /top-scored-routes"
-            ),
-            log_label="/top-in-stock-routes",
+            title=title,
+            footer_note=footer_note,
+            log_label="/top-routes",
         )
 
     # -- /movers: single bulk call, computed on demand -----------------------
