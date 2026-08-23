@@ -70,3 +70,24 @@ def test_data_health_and_fuel_snapshots_are_change_only(tmp_path):
         assert await db.record_fuel_price_snapshot([fuel]) == (0, 1)
 
     asyncio.run(run())
+
+
+def test_marketplace_tier_history_seeds_an_existing_current_state(tmp_path):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        tier = {
+            "id_item": 5, "item_name": "Gold", "quality_tier": 0, "operation": "sell",
+            "currency": "UEC", "unit": "unit", "listings_count": 3,
+            "price_avg": 100.0, "price_avg_week": 95.0, "price_avg_month": 90.0,
+        }
+        await db.upsert_marketplace_tier_stats([tier])
+        async with db.connect() as sqlite:
+            await sqlite.execute("DELETE FROM marketplace_tier_observations")
+            await sqlite.commit()
+        await db.upsert_marketplace_tier_stats([tier])
+        async with db.connect() as sqlite:
+            cursor = await sqlite.execute("SELECT COUNT(*) AS count FROM marketplace_tier_observations")
+            assert (await cursor.fetchone())["count"] == 1
+
+    asyncio.run(run())

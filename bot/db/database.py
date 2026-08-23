@@ -1153,10 +1153,22 @@ class Database:
                 (row["id_item"], row["quality_tier"], row["operation"], row["currency"], row["unit"]): tuple(row)[5:]
                 for row in await cursor.fetchall()
             }
+            history_cursor = await db.execute(
+                """SELECT DISTINCT id_item, quality_tier, operation, currency, unit
+                   FROM marketplace_tier_observations"""
+            )
+            history_keys = {
+                (row["id_item"], row["quality_tier"], row["operation"], row["currency"], row["unit"])
+                for row in await history_cursor.fetchall()
+            }
             changed = [
                 r for r in rows
-                if existing.get((r["id_item"], r["quality_tier"], r["operation"], r["currency"], r["unit"]))
-                != (r["item_name"], r["listings_count"], r.get("price_avg"), r.get("price_avg_week"), r.get("price_avg_month"))
+                if (
+                    (key := (r["id_item"], r["quality_tier"], r["operation"], r["currency"], r["unit"]))
+                    not in history_keys
+                    or existing.get(key)
+                    != (r["item_name"], r["listings_count"], r.get("price_avg"), r.get("price_avg_week"), r.get("price_avg_month"))
+                )
             ]
             await db.executemany(
                 """INSERT INTO marketplace_item_tier_stats
