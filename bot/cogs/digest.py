@@ -1,7 +1,7 @@
-"""Daily server digest: price movers, most actively traded commodities, and UEX Marketplace
-trending items, auto-posted once a day to an admin-configured channel/time. /digest-now
-builds and posts the exact same content on demand, so nobody has to wait for the scheduled
-time just to see it.
+"""Daily server digest: price movers, most actively traded commodities, Marketplace
+trending items, and sellability insights. It is auto-posted once a day to an
+admin-configured channel/time. /digest-now builds and posts the exact same content on
+demand, so nobody has to wait for the scheduled time just to see it.
 """
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from bot.uex.exceptions import UexApiError
+from bot.uex.marketplace import marketplace_item_url
 from bot.uex.trends import compute_movers
 
 logger = logging.getLogger("uexbot.digest")
@@ -65,7 +66,7 @@ class Digest(commands.Cog):
 
     @app_commands.command(
         name="digest-now",
-        description="Post the trading digest (price movers, trending, marketplace trending) right now.",
+        description="Post the trading digest (prices, trends, Marketplace sellability) right now.",
     )
     async def digest_now(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer()
@@ -118,7 +119,15 @@ class Digest(commands.Cog):
         else:
             embed.add_field(name="Marketplace Trending", value="No marketplace trend data right now.", inline=False)
 
-        embed.set_footer(text="UEX Corp data · /best-route and /price for full detail")
+        sellability_rows = await self.bot.db.get_top_liquidity_items(limit=3)
+        liquidity_movers = await self.bot.db.get_liquidity_movers(limit=3)
+        embed.add_field(
+            name="Marketplace Sellability",
+            value=_format_sellability_digest(sellability_rows, liquidity_movers),
+            inline=False,
+        )
+
+        embed.set_footer(text="UEX Corp data · /liquidity-rank, /best-route, and /price for full detail")
         return embed
 
     @tasks.loop(minutes=CHECK_INTERVAL_MINUTES)
@@ -161,3 +170,35 @@ class Digest(commands.Cog):
 
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(Digest(bot))
+
+
+def _format_sellability_digest(rows: list[dict], movers: list[dict]) -> str:
+    """Create one compact daily-digest field from locally tracked liquidity data."""
+    if not rows:
+        return "Still collecting Marketplace sellability data."
+
+    lines = ["**Best to list now**"]
+    for index, row in enumerate(rows, start=1):
+        item_name = row["item_name"]
+        id_item = row.get("id_item")
+        item = f"[{item_name}]({marketplace_item_url(id_item)})" if id_item is not None else item_name
+        lines.append(f"{index}. {item} — **{float(row['score']):,.0f}/100**")
+
+    if movers:
+        lines.append("\n**Biggest rating shifts**")
+        for mover in movers:
+            previous = float(mover["previous_score"])
+            current = float(mover["current_score"])
+            change = current - previous
+            arrow = "📈" if change > 0 else "📉" if change < 0 else "➖"
+            direction = "up" if change > 0 else "down" if change < 0 else "unchanged"
+            item_name = mover["item_name"]
+            id_item = mover.get("id_item")
+            item = f"[{item_name}]({marketplace_item_url(id_item)})" if id_item is not None else item_name
+            if change:
+                lines.append(f"{arrow} {item} {direction} {abs(change):,.0f} pts ({previous:,.0f} → {current:,.0f})")
+            else:
+                lines.append(f"{arrow} {item} unchanged at {current:,.0f}/100")
+    else:
+        lines.append("\n*Rating shifts appear after another hourly snapshot.*")
+    return "\n".join(lines)

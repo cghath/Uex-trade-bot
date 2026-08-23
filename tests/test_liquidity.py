@@ -7,11 +7,47 @@ import sqlite3
 from cryptography.fernet import Fernet
 
 from bot.db.database import Database
+from bot.cogs.liquidity import _format_rating_change
+from bot.cogs.help import _add_command_fields
+from bot.cogs.digest import _format_sellability_digest
 from bot.uex.marketplace import compute_liquidity_score
 
 
 def _make_db(tmp_path) -> Database:
     return Database(tmp_path / "test.sqlite3", Fernet(Fernet.generate_key()))
+
+
+def test_rating_change_display_uses_plain_language_and_a_bounded_scale():
+    assert _format_rating_change(45, 72) == "📈 **Up 27 points** · 45 → 72 / 100"
+    assert _format_rating_change(38, 36) == "📉 **Down 2 points** · 38 → 36 / 100"
+    assert _format_rating_change(14, 15) == "📈 **Up 1 point** · 14 → 15 / 100"
+
+
+def test_intro_splits_oversized_command_categories_without_truncating_lines():
+    class FakeEmbed:
+        def __init__(self):
+            self.fields = []
+
+        def add_field(self, **kwargs):
+            self.fields.append(kwargs)
+
+    embed = FakeEmbed()
+    lines = ["a" * 600, "b" * 600, "c" * 20]
+    _add_command_fields(embed, "Marketplace", lines)
+    assert [field["name"] for field in embed.fields] == ["Marketplace", "Marketplace (continued)"]
+    assert [field["value"] for field in embed.fields] == ["a" * 600, ("b" * 600) + "\n" + ("c" * 20)]
+    assert all(len(field["value"]) <= 1024 for field in embed.fields)
+
+
+def test_digest_sellability_section_includes_rankings_and_rating_shifts():
+    value = _format_sellability_digest(
+        [{"item_name": "Gold", "id_item": 1, "score": 74}],
+        [{"item_name": "Gold", "id_item": 1, "previous_score": 70, "current_score": 74}],
+    )
+    assert "**Best to list now**" in value
+    assert "**74/100**" in value
+    assert "📈" in value
+    assert "up 4 pts (70 → 74)" in value
 
 
 def test_liquidity_score_weights_completed_and_open_negotiations_against_sell_supply():

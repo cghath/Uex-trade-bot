@@ -37,6 +37,20 @@ def _relative_timestamp(raw: str | None) -> str | None:
     return f"<t:{int(when.timestamp())}:R>"
 
 
+def _format_rating_change(previous: float, current: float) -> str:
+    """Render a compact, plain-language before/after sellability rating."""
+    change = current - previous
+    points = abs(round(change))
+    point_word = "point" if points == 1 else "points"
+    if change > 0:
+        direction = f"📈 **Up {points} {point_word}**"
+    elif change < 0:
+        direction = f"📉 **Down {points} {point_word}**"
+    else:
+        direction = "➖ **No change**"
+    return f"{direction} · {previous:,.0f} → {current:,.0f} / 100"
+
+
 class LiquidityCog(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
@@ -122,7 +136,9 @@ class LiquidityCog(commands.Cog):
                 color=discord.Color.orange(),
             )
             embed.add_field(name="Current sellability rating", value=f"**{float(latest['score']):,.0f}/100**")
-            change_text = f"{change:+,.0f}" + (f" ({pct_change:+.1f}%)" if pct_change is not None else "")
+            change_text = _format_rating_change(float(first["score"]), float(latest["score"]))
+            if pct_change is not None:
+                change_text += f" ({pct_change:+.1f}%)"
             embed.add_field(name="Change over recorded history", value=change_text)
             embed.add_field(
                 name="Latest activity",
@@ -151,15 +167,16 @@ class LiquidityCog(commands.Cog):
             return
         embed = discord.Embed(
             title="📈 Marketplace Liquidity Movers",
-            description="Largest score changes over the available history from the last 24 hours.",
+            description="Biggest sellability-rating changes over the available history from the last 24 hours.",
             color=discord.Color.gold(),
         )
         lines = []
         for i, mover in enumerate(movers, start=1):
-            change = float(mover["score_change"])
+            previous = float(mover["previous_score"])
+            current = float(mover["current_score"])
             lines.append(
-                f"**{i}. {_marketplace_name(mover['item_name'], mover.get('id_item'))}** — "
-                f"{change:+,.0f} ({float(mover['previous_score']):,.0f} → {float(mover['current_score']):,.0f})"
+                f"**{i}. {_marketplace_name(mover['item_name'], mover.get('id_item'))}**\n"
+                f"{_format_rating_change(previous, current)}"
             )
         embed.description += "\n\n" + "\n".join(lines)
         embed.set_footer(text="A full 24-hour comparison becomes available after one day of tracking.")

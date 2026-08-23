@@ -609,35 +609,6 @@ class Database:
             await db.commit()
         return count
 
-    async def seed_test_liquidity(self) -> None:
-        """Seeds dummy data for testing the liquidity rank command."""
-        async with self.connect() as db:
-            # Dummy items with varying scores
-            test_items = [
-                ("Gold", 5000),
-                ("Silver", 3500),
-                ("Copper", 2000),
-                ("Iron", 1500),
-                ("Tin", 1200),
-                ("Lead", 800),
-                ("Zinc", 700),
-                ("Nickel", 600),
-                ("Aluminum", 400),
-                ("Titanium", 200)
-            ]
-            for name, score in test_items:
-                await db.execute(
-                    """INSERT INTO liquidity_scores (item_name, score, last_updated)
-                       VALUES (?, ?, datetime('now'))
-                       ON CONFLICT(item_name) DO UPDATE SET
-                           score = excluded.score,
-                           last_updated = datetime('now')""",
-                    (name, score)
-                )
-            await db.commit()
-            logger.info("Seeded dummy liquidity data for testing.")
-
-
     async def get_top_liquidity_items(self, limit: int = 10) -> list[dict[str, Any]]:
         """Returns the top N items with the highest liquidity scores."""
         async with self.connect() as db:

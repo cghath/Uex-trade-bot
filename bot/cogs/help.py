@@ -25,6 +25,9 @@ CATEGORIES: list[tuple[str, list[str]]] = [
         "marketplace-history", "my-negotiations", "my-favorites", "marketplace-post",
         "marketplace-delete-listing", "marketplace-index-status",
     ]),
+    ("Marketplace Intelligence", [
+        "liquidity-rank", "liquidity-trends", "scan-now", "scanner-status", "set-scanner-channel",
+    ]),
     ("Marketplace Alerts", ["marketplace-alert-add", "marketplace-alert-list", "marketplace-alert-remove"]),
     ("Stock Alerts", ["stock-alert-add", "stock-alert-list", "stock-alert-remove"]),
     ("Daily Digest", ["digest-now", "set-digest-channel", "digest-disable"]),
@@ -49,6 +52,8 @@ class Help(commands.Cog):
                 "Star Citizen trading tools backed by live UEX Corp data: commodity prices and "
                 "trade routes, trend/volume tracking, price alerts, a personal trade ledger, "
                 "cargo math for your ship, and the player-to-player UEX Marketplace.\n\n"
+                "Use **Marketplace Intelligence** to find items with strong sellability, track "
+                "their rating over time, and scan for undervalued listings.\n\n"
                 "Options in *italics* are optional."
             ),
             color=discord.Color.blurple(),
@@ -63,12 +68,12 @@ class Help(commands.Cog):
                 categorized_names.add(name)
                 lines.append(_format_command_line(cmd))
             if lines:
-                embed.add_field(name=category_name, value="\n".join(lines), inline=False)
+                _add_command_fields(embed, category_name, lines)
 
         leftover = [c for n, c in commands_by_name.items() if n not in categorized_names]
         if leftover:
             lines = [_format_command_line(c) for c in sorted(leftover, key=lambda c: c.name)]
-            embed.add_field(name="Other", value="\n".join(lines), inline=False)
+            _add_command_fields(embed, "Other", lines)
 
         embed.set_footer(text="Tip: most commands with a text option support autocomplete - start typing and pick from the dropdown.")
         await interaction.response.send_message(embed=embed)
@@ -80,6 +85,33 @@ def _format_command_line(cmd: app_commands.Command) -> str:
         for p in cmd.parameters
     )
     return f"`/{cmd.name}{params}` — {cmd.description}"
+
+
+def _add_command_fields(embed: discord.Embed, category_name: str, lines: list[str]) -> None:
+    """Add one or more Discord-safe fields for a command category.
+
+    Discord limits a field value to 1,024 characters. Command descriptions are pulled
+    from the live command tree, so a category can legitimately outgrow that limit as
+    commands become more helpful. Split only between whole command lines so no command
+    description is truncated.
+    """
+    chunks: list[list[str]] = []
+    current: list[str] = []
+    current_length = 0
+    for line in lines:
+        added_length = len(line) + (1 if current else 0)  # newline between entries
+        if current and current_length + added_length > 1024:
+            chunks.append(current)
+            current = []
+            current_length = 0
+        current.append(line)
+        current_length += len(line) + (1 if len(current) > 1 else 0)
+    if current:
+        chunks.append(current)
+
+    for index, chunk in enumerate(chunks):
+        name = category_name if index == 0 else f"{category_name} (continued)"
+        embed.add_field(name=name, value="\n".join(chunk), inline=False)
 
 
 async def setup(bot: commands.Bot) -> None:
