@@ -299,9 +299,18 @@ guessed at.
     so an item with real demand and no competing sellers disappears from the leaderboard -
     arguably the single best thing to list. The guard conflates "no competition (opportunity)"
     with "no activity (irrelevant)".
-  - *Scale compression.* With 5 sell listings you need roughly 24 completed sales to reach
-    50/100. Most items land well under that, so a leaderboard *leader* may read around 12/100.
-    Fine for ranking items against each other, misleading if read as an absolute rating.
+  - *The fallback path over-scores.* When `negotiations_success`/`negotiations_open` are both
+    absent, `compute_liquidity_score` falls back to `negotiations_count` and weights it at
+    `1.0` - the *completed-sale* weight. So an item with 10 open negotiations and zero sales
+    scores 29.41 through the fallback but 17.24 when the same reality is reported in detail
+    (1.7x). Same class of defect as the buy-posting weight: a signal weighted as something
+    stronger than it is. Fixing it means weighting the fallback nearer `WEIGHT_OPEN_NEGOTIATION`,
+    or refusing to score without detail. Not decided.
+- **Checked and dismissed:** an earlier review worried the 0-100 scale was so compressed that a
+  leaderboard leader would read ~12/100. Recomputed against 503 real `marketplace_item_activity`
+  rows, the top score is 84.21, the median nonzero score 26.15, and nothing scores 0. The worry
+  came from reasoning about completed-sale counts alone; real items carry far larger *total*
+  negotiation counts. The scale is fine - don't re-open this without new data.
 - The footer text in `bot/cogs/liquidity.py` ("each buy posting adds a small demand bonus")
   described the *intended* behaviour and only became accurate once the buy-posting weight was
   lowered to 0.25 - see timeline item 10.
