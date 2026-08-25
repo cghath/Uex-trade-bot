@@ -561,6 +561,122 @@ class Database:
             await db.commit()
         return (len(changed), len(normalized))
 
+    async def get_terminal_data_health(
+        self, terminal_names: list[str], data_type: str = "commodity"
+    ) -> dict[str, dict[str, Any]]:
+        """Return current data-monitor rows keyed by case-folded terminal name.
+
+        Route responses expose terminal names but not consistently terminal ids, so the
+        user-facing health layer deliberately joins on UEX's canonical terminal name.
+        """
+        names = sorted({name.strip().casefold() for name in terminal_names if name and name.strip()})
+        if not names:
+            return {}
+        placeholders = ",".join("?" for _ in names)
+        async with self.connect() as db:
+            cursor = await db.execute(
+                f"""SELECT * FROM terminal_data_health_state
+                    WHERE data_type = ? AND lower(terminal_name) IN ({placeholders})""",
+                [data_type, *names],
+            )
+            rows = await cursor.fetchall()
+            return {row["terminal_name"].casefold(): dict(row) for row in rows}
+
+    async def get_route_market_signals(
+        self, commodity_ids: list[int], terminal_names: list[str]
+    ) -> dict[tuple[int, str], dict[str, Any]]:
+        """Current report-depth and volatility signals for route-confidence scoring."""
+        ids = sorted(set(commodity_ids))
+        names = sorted({name.casefold() for name in terminal_names if name})
+        if not ids or not names:
+            return {}
+        id_marks = ",".join("?" for _ in ids)
+        name_marks = ",".join("?" for _ in names)
+        async with self.connect() as db:
+            cursor = await db.execute(
+                f"""SELECT * FROM terminal_market_state
+                    WHERE id_commodity IN ({id_marks})
+                      AND lower(terminal_name) IN ({name_marks})""",
+                [*ids, *names],
+            )
+            rows = await cursor.fetchall()
+            return {(row["id_commodity"], row["terminal_name"].casefold()): dict(row) for row in rows}
+
+    async def get_route_terminal_references(
+        self, commodity_ids: list[int], terminal_names: list[str]
+    ) -> dict[tuple[int, str], dict[str, Any]]:
+        """Resolve route terminal metadata through market-state terminal ids.
+
+        Reference names can include role prefixes that route names omit, so joining by the
+        shared UEX terminal id is materially safer than matching terminal_reference names.
+        """
+        ids = sorted(set(commodity_ids))
+        names = sorted({name.casefold() for name in terminal_names if name})
+        if not ids or not names:
+            return {}
+        id_marks = ",".join("?" for _ in ids)
+        name_marks = ",".join("?" for _ in names)
+        async with self.connect() as db:
+            cursor = await db.execute(
+                f"""SELECT m.id_commodity, m.terminal_name AS market_terminal_name, r.*
+                    FROM terminal_market_state AS m
+                    JOIN terminal_reference AS r ON r.id_terminal = m.id_terminal
+                    WHERE m.id_commodity IN ({id_marks})
+                      AND lower(m.terminal_name) IN ({name_marks})""",
+                [*ids, *names],
+            )
+            rows = await cursor.fetchall()
+            return {
+                (row["id_commodity"], row["market_terminal_name"].casefold()): dict(row)
+                for row in rows
+            }
+
+    async def get_commodity_references(self, commodity_ids: list[int]) -> dict[int, dict[str, Any]]:
+        """Return collected operational flags for the requested commodities."""
+        ids = sorted(set(commodity_ids))
+        if not ids:
+            return {}
+        placeholders = ",".join("?" for _ in ids)
+        async with self.connect() as db:
+            cursor = await db.execute(
+                f"SELECT * FROM commodity_reference WHERE id_commodity IN ({placeholders})",
+                ids,
+            )
+            rows = await cursor.fetchall()
+            return {row["id_commodity"]: dict(row) for row in rows}
+
+    async def get_terminal_market_history(
+        self, commodity_name: str, terminal_name: str
+    ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+        """Return current state plus change-only history for one commodity/terminal pair."""
+        async with self.connect() as db:
+            cursor = await db.execute(
+                """SELECT * FROM terminal_market_state
+                   WHERE lower(commodity_name) = lower(?) AND lower(terminal_name) = lower(?)""",
+                (commodity_name.strip(), terminal_name.strip()),
+            )
+            state_row = await cursor.fetchone()
+            if not state_row:
+                return None, []
+            cursor = await db.execute(
+                """SELECT * FROM terminal_market_observations
+                   WHERE id_commodity = ? AND id_terminal = ? ORDER BY observed_at""",
+                (state_row["id_commodity"], state_row["id_terminal"]),
+            )
+            observations = await cursor.fetchall()
+            return dict(state_row), [dict(row) for row in observations]
+
+    async def find_terminal_market_names(self, commodity_name: str, query: str, limit: int = 10) -> list[str]:
+        """Suggest known terminal names when an exact /terminal-history lookup misses."""
+        async with self.connect() as db:
+            cursor = await db.execute(
+                """SELECT terminal_name FROM terminal_market_state
+                   WHERE lower(commodity_name) = lower(?) AND lower(terminal_name) LIKE lower(?)
+                   ORDER BY terminal_name LIMIT ?""",
+                (commodity_name.strip(), f"%{query.strip()}%", limit),
+            )
+            return [row["terminal_name"] for row in await cursor.fetchall()]
+
     async def record_fuel_price_snapshot(self, rows: list[dict[str, Any]]) -> tuple[int, int]:
         normalized = []
         for row in rows:

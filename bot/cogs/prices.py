@@ -9,6 +9,11 @@ from discord.ext import commands
 
 from bot.cogs.ships import ship_name_autocomplete
 from bot.uex.exceptions import UexApiError
+from bot.uex.data_health import classify_terminal_health, format_health_note
+from bot.uex.route_confidence import compute_route_confidence
+from bot.uex.practical_routes import route_practical_notes
+from bot.uex.commodity_risk import format_commodity_risk
+from bot.uex.supply_demand import analyze_terminal_market_history
 from bot.uex.ships import estimate_route_cargo, resolve_ship
 from bot.uex.status import build_status_lookup, resolve_status_label
 from bot.uex.trading import best_buy_locations, best_routes, best_sell_locations
@@ -34,6 +39,17 @@ async def commodity_name_autocomplete(interaction: discord.Interaction, current:
     return [app_commands.Choice(name=(c.get("name") or "")[:100], value=c.get("name") or "") for c in matches]
 
 
+async def terminal_history_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[str]]:
+    """Suggest collected terminals for the commodity already entered in the command."""
+    commodity = str(getattr(interaction.namespace, "commodity", "") or "").strip()
+    if not commodity:
+        return []
+    names = await interaction.client.db.find_terminal_market_names(commodity, current, limit=25)
+    return [app_commands.Choice(name=name[:100], value=name[:100]) for name in names]
+
+
 class Prices(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
@@ -48,6 +64,20 @@ class Prices(commands.Cog):
             logger.info("Status labels unavailable: %s", exc)
             return {"buy": {}, "sell": {}}
         return build_status_lookup(status_data)
+
+    async def _get_health_notes(self, terminal_names: list[str]) -> dict[str, str]:
+        """Best-effort stale/limited warnings keyed by terminal name.
+
+        Missing local history is neutral: price and route commands still work normally
+        while the collector is new or if the health snapshot is temporarily unavailable.
+        """
+        rows = await self.bot.db.get_terminal_data_health(terminal_names)
+        notes: dict[str, str] = {}
+        for key, row in rows.items():
+            note = format_health_note(classify_terminal_health(row))
+            if note:
+                notes[key] = note
+        return notes
 
     @app_commands.command(name="price", description="Show current buy/sell prices for a commodity across terminals.")
     @app_commands.describe(commodity="Commodity name, e.g. 'Gold' or 'Laranite'")
@@ -70,23 +100,76 @@ class Prices(commands.Cog):
         top_sell = best_sell_locations(rows, limit=MAX_FIELD_ROWS)
         top_buy = best_buy_locations(rows, limit=MAX_FIELD_ROWS)
         status_lookup = await self._get_status_lookup()
+        health_notes = await self._get_health_notes(
+            [r.get("terminal_name", "") for r in [*top_sell, *top_buy]]
+        )
 
         if top_sell:
             lines = []
             for r in top_sell:
                 label = resolve_status_label(status_lookup, "sell", r.get("status_sell"))
                 label_text = f" · {label}" if label else ""
-                lines.append(f"**{r['terminal_name']}** — {r['price_sell']:.2f} aUEC/unit{label_text}")
+                health_text = f" · {health_notes[r['terminal_name'].casefold()]}" if r['terminal_name'].casefold() in health_notes else ""
+                lines.append(f"**{r['terminal_name']}** — {r['price_sell']:.2f} aUEC/unit{label_text}{health_text}")
             embed.add_field(name="Best places to SELL", value="\n".join(lines), inline=False)
         if top_buy:
             lines = []
             for r in top_buy:
                 label = resolve_status_label(status_lookup, "buy", r.get("status_buy"))
                 label_text = f" · {label}" if label else ""
-                lines.append(f"**{r['terminal_name']}** — {r['price_buy']:.2f} aUEC/unit{label_text}")
+                health_text = f" · {health_notes[r['terminal_name'].casefold()]}" if r['terminal_name'].casefold() in health_notes else ""
+                lines.append(f"**{r['terminal_name']}** — {r['price_buy']:.2f} aUEC/unit{label_text}{health_text}")
             embed.add_field(name="Best places to BUY", value="\n".join(lines), inline=False)
 
         embed.set_footer(text="Data from UEX Corp · cached up to 30 min · status = current stock/demand level")
+        await interaction.followup.send(embed=embed)
+
+    @app_commands.command(
+        name="terminal-history",
+        description="Show historical supply and demand reliability for one commodity at a terminal.",
+    )
+    @app_commands.describe(
+        commodity="Commodity name, e.g. 'Gold' or 'Laranite'",
+        terminal="Exact terminal name as shown by /price",
+    )
+    @app_commands.autocomplete(
+        commodity=commodity_name_autocomplete,
+        terminal=terminal_history_autocomplete,
+    )
+    async def terminal_history(
+        self, interaction: discord.Interaction, commodity: str, terminal: str
+    ) -> None:
+        await interaction.response.defer()
+        state, observations = await self.bot.db.get_terminal_market_history(commodity, terminal)
+        if not state:
+            suggestions = await self.bot.db.find_terminal_market_names(commodity, terminal)
+            suggestion_text = f" Try: {', '.join(suggestions[:5])}" if suggestions else ""
+            await interaction.followup.send(
+                f"No collected history found for **{commodity}** at **{terminal}**.{suggestion_text}"
+            )
+            return
+
+        history = analyze_terminal_market_history(observations, observed_until=state["last_seen"])
+        if not history:
+            await interaction.followup.send(
+                f"History collection has started for **{state['commodity_name']}** at "
+                f"**{state['terminal_name']}**, but it needs another collector cycle before analysis."
+            )
+            return
+
+        color = discord.Color.green() if history.enough_history else discord.Color.gold()
+        embed = discord.Embed(
+            title=f"{state['commodity_name']} — {state['terminal_name']}",
+            description="Time-weighted from locally collected terminal states.",
+            color=color,
+        )
+        embed.add_field(name="Supply available", value=f"**{history.supply_available_pct:.1f}%** of observed time")
+        embed.add_field(name="Buyer demand", value=f"**{history.demand_available_pct:.1f}%** of observed time")
+        embed.add_field(name="State changes", value=f"**{history.state_changes}**", inline=True)
+        footer = f"Observed for {history.observed_hours:.1f} hours"
+        if not history.enough_history:
+            footer += " · preliminary: needs at least 24 hours"
+        embed.set_footer(text=footer)
         await interaction.followup.send(embed=embed)
 
     @app_commands.command(name="best-route", description="Find the most profitable buy->sell terminal pair for a commodity.")
@@ -125,21 +208,10 @@ class Prices(commands.Cog):
         ship_cargo_scu = ship_vehicle.get("scu") if ship_vehicle else None
         status_lookup = await self._get_status_lookup()
 
-        # Best-effort illegal-cargo check - /commodities already carries is_illegal per
-        # commodity (a separate field, not tied to /jurisdictions' faction territories).
-        # Never blocks the route lookup itself: a failed/missing lookup just means no
-        # warning shown, not an error for the whole command.
-        illegal_warning: str | None = None
+        risk_warning: str | None = None
         if id_commodity is not None:
-            try:
-                commodity_details = await self.bot.uex.get_commodities(id_commodity=id_commodity)
-                if commodity_details and commodity_details[0].get("is_illegal"):
-                    illegal_warning = (
-                        "⚠️ **Illegal cargo** — this commodity is contraband. Expect scans/fines "
-                        "at checkpoints and no legal buyer at most terminals."
-                    )
-            except UexApiError as exc:
-                logger.info("is_illegal lookup failed for %s: %s", commodity_display, exc)
+            commodity_references = await self.bot.db.get_commodity_references([int(id_commodity)])
+            risk_warning = format_commodity_risk(commodity_references.get(int(id_commodity)))
 
         # Prefer UEX's own precomputed routes (real inter-terminal distance, ROI, profit,
         # and a UEX quality score) over our own buy/sell pairing, which has no distance data.
@@ -152,9 +224,25 @@ class Prices(commands.Cog):
 
         if uex_routes:
             ranked = sorted(uex_routes, key=lambda r: r.get("profit") or 0, reverse=True)[:MAX_FIELD_ROWS]
+            route_terminal_names = [
+                name
+                for route in ranked
+                for name in (route.get("origin_terminal_name"), route.get("destination_terminal_name"))
+                if name
+            ]
+            health_rows = await self.bot.db.get_terminal_data_health(route_terminal_names)
+            health_notes = {
+                key: note
+                for key, row in health_rows.items()
+                if (note := format_health_note(classify_terminal_health(row)))
+            }
+            live_signals = {(row.get("terminal_name") or "").casefold(): row for row in rows}
+            terminal_references = await self.bot.db.get_route_terminal_references(
+                [int(id_commodity)], route_terminal_names
+            )
             embed = discord.Embed(title=f"{commodity_display} — Best Trade Routes", color=discord.Color.green())
-            if illegal_warning:
-                embed.description = illegal_warning
+            if risk_warning:
+                embed.description = risk_warning
             for r in ranked:
                 origin = r.get("origin_terminal_name", "Unknown")
                 dest = r.get("destination_terminal_name", "Unknown")
@@ -172,6 +260,10 @@ class Prices(commands.Cog):
                 value_lines = [
                     f"Buy {price_origin:.2f} / Sell {price_destination:.2f} (+{per_unit_diff:.2f} aUEC/unit)"
                 ]
+                for side, terminal_name in (("origin", origin), ("destination", dest)):
+                    health_note = health_notes.get(terminal_name.casefold())
+                    if health_note:
+                        value_lines.append(f"{side.title()}: {health_note}")
 
                 buy_status = resolve_status_label(status_lookup, "buy", r.get("status_origin"))
                 sell_status = resolve_status_label(status_lookup, "sell", r.get("status_destination"))
@@ -217,6 +309,31 @@ class Prices(commands.Cog):
                     loc_bits.append(f"UEX score {score:,.0f}")
                 if loc_bits:
                     value_lines.append(" · ".join(loc_bits))
+                origin_signal = live_signals.get(origin.casefold(), {})
+                destination_signal = live_signals.get(dest.casefold(), {})
+                confidence = compute_route_confidence(
+                    origin_health=(classify_terminal_health(health_rows[origin.casefold()])
+                                   if origin.casefold() in health_rows else None),
+                    destination_health=(classify_terminal_health(health_rows[dest.casefold()])
+                                        if dest.casefold() in health_rows else None),
+                    origin_report_count=(origin_signal.get("price_buy_users_rows")
+                                         or origin_signal.get("scu_buy_users_rows")),
+                    destination_report_count=(destination_signal.get("price_sell_users_rows")
+                                              or destination_signal.get("scu_sell_users_rows")),
+                    volatility_origin=r.get("volatility_origin"),
+                    volatility_destination=r.get("volatility_destination"),
+                    origin_available=bool(r.get("scu_origin") and r.get("scu_origin") > 0),
+                    destination_available=bool(
+                        r.get("scu_destination") and r.get("scu_destination") > 0
+                        and r.get("status_destination") not in (None, 0, 7)
+                    ),
+                )
+                value_lines.append(f"Confidence: **{confidence.label} ({confidence.score}/100)**")
+                practical_notes = route_practical_notes(
+                    terminal_references.get((int(id_commodity), origin.casefold())),
+                    terminal_references.get((int(id_commodity), dest.casefold())),
+                )
+                value_lines.extend(practical_notes)
                 embed.add_field(name=f"{origin} → {dest}", value="\n".join(value_lines), inline=False)
             footer = "Data from UEX Corp /commodities_routes"
             if not ship_vehicle:
@@ -231,17 +348,33 @@ class Prices(commands.Cog):
             await interaction.followup.send(f"No profitable buy/sell pair found for '{commodity}' right now.")
             return
 
+        health_notes = await self._get_health_notes(
+            [name for route in routes for name in (route.buy_terminal, route.sell_terminal)]
+        )
+        route_health_rows = await self.bot.db.get_terminal_data_health(
+            [name for route in routes for name in (route.buy_terminal, route.sell_terminal)]
+        )
+        live_signals = {(row.get("terminal_name") or "").casefold(): row for row in rows}
+        fallback_references = await self.bot.db.get_route_terminal_references(
+            [int(id_commodity)] if id_commodity is not None else [],
+            [name for route in routes for name in (route.buy_terminal, route.sell_terminal)],
+        )
+
         embed = discord.Embed(
             title=f"{routes[0].commodity_name} — Best Trade Routes",
             color=discord.Color.green(),
         )
-        if illegal_warning:
-            embed.description = illegal_warning
+        if risk_warning:
+            embed.description = risk_warning
         for route in routes:
             value_lines = [
                 f"Buy {route.buy_price:.2f} / Sell {route.sell_price:.2f}\n"
                 f"Profit: **{route.profit_per_unit:.2f} aUEC/unit** ({route.margin_pct}%)"
             ]
+            for side, terminal_name in (("origin", route.buy_terminal), ("destination", route.sell_terminal)):
+                health_note = health_notes.get(terminal_name.casefold())
+                if health_note:
+                    value_lines.append(f"{side.title()}: {health_note}")
 
             buy_status = resolve_status_label(status_lookup, "buy", route.status_buy_code)
             sell_status = resolve_status_label(status_lookup, "sell", route.status_sell_code)
@@ -272,6 +405,34 @@ class Prices(commands.Cog):
                 value_lines.append(cargo_line)
             elif not ship_vehicle:
                 value_lines.append("Cargo: unknown (set a ship with /set-default-ship to see haulable SCU)")
+
+            origin_signal = live_signals.get(route.buy_terminal.casefold(), {})
+            destination_signal = live_signals.get(route.sell_terminal.casefold(), {})
+            confidence = compute_route_confidence(
+                origin_health=(classify_terminal_health(route_health_rows[route.buy_terminal.casefold()])
+                               if route.buy_terminal.casefold() in route_health_rows else None),
+                destination_health=(classify_terminal_health(route_health_rows[route.sell_terminal.casefold()])
+                                    if route.sell_terminal.casefold() in route_health_rows else None),
+                origin_report_count=(origin_signal.get("price_buy_users_rows")
+                                     or origin_signal.get("scu_buy_users_rows")),
+                destination_report_count=(destination_signal.get("price_sell_users_rows")
+                                          or destination_signal.get("scu_sell_users_rows")),
+                volatility_origin=origin_signal.get("volatility_price_buy"),
+                volatility_destination=destination_signal.get("volatility_price_sell"),
+                origin_available=bool(route.scu_buy_available and route.scu_buy_available > 0),
+                destination_available=bool(
+                    route.scu_sell_wanted and route.scu_sell_wanted > 0
+                    and route.status_sell_code not in (None, 0, 7)
+                ),
+            )
+            value_lines.append(f"Confidence: **{confidence.label} ({confidence.score}/100)**")
+            if id_commodity is not None:
+                value_lines.extend(
+                    route_practical_notes(
+                        fallback_references.get((int(id_commodity), route.buy_terminal.casefold())),
+                        fallback_references.get((int(id_commodity), route.sell_terminal.casefold())),
+                    )
+                )
 
             embed.add_field(name=f"{route.buy_terminal} → {route.sell_terminal}", value="\n".join(value_lines), inline=False)
 

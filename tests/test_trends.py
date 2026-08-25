@@ -13,6 +13,8 @@ from bot.uex.trends import (
     select_best_available_route,
     select_best_in_stock_route,
 )
+from bot.uex.data_health import classify_terminal_health
+from bot.uex.route_confidence import compute_route_confidence
 
 
 def _price_row(**overrides) -> dict:
@@ -225,3 +227,39 @@ def test_rank_top_scored_routes_orders_by_score_and_caps():
     ranked = rank_top_scored_routes(entries, limit=10)
     assert len(ranked) == 10
     assert [e.score for e in ranked] == list(range(14, 4, -1))
+
+
+def test_route_confidence_rewards_fresh_reports_availability_and_stable_prices():
+    fresh = classify_terminal_health(
+        {"terminal_name": "A", "has_recent_reports": 1, "last_update_days": 0,
+         "prices_updated_percentage": 100}
+    )
+    high = compute_route_confidence(
+        origin_health=fresh, destination_health=fresh,
+        origin_report_count=5, destination_report_count=5,
+        volatility_origin=0.1, volatility_destination=0.1,
+        origin_available=True, destination_available=True,
+    )
+    low = compute_route_confidence(
+        origin_health=None, destination_health=None,
+        origin_report_count=0, destination_report_count=0,
+        volatility_origin=1.0, volatility_destination=1.0,
+        origin_available=True, destination_available=False,
+    )
+    assert high.label == "High"
+    assert high.score > low.score
+    assert low.label == "Low"
+
+
+def test_route_confidence_is_not_a_profit_score():
+    stale = classify_terminal_health(
+        {"terminal_name": "A", "has_recent_reports": 0, "last_update_days": 14,
+         "prices_updated_percentage": 100}
+    )
+    confidence = compute_route_confidence(
+        origin_health=stale, destination_health=stale,
+        origin_report_count=0, destination_report_count=0,
+        volatility_origin=None, volatility_destination=None,
+        origin_available=True, destination_available=True,
+    )
+    assert confidence.score < 50

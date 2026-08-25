@@ -41,6 +41,8 @@ class ScoredRouteEntry:
     scu_destination: float | None
     status_origin: int | None
     status_destination: int | None
+    volatility_origin: float | None = None
+    volatility_destination: float | None = None
 
 
 def aggregate_commodity_trips(rows: list[dict]) -> tuple[int, float | None]:
@@ -157,6 +159,8 @@ def select_best_available_route(
         scu_destination=best.get("scu_destination"),
         status_origin=best.get("status_origin"),
         status_destination=best.get("status_destination"),
+        volatility_origin=best.get("volatility_origin"),
+        volatility_destination=best.get("volatility_destination"),
     )
 
 
@@ -225,4 +229,6 @@ def select_best_in_stock_route(
         scu_destination=best.get("scu_destination"),
         status_origin=best.get("status_origin"),
         status_destination=best.get("status_destination"),
+        volatility_origin=best.get("volatility_origin"),
+        volatility_destination=best.get("volatility_destination"),
     )

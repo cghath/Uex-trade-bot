@@ -226,6 +226,24 @@ guessed at.
 - **Liquidity rating** is deliberately an indicator, not a predicted percentage chance of
   sale. It is bounded to 0-100 so users can interpret it at a glance. The history/movers view
   needs at least two hourly Marketplace snapshots before it can show a comparison.
+- **Terminal Data Health** uses UEX's TTL-aware `has_recent_reports` value as the freshness
+  decision and treats `prices_updated_percentage` as coverage only. `/price`, `/best-route`,
+  and `/top-routes` warn on stale or poorly covered terminals but stay quiet for healthy data.
+- **Route Confidence Rating** is separate from profit and UEX's proprietary route score.
+  `/best-route` and `/top-routes` show a 0-100 High/Medium/Low confidence rating based on
+  terminal freshness, directional player-report depth, live stock/demand, and price volatility.
+- **Supply & Demand History** is reconstructed from the change-only terminal observations,
+  weighting each state by how long it remained active rather than counting database rows.
+  `/terminal-history [commodity] [terminal]` shows supply and buyer-demand availability rates,
+  the observed window, and state-change count; windows shorter than 24 hours are preliminary.
+- **Practical Route Checks** join route terminals through UEX terminal ids (not names, because
+  reference names can include prefixes such as `Admin -`). `/best-route` and `/top-routes`
+  surface container-size limits, missing cargo infrastructure, player-owned locations, and
+  confirmed refuel, repair, or cargo-center services without changing route ranking.
+- **Commodity Risk Labels** use collected UEX flags and remain separate from profit and route
+  confidence. Route views label jurisdiction restrictions, explosion risk, quantum/time
+  volatility, and recent gameplay bugs. `is_illegal` is worded as restricted in some
+  jurisdictions, matching UEX's definition rather than overstating it as universal contraband.
 - The data collectors in `bot/cogs/intelligence.py` only pay off once they've been running a
   while - most of the `ROADMAP.md` intelligence backlog depends on accumulated history, so
   those features will look broken/empty if built and tested against a fresh database.

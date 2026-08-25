@@ -29,6 +29,10 @@ from bot.cogs.prices import commodity_name_autocomplete
 from bot.cogs.ships import ship_name_autocomplete
 from bot.uex.charts import render_price_history_chart
 from bot.uex.exceptions import UexApiError
+from bot.uex.data_health import classify_terminal_health, format_health_note
+from bot.uex.route_confidence import compute_route_confidence
+from bot.uex.practical_routes import route_practical_notes
+from bot.uex.commodity_risk import format_commodity_risk
 from bot.uex.ships import estimate_route_cargo, resolve_ship
 from bot.uex.status import build_status_lookup, resolve_status_label
 from bot.uex.trends import (
@@ -308,10 +312,77 @@ class Trends(commands.Cog):
                 logger.info("Vehicle lookup failed for '%s' in %s: %s", ship_query, log_label, exc)
         ship_cargo_scu = ship_vehicle.get("scu") if ship_vehicle else None
         status_lookup = await self._get_status_lookup()
+        health_rows = await self.bot.db.get_terminal_data_health(
+            [
+                terminal_name
+                for route in entries
+                for terminal_name in (route.origin_terminal_name, route.destination_terminal_name)
+            ]
+        )
+        health_notes = {
+            key: note
+            for key, row in health_rows.items()
+            if (note := format_health_note(classify_terminal_health(row)))
+        }
+        market_signals = await self.bot.db.get_route_market_signals(
+            [route.id_commodity for route in entries],
+            [
+                terminal_name
+                for route in entries
+                for terminal_name in (route.origin_terminal_name, route.destination_terminal_name)
+            ],
+        )
+        terminal_references = await self.bot.db.get_route_terminal_references(
+            [route.id_commodity for route in entries],
+            [
+                terminal_name
+                for route in entries
+                for terminal_name in (route.origin_terminal_name, route.destination_terminal_name)
+            ],
+        )
+        commodity_references = await self.bot.db.get_commodity_references(
+            [route.id_commodity for route in entries]
+        )
 
         embed = discord.Embed(title=title, color=discord.Color.green())
         for i, r in enumerate(entries, start=1):
             name, value = _build_route_field(i, r, ship_vehicle, ship_cargo_scu, status_lookup)
+            warnings = []
+            for side, terminal_name in (
+                ("Origin", r.origin_terminal_name),
+                ("Destination", r.destination_terminal_name),
+            ):
+                note = health_notes.get(terminal_name.casefold())
+                if note:
+                    warnings.append(f"{side}: {note}")
+            if warnings:
+                value += "\n" + "\n".join(warnings)
+            origin_health_row = health_rows.get(r.origin_terminal_name.casefold())
+            destination_health_row = health_rows.get(r.destination_terminal_name.casefold())
+            origin_signal = market_signals.get((r.id_commodity, r.origin_terminal_name.casefold()), {})
+            destination_signal = market_signals.get((r.id_commodity, r.destination_terminal_name.casefold()), {})
+            confidence = compute_route_confidence(
+                origin_health=classify_terminal_health(origin_health_row) if origin_health_row else None,
+                destination_health=classify_terminal_health(destination_health_row) if destination_health_row else None,
+                origin_report_count=origin_signal.get("buy_report_count"),
+                destination_report_count=destination_signal.get("sell_report_count"),
+                volatility_origin=r.volatility_origin,
+                volatility_destination=r.volatility_destination,
+                origin_available=bool(r.scu_origin and r.scu_origin > 0),
+                destination_available=bool(
+                    r.scu_destination and r.scu_destination > 0 and r.status_destination not in (None, 0, 7)
+                ),
+            )
+            value += f"\nConfidence: **{confidence.label} ({confidence.score}/100)**"
+            practical_notes = route_practical_notes(
+                terminal_references.get((r.id_commodity, r.origin_terminal_name.casefold())),
+                terminal_references.get((r.id_commodity, r.destination_terminal_name.casefold())),
+            )
+            if practical_notes:
+                value += "\n" + "\n".join(practical_notes)
+            risk_note = format_commodity_risk(commodity_references.get(r.id_commodity))
+            if risk_note:
+                value += f"\n{risk_note}"
             embed.add_field(name=name, value=value, inline=False)
 
         footer = footer_note + " · " + SELL_SIDE_STATUS_CLARIFIER
