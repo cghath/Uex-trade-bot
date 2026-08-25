@@ -86,9 +86,10 @@ Five docs, deliberately scoped so they don't duplicate each other:
 | `PROJECT_CONTEXT.md` (this doc) | *What happened and why* - history, hard-won API knowledge, current state |
 | `ROADMAP.md` | *What's next* - completed features and the backlog of ideas |
 
-Historical debugging write-ups (e.g. `Troubleshooting_Log_Sync_Fix.md`) are point-in-time
-records of specific incidents, not maintained guidance - treat `CONTRIBUTING.md` as the
-authority where they overlap.
+Standalone troubleshooting write-ups have been folded into `CONTRIBUTING.md` rather than kept
+as separate files - point-in-time incident logs drift out of date and end up contradicting the
+maintained guidance. If you debug something worth remembering, add it to `CONTRIBUTING.md`
+(mechanics and prevention) or here (history and context), not a new log file.
 
 ## How the scanner's matching logic evolved (read before touching `bot/uex/scanner.py`)
 
