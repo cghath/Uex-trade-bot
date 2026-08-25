@@ -34,6 +34,7 @@ BASE_URL = "https://api.uexcorp.uk/2.0"
 _DEFAULT_CACHE_TTL = 300  # 5 minutes, conservative default
 _ENDPOINT_CACHE_TTL = {
     "terminals": 12 * 3600,
+    "space_stations": 24 * 3600,
     "commodities": 12 * 3600,
     "commodities_prices": 30 * 60,
     "commodities_prices_all": 30 * 60,
@@ -245,6 +246,10 @@ class UexClient:
     async def get_terminals(self, **filters: Any) -> list[dict[str, Any]]:
         """Trading terminals/locations. Filters: id_star_system, id_planet, name, type, code, ..."""
         return await self._get("terminals", params=filters) or []
+
+    async def get_space_stations(self, **filters: Any) -> list[dict[str, Any]]:
+        """Space-station access metadata, including pad sizes and external loading docks."""
+        return await self._get("space_stations", params=filters) or []
 
     async def get_commodities(self, **filters: Any) -> list[dict[str, Any]]:
         return await self._get("commodities", params=filters) or []

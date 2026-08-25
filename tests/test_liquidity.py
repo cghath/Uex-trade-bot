@@ -3,13 +3,14 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+from datetime import datetime, timezone
 
 from cryptography.fernet import Fernet
 
 from bot.db.database import Database
 from bot.cogs.liquidity import _format_rating_change
 from bot.cogs.help import _add_command_fields
-from bot.cogs.digest import _format_sellability_digest
+from bot.cogs.digest import _format_data_freshness, _format_sellability_digest_fields
 from bot.uex.marketplace import compute_liquidity_score
 
 
@@ -40,14 +41,44 @@ def test_intro_splits_oversized_command_categories_without_truncating_lines():
 
 
 def test_digest_sellability_section_includes_rankings_and_rating_shifts():
-    value = _format_sellability_digest(
+    rankings, shifts_up, shifts_down = _format_sellability_digest_fields(
         [{"item_name": "Gold", "id_item": 1, "score": 74}],
         [{"item_name": "Gold", "id_item": 1, "previous_score": 70, "current_score": 74}],
+        [{"item_name": "Silver", "id_item": 2, "previous_score": 50, "current_score": 43}],
     )
-    assert "**Best to list now**" in value
-    assert "**74/100**" in value
-    assert "📈" in value
-    assert "up 4 pts (70 → 74)" in value
+    assert "**74/100**" in rankings
+    assert "📈" in shifts_up
+    assert "up 4 pts (70 → 74)" in shifts_up
+    assert "📉" in shifts_down
+    assert "down 7 pts (50 → 43)" in shifts_down
+    assert all(len(field) <= 1024 for field in (rankings, shifts_up, shifts_down))
+
+
+def test_digest_data_freshness_is_compact_and_flags_overdue_collectors():
+    value = _format_data_freshness(
+        {
+            "terminal_market": "2026-08-25 11:30:00",
+            "liquidity": "2026-08-25 14:30:00",
+            "marketplace": None,
+        },
+        now=datetime(2026, 8, 25, 15, 0, tzinfo=timezone.utc),
+    )
+    assert "✅ **Liquidity ratings:** 30m ago" in value
+    assert "⚠️ **Terminal markets:** 3h 30m ago · overdue" in value
+    assert "⚠️ **Marketplace index:** not collected yet" in value
+    assert len(value) <= 1024
+
+
+def test_marking_digest_posted_is_persisted(tmp_path):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await db.set_guild_digest_config(guild_id=1, channel_id=2, hour_utc=12)
+        await db.mark_guild_digest_posted(1, "2026-08-25")
+        config = await db.get_guild_digest_config(1)
+        assert config["last_posted_date"] == "2026-08-25"
+
+    asyncio.run(run())
 
 
 def test_liquidity_score_weights_completed_and_open_negotiations_against_sell_supply():
@@ -158,6 +189,51 @@ def test_liquidity_movers_compare_oldest_and_newest_snapshot_in_window(tmp_path)
             ("Rising", 140.0),
             ("Falling", -80.0),
         ]
+
+    asyncio.run(run())
+
+
+def test_liquidity_movers_can_be_limited_independently_by_direction(tmp_path):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        async with db.connect() as sqlite:
+            for item_id in range(1, 7):
+                await sqlite.execute(
+                    """INSERT INTO liquidity_score_snapshots
+                       (id_item, item_name, score, negotiations_success, negotiations_open,
+                        listings_count, listings_count_sell, listings_count_buy, recorded_hour)
+                       VALUES (?, ?, 10, 1, 0, 1, 1, 0, datetime('now', '-2 hours'))""",
+                    (item_id, f"Rising {item_id}"),
+                )
+                await sqlite.execute(
+                    """INSERT INTO liquidity_score_snapshots
+                       (id_item, item_name, score, negotiations_success, negotiations_open,
+                        listings_count, listings_count_sell, listings_count_buy, recorded_hour)
+                       VALUES (?, ?, ?, 1, 0, 1, 1, 0, datetime('now', '-1 hour'))""",
+                    (item_id, f"Rising {item_id}", 10 + item_id),
+                )
+            for item_id in range(7, 13):
+                await sqlite.execute(
+                    """INSERT INTO liquidity_score_snapshots
+                       (id_item, item_name, score, negotiations_success, negotiations_open,
+                        listings_count, listings_count_sell, listings_count_buy, recorded_hour)
+                       VALUES (?, ?, 20, 1, 0, 1, 1, 0, datetime('now', '-2 hours'))""",
+                    (item_id, f"Falling {item_id}"),
+                )
+                await sqlite.execute(
+                    """INSERT INTO liquidity_score_snapshots
+                       (id_item, item_name, score, negotiations_success, negotiations_open,
+                        listings_count, listings_count_sell, listings_count_buy, recorded_hour)
+                       VALUES (?, ?, ?, 1, 0, 1, 1, 0, datetime('now', '-1 hour'))""",
+                    (item_id, f"Falling {item_id}", 20 - (item_id - 6)),
+                )
+            await sqlite.commit()
+        gainers = await db.get_liquidity_movers(limit=4, direction="up")
+        losers = await db.get_liquidity_movers(limit=4, direction="down")
+        assert len(gainers) == len(losers) == 4
+        assert all(row["score_change"] > 0 for row in gainers)
+        assert all(row["score_change"] < 0 for row in losers)
 
     asyncio.run(run())
 

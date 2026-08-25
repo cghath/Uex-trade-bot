@@ -18,7 +18,7 @@ HIDDEN_COMMANDS = {"marketplace-index-status"}
 
 CATEGORIES: list[tuple[str, str, list[str]]] = [
     ("💰 Prices & Routes", "Terminal prices, profitable hauls, and ranked live routes.", [
-        "price", "best-route", "top-routes", "terminal-history",
+        "price", "best-route", "mixed-routes", "top-routes", "terminal-history",
     ]),
     ("📊 Commodity Trends", "Trade volume, price movement, and commodity price charts.", [
         "trending", "movers", "commodity-history",
@@ -43,7 +43,7 @@ CATEGORIES: list[tuple[str, str, list[str]]] = [
         "liquidity-rank", "liquidity-trends", "scan-now", "scanner-status", "set-scanner-channel",
     ]),
     ("🗓️ Daily Digest", "Post a snapshot now or configure the server's scheduled digest.", [
-        "digest-now", "set-digest-channel", "digest-disable",
+        "digest-now", "intelligence-brief", "set-digest-channel", "digest-disable",
     ]),
     ("🔗 Account Linking", "Connect UEX securely to use personal Marketplace and trade-history tools.", [
         "link-uex-account", "unlink-uex-account", "uex-account-status",
@@ -69,6 +69,7 @@ class Help(commands.Cog):
             description=(
                 "Your quick map to live UEX Corp trading tools.\n\n"
                 "**Start here:** `/price` for terminal prices · `/best-route` for a haul · "
+                "`/mixed-routes` for combined cargo · "
                 "`/liquidity-rank` for Marketplace sellability.\n\n"
                 "Start typing any command to see its options and autocomplete."
             ),

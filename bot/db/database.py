@@ -312,6 +312,11 @@ CREATE TABLE IF NOT EXISTS terminal_reference (
     id_terminal INTEGER PRIMARY KEY,
     terminal_name TEXT NOT NULL,
     terminal_type TEXT,
+    id_space_station INTEGER,
+    space_station_name TEXT,
+    id_outpost INTEGER,
+    outpost_name TEXT,
+    id_city INTEGER,
     star_system_name TEXT,
     planet_name TEXT,
     moon_name TEXT,
@@ -406,6 +411,11 @@ class Database:
             "ALTER TABLE liquidity_scores ADD COLUMN listings_count_buy INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE liquidity_score_snapshots ADD COLUMN listings_count_sell INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE liquidity_score_snapshots ADD COLUMN listings_count_buy INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE terminal_reference ADD COLUMN id_space_station INTEGER",
+            "ALTER TABLE terminal_reference ADD COLUMN space_station_name TEXT",
+            "ALTER TABLE terminal_reference ADD COLUMN id_outpost INTEGER",
+            "ALTER TABLE terminal_reference ADD COLUMN outpost_name TEXT",
+            "ALTER TABLE terminal_reference ADD COLUMN id_city INTEGER",
         ]
         for statement in migrations:
             try:
@@ -602,6 +612,25 @@ class Database:
             rows = await cursor.fetchall()
             return {(row["id_commodity"], row["terminal_name"].casefold()): dict(row) for row in rows}
 
+    async def get_mixed_route_market_rows(self) -> list[dict[str, Any]]:
+        """Current market snapshot enriched with terminal and commodity warning metadata."""
+        async with self.connect() as db:
+            cursor = await db.execute(
+                """SELECT m.*,
+                          t.terminal_type, t.id_space_station, t.space_station_name,
+                          t.id_outpost, t.outpost_name, t.id_city,
+                          t.star_system_name, t.planet_name, t.moon_name,
+                          t.city_name, t.max_container_size, t.has_loading_dock,
+                          t.has_freight_elevator, t.is_cargo_center, t.is_refuel,
+                          t.is_repair, t.is_player_owned,
+                          c.is_illegal, c.is_volatile_qt, c.is_volatile_time,
+                          c.is_explosive, c.is_buggy
+                   FROM terminal_market_state AS m
+                   LEFT JOIN terminal_reference AS t ON t.id_terminal = m.id_terminal
+                   LEFT JOIN commodity_reference AS c ON c.id_commodity = m.id_commodity"""
+            )
+            return [dict(row) for row in await cursor.fetchall()]
+
     async def get_route_terminal_references(
         self, commodity_ids: list[int], terminal_names: list[str]
     ) -> dict[tuple[int, str], dict[str, Any]]:
@@ -725,7 +754,9 @@ class Database:
             if id_terminal is None or not name:
                 continue
             params.append(
-                (id_terminal, str(name), row.get("type"), row.get("star_system_name"), row.get("planet_name"),
+                (id_terminal, str(name), row.get("type"), self._integer(row.get("id_space_station")),
+                 row.get("space_station_name"), self._integer(row.get("id_outpost")), row.get("outpost_name"),
+                 self._integer(row.get("id_city")), row.get("star_system_name"), row.get("planet_name"),
                  row.get("moon_name"), row.get("city_name"), self._integer(row.get("max_container_size")),
                  self._flag(row.get("has_loading_dock")), self._flag(row.get("has_freight_elevator")),
                  self._flag(row.get("is_cargo_center")), self._flag(row.get("is_refuel")), self._flag(row.get("is_repair")),
@@ -736,12 +767,15 @@ class Database:
         async with self.connect() as db:
             await db.executemany(
                 """INSERT INTO terminal_reference
-                   (id_terminal, terminal_name, terminal_type, star_system_name, planet_name, moon_name, city_name,
+                   (id_terminal, terminal_name, terminal_type, id_space_station, space_station_name,
+                    id_outpost, outpost_name, id_city, star_system_name, planet_name, moon_name, city_name,
                     max_container_size, has_loading_dock, has_freight_elevator, is_cargo_center, is_refuel,
                     is_repair, is_player_owned, last_seen)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
                    ON CONFLICT(id_terminal) DO UPDATE SET
                        terminal_name=excluded.terminal_name, terminal_type=excluded.terminal_type,
+                       id_space_station=excluded.id_space_station, space_station_name=excluded.space_station_name,
+                       id_outpost=excluded.id_outpost, outpost_name=excluded.outpost_name, id_city=excluded.id_city,
                        star_system_name=excluded.star_system_name, planet_name=excluded.planet_name,
                        moon_name=excluded.moon_name, city_name=excluded.city_name,
                        max_container_size=excluded.max_container_size,
@@ -1097,6 +1131,46 @@ class Database:
                 "UPDATE guild_digest_config SET last_posted_date = ? WHERE guild_id = ?",
                 (date_str, guild_id),
             )
+            await db.commit()
+
+    async def get_digest_data_freshness(self) -> dict[str, str | None]:
+        """Latest successful timestamps for the collectors summarized by the daily digest."""
+        async with self.connect() as db:
+            cursor = await db.execute(
+                """SELECT
+                       (SELECT MAX(last_seen) FROM terminal_market_state) AS terminal_market,
+                       (SELECT MAX(recorded_hour) FROM liquidity_score_snapshots) AS liquidity,
+                       (SELECT MAX(last_seen) FROM marketplace_item_activity) AS marketplace"""
+            )
+            row = await cursor.fetchone()
+            return dict(row) if row else {
+                "terminal_market": None, "liquidity": None, "marketplace": None
+            }
+
+    async def get_terminal_market_shifts(self, hours: int = 24) -> list[dict[str, Any]]:
+        """Supply and demand changes between each market's oldest/newest observations."""
+        async with self.connect() as db:
+            cursor = await db.execute(
+                """WITH windowed AS (
+                       SELECT * FROM terminal_market_observations
+                       WHERE observed_at >= datetime('now', ?)
+                   ), bounds AS (
+                       SELECT id_commodity, id_terminal, MIN(observed_at) first_at, MAX(observed_at) last_at
+                       FROM windowed GROUP BY id_commodity, id_terminal HAVING COUNT(*) >= 2
+                   )
+                   SELECT latest.commodity_name, latest.terminal_name,
+                          earliest.scu_buy AS previous_supply, latest.scu_buy AS current_supply,
+                          earliest.scu_sell AS previous_demand, latest.scu_sell AS current_demand,
+                          COALESCE(latest.scu_buy, 0) - COALESCE(earliest.scu_buy, 0) AS supply_change,
+                          COALESCE(latest.scu_sell, 0) - COALESCE(earliest.scu_sell, 0) AS demand_change
+                   FROM bounds
+                   JOIN windowed earliest ON earliest.id_commodity=bounds.id_commodity
+                     AND earliest.id_terminal=bounds.id_terminal AND earliest.observed_at=bounds.first_at
+                   JOIN windowed latest ON latest.id_commodity=bounds.id_commodity
+                     AND latest.id_terminal=bounds.id_terminal AND latest.observed_at=bounds.last_at""",
+                (f"-{hours} hours",),
+            )
+            return [dict(row) for row in await cursor.fetchall()]
 
     # -- liquidity scores -------------------------------------------------------
 
@@ -1191,24 +1265,38 @@ class Database:
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
 
-    async def get_liquidity_movers(self, hours: int = 24, limit: int = 10) -> list[dict[str, Any]]:
-        """Largest score changes over the available history within the requested window."""
+    async def get_liquidity_movers(
+        self, hours: int = 24, limit: int = 10, direction: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Largest score changes over the requested window, optionally split by direction."""
+        if direction not in (None, "up", "down"):
+            raise ValueError("direction must be 'up', 'down', or None")
+        direction_sql = {
+            "up": "WHERE score_change > 0",
+            "down": "WHERE score_change < 0",
+            None: "",
+        }[direction]
         async with self.connect() as db:
             cursor = await db.execute(
-                """WITH windowed AS (
+                f"""WITH windowed AS (
                        SELECT * FROM liquidity_score_snapshots
                        WHERE recorded_hour >= datetime('now', ?)
                    ), bounds AS (
                        SELECT id_item, MIN(recorded_hour) AS first_hour, MAX(recorded_hour) AS last_hour
                        FROM windowed GROUP BY id_item HAVING COUNT(*) >= 2
+                   ), movements AS (
+                       SELECT latest.item_name, latest.id_item, earliest.score AS previous_score,
+                              latest.score AS current_score, latest.score - earliest.score AS score_change,
+                              earliest.recorded_hour AS first_hour, latest.recorded_hour AS last_hour
+                       FROM bounds
+                       JOIN windowed AS earliest
+                         ON earliest.id_item = bounds.id_item AND earliest.recorded_hour = bounds.first_hour
+                       JOIN windowed AS latest
+                         ON latest.id_item = bounds.id_item AND latest.recorded_hour = bounds.last_hour
                    )
-                   SELECT latest.item_name, latest.id_item, earliest.score AS previous_score,
-                          latest.score AS current_score, latest.score - earliest.score AS score_change,
-                          earliest.recorded_hour AS first_hour, latest.recorded_hour AS last_hour
-                   FROM bounds
-                   JOIN windowed AS earliest ON earliest.id_item = bounds.id_item AND earliest.recorded_hour = bounds.first_hour
-                   JOIN windowed AS latest ON latest.id_item = bounds.id_item AND latest.recorded_hour = bounds.last_hour
-                   ORDER BY ABS(latest.score - earliest.score) DESC LIMIT ?""",
+                   SELECT * FROM movements
+                   {direction_sql}
+                   ORDER BY ABS(score_change) DESC LIMIT ?""",
                 (f"-{hours} hours", limit),
             )
             rows = await cursor.fetchall()

@@ -9,6 +9,7 @@ from bot.db.database import Database
 from bot.uex.data_health import classify_terminal_health, format_health_note
 from bot.uex.supply_demand import analyze_terminal_market_history
 from bot.uex.practical_routes import route_practical_notes
+from bot.cogs.intelligence_brief import _format_market_shifts
 from bot.uex.commodity_risk import commodity_risk_labels, format_commodity_risk
 
 
@@ -197,6 +198,37 @@ def test_commodity_risk_labels_are_specific_and_do_not_overstate_illegality():
 
 def test_safe_commodity_has_no_risk_line():
     assert format_commodity_risk({}) is None
+
+
+def test_intelligence_brief_formats_supply_and_demand_direction():
+    rows = [
+        {"commodity_name": "Gold", "terminal_name": "Station", "supply_change": 50},
+        {"commodity_name": "Iron", "terminal_name": "Outpost", "supply_change": -20},
+    ]
+    value = _format_market_shifts(rows, "supply_change")
+    assert "📈 **Gold** at Station: +50 SCU" in value
+    assert "📉 **Iron** at Outpost: -20 SCU" in value
+
+
+def test_terminal_market_shifts_compare_oldest_and_newest_observation(tmp_path):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        async with db.connect() as sqlite:
+            await sqlite.executescript(
+                """INSERT INTO terminal_market_observations
+                   (id_commodity,id_terminal,observed_at,commodity_name,terminal_name,scu_buy,scu_sell)
+                   VALUES (1,10,datetime('now','-2 hours'),'Gold','Station',10,100);
+                   INSERT INTO terminal_market_observations
+                   (id_commodity,id_terminal,observed_at,commodity_name,terminal_name,scu_buy,scu_sell)
+                   VALUES (1,10,datetime('now','-1 hour'),'Gold','Station',40,70);"""
+            )
+            await sqlite.commit()
+        (shift,) = await db.get_terminal_market_shifts()
+        assert shift["supply_change"] == 30
+        assert shift["demand_change"] == -30
+
+    asyncio.run(run())
 
 
 def test_marketplace_tier_history_seeds_an_existing_current_state(tmp_path):
