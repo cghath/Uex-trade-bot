@@ -23,6 +23,10 @@ This split exists because early work (see below) went straight to `main`, and th
 wanted a safer place to land less-proven changes - notably the Undervalued Scanner, which
 went through several real correctness bugs found only by testing against live data.
 
+Don't assume from this doc whether a given feature has reached `main` yet - that changes
+often. Check with `git log --oneline origin/main..origin/TestBranch` (empty output means
+they're in sync).
+
 ## Timeline so far
 
 1. **Housekeeping** (merged to `main`): secrets (`.env`, `data/`) and `__pycache__` were
@@ -57,13 +61,34 @@ went through several real correctness bugs found only by testing against live da
    a modest active-buy-posting bonus. A three-listing supply cushion prevents one-listing
    items from dominating the rank. `/liquidity-trends [item]` charts an item's hourly
    rating history; without an item it will show the biggest 24-hour movers once enough
-   snapshots have accumulated. The implementation was live-tested in Discord and the current
-   test suite has 78 passing automated tests.
+   snapshots have accumulated. The implementation was live-tested in Discord.
 8. **Command and scanner polish**: `/top-scored-routes` and `/top-in-stock-routes` became one
    `/top-routes` command with an optional strict live-availability filter. `/intro` is now a
    compact categorized guide with emoji headings rather than a wall of repeated descriptions.
    Marketplace Intelligence distinguishes all-item sellability from the Raw Materials Deal
    Scanner, which is explicitly limited to quality-matched Commodities and Harvestables.
+9. **UEX data collection foundation** (`bot/cogs/intelligence.py`): background collectors that
+   periodically snapshot terminal market state, terminal data freshness, fuel prices, refinery
+   yields, reference metadata, and Marketplace tier changes into 12 new tables, so the
+   forward-looking features in `ROADMAP.md` have real accumulated history to work from rather
+   than only whatever a single live API call returns. See "Data collection architecture" below
+   for the shape these tables use and why.
+
+## Where to look for what
+
+Five docs, deliberately scoped so they don't duplicate each other:
+
+| Doc | Answers |
+|---|---|
+| `README.md` | What the bot does, how to install/run/deploy it |
+| `CLAUDE.md` | Auto-loaded pointer for AI sessions: the two most critical gotchas + quick facts |
+| `CONTRIBUTING.md` | *How* to work on this codebase - required patterns, pre-flight checklist |
+| `PROJECT_CONTEXT.md` (this doc) | *What happened and why* - history, hard-won API knowledge, current state |
+| `ROADMAP.md` | *What's next* - completed features and the backlog of ideas |
+
+Historical debugging write-ups (e.g. `Troubleshooting_Log_Sync_Fix.md`) are point-in-time
+records of specific incidents, not maintained guidance - treat `CONTRIBUTING.md` as the
+authority where they overlap.
 
 ## How the scanner's matching logic evolved (read before touching `bot/uex/scanner.py`)
 
@@ -77,7 +102,7 @@ tests with synthetic fixtures."
 | 1 | Matched a listing to an average by `id_item` alone | UEX returns separate average rows per currency (UEC/WIF/MGS) and per unit (unit/scu/crate/pack/stack/...) - comparing across them is comparing unrelated numbers | Key on `(id_item, currency, unit)` |
 | 2 | Took the lowest `price_avg_month` across all rows for a match | An average built from 1-2 historical listings can be dominated by a single outlier (troll price, typo) | Require `listings_count >= MIN_LISTINGS_FOR_FAIR_PRICE` (3) before trusting a row |
 | 3 | Scanned every Marketplace category | Crafted gear (weapons, armor, ship components) has real value driven by crafting-material quality that UEX **never exposes as structured data** - only as free text a seller typed ("Q970", "-44% dmg", "CRAFTED"). `/items` catalog doesn't even have entries for most of these. No amount of matching logic fixes missing data. | Restrict to `ALLOWED_MARKETPLACE_CATEGORY_IDS = {36, 87}` (Commodities, Harvestables) - the only categories where quality is a real, structured, usable signal |
-| 4 | Still took the lowest-price *tier* among an item's averages, ignoring the listing's own reported quality | Even raw ore's price varies enormously by quality tier (one commodity ranged ~150K to 200M+ UEC across tiers 0-7) - comparing against "whichever tier happened to have enough sample data" produced real false positives | Key on `(id_item, quality_tier, currency, unit)`; convert the listing's own `quality` (0-1000) to a tier via `bot/sell_list.py: quality_to_tier` and match **only** that exact tier, skipping if no reported quality or no matching tier exists |
+| 4 | Still took the lowest-price *tier* among an item's averages, ignoring the listing's own reported quality | Even raw ore's price varies enormously by quality tier (one commodity ranged ~150K to 200M+ UEC across tiers 0-7) - comparing against "whichever tier happened to have enough sample data" produced real false positives | Key on `(id_item, quality_tier, currency, unit)`; convert the listing's own `quality` (0-1000) to a tier via `bot/uex/marketplace.py: quality_to_tier` and match **only** that exact tier, skipping if no reported quality or no matching tier exists |
 
 After all four fixes, matching logic was cross-checked against UEX's own field-level docs
 (`/marketplace_prices_averages_all`) and confirmed exact on every point: `quality_tier`
@@ -134,10 +159,27 @@ wins when the two disagree.
 - Live API investigation should use the bot's configured environment or a short-lived diagnostic
   script (see below). Some restricted development environments may block direct API access.
 
+## Data collection architecture (the `intelligence` cog)
+
+`bot/cogs/intelligence.py` is shaped differently from every other cog and it's worth knowing
+why before extending it: **it has no slash commands at all**, only background `tasks.loop`
+collectors. It exists to accumulate history, not to answer questions - the querying happens in
+whatever feature later consumes that history.
+
+Its 12 tables come in deliberate `*_state` / `*_observations` pairs (e.g.
+`terminal_market_state` + `terminal_market_observations`). The state table holds one current
+row per key; the observations table is append-only and **only gets a row when a value actually
+changes**. That's what makes multi-week history affordable - writing a full copy of every
+terminal every hour would balloon the SQLite file for no added signal. If you add a collector,
+follow the same pair pattern rather than dumping full snapshots on a timer.
+
 ## The `diagnose.py` pattern
 
-Several rounds of debugging used a throwaway script (never committed) that reuses the
-bot's own `Config`/`UexClient` to pull real data:
+Several rounds of debugging used a throwaway script (gitignored, not committed - see
+`.gitignore`'s "local investigation notes" block, which also covers `categories.txt`,
+`dump.txt`, and friends) that reuses the bot's own `Config`/`UexClient` to pull real data.
+Note the split: one-off investigation scripts stay local and ignored, while anything reusable
+belongs in `scripts/` and gets committed.
 
 ```python
 import asyncio
@@ -161,20 +203,10 @@ guessed at.
 
 ## Current state / what's pending
 
-- **Resolved: PR #10** on `TestBranch` came from `jcocja-commits`, a collaborator the
-  user added (confirmed) - not an unexpected account. It deleted the entire
-  `/items-to-sell` feature (`bot/cogs/sell_list.py`, `bot/sell_list.py`,
-  `user_sell_list` table) and replaced it with a `marketplace_item_tier_stats` table,
-  moving `quality_to_tier()` into `bot/uex/marketplace.py` - intentional (confirmed by
-  the user), not a mistake. It correctly updated `bot/uex/scanner.py`'s import to match
-  the new location (verified: all 68 tests pass, including all 22 scanner tests).
-  `bot/uex/scanner.py` currently imports `quality_to_tier` from `bot.uex.marketplace`,
-  not `bot.sell_list` - if you're reading older PR descriptions in this repo's history
-  that reference `bot/sell_list.py`, that file no longer exists.
-- All Raw Materials Deal Scanner work (PRs adding the feature and its four fixes, plus the threshold change)
-  lives on `TestBranch`, not yet merged to `main`. Confirm with the user before assuming
-  it's in production.
-- `CONTRIBUTING.md`/`CLAUDE.md` PR may or may not be merged yet - check before assuming.
+- **`bot/sell_list.py` no longer exists.** The per-user `/items-to-sell` feature was
+  intentionally dropped as redundant, and `quality_to_tier()` moved to
+  `bot/uex/marketplace.py`. Older PR descriptions and commit messages in this repo's history
+  still reference the old path - import from `bot.uex.marketplace` instead.
 - Discord bot token and UEX app token committed in old git history have not been rotated.
   Low urgency (private repo) but still outstanding.
 - `Harvestables` (category id 87) is in the scanner's allowlist alongside `Commodities`
@@ -190,8 +222,10 @@ guessed at.
   *and* `operation` together) - not fixed, see the API-facts note above for detail.
 - `Local-model-handoff` remains available as a backup, but current development happens on
   `TestBranch`.
-- **Liquidity feature:** current work is on `TestBranch`, not `main`. Its
-  score is deliberately an indicator, not a predicted percentage chance of sale. It is
-  bounded to 0-100 so users can interpret it at a glance. The history/movers view needs
-  at least two hourly Marketplace snapshots before it can show a comparison.
+- **Liquidity rating** is deliberately an indicator, not a predicted percentage chance of
+  sale. It is bounded to 0-100 so users can interpret it at a glance. The history/movers view
+  needs at least two hourly Marketplace snapshots before it can show a comparison.
+- The data collectors in `bot/cogs/intelligence.py` only pay off once they've been running a
+  while - most of the `ROADMAP.md` intelligence backlog depends on accumulated history, so
+  those features will look broken/empty if built and tested against a fresh database.
 
