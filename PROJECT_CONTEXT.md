@@ -299,18 +299,28 @@ guessed at.
     so an item with real demand and no competing sellers disappears from the leaderboard -
     arguably the single best thing to list. The guard conflates "no competition (opportunity)"
     with "no activity (irrelevant)".
-  - *The fallback path over-scores.* When `negotiations_success`/`negotiations_open` are both
-    absent, `compute_liquidity_score` falls back to `negotiations_count` and weights it at
-    `1.0` - the *completed-sale* weight. So an item with 10 open negotiations and zero sales
-    scores 29.41 through the fallback but 17.24 when the same reality is reported in detail
-    (1.7x). Same class of defect as the buy-posting weight: a signal weighted as something
-    stronger than it is. Fixing it means weighting the fallback nearer `WEIGHT_OPEN_NEGOTIATION`,
-    or refusing to score without detail. Not decided.
-- **Checked and dismissed:** an earlier review worried the 0-100 scale was so compressed that a
-  leaderboard leader would read ~12/100. Recomputed against 503 real `marketplace_item_activity`
-  rows, the top score is 84.21, the median nonzero score 26.15, and nothing scores 0. The worry
-  came from reasoning about completed-sale counts alone; real items carry far larger *total*
-  negotiation counts. The scale is fine - don't re-open this without new data.
+  - *`compute_liquidity_score`'s fallback is unreachable, and fails the wrong way.* The guard
+    reads `if successful is None and open_negotiations is None`, and its comment says it exists
+    to "preserve a useful score if UEX ever omits the detailed fields but continues to provide
+    its aggregate negotiation count." It cannot do that. Every production row reaches it through
+    `extract_item_activity`, which coerces each field with `or 0` - so an omitted field arrives
+    as `0`, never `None`, and the guard never trips. The consequence is the exact opposite of
+    the intent: if UEX ever did drop those fields, `weighted_demand` would be `0` and the item
+    would score **0.0** and vanish from the leaderboard, where the fallback intended 84.21.
+    Verified by calling `extract_item_activity` on a row with the fields absent. Two possible
+    fixes - preserve `None` through extraction so the guard can fire, or delete the dead branch
+    and state plainly that UEX documents both fields as non-nullable `int` on
+    `/marketplace_trends`. Not decided; low urgency, since UEX does currently always send them.
+- **Still unknown: is the 0-100 scale too compressed?** An earlier review guessed a leaderboard
+  leader would read ~12/100. An attempt to settle this by recomputing over the 503 rows in
+  `marketplace_item_activity` produced a reassuring top score of 84.21 - but that table stores
+  only `negotiations_count` and `listings_count`, so the recomputation ran the unreachable
+  fallback branch above, weighting *every* negotiation as a completed sale and using total
+  listings as supply. **Those numbers do not describe the live leaderboard** and neither does
+  the ~12/100 guess. Answering this needs either live `/marketplace_trends` data or a database
+  that has accumulated real `liquidity_scores` rows. Worth re-checking once the Pi has run a
+  while - and note the general trap: `marketplace_item_activity` is the *activity index*, a
+  different and coarser table than the liquidity path's own storage.
 - The footer text in `bot/cogs/liquidity.py` ("each buy posting adds a small demand bonus")
   described the *intended* behaviour and only became accurate once the buy-posting weight was
   lowered to 0.25 - see timeline item 10.
