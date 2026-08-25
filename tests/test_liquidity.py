@@ -67,6 +67,25 @@ def test_liquidity_score_is_bounded_and_buy_postings_raise_sellability():
     assert 0 < without_buy_orders < with_buy_orders < 100
 
 
+def test_liquidity_score_ranks_demand_signals_completed_over_open_over_buy_postings():
+    """Regression test: the weights must stay ordered completed > open > buy posting.
+
+    An earlier version weighted buy postings at 2.0 - twice a completed sale - so an item
+    with zero actual sales scored higher than one with five completed sales. For a
+    "will this sell?" rating that is backwards, and it contradicted the module's own
+    description of buy postings as the weaker, shorter-lived signal. The existing tests
+    only asserted that buy postings raise the score at all, so nothing caught it.
+    """
+    supply = {"listings_count_sell": 5}
+    five_completed = compute_liquidity_score({**supply, "negotiations_success": 5})
+    five_open = compute_liquidity_score({**supply, "negotiations_open": 5})
+    five_buy_postings = compute_liquidity_score({**supply, "listings_count_buy": 5})
+
+    assert five_completed > five_open > five_buy_postings > 0
+    # The specific failure that motivated this: real sales must outrank pure want-ads.
+    assert five_completed > five_buy_postings
+
+
 def test_liquidity_score_is_zero_when_there_are_no_active_listings():
     assert compute_liquidity_score({"negotiations_success": 50, "listings_count": 0}) == 0.0
 
