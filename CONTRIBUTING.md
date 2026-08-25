@@ -27,6 +27,30 @@ If a cog isn't in this tuple, `setup_hook()` never calls `load_extension()` on i
 logs in fine, and the command just silently never appears in Discord. This exact silent
 failure is what actually broke `/scan-now` — not a library bug.
 
+## The #2 rule: dev-guild syncing needs `copy_global_to`
+
+`@app_commands.command()` registers a command on the bot's **global** command tree.
+`tree.sync(guild=...)` only pushes commands registered to *that guild's* tree. So syncing to
+a dev guild without bridging the two pushes nothing:
+
+```python
+if self.config.discord_dev_guild_id:
+    guild = discord.Object(id=self.config.discord_dev_guild_id)
+    self.tree.copy_global_to(guild=guild)   # <- without this, the next line syncs 0 commands
+    synced = await self.tree.sync(guild=guild)
+```
+
+**`Synced 0 commands to dev guild ...` in the startup log means exactly this**, and it's the
+one symptom that reliably distinguishes it from the `INITIAL_COGS` failure above (which
+instead shows a missing `Loaded extension` line). This has already bitten the repo twice —
+the `copy_global_to` line was present from the initial commit, got dropped during a later
+refactor, and had to be restored. Don't remove it, and if you're rewriting `setup_hook`,
+carry it across.
+
+Note this only affects the dev-guild path (`DISCORD_DEV_GUILD_ID` set in `.env`). A plain
+global `tree.sync()` needs no bridging, but takes up to an hour to appear in Discord, which
+is why the dev-guild path exists at all.
+
 ## Slash commands: there is exactly one correct pattern in this codebase
 
 Every cog uses standard decorators directly on the Cog's methods, and `setup()` does
@@ -136,5 +160,6 @@ Run through this before considering a feature finished:
 - [ ] Any new config value is read in `bot/config.py` and documented in `.env.example`
 - [ ] `python -m pytest -q` passes
 - [ ] Started the bot locally and saw `Loaded extension bot.cogs.<yours>` and a plausible
-      `Synced N commands` line in the log
+      `Synced N commands` line in the log — `Synced 0` to a dev guild means the
+      `copy_global_to` bridge is missing (see "The #2 rule" above)
 - [ ] Actually ran the new command(s) in a real Discord server, not just imported the code

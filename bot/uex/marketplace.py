@@ -276,16 +276,33 @@ def extract_item_activity(trend_rows: list[dict]) -> list[dict]:
     return result
 
 
+# Relative weight of each demand signal, strongest first.
+#
+# A completed negotiation is the baseline (1.0) - direct proof the item actually sells.
+# An open negotiation is a real conversation against a specific listing but may never
+# close, so it counts half. A buy posting is only a standing want-ad: nobody has engaged
+# a seller yet, and it vanishes whenever the poster loses interest, so it is the weakest
+# of the three.
+#
+# Keep these ordered COMPLETED > OPEN > BUY_POSTING. An earlier version weighted buy
+# postings at 2.0 - twice a completed sale - which made an item with zero sales outrank
+# one with five real completed sales. That is backwards for a rating whose whole question
+# is "will this actually sell?", and it contradicted this module's own description of buy
+# postings as the weaker signal.
+WEIGHT_COMPLETED_NEGOTIATION = 1.0
+WEIGHT_OPEN_NEGOTIATION = 0.5
+WEIGHT_BUY_POSTING = 0.25
+
+
 def compute_liquidity_score(activity: dict) -> float:
     """Return a bounded 0-100 sellability rating for one Marketplace item.
 
-    Completed negotiations are the strongest signal that an item actually sells. Open
-    negotiations represent live interest, but may not complete, so they receive half
-    weight. Dividing this demand signal by the number of active listings prevents raw
-    volume alone from making heavily supplied items look more liquid than they are.
-    For a seller, the relevant supply is competing *sell* listings, rather than buy
-    postings. Active buy postings are a direct, but weaker and shorter-lived, sign of
-    demand, so each adds the weight of two completed negotiations.
+    Demand combines three signals at the weights above: completed negotiations (proof of
+    sale), open negotiations (live but unresolved interest), and active buy postings
+    (standing demand nobody has acted on yet). Dividing that demand by active listings
+    prevents raw volume alone from making heavily supplied items look more liquid than
+    they are. For a seller, the relevant supply is competing *sell* listings, not buy
+    postings.
 
     A three-listing supply cushion keeps a single listing from producing a misleading
     outlier. The final saturation step makes the rating easy to read: it always falls
@@ -307,9 +324,9 @@ def compute_liquidity_score(activity: dict) -> float:
 
     buy_postings = float(activity.get("listings_count_buy") or 0)
     weighted_demand = (
-        float(successful or 0)
-        + (float(open_negotiations or 0) * 0.5)
-        + (buy_postings * 2)
+        (float(successful or 0) * WEIGHT_COMPLETED_NEGOTIATION)
+        + (float(open_negotiations or 0) * WEIGHT_OPEN_NEGOTIATION)
+        + (buy_postings * WEIGHT_BUY_POSTING)
     )
     if weighted_demand <= 0:
         return 0.0
