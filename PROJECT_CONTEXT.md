@@ -67,24 +67,36 @@ they're in sync).
    compact categorized guide with emoji headings rather than a wall of repeated descriptions.
    Marketplace Intelligence distinguishes all-item sellability from the Raw Materials Deal
    Scanner, which is explicitly limited to quality-matched Commodities and Harvestables.
-9. **UEX data collection foundation** (`bot/cogs/intelligence.py`): background collectors that
-   periodically snapshot terminal market state, terminal data freshness, fuel prices, refinery
-   yields, reference metadata, and Marketplace tier changes into 12 new tables, so the
-   forward-looking features in `ROADMAP.md` have real accumulated history to work from rather
-   than only whatever a single live API call returns. See "Data collection architecture" below
-   for the shape these tables use and why.
-10. **Route intelligence completed**: terminal-data health, route-confidence scoring,
+9. **UEX data collection foundation** (`bot/cogs/intelligence.py`): four background collectors
+   that periodically snapshot terminal market state, terminal data freshness, fuel prices, and
+   reference metadata into 10 new tables, so the forward-looking features in `ROADMAP.md` have
+   real accumulated history to work from rather than only whatever a single live API call
+   returns. Refinery yields are gathered too, but by the daily reference refresh rather than a
+   collector of their own. See "Data collection architecture" below for the storage patterns
+   these tables use and when to use which.
+10. **Liquidity buy-posting weight corrected** (`ff997e0`): `compute_liquidity_score` weighted
+    an active buy posting at `2.0` - twice a completed sale - so an item nobody had actually
+    bought could outrank one with five real completed transactions. Backwards for a rating whose
+    whole question is "will this sell?". Now `0.25`, behind named constants ordered
+    `COMPLETED (1.0) > OPEN (0.5) > BUY_POSTING (0.25)` in `bot/uex/marketplace.py`, with a
+    regression test pinning that ordering. Scores for items with no buy postings are unchanged.
+    Worth noting *how* this surfaced: item 7 above already described the feature as "a modest
+    active-buy-posting bonus" while the code made it the strongest signal in the formula. The
+    doc recorded the intent correctly and the code contradicted it - that gap **was** the bug.
+    Two lessons: writing intent down pays off, and a prose/code mismatch is a defect report,
+    not a stale comment.
+11. **Route intelligence completed**: terminal-data health, route-confidence scoring,
     time-weighted supply/demand history, terminal infrastructure checks, and commodity-risk
     labels now feed the existing route commands without mixing safety/confidence into the
     profit score. `/terminal-history` exposes the collected history directly.
-11. **Mixed-cargo routing added on `TestBranch`**: `/mixed-routes` combines two or three
+12. **Mixed-cargo routing added on `TestBranch`**: `/mixed-routes` combines two or three
     commodities from one origin to one destination and returns the five best ship- and
     budget-adjusted loads. Allocation is bounded by origin stock, destination demand, cargo
     capacity, and investment capital. `space-only:true` fails closed unless both terminals
     have an explicit UEX space-station relationship. XL/loading-dock ships such as the
     Polaris automatically require confirmed external loading docks or XL station access at
     both ends; missing access metadata excludes the route rather than presenting it as safe.
-12. **Digest and intelligence brief expanded on `TestBranch`**: the daily digest now keeps
+13. **Digest and intelligence brief expanded on `TestBranch`**: the daily digest now keeps
     four upward and four downward Sellability Rating shifts in separate Discord-safe fields,
     includes collector freshness, and correctly commits its once-per-day posting marker.
     `/intelligence-brief` is the deeper on-demand view: executive signals, personalized mixed
@@ -183,12 +195,44 @@ why before extending it: **it has no slash commands at all**, only background `t
 collectors. It exists to accumulate history, not to answer questions - the querying happens in
 whatever feature later consumes that history.
 
-Its 12 tables come in deliberate `*_state` / `*_observations` pairs (e.g.
-`terminal_market_state` + `terminal_market_observations`). The state table holds one current
-row per key; the observations table is append-only and **only gets a row when a value actually
-changes**. That's what makes multi-week history affordable - writing a full copy of every
-terminal every hour would balloon the SQLite file for no added signal. If you add a collector,
-follow the same pair pattern rather than dumping full snapshots on a timer.
+It runs exactly four loops:
+
+| Loop | Cadence | Writes |
+|---|---|---|
+| `snapshot_terminal_market` | 2h | `terminal_market_state` + `terminal_market_observations` |
+| `snapshot_data_health` | 1h | `terminal_data_health_state` + `terminal_data_health_observations` |
+| `snapshot_fuel_prices` | 6h | `fuel_price_state` + `fuel_price_observations` |
+| `refresh_reference_data` | 24h | `commodity_reference`, `terminal_reference`, `refinery_yield_observations` |
+
+### Three storage patterns, not one
+
+An earlier version of this section said every table here is a `*_state` / `*_observations`
+pair. Six of the ten are, forming three pairs; the other four aren't. If you're adding a
+collector, pick the pattern that matches the *shape of the data*, not the one that sounds most
+consistent:
+
+- **Change-only pair** - for values that are stable and change unpredictably (market prices,
+  data freshness, fuel). The `*_state` table holds one current row per key; the
+  `*_observations` table is append-only and **only gets a row when a value actually changes**.
+  That's what makes multi-week history affordable - writing a full copy of every terminal every
+  hour would balloon the SQLite file for no added signal. Six tables use it, and it's the right
+  default for anything polled on a timer.
+- **Daily upsert** - for values UEX itself reports at a daily grain.
+  `refinery_yield_observations` has no state partner and isn't change-only: it upserts one row
+  per `(id_commodity, id_terminal, recorded_day)` (`record_refinery_yield_snapshot` in
+  `bot/db/database.py`). Deliberate, not a degraded pair - the source data has a daily grain, so
+  one row per day *is* the natural resolution.
+- **Reference tables** - `commodity_reference` and `terminal_reference` are slow-moving catalog
+  data, refreshed wholesale on the 24h loop. No history is kept because none is useful.
+
+Two traps before you try to count these tables yourself:
+
+- `marketplace_tier_observations` is the tenth table and a real change-only pair, but **nothing
+  in this cog writes it** - the writer is `bot/cogs/marketplace.py`. Its state partner is also
+  named `marketplace_item_tier_stats` rather than `*_state`, and predates this batch (`29a09f5`).
+  Schema location is not a reliable guide to ownership.
+- `stock_alert_terminal_state` matches the `*_state` naming but belongs to the stock-alerts
+  feature and has nothing to do with data collection.
 
 User-facing intelligence stays outside the collector cog. `bot/cogs/intelligence_brief.py`
 queries these durable tables for `/intelligence-brief`, while `bot/uex/mixed_routes.py` owns
@@ -248,6 +292,19 @@ guessed at.
 - **Liquidity rating** is deliberately an indicator, not a predicted percentage chance of
   sale. It is bounded to 0-100 so users can interpret it at a glance. The history/movers view
   needs at least two hourly Marketplace snapshots before it can show a comparison.
+- **Two open liquidity judgment calls**, both deliberate deferrals awaiting live results
+  rather than oversights - decide them by looking at a real `/liquidity-rank`, not from first
+  principles:
+  - *Zero sell listings scores 0.* `compute_liquidity_score` returns `0.0` when `listings <= 0`,
+    so an item with real demand and no competing sellers disappears from the leaderboard -
+    arguably the single best thing to list. The guard conflates "no competition (opportunity)"
+    with "no activity (irrelevant)".
+  - *Scale compression.* With 5 sell listings you need roughly 24 completed sales to reach
+    50/100. Most items land well under that, so a leaderboard *leader* may read around 12/100.
+    Fine for ranking items against each other, misleading if read as an absolute rating.
+- The footer text in `bot/cogs/liquidity.py` ("each buy posting adds a small demand bonus")
+  described the *intended* behaviour and only became accurate once the buy-posting weight was
+  lowered to 0.25 - see timeline item 10.
 - **Terminal Data Health** uses UEX's TTL-aware `has_recent_reports` value as the freshness
   decision and treats `prices_updated_percentage` as coverage only. `/price`, `/best-route`,
   and `/top-routes` warn on stale or poorly covered terminals but stay quiet for healthy data.
