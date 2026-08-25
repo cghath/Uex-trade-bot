@@ -73,6 +73,22 @@ they're in sync).
    forward-looking features in `ROADMAP.md` have real accumulated history to work from rather
    than only whatever a single live API call returns. See "Data collection architecture" below
    for the shape these tables use and why.
+10. **Route intelligence completed**: terminal-data health, route-confidence scoring,
+    time-weighted supply/demand history, terminal infrastructure checks, and commodity-risk
+    labels now feed the existing route commands without mixing safety/confidence into the
+    profit score. `/terminal-history` exposes the collected history directly.
+11. **Mixed-cargo routing added on `TestBranch`**: `/mixed-routes` combines two or three
+    commodities from one origin to one destination and returns the five best ship- and
+    budget-adjusted loads. Allocation is bounded by origin stock, destination demand, cargo
+    capacity, and investment capital. `space-only:true` fails closed unless both terminals
+    have an explicit UEX space-station relationship. XL/loading-dock ships such as the
+    Polaris automatically require confirmed external loading docks or XL station access at
+    both ends; missing access metadata excludes the route rather than presenting it as safe.
+12. **Digest and intelligence brief expanded on `TestBranch`**: the daily digest now keeps
+    four upward and four downward Sellability Rating shifts in separate Discord-safe fields,
+    includes collector freshness, and correctly commits its once-per-day posting marker.
+    `/intelligence-brief` is the deeper on-demand view: executive signals, personalized mixed
+    routes, 24-hour supply/demand changes, rating direction, risk notes, and data health.
 
 ## Where to look for what
 
@@ -174,6 +190,12 @@ changes**. That's what makes multi-week history affordable - writing a full copy
 terminal every hour would balloon the SQLite file for no added signal. If you add a collector,
 follow the same pair pattern rather than dumping full snapshots on a timer.
 
+User-facing intelligence stays outside the collector cog. `bot/cogs/intelligence_brief.py`
+queries these durable tables for `/intelligence-brief`, while `bot/uex/mixed_routes.py` owns
+the dependency-free mixed-load allocation and terminal-access gates. Keep that split: the
+collector records evidence, database methods retrieve it, pure helpers rank it, and cogs only
+coordinate Discord/API presentation.
+
 ## The `diagnose.py` pattern
 
 Several rounds of debugging used a throwaway script (gitignored, not committed - see
@@ -244,6 +266,25 @@ guessed at.
   confidence. Route views label jurisdiction restrictions, explosion risk, quantum/time
   volatility, and recent gameplay bugs. `is_illegal` is worded as restricted in some
   jurisdictions, matching UEX's definition rather than overstating it as universal contraband.
+- **Mixed Routes** intentionally rank by estimated profit *after* ship, stock, demand, and
+  optional budget limits. They do not include travel time/distance in the score, so the output
+  retains cross-system and missing-distance warnings. A qualifying result must allocate at
+  least two commodities; a commodity that can fill the ship alone remains a `/best-route`
+  concern instead of being disguised as a mixed load.
+- **Capital-ship cargo access** uses UEX vehicle `pad_type`/`is_loading_dock`, terminal
+  `has_loading_dock`, and parent space-station `pad_types`/`has_loading_dock`. Do not infer
+  orbital access from `planet_name`: UEX attaches orbiting stations to nearby planets. Also
+  treat foreign-key value `0` as absent—real UEX terminal data uses both zero and null for
+  missing relationships.
+- **Digest freshness thresholds** follow collector schedules: terminal-market data warns
+  after three hours; hourly liquidity and Marketplace data warn after two. The rating-shift
+  queries request four gainers and four losers independently so one direction cannot crowd
+  out the other, and the fields are separated to stay below Discord's 1,024-character limit.
+- **Current staging state (2026-08-25)**: `TestBranch` contains the mixed-route, digest, and
+  intelligence-brief work; `main` remains the stable Pi branch. The latest Pi database was
+  copied to the local ignored `data/` folder for PC testing, and the Pi service was deliberately
+  left stopped. The full suite has 107 passing tests. Re-check live service/branch state rather
+  than assuming this point-in-time operational note is still current.
 - The data collectors in `bot/cogs/intelligence.py` only pay off once they've been running a
   while - most of the `ROADMAP.md` intelligence backlog depends on accumulated history, so
   those features will look broken/empty if built and tested against a fresh database.
