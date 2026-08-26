@@ -10,6 +10,20 @@ MIN_HISTORY_HOURS = 24
 SELL_SIDE_NO_DEMAND_CODE = 7
 
 
+def has_sell_side_demand(scu_wanted: Any, status_sell: Any) -> bool:
+    """Return whether a sell-side market is confirmed to be accepting cargo.
+
+    UEX status 7 means maximum terminal inventory (no demand), while 0/None are not
+    applicable or unknown. Demand is a hard route limit, so unknown values fail closed.
+    """
+    try:
+        wanted = float(scu_wanted)
+        status = int(float(status_sell)) if status_sell is not None else None
+    except (TypeError, ValueError):
+        return False
+    return wanted > 0 and status not in (None, 0, SELL_SIDE_NO_DEMAND_CODE)
+
+
 @dataclass(frozen=True)
 class TerminalMarketHistory:
     observed_hours: float
@@ -51,10 +65,8 @@ def analyze_terminal_market_history(
         seconds = max(0.0, (interval_end - interval_start).total_seconds())
         if (row.get("price_buy") or 0) > 0 and (row.get("scu_buy") or 0) > 0:
             supply_seconds += seconds
-        if (
-            (row.get("price_sell") or 0) > 0
-            and (row.get("scu_sell") or 0) > 0
-            and row.get("status_sell") not in (None, 0, SELL_SIDE_NO_DEMAND_CODE)
+        if (row.get("price_sell") or 0) > 0 and has_sell_side_demand(
+            row.get("scu_sell"), row.get("status_sell")
         ):
             demand_seconds += seconds
 

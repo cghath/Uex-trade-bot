@@ -25,7 +25,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
-from bot.cogs.prices import commodity_name_autocomplete
+from bot.cogs.prices import _add_chunked_fields, commodity_name_autocomplete
 from bot.cogs.ships import ship_name_autocomplete
 from bot.uex.charts import render_price_history_chart
 from bot.uex.exceptions import UexApiError
@@ -35,6 +35,7 @@ from bot.uex.practical_routes import route_practical_notes
 from bot.uex.commodity_risk import format_commodity_risk
 from bot.uex.ships import estimate_route_cargo, resolve_ship
 from bot.uex.status import build_status_lookup, resolve_status_label
+from bot.uex.supply_demand import has_sell_side_demand
 from bot.uex.trends import (
     ScoredRouteEntry,
     TrendingEntry,
@@ -312,34 +313,27 @@ class Trends(commands.Cog):
                 logger.info("Vehicle lookup failed for '%s' in %s: %s", ship_query, log_label, exc)
         ship_cargo_scu = ship_vehicle.get("scu") if ship_vehicle else None
         status_lookup = await self._get_status_lookup()
-        health_rows = await self.bot.db.get_terminal_data_health(
-            [
-                terminal_name
-                for route in entries
-                for terminal_name in (route.origin_terminal_name, route.destination_terminal_name)
-            ]
-        )
+        terminal_ids = [
+            terminal_id
+            for route in entries
+            for terminal_id in (route.origin_terminal_id, route.destination_terminal_id)
+            if terminal_id is not None
+        ]
+        health_rows = await self.bot.db.get_terminal_data_health_by_ids(terminal_ids)
         health_notes = {
-            key: note
-            for key, row in health_rows.items()
+            terminal_id: note
+            for terminal_id, row in health_rows.items()
             if (note := format_health_note(classify_terminal_health(row)))
         }
-        market_signals = await self.bot.db.get_route_market_signals(
-            [route.id_commodity for route in entries],
+        market_signals = await self.bot.db.get_route_market_signals_by_ids(
             [
-                terminal_name
+                (route.id_commodity, terminal_id)
                 for route in entries
-                for terminal_name in (route.origin_terminal_name, route.destination_terminal_name)
+                for terminal_id in (route.origin_terminal_id, route.destination_terminal_id)
+                if terminal_id is not None
             ],
         )
-        terminal_references = await self.bot.db.get_route_terminal_references(
-            [route.id_commodity for route in entries],
-            [
-                terminal_name
-                for route in entries
-                for terminal_name in (route.origin_terminal_name, route.destination_terminal_name)
-            ],
-        )
+        terminal_references = await self.bot.db.get_terminal_references_by_ids(terminal_ids)
         commodity_references = await self.bot.db.get_commodity_references(
             [route.id_commodity for route in entries]
         )
@@ -348,19 +342,19 @@ class Trends(commands.Cog):
         for i, r in enumerate(entries, start=1):
             name, value = _build_route_field(i, r, ship_vehicle, ship_cargo_scu, status_lookup)
             warnings = []
-            for side, terminal_name in (
-                ("Origin", r.origin_terminal_name),
-                ("Destination", r.destination_terminal_name),
+            for side, terminal_id in (
+                ("Origin", r.origin_terminal_id),
+                ("Destination", r.destination_terminal_id),
             ):
-                note = health_notes.get(terminal_name.casefold())
+                note = health_notes.get(terminal_id)
                 if note:
                     warnings.append(f"{side}: {note}")
             if warnings:
                 value += "\n" + "\n".join(warnings)
-            origin_health_row = health_rows.get(r.origin_terminal_name.casefold())
-            destination_health_row = health_rows.get(r.destination_terminal_name.casefold())
-            origin_signal = market_signals.get((r.id_commodity, r.origin_terminal_name.casefold()), {})
-            destination_signal = market_signals.get((r.id_commodity, r.destination_terminal_name.casefold()), {})
+            origin_health_row = health_rows.get(r.origin_terminal_id)
+            destination_health_row = health_rows.get(r.destination_terminal_id)
+            origin_signal = market_signals.get((r.id_commodity, r.origin_terminal_id), {})
+            destination_signal = market_signals.get((r.id_commodity, r.destination_terminal_id), {})
             confidence = compute_route_confidence(
                 origin_health=classify_terminal_health(origin_health_row) if origin_health_row else None,
                 destination_health=classify_terminal_health(destination_health_row) if destination_health_row else None,
@@ -369,21 +363,21 @@ class Trends(commands.Cog):
                 volatility_origin=r.volatility_origin,
                 volatility_destination=r.volatility_destination,
                 origin_available=bool(r.scu_origin and r.scu_origin > 0),
-                destination_available=bool(
-                    r.scu_destination and r.scu_destination > 0 and r.status_destination not in (None, 0, 7)
+                destination_available=has_sell_side_demand(
+                    r.scu_destination, r.status_destination
                 ),
             )
             value += f"\nConfidence: **{confidence.label} ({confidence.score}/100)**"
             practical_notes = route_practical_notes(
-                terminal_references.get((r.id_commodity, r.origin_terminal_name.casefold())),
-                terminal_references.get((r.id_commodity, r.destination_terminal_name.casefold())),
+                terminal_references.get(r.origin_terminal_id),
+                terminal_references.get(r.destination_terminal_id),
             )
             if practical_notes:
                 value += "\n" + "\n".join(practical_notes)
             risk_note = format_commodity_risk(commodity_references.get(r.id_commodity))
             if risk_note:
                 value += f"\n{risk_note}"
-            embed.add_field(name=name, value=value, inline=False)
+            _add_chunked_fields(embed, name=name, lines=value.splitlines())
 
         footer = footer_note + " · " + SELL_SIDE_STATUS_CLARIFIER
         if updated_at:

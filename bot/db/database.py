@@ -13,6 +13,7 @@ import aiosqlite
 from cryptography.fernet import Fernet, InvalidToken
 
 from bot.uex.marketplace import compute_liquidity_score
+from bot.uex.route_confidence import coalesce_report_count
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS price_alerts (
@@ -265,7 +266,9 @@ CREATE TABLE IF NOT EXISTS terminal_data_health_state (
     prices_total INTEGER,
     prices_updated INTEGER,
     prices_updated_percentage INTEGER,
+    last_update_days_limit INTEGER,
     last_update_days REAL,
+    last_update_days_percentage INTEGER,
     has_recent_reports INTEGER,
     last_seen TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (id_terminal, data_type)
@@ -279,7 +282,9 @@ CREATE TABLE IF NOT EXISTS terminal_data_health_observations (
     prices_total INTEGER,
     prices_updated INTEGER,
     prices_updated_percentage INTEGER,
+    last_update_days_limit INTEGER,
     last_update_days REAL,
+    last_update_days_percentage INTEGER,
     has_recent_reports INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_terminal_data_health_observations_lookup
@@ -416,6 +421,10 @@ class Database:
             "ALTER TABLE terminal_reference ADD COLUMN id_outpost INTEGER",
             "ALTER TABLE terminal_reference ADD COLUMN outpost_name TEXT",
             "ALTER TABLE terminal_reference ADD COLUMN id_city INTEGER",
+            "ALTER TABLE terminal_data_health_state ADD COLUMN last_update_days_limit INTEGER",
+            "ALTER TABLE terminal_data_health_state ADD COLUMN last_update_days_percentage INTEGER",
+            "ALTER TABLE terminal_data_health_observations ADD COLUMN last_update_days_limit INTEGER",
+            "ALTER TABLE terminal_data_health_observations ADD COLUMN last_update_days_percentage INTEGER",
         ]
         for statement in migrations:
             try:
@@ -475,8 +484,12 @@ class Database:
                     self._integer(row.get("status_buy")), self._integer(row.get("status_sell")),
                     self._integer(row.get("quality")),
                     self._number(row.get("volatility_price_buy")), self._number(row.get("volatility_price_sell")),
-                    self._integer(row.get("price_buy_users_rows") or row.get("scu_buy_users_rows")),
-                    self._integer(row.get("price_sell_users_rows") or row.get("scu_sell_users_rows")),
+                    self._integer(coalesce_report_count(
+                        row.get("price_buy_users_rows"), row.get("scu_buy_users_rows")
+                    )),
+                    self._integer(coalesce_report_count(
+                        row.get("price_sell_users_rows"), row.get("scu_sell_users_rows")
+                    )),
                 )
             )
         if not normalized:
@@ -534,7 +547,10 @@ class Database:
                 (
                     id_terminal, str(data_type), str(terminal_name), self._integer(row.get("prices_total")),
                     self._integer(row.get("prices_updated")), self._integer(row.get("prices_updated_percentage")),
-                    self._number(row.get("last_update_days")), self._flag(row.get("has_recent_reports")),
+                    self._integer(row.get("last_update_days_limit")),
+                    self._number(row.get("last_update_days")),
+                    self._integer(row.get("last_update_days_percentage")),
+                    self._flag(row.get("has_recent_reports")),
                 )
             )
         if not normalized:
@@ -542,7 +558,8 @@ class Database:
         async with self.connect() as db:
             cursor = await db.execute(
                 """SELECT id_terminal, data_type, terminal_name, prices_total, prices_updated,
-                          prices_updated_percentage, last_update_days, has_recent_reports
+                          prices_updated_percentage, last_update_days_limit, last_update_days,
+                          last_update_days_percentage, has_recent_reports
                    FROM terminal_data_health_state"""
             )
             existing = {(row["id_terminal"], row["data_type"]): tuple(row)[2:] for row in await cursor.fetchall()}
@@ -550,13 +567,16 @@ class Database:
             await db.executemany(
                 """INSERT INTO terminal_data_health_state
                    (id_terminal, data_type, terminal_name, prices_total, prices_updated,
-                    prices_updated_percentage, last_update_days, has_recent_reports, last_seen)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                    prices_updated_percentage, last_update_days_limit, last_update_days,
+                    last_update_days_percentage, has_recent_reports, last_seen)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
                    ON CONFLICT(id_terminal, data_type) DO UPDATE SET
                        terminal_name=excluded.terminal_name, prices_total=excluded.prices_total,
                        prices_updated=excluded.prices_updated,
                        prices_updated_percentage=excluded.prices_updated_percentage,
+                       last_update_days_limit=excluded.last_update_days_limit,
                        last_update_days=excluded.last_update_days,
+                       last_update_days_percentage=excluded.last_update_days_percentage,
                        has_recent_reports=excluded.has_recent_reports, last_seen=datetime('now')""",
                 normalized,
             )
@@ -564,8 +584,9 @@ class Database:
                 await db.executemany(
                     """INSERT INTO terminal_data_health_observations
                        (id_terminal, data_type, terminal_name, prices_total, prices_updated,
-                        prices_updated_percentage, last_update_days, has_recent_reports)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                        prices_updated_percentage, last_update_days_limit, last_update_days,
+                        last_update_days_percentage, has_recent_reports)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     changed,
                 )
             await db.commit()
@@ -574,11 +595,7 @@ class Database:
     async def get_terminal_data_health(
         self, terminal_names: list[str], data_type: str = "commodity"
     ) -> dict[str, dict[str, Any]]:
-        """Return current data-monitor rows keyed by case-folded terminal name.
-
-        Route responses expose terminal names but not consistently terminal ids, so the
-        user-facing health layer deliberately joins on UEX's canonical terminal name.
-        """
+        """Legacy name lookup for non-route callers without terminal ids."""
         names = sorted({name.strip().casefold() for name in terminal_names if name and name.strip()})
         if not names:
             return {}
@@ -591,6 +608,26 @@ class Database:
             )
             rows = await cursor.fetchall()
             return {row["terminal_name"].casefold(): dict(row) for row in rows}
+
+    async def get_terminal_data_health_by_ids(
+        self, terminal_ids: list[int], data_type: str = "commodity"
+    ) -> dict[int, dict[str, Any]]:
+        """Return current data-monitor rows keyed by stable UEX terminal id."""
+        ids = sorted({
+            parsed for value in terminal_ids
+            if (parsed := self._integer(value)) is not None and parsed > 0
+        })
+        if not ids:
+            return {}
+        placeholders = ",".join("?" for _ in ids)
+        async with self.connect() as db:
+            cursor = await db.execute(
+                f"""SELECT * FROM terminal_data_health_state
+                    WHERE data_type = ? AND id_terminal IN ({placeholders})""",
+                [data_type, *ids],
+            )
+            rows = await cursor.fetchall()
+            return {int(row["id_terminal"]): dict(row) for row in rows}
 
     async def get_route_market_signals(
         self, commodity_ids: list[int], terminal_names: list[str]
@@ -611,6 +648,39 @@ class Database:
             )
             rows = await cursor.fetchall()
             return {(row["id_commodity"], row["terminal_name"].casefold()): dict(row) for row in rows}
+
+    async def get_route_market_signals_by_ids(
+        self, commodity_terminal_ids: list[tuple[int, int]]
+    ) -> dict[tuple[int, int], dict[str, Any]]:
+        """Return confidence signals keyed by stable commodity and terminal ids."""
+        keys: set[tuple[int, int]] = set()
+        for commodity_id, terminal_id in commodity_terminal_ids:
+            parsed_commodity = self._integer(commodity_id)
+            parsed_terminal = self._integer(terminal_id)
+            if (
+                parsed_commodity is not None and parsed_commodity > 0
+                and parsed_terminal is not None and parsed_terminal > 0
+            ):
+                keys.add((parsed_commodity, parsed_terminal))
+        if not keys:
+            return {}
+        commodity_ids = sorted({key[0] for key in keys})
+        terminal_ids = sorted({key[1] for key in keys})
+        commodity_marks = ",".join("?" for _ in commodity_ids)
+        terminal_marks = ",".join("?" for _ in terminal_ids)
+        async with self.connect() as db:
+            cursor = await db.execute(
+                f"""SELECT * FROM terminal_market_state
+                    WHERE id_commodity IN ({commodity_marks})
+                      AND id_terminal IN ({terminal_marks})""",
+                [*commodity_ids, *terminal_ids],
+            )
+            rows = await cursor.fetchall()
+            return {
+                (int(row["id_commodity"]), int(row["id_terminal"])): dict(row)
+                for row in rows
+                if (int(row["id_commodity"]), int(row["id_terminal"])) in keys
+            }
 
     async def get_mixed_route_market_rows(self) -> list[dict[str, Any]]:
         """Current market snapshot enriched with terminal and commodity warning metadata."""
@@ -659,6 +729,25 @@ class Database:
                 (row["id_commodity"], row["market_terminal_name"].casefold()): dict(row)
                 for row in rows
             }
+
+    async def get_terminal_references_by_ids(
+        self, terminal_ids: list[int]
+    ) -> dict[int, dict[str, Any]]:
+        """Return collected terminal metadata keyed by stable UEX terminal id."""
+        ids = sorted({
+            parsed for value in terminal_ids
+            if (parsed := self._integer(value)) is not None and parsed > 0
+        })
+        if not ids:
+            return {}
+        placeholders = ",".join("?" for _ in ids)
+        async with self.connect() as db:
+            cursor = await db.execute(
+                f"SELECT * FROM terminal_reference WHERE id_terminal IN ({placeholders})",
+                ids,
+            )
+            rows = await cursor.fetchall()
+            return {int(row["id_terminal"]): dict(row) for row in rows}
 
     async def get_commodity_references(self, commodity_ids: list[int]) -> dict[int, dict[str, Any]]:
         """Return collected operational flags for the requested commodities."""

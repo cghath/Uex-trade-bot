@@ -5,6 +5,8 @@ from dataclasses import dataclass
 import math
 from typing import Any
 
+from bot.uex.supply_demand import has_sell_side_demand
+
 
 @dataclass(frozen=True)
 class MixedCargoItem:
@@ -69,7 +71,11 @@ def build_mixed_routes(
         and (not capital_access_only or supports_capital_cargo_access(r))
     ]
     origins = [r for r in eligible_rows if _positive(r.get("price_buy")) and _positive(r.get("scu_buy"))]
-    destinations = [r for r in eligible_rows if _positive(r.get("price_sell")) and _positive(r.get("scu_sell"))]
+    destinations = [
+        r for r in eligible_rows
+        if _positive(r.get("price_sell"))
+        and has_sell_side_demand(r.get("scu_sell"), r.get("status_sell"))
+    ]
     destinations_by_commodity: dict[int, list[dict[str, Any]]] = {}
     for row in destinations:
         commodity_id = _integer(row.get("id_commodity"))

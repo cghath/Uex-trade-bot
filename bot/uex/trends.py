@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from bot.uex.supply_demand import SELL_SIDE_NO_DEMAND_CODE, has_sell_side_demand
+
 
 @dataclass
 class TrendingEntry:
@@ -43,6 +45,16 @@ class ScoredRouteEntry:
     status_destination: int | None
     volatility_origin: float | None = None
     volatility_destination: float | None = None
+    origin_terminal_id: int | None = None
+    destination_terminal_id: int | None = None
+
+
+def _positive_id(value: object) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
 
 
 def aggregate_commodity_trips(rows: list[dict]) -> tuple[int, float | None]:
@@ -161,6 +173,8 @@ def select_best_available_route(
         status_destination=best.get("status_destination"),
         volatility_origin=best.get("volatility_origin"),
         volatility_destination=best.get("volatility_destination"),
+        origin_terminal_id=_positive_id(best.get("id_terminal_origin")),
+        destination_terminal_id=_positive_id(best.get("id_terminal_destination")),
     )
 
 
@@ -179,11 +193,8 @@ def rank_top_scored_routes(entries: list[ScoredRouteEntry], limit: int = 10) -> 
 # while terminals not buying at all showed price 0. The sell side runs in the opposite
 # direction from the buy side: low inventory = high demand (good to sell into), full
 # inventory = UEX's own explicit "no demand" (bad). This is the one sell-side code UEX itself
-# flags as unambiguously bad; code 0/None ("not applicable" - this terminal doesn't buy the
-# commodity at all) is excluded separately via the price_destination check below.
-SELL_SIDE_NO_DEMAND_CODE = 7
-
-
+# flags as unambiguously bad. The shared demand check also fails closed for code 0/None
+# ("not applicable" or unknown) and requires a positive destination SCU value.
 def select_best_in_stock_route(
     commodity_name: str, id_commodity: int, route_rows: list[dict]
 ) -> ScoredRouteEntry | None:
@@ -191,12 +202,10 @@ def select_best_in_stock_route(
     have real, currently-live sell-side demand, not just the origin having real buy-side stock.
     The default /top-routes view only checks the buy side, which means a route can rank highly and
     still be practically dead - great buy-side stock but the destination has UEX's own
-    explicit "no demand" status. price_destination > 0 and scu_destination > 0 rule out a
-    terminal that doesn't buy the commodity at all; status_destination not being
-    SELL_SIDE_NO_DEMAND_CODE (or the "not applicable" 0/None) rules out one that does buy it
-    but is currently fully stocked and not interested in more, per UEX's own status codes -
-    scu_destination alone doesn't catch this since it's a much larger, closer-to-static figure
-    that doesn't reflect live status the way the categorical code does. Same
+    explicit "no demand" status. The shared demand check requires positive destination SCU
+    and a known, applicable status other than SELL_SIDE_NO_DEMAND_CODE. SCU alone doesn't
+    catch this since it is a much larger, closer-to-static figure that doesn't reflect live
+    status the way the categorical code does. Same
     one-highest-score-per-commodity selection as select_best_available_route otherwise; returns
     None if nothing on this commodity qualifies.
     """
@@ -206,8 +215,7 @@ def select_best_in_stock_route(
         if (r.get("price_origin") or 0) > 0
         and (r.get("scu_origin") or 0) > 0
         and (r.get("price_destination") or 0) > 0
-        and (r.get("scu_destination") or 0) > 0
-        and r.get("status_destination") not in (None, 0, SELL_SIDE_NO_DEMAND_CODE)
+        and has_sell_side_demand(r.get("scu_destination"), r.get("status_destination"))
         and r.get("score") is not None
     ]
     if not candidates:
@@ -231,4 +239,6 @@ def select_best_in_stock_route(
         status_destination=best.get("status_destination"),
         volatility_origin=best.get("volatility_origin"),
         volatility_destination=best.get("volatility_destination"),
+        origin_terminal_id=_positive_id(best.get("id_terminal_origin")),
+        destination_terminal_id=_positive_id(best.get("id_terminal_destination")),
     )

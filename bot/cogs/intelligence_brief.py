@@ -7,7 +7,7 @@ from discord.ext import commands
 
 from bot.cogs.digest import _format_data_freshness, _format_rating_movers
 from bot.cogs.ships import ship_name_autocomplete
-from bot.uex.commodity_risk import commodity_risk_labels
+from bot.uex.commodity_risk import commodity_risk_labels, has_commodity_risk_metadata
 from bot.uex.exceptions import UexApiError
 from bot.uex.mixed_routes import build_mixed_routes, requires_capital_cargo_access
 from bot.uex.ships import resolve_ship
@@ -99,18 +99,25 @@ class IntelligenceBrief(commands.Cog):
         for index, route in enumerate(routes, 1):
             manifest = ", ".join(f"{item.commodity_name} {item.quantity_scu:,.0f} SCU" for item in route.cargo)
             risks = sorted({label for item in route.cargo for label in commodity_risk_labels(item.source)})
+            unknown_risks = sorted({
+                item.commodity_name
+                for item in route.cargo
+                if not has_commodity_risk_metadata(item.source)
+            })
             notes = [
                 manifest,
                 f"Profit **{route.profit:,.0f} aUEC** · investment {route.investment:,.0f} · ROI {route.roi_pct:.1f}%",
             ]
             if risks:
                 notes.append("⚠️ " + " · ".join(risks))
+            if unknown_risks:
+                notes.append(f"⚠️ Cargo risk metadata unavailable: {', '.join(unknown_risks)}")
             if capital_gate:
                 notes.append("Capital access confirmed at both ends")
             origin_system = route.cargo[0].source.get("star_system_name")
             destination_system = route.cargo[0].destination.get("star_system_name")
-            if origin_system != destination_system:
-                notes.append(f"⚠️ Cross-system: {origin_system} → {destination_system}")
+            if cross_system_note := _format_cross_system_note(origin_system, destination_system):
+                notes.append(cross_system_note)
             embed.add_field(name=f"#{index} {route.origin_name} → {route.destination_name}", value="\n".join(notes), inline=False)
         if not routes:
             embed.description = "No verified mixed routes fit the selected ship, budget, and safety filters."
@@ -131,6 +138,16 @@ def _format_market_shifts(rows: list[dict], key: str) -> str:
         f"{'📈' if row[key] > 0 else '📉'} **{row['commodity_name']}** at {row['terminal_name']}: {row[key]:+,.0f} SCU"
         for row in rows
     )
+
+
+def _format_cross_system_note(origin_system: object, destination_system: object) -> str | None:
+    origin = str(origin_system).strip() if origin_system is not None else ""
+    destination = str(destination_system).strip() if destination_system is not None else ""
+    if not origin or not destination:
+        return "⚠️ Star-system data incomplete; verify travel distance before departure"
+    if origin != destination:
+        return f"⚠️ Cross-system: {origin} → {destination}"
+    return None
 
 
 async def setup(bot: commands.Bot) -> None:

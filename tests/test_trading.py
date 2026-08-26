@@ -93,6 +93,8 @@ def test_best_routes_carries_stock_and_status_fields_through():
     assert route.scu_sell_wanted == 800
     assert route.status_buy_code == 2
     assert route.status_sell_code == 1
+    assert route.buy_terminal_id == 1
+    assert route.sell_terminal_id == 2
 
 
 def test_trade_route_profit_and_margin():

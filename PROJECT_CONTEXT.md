@@ -101,6 +101,12 @@ they're in sync).
     includes collector freshness, and correctly commits its once-per-day posting marker.
     `/intelligence-brief` is the deeper on-demand view: executive signals, personalized mixed
     routes, 24-hour supply/demand changes, rating direction, risk notes, and data health.
+14. **Route-intelligence audit hardened on `TestBranch`**: freshness now follows UEX's explicit
+    TTL age/limit fields instead of the pending-report queue flag; mixed routes reject full or
+    unknown sell-side demand; every route view uses consistent confidence inputs and stable
+    terminal ids; oversized Discord fields are split without dropping warnings; missing cargo
+    risk metadata is disclosed instead of looking safe; and incomplete system names no longer
+    render as literal `None` values.
 
 ## Where to look for what
 
@@ -314,9 +320,12 @@ guessed at.
 - The footer text in `bot/cogs/liquidity.py` ("each buy posting adds a small demand bonus")
   described the *intended* behaviour and only became accurate once the buy-posting weight was
   lowered to 0.25 - see timeline item 10.
-- **Terminal Data Health** uses UEX's TTL-aware `has_recent_reports` value as the freshness
-  decision and treats `prices_updated_percentage` as coverage only. `/price`, `/best-route`,
-  and `/top-routes` warn on stale or poorly covered terminals but stay quiet for healthy data.
+- **Terminal Data Health** uses UEX's explicit `last_update_days_limit`, `last_update_days`,
+  and `last_update_days_percentage` fields for freshness, while
+  `prices_updated_percentage` remains coverage only. `has_recent_reports` means pending,
+  unconsolidated report ids exist and is retained only as diagnostic state—it must never
+  influence freshness. `/price`, `/best-route`, and `/top-routes` warn on stale, unknown,
+  or poorly covered terminals but stay quiet for healthy data.
 - **Route Confidence Rating** is separate from profit and UEX's proprietary route score.
   `/best-route` and `/top-routes` show a 0-100 High/Medium/Low confidence rating based on
   terminal freshness, directional player-report depth, live stock/demand, and price volatility.
@@ -324,14 +333,18 @@ guessed at.
   weighting each state by how long it remained active rather than counting database rows.
   `/terminal-history [commodity] [terminal]` shows supply and buyer-demand availability rates,
   the observed window, and state-change count; windows shorter than 24 hours are preliminary.
-- **Practical Route Checks** join route terminals through UEX terminal ids (not names, because
-  reference names can include prefixes such as `Admin -`). `/best-route` and `/top-routes`
-  surface container-size limits, missing cargo infrastructure, player-owned locations, and
-  confirmed refuel, repair, or cargo-center services without changing route ranking.
+- **Route evidence and Practical Route Checks** carry UEX terminal ids through both cached and
+  fallback route objects. Health, report-depth, and terminal-reference lookups use those ids,
+  not names, because endpoint-specific names can include prefixes such as `Admin -`.
+  `/best-route` and `/top-routes` surface container-size limits, missing cargo infrastructure,
+  player-owned locations, and confirmed refuel, repair, or cargo-center services without
+  changing route ranking.
 - **Commodity Risk Labels** use collected UEX flags and remain separate from profit and route
   confidence. Route views label jurisdiction restrictions, explosion risk, quantum/time
   volatility, and recent gameplay bugs. `is_illegal` is worded as restricted in some
   jurisdictions, matching UEX's definition rather than overstating it as universal contraband.
+  If the commodity reference row or any risk flag is missing, route views explicitly warn that
+  risk metadata is unavailable rather than silently presenting the cargo as safe.
 - **Mixed Routes** intentionally rank by estimated profit *after* ship, stock, demand, and
   optional budget limits. They do not include travel time/distance in the score, so the output
   retains cross-system and missing-distance warnings. A qualifying result must allocate at
@@ -349,7 +362,7 @@ guessed at.
 - **Current staging state (2026-08-25)**: `TestBranch` contains the mixed-route, digest, and
   intelligence-brief work; `main` remains the stable Pi branch. The latest Pi database was
   copied to the local ignored `data/` folder for PC testing, and the Pi service was deliberately
-  left stopped. The full suite has 107 passing tests. Re-check live service/branch state rather
+  left stopped. The full suite has 117 passing tests. Re-check live service/branch state rather
   than assuming this point-in-time operational note is still current.
 - The data collectors in `bot/cogs/intelligence.py` only pay off once they've been running a
   while - most of the `ROADMAP.md` intelligence backlog depends on accumulated history, so

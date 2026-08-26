@@ -1,11 +1,13 @@
 """Tests for mixed-commodity cargo allocation and ranking."""
+import discord
+
 from bot.uex.mixed_routes import (
     build_mixed_routes,
     is_space_terminal,
     requires_capital_cargo_access,
     supports_capital_cargo_access,
 )
-from bot.cogs.prices import _chunk_lines
+from bot.cogs.prices import _add_chunked_fields, _chunk_lines
 
 
 def _row(commodity_id, terminal_id, name, terminal, **values):
@@ -18,6 +20,7 @@ def _row(commodity_id, terminal_id, name, terminal, **values):
         "price_sell": None,
         "scu_buy": None,
         "scu_sell": None,
+        "status_sell": 1,
         **values,
     }
 
@@ -77,11 +80,44 @@ def test_single_commodity_and_unprofitable_pairs_are_excluded():
     assert build_mixed_routes(rows, ship_capacity_scu=10) == []
 
 
+def test_destination_with_no_demand_status_is_a_hard_exclusion():
+    rows = [
+        _row(1, 1, "A", "Origin", price_buy=10, scu_buy=2),
+        _row(1, 2, "A", "Destination", price_sell=20, scu_sell=2, status_sell=7),
+        _row(2, 1, "B", "Origin", price_buy=10, scu_buy=2),
+        _row(2, 2, "B", "Destination", price_sell=20, scu_sell=2, status_sell="7"),
+    ]
+    assert build_mixed_routes(rows, ship_capacity_scu=10) == []
+
+
+def test_destination_with_unknown_status_is_not_treated_as_confirmed_demand():
+    rows = [
+        _row(1, 1, "A", "Origin", price_buy=10, scu_buy=2),
+        _row(1, 2, "A", "Destination", price_sell=20, scu_sell=2, status_sell=None),
+        _row(2, 1, "B", "Origin", price_buy=10, scu_buy=2),
+        _row(2, 2, "B", "Destination", price_sell=20, scu_sell=2, status_sell=0),
+    ]
+    assert build_mixed_routes(rows, ship_capacity_scu=10) == []
+
+
 def test_warning_lines_are_split_without_being_dropped():
     lines = ["warning one", "warning two is longer", "warning three"]
     chunks = _chunk_lines(lines, max_length=25)
     assert all(len(chunk) <= 25 for chunk in chunks)
     assert "\n".join(chunks).splitlines() == lines
+
+
+def test_oversized_embed_fields_are_split_without_dropping_text():
+    oversized = "x" * 2200
+    chunks = _chunk_lines([oversized])
+    assert all(len(chunk) <= 1024 for chunk in chunks)
+    assert "".join(chunks) == oversized
+
+    embed = discord.Embed(title="Routes")
+    _add_chunked_fields(embed, name="n" * 300, lines=[oversized])
+    assert all(len(field.name) <= 256 for field in embed.fields)
+    assert all(len(field.value) <= 1024 for field in embed.fields)
+    assert "".join(field.value for field in embed.fields) == oversized
 
 
 def test_space_terminal_uses_explicit_uex_relationship_not_planet_name():

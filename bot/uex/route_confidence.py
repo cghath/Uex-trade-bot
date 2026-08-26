@@ -12,6 +12,11 @@ class RouteConfidence:
     label: str
 
 
+def coalesce_report_count(primary: int | None, fallback: int | None) -> int | None:
+    """Prefer the primary UEX report count without treating a valid zero as missing."""
+    return primary if primary is not None else fallback
+
+
 def compute_route_confidence(
     *,
     origin_health: TerminalDataHealth | None,
@@ -24,7 +29,7 @@ def compute_route_confidence(
     destination_available: bool,
 ) -> RouteConfidence:
     """Score evidence quality, not profitability, on a bounded 0-100 scale."""
-    health_weight = {"fresh": 1.0, "recent": 0.8, "limited": 0.5, "stale": 0.0}
+    health_weight = {"fresh": 1.0, "recent": 0.8, "limited": 0.5, "unknown": 0.4, "stale": 0.0}
     health_scores = [
         health_weight.get(health.status, 0.0) if health else 0.4
         for health in (origin_health, destination_health)
