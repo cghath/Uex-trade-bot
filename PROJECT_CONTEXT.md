@@ -107,6 +107,18 @@ they're in sync).
     terminal ids; oversized Discord fields are split without dropping warnings; missing cargo
     risk metadata is disclosed instead of looking safe; and incomplete system names no longer
     render as literal `None` values.
+15. **Personal inventory and best-time Marketplace posting built for local validation**:
+    `/inventory-add` stores catalogued game-earned stacks by quality and location without an
+    acquisition-cost field; `/inventory` shows the existing Sellability Rating and links item
+    names to UEX postings; `/best-posting-time` ranks four-hour Eastern windows from positive
+    hourly negotiation/listing changes; and `/inventory-sell` provides a paged checklist plus
+    a deliberate authorization gate. Automatic UEC sell posts recalculate a balanced price at
+    execution time, enforce the user's manual per-unit floor, expire after 48 hours, and relist
+    only from explicit remaining-stock evidence. Network-ambiguous or interrupted POSTs are
+    quarantined, never blindly retried. Private notes stay private. The implementation also
+    corrected the older manual-post confirmation to read UEX's documented `id_listing` result.
+    Every inventory interaction response is explicitly ephemeral; background worker updates use
+    private DMs because Discord cannot make a non-interaction channel post ephemeral.
 
 ## Where to look for what
 
@@ -161,6 +173,17 @@ wins when the two disagree.
   `"price": "450000"`). Always go through `parse_uex_number` (`bot/uex/marketplace.py`)
   before comparing or formatting - `commodities_prices`-style endpoints don't have this
   quirk, only Marketplace ones do.
+- `POST /marketplace_advertise` returns the created id as **`id_listing`**, not `id`. Treat a
+  missing id or a lost/invalid POST response as ambiguous: the public listing may exist, so a
+  blind retry can create a duplicate.
+- `/items` currently enforces its documented category/filter requirement: the inherited
+  unfiltered `get_items()` pattern returns zero rows with `requires_id_category`. Full-catalog
+  callers must use `UexClient.get_item_catalog()`, which loads item categories in bounded batches,
+  deduplicates the result, and caches it for 12 hours. Fast autocomplete uses the persisted
+  Marketplace activity index and only supplements it from an already-warm catalog.
+- `/marketplace_listings` may expose a listing with `is_sold_out=1` while it remains in the
+  active-advertisement window. Its asking price is useful supporting evidence, but neither that
+  flag nor a disappeared listing proves the final negotiated unit price.
 - `quality_tier` buckets (confirmed via official docs, `/marketplace_prices_averages_all`):
   `0 = Q0, 1 = Q1-499, 2 = Q500-599, 3 = Q600-699, 4 = Q700-799, 5 = Q800-899, 6 = Q900-949,
   7 = Q950-1000`. Uneven on purpose, not a bug.
@@ -359,11 +382,12 @@ guessed at.
   after three hours; hourly liquidity and Marketplace data warn after two. The rating-shift
   queries request four gainers and four losers independently so one direction cannot crowd
   out the other, and the fields are separated to stay below Discord's 1,024-character limit.
-- **Current staging state (2026-08-25)**: `TestBranch` contains the mixed-route, digest, and
-  intelligence-brief work; `main` remains the stable Pi branch. The latest Pi database was
-  copied to the local ignored `data/` folder for PC testing, and the Pi service was deliberately
-  left stopped. The full suite has 117 passing tests. Re-check live service/branch state rather
-  than assuming this point-in-time operational note is still current.
+- **Current staging state (2026-08-26)**: `TestBranch` contains the mixed-route, digest,
+  intelligence-brief, and route-audit work; the personal-inventory feature is being validated
+  locally before any requested push. The latest Pi database is in the ignored local `data/`
+  folder, the PC bot is still collecting, and the Pi service remains deliberately stopped.
+  The full suite has 131 passing tests after the inventory additions. Re-check live service and
+  branch state rather than assuming this point-in-time operational note is still current.
 - The data collectors in `bot/cogs/intelligence.py` only pay off once they've been running a
   while - most of the `ROADMAP.md` intelligence backlog depends on accumulated history, so
   those features will look broken/empty if built and tested against a fresh database.

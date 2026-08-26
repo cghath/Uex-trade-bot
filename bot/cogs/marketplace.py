@@ -17,6 +17,7 @@ from discord.ext import commands, tasks
 
 from bot.uex.charts import render_price_history_chart
 from bot.uex.exceptions import UexApiError
+from bot.uex.inventory import extract_listing_id
 from bot.uex.marketplace import (
     MarketplaceAverageEntry,
     compute_marketplace_movers,
@@ -78,10 +79,9 @@ MAX_AVERAGE_LINES_PER_SIDE = 9
 
 
 async def item_name_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
-    try:
-        items = await interaction.client.uex.get_items()
-    except UexApiError:
-        return []
+    # Autocomplete must answer quickly. Use the already-warm full catalog when available;
+    # traded_item_autocomplete above it supplies the persisted active-market index first.
+    items = interaction.client.uex.get_cached_item_catalog()
     current_lower = current.lower()
     matches = [i for i in items if current_lower in (i.get("name") or "").lower()][:25]
     return [app_commands.Choice(name=(i.get("name") or "")[:100], value=i.get("name") or "") for i in matches]
@@ -152,7 +152,7 @@ class ConfirmListingView(discord.ui.View):
             await interaction.followup.send(f"Failed to create the listing: {exc}", ephemeral=True)
             return
 
-        listing_id = created.get("id") if isinstance(created, dict) else None
+        listing_id = extract_listing_id(created)
         confirmation = "Listing posted to UEX Marketplace."
         if listing_id is not None:
             confirmation += f" Listing id: **{listing_id}** (use /marketplace-delete-listing to remove it later)."
@@ -332,7 +332,7 @@ class Marketplace(commands.Cog):
         await interaction.response.defer()
 
         try:
-            items = await self.bot.uex.get_items()
+            items = await self.bot.uex.get_item_catalog()
         except UexApiError:
             items = []
         id_item = find_item_id_by_name(items, query)
@@ -468,7 +468,7 @@ class Marketplace(commands.Cog):
         # that doesn't resolve locally still has a shot (unlike /marketplace_prices_history,
         # which /marketplace-history has to resolve to an id first).
         try:
-            items = await self.bot.uex.get_items()
+            items = await self.bot.uex.get_item_catalog()
         except UexApiError:
             items = []
         id_item = find_item_id_by_name(items, item)
@@ -563,7 +563,7 @@ class Marketplace(commands.Cog):
         await interaction.response.defer()
 
         try:
-            items = await self.bot.uex.get_items()
+            items = await self.bot.uex.get_item_catalog()
         except UexApiError:
             items = []
         id_item = find_item_id_by_name(items, item)
@@ -698,13 +698,17 @@ class Marketplace(commands.Cog):
         }
 
         if item:
-            try:
-                items = await self.bot.uex.get_items()
-                id_item = find_item_id_by_name(items, item)
-                if id_item is not None:
-                    base_payload["id_item"] = id_item
-            except UexApiError:
-                pass  # optional field - fine to skip if lookup fails
+            # A modal must be opened inside Discord's short initial-response window. Do
+            # not warm the 66-category catalog here; this item's autocomplete is powered
+            # by the persisted Marketplace activity index, which already carries id_item.
+            activity = await self.bot.db.list_marketplace_item_activity()
+            indexed_items = [
+                {"id": row.get("id_item"), "name": row.get("item_name")}
+                for row in activity
+            ]
+            id_item = find_item_id_by_name(indexed_items, item)
+            if id_item is not None:
+                base_payload["id_item"] = id_item
 
         await interaction.response.send_modal(ListingDetailsModal(self.bot, base_payload))
 
@@ -717,14 +721,62 @@ class Marketplace(commands.Cog):
             return
 
         await interaction.response.defer(ephemeral=True)
+        tracked_job = await self.bot.db.get_inventory_post_job_by_listing(
+            interaction.user.id, listing_id
+        )
+        if tracked_job:
+            try:
+                listing_rows = await self.bot.uex.get_marketplace_listings(id=listing_id)
+            except UexApiError as exc:
+                await interaction.followup.send(
+                    f"UEX could not verify remaining inventory before deletion: {exc}",
+                    ephemeral=True,
+                )
+                return
+            if not listing_rows:
+                await self.bot.db.mark_inventory_post_needs_confirmation(
+                    int(tracked_job["id"]),
+                    "Deletion requested, but UEX no longer exposed final stock",
+                )
+                await interaction.followup.send(
+                    "This is a tracked inventory listing, but UEX no longer exposes its final stock. "
+                    f"Deletion stopped without releasing or relisting anything. Use `/inventory-confirm-sale` "
+                    f"for job #{tracked_job['id']}.",
+                    ephemeral=True,
+                )
+                return
+            current_stock = parse_uex_number(listing_rows[0].get("in_stock"))
+            if current_stock is None:
+                await interaction.followup.send(
+                    "This tracked listing has no remaining-stock value from UEX, so deletion stopped rather "
+                    "than guessing at your private inventory.",
+                    ephemeral=True,
+                )
+                return
+            await self.bot.db.record_inventory_listing_stock(
+                int(tracked_job["id"]),
+                in_stock=int(current_stock),
+                sold_out=_uex_flag(listing_rows[0].get("is_sold_out")),
+            )
         try:
             await self.bot.uex.delete_marketplace_listing(listing_id=listing_id, secret_key=secret_key)
         except UexApiError as exc:
-            await interaction.followup.send(f"Couldn't delete listing #{listing_id}: {exc}")
+            await interaction.followup.send(f"Couldn't delete listing #{listing_id}: {exc}", ephemeral=True)
             return
 
-        await interaction.followup.send(f"Listing #{listing_id} deleted (if it existed and belonged to you).")
+        released = await self.bot.db.cancel_tracked_inventory_listing(interaction.user.id, listing_id)
+        inventory_note = " Its unsold reserved inventory is available again." if released else ""
+        await interaction.followup.send(
+            f"Listing #{listing_id} deleted (if it existed and belonged to you).{inventory_note}",
+            ephemeral=True,
+        )
 
 
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(Marketplace(bot))
+
+
+def _uex_flag(raw: object) -> bool:
+    if isinstance(raw, str):
+        return raw.strip().lower() in {"1", "true", "yes"}
+    return bool(raw)

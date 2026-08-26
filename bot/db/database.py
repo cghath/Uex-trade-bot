@@ -6,6 +6,7 @@ migrated idempotently on startup via CREATE TABLE IF NOT EXISTS.
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, AsyncIterator
 
@@ -378,6 +379,64 @@ CREATE TABLE IF NOT EXISTS marketplace_tier_observations (
 );
 CREATE INDEX IF NOT EXISTS idx_marketplace_tier_observations_lookup
     ON marketplace_tier_observations (id_item, quality_tier, operation, currency, unit, observed_at);
+
+-- Personal, game-earned Marketplace inventory. Acquisition cost is intentionally absent:
+-- the only price protection for automatic posting is the player's explicit minimum.
+CREATE TABLE IF NOT EXISTS personal_inventory (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    id_item INTEGER NOT NULL,
+    id_category INTEGER NOT NULL,
+    item_name TEXT NOT NULL,
+    item_slug TEXT,
+    quantity INTEGER NOT NULL CHECK (quantity >= 0),
+    reserved_quantity INTEGER NOT NULL DEFAULT 0 CHECK (reserved_quantity >= 0),
+    quality INTEGER NOT NULL DEFAULT 0 CHECK (quality >= 0 AND quality <= 1000),
+    location TEXT NOT NULL,
+    unit TEXT NOT NULL DEFAULT 'unit',
+    minimum_price INTEGER CHECK (minimum_price IS NULL OR minimum_price > 0),
+    notes TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_personal_inventory_user
+    ON personal_inventory (user_id, id);
+
+-- One row is one deliberate posting authorization. The scheduler atomically claims a due
+-- row by moving pending -> posting before calling UEX, so a restart cannot double-submit it.
+-- A network-ambiguous POST is never retried: it becomes needs_confirmation instead.
+CREATE TABLE IF NOT EXISTS marketplace_post_jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    inventory_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    quantity INTEGER NOT NULL CHECK (quantity > 0),
+    minimum_price INTEGER NOT NULL CHECK (minimum_price > 0),
+    pricing_strategy TEXT NOT NULL DEFAULT 'balanced',
+    scheduled_for TEXT NOT NULL,
+    timezone_name TEXT NOT NULL DEFAULT 'America/New_York',
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (
+        status IN ('pending', 'posting', 'listed', 'expired', 'sold',
+                   'cancelled', 'failed', 'needs_confirmation')
+    ),
+    listing_id INTEGER,
+    listing_url TEXT,
+    posted_price INTEGER,
+    last_known_stock INTEGER,
+    sold_quantity INTEGER NOT NULL DEFAULT 0,
+    deal_value REAL,
+    deal_value_currency TEXT,
+    date_closed INTEGER,
+    date_expiration INTEGER,
+    auto_relist INTEGER NOT NULL DEFAULT 1,
+    relist_count INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_marketplace_post_jobs_due
+    ON marketplace_post_jobs (status, scheduled_for);
+CREATE INDEX IF NOT EXISTS idx_marketplace_post_jobs_listing
+    ON marketplace_post_jobs (listing_id);
 """
 
 
@@ -1555,6 +1614,592 @@ class Database:
             cursor = await db.execute("SELECT COUNT(*) AS c FROM marketplace_item_activity")
             row = await cursor.fetchone()
             return row["c"] if row else 0
+
+    # -- personal Marketplace inventory and guarded posting ------------------
+
+    async def add_inventory_item(
+        self,
+        *,
+        user_id: int,
+        id_item: int,
+        id_category: int,
+        item_name: str,
+        item_slug: str | None,
+        quantity: int,
+        quality: int,
+        location: str,
+        unit: str = "unit",
+        minimum_price: int | None = None,
+        notes: str | None = None,
+    ) -> int:
+        if quantity <= 0:
+            raise ValueError("quantity must be positive")
+        if not 0 <= quality <= 1000:
+            raise ValueError("quality must be between 0 and 1000")
+        if minimum_price is not None and minimum_price <= 0:
+            raise ValueError("minimum price must be positive")
+        async with self.connect() as db:
+            cursor = await db.execute(
+                """INSERT INTO personal_inventory
+                   (user_id, id_item, id_category, item_name, item_slug, quantity, quality,
+                    location, unit, minimum_price, notes)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    user_id, id_item, id_category, item_name, item_slug, quantity, quality,
+                    location.strip(), unit.strip().lower(), minimum_price, notes,
+                ),
+            )
+            await db.commit()
+            return cursor.lastrowid
+
+    async def list_inventory(self, user_id: int) -> list[dict[str, Any]]:
+        async with self.connect() as db:
+            cursor = await db.execute(
+                """SELECT inventory.*, liquidity.score AS sellability_score,
+                          liquidity.last_updated AS sellability_updated,
+                          (SELECT COUNT(*) FROM marketplace_post_jobs jobs
+                           WHERE jobs.inventory_id = inventory.id
+                             AND jobs.status IN ('pending', 'posting', 'listed', 'needs_confirmation'))
+                              AS active_job_count
+                   FROM personal_inventory inventory
+                   LEFT JOIN liquidity_scores liquidity ON liquidity.id_item = inventory.id_item
+                   WHERE inventory.user_id = ?
+                   ORDER BY inventory.item_name COLLATE NOCASE, inventory.quality DESC,
+                            inventory.location COLLATE NOCASE, inventory.id""",
+                (user_id,),
+            )
+            return [dict(row) for row in await cursor.fetchall()]
+
+    async def get_inventory_item(self, user_id: int, inventory_id: int) -> dict[str, Any] | None:
+        async with self.connect() as db:
+            cursor = await db.execute(
+                """SELECT inventory.*, liquidity.score AS sellability_score
+                   FROM personal_inventory inventory
+                   LEFT JOIN liquidity_scores liquidity ON liquidity.id_item = inventory.id_item
+                   WHERE inventory.user_id = ? AND inventory.id = ?""",
+                (user_id, inventory_id),
+            )
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+    async def set_inventory_minimum_price(
+        self, user_id: int, inventory_id: int, minimum_price: int
+    ) -> bool:
+        if minimum_price <= 0:
+            raise ValueError("minimum price must be positive")
+        async with self.connect() as db:
+            cursor = await db.execute(
+                """UPDATE personal_inventory
+                   SET minimum_price = ?, updated_at = datetime('now')
+                   WHERE user_id = ? AND id = ?""",
+                (minimum_price, user_id, inventory_id),
+            )
+            if cursor.rowcount > 0:
+                # Pending posts and future relists follow the newest floor. A currently
+                # public listing cannot be edited through UEX, so its present price remains
+                # until the user cancels it or the guarded 48-hour relist occurs.
+                await db.execute(
+                    """UPDATE marketplace_post_jobs
+                       SET minimum_price = ?, updated_at = datetime('now')
+                       WHERE user_id = ? AND inventory_id = ?
+                         AND status IN ('pending', 'listed', 'needs_confirmation')""",
+                    (minimum_price, user_id, inventory_id),
+                )
+            await db.commit()
+            return cursor.rowcount > 0
+
+    async def remove_inventory_quantity(
+        self, user_id: int, inventory_id: int, quantity: int
+    ) -> int | None:
+        """Remove only unreserved inventory and return the new total quantity."""
+        if quantity <= 0:
+            raise ValueError("quantity must be positive")
+        async with self.connect() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            cursor = await db.execute(
+                "SELECT quantity, reserved_quantity FROM personal_inventory WHERE user_id = ? AND id = ?",
+                (user_id, inventory_id),
+            )
+            row = await cursor.fetchone()
+            if not row:
+                await db.rollback()
+                return None
+            available = row["quantity"] - row["reserved_quantity"]
+            if quantity > available:
+                await db.rollback()
+                raise ValueError(f"only {available} unreserved items are available")
+            new_quantity = row["quantity"] - quantity
+            await db.execute(
+                """UPDATE personal_inventory SET quantity = ?, updated_at = datetime('now')
+                   WHERE user_id = ? AND id = ?""",
+                (new_quantity, user_id, inventory_id),
+            )
+            await db.commit()
+            return new_quantity
+
+    async def get_marketplace_timing_rows(self, hours: int = 24 * 56) -> list[dict[str, Any]]:
+        async with self.connect() as db:
+            cursor = await db.execute(
+                """SELECT id_item, recorded_hour, negotiations_success, negotiations_open,
+                          listings_count_sell
+                   FROM liquidity_score_snapshots
+                   WHERE recorded_hour >= datetime('now', ?)
+                   ORDER BY id_item, recorded_hour""",
+                (f"-{hours} hours",),
+            )
+            return [dict(row) for row in await cursor.fetchall()]
+
+    async def get_inventory_completed_unit_prices(
+        self, *, user_id: int, id_item: int, quality: int, unit: str, limit: int = 20
+    ) -> list[float]:
+        """Known own-deal prices only where quantity=1, so deal_value is a unit price."""
+        async with self.connect() as db:
+            cursor = await db.execute(
+                """SELECT jobs.deal_value
+                   FROM marketplace_post_jobs jobs
+                   JOIN personal_inventory inventory ON inventory.id = jobs.inventory_id
+                   WHERE jobs.user_id = ? AND inventory.id_item = ? AND inventory.quality = ?
+                     AND inventory.unit = ? COLLATE NOCASE
+                     AND jobs.quantity = 1 AND jobs.deal_value > 0
+                     AND COALESCE(jobs.deal_value_currency, 'UEC') = 'UEC'
+                     AND jobs.date_closed >= CAST(strftime('%s', 'now', '-30 days') AS INTEGER)
+                   ORDER BY COALESCE(jobs.date_closed, 0) DESC, jobs.updated_at DESC
+                   LIMIT ?""",
+                (user_id, id_item, quality, unit, limit),
+            )
+            return [float(row["deal_value"]) for row in await cursor.fetchall()]
+
+    async def create_inventory_post_jobs(
+        self, user_id: int, jobs: list[dict[str, Any]]
+    ) -> list[int]:
+        """Atomically reserve inventory and create one explicit authorization per entry."""
+        if not jobs:
+            return []
+        created: list[int] = []
+        async with self.connect() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                for job in jobs:
+                    inventory_id = int(job["inventory_id"])
+                    cursor = await db.execute(
+                        """SELECT quantity, reserved_quantity, minimum_price
+                           FROM personal_inventory WHERE user_id = ? AND id = ?""",
+                        (user_id, inventory_id),
+                    )
+                    entry = await cursor.fetchone()
+                    if not entry:
+                        raise ValueError(f"inventory entry #{inventory_id} no longer exists")
+                    quantity = int(job["quantity"])
+                    available = entry["quantity"] - entry["reserved_quantity"]
+                    if quantity <= 0 or quantity > available:
+                        raise ValueError(
+                            f"inventory entry #{inventory_id} has only {available} available"
+                        )
+                    minimum_price = entry["minimum_price"]
+                    if minimum_price is None or minimum_price <= 0:
+                        raise ValueError(
+                            f"inventory entry #{inventory_id} needs a minimum price first"
+                        )
+                    scheduled_for = self._utc_text(job["scheduled_for"])
+                    cursor = await db.execute(
+                        """INSERT INTO marketplace_post_jobs
+                           (inventory_id, user_id, quantity, minimum_price, scheduled_for,
+                            timezone_name, auto_relist, relist_count)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            inventory_id, user_id, quantity, minimum_price, scheduled_for,
+                            job.get("timezone_name") or "America/New_York",
+                            1 if job.get("auto_relist", True) else 0,
+                            int(job.get("relist_count") or 0),
+                        ),
+                    )
+                    created.append(cursor.lastrowid)
+                    await db.execute(
+                        """UPDATE personal_inventory
+                           SET reserved_quantity = reserved_quantity + ?, updated_at = datetime('now')
+                           WHERE id = ?""",
+                        (quantity, inventory_id),
+                    )
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
+        return created
+
+    async def list_due_inventory_post_jobs(self, limit: int = 10) -> list[dict[str, Any]]:
+        async with self.connect() as db:
+            cursor = await db.execute(
+                """SELECT jobs.*, inventory.id_item, inventory.id_category,
+                          inventory.item_name, inventory.item_slug, inventory.quality,
+                          inventory.location, inventory.unit, inventory.notes
+                   FROM marketplace_post_jobs jobs
+                   JOIN personal_inventory inventory ON inventory.id = jobs.inventory_id
+                   WHERE jobs.status = 'pending' AND jobs.scheduled_for <= datetime('now')
+                   ORDER BY jobs.scheduled_for, jobs.id LIMIT ?""",
+                (limit,),
+            )
+            return [dict(row) for row in await cursor.fetchall()]
+
+    async def claim_inventory_post_job(self, job_id: int) -> bool:
+        async with self.connect() as db:
+            cursor = await db.execute(
+                """UPDATE marketplace_post_jobs
+                   SET status = 'posting', updated_at = datetime('now')
+                   WHERE id = ? AND status = 'pending'""",
+                (job_id,),
+            )
+            await db.commit()
+            return cursor.rowcount == 1
+
+    async def flag_stale_inventory_post_jobs(self, minutes: int = 15) -> list[dict[str, Any]]:
+        """Quarantine interrupted POSTs instead of retrying and risking duplicates."""
+        async with self.connect() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            cursor = await db.execute(
+                """SELECT jobs.id, jobs.user_id, inventory.item_name, inventory.id_item
+                   FROM marketplace_post_jobs jobs
+                   JOIN personal_inventory inventory ON inventory.id = jobs.inventory_id
+                   WHERE jobs.status = 'posting' AND jobs.updated_at <= datetime('now', ?)""",
+                (f"-{minutes} minutes",),
+            )
+            rows = [dict(row) for row in await cursor.fetchall()]
+            if rows:
+                await db.executemany(
+                    """UPDATE marketplace_post_jobs
+                       SET status = 'needs_confirmation',
+                           last_error = 'Bot stopped while UEX POST result was unknown; no retry was attempted',
+                           updated_at = datetime('now')
+                       WHERE id = ? AND status = 'posting'""",
+                    [(row["id"],) for row in rows],
+                )
+            await db.commit()
+            return rows
+
+    async def mark_inventory_post_listed(
+        self,
+        job_id: int,
+        *,
+        listing_id: int,
+        listing_url: str | None,
+        posted_price: int,
+        date_expiration: int | None,
+    ) -> None:
+        async with self.connect() as db:
+            await db.execute(
+                """UPDATE marketplace_post_jobs
+                   SET status = 'listed', listing_id = ?, listing_url = ?, posted_price = ?,
+                       last_known_stock = quantity, date_expiration = ?, last_error = NULL,
+                       updated_at = datetime('now')
+                   WHERE id = ? AND status = 'posting'""",
+                (listing_id, listing_url, posted_price, date_expiration, job_id),
+            )
+            await db.commit()
+
+    async def mark_inventory_post_failed(
+        self, job_id: int, error: str, *, ambiguous: bool = False
+    ) -> None:
+        status = "needs_confirmation" if ambiguous else "failed"
+        async with self.connect() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            cursor = await db.execute(
+                """SELECT inventory_id, quantity, sold_quantity, status
+                   FROM marketplace_post_jobs WHERE id = ?""",
+                (job_id,),
+            )
+            job = await cursor.fetchone()
+            if not job:
+                await db.rollback()
+                return
+            await db.execute(
+                """UPDATE marketplace_post_jobs
+                   SET status = ?, last_error = ?, updated_at = datetime('now') WHERE id = ?""",
+                (status, error[:1000], job_id),
+            )
+            if not ambiguous and job["status"] in {"pending", "posting"}:
+                remaining = max(job["quantity"] - job["sold_quantity"], 0)
+                await db.execute(
+                    """UPDATE personal_inventory
+                       SET reserved_quantity = MAX(reserved_quantity - ?, 0), updated_at = datetime('now')
+                       WHERE id = ?""",
+                    (remaining, job["inventory_id"]),
+                )
+            await db.commit()
+
+    async def list_tracked_inventory_posts(self, limit: int = 100) -> list[dict[str, Any]]:
+        async with self.connect() as db:
+            cursor = await db.execute(
+                """SELECT jobs.*, inventory.id_item, inventory.id_category,
+                          inventory.item_name, inventory.item_slug, inventory.quality,
+                          inventory.location, inventory.unit, inventory.notes
+                   FROM marketplace_post_jobs jobs
+                   JOIN personal_inventory inventory ON inventory.id = jobs.inventory_id
+                   WHERE jobs.status = 'listed'
+                      OR (jobs.status = 'sold' AND jobs.quantity = 1 AND jobs.deal_value IS NULL
+                          AND jobs.updated_at >= datetime('now', '-30 days'))
+                   ORDER BY CASE jobs.status WHEN 'listed' THEN 0 ELSE 1 END,
+                            jobs.updated_at LIMIT ?""",
+                (limit,),
+            )
+            return [dict(row) for row in await cursor.fetchall()]
+
+    async def record_inventory_listing_stock(
+        self, job_id: int, *, in_stock: int, sold_out: bool
+    ) -> dict[str, Any] | None:
+        """Apply only an explicit UEX remaining-stock decrease to local inventory."""
+        async with self.connect() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            cursor = await db.execute(
+                """SELECT * FROM marketplace_post_jobs
+                   WHERE id = ? AND status IN ('listed', 'needs_confirmation')""",
+                (job_id,),
+            )
+            job = await cursor.fetchone()
+            if not job:
+                await db.rollback()
+                return None
+            previous_stock = job["last_known_stock"]
+            if previous_stock is None:
+                previous_stock = max(job["quantity"] - job["sold_quantity"], 0)
+            current_stock = max(0, min(int(in_stock), int(previous_stock)))
+            if sold_out:
+                current_stock = 0
+            sold_delta = max(int(previous_stock) - current_stock, 0)
+            if sold_delta:
+                await db.execute(
+                    """UPDATE personal_inventory
+                       SET quantity = MAX(quantity - ?, 0),
+                           reserved_quantity = MAX(reserved_quantity - ?, 0),
+                           updated_at = datetime('now')
+                       WHERE id = ?""",
+                    (sold_delta, sold_delta, job["inventory_id"]),
+                )
+            new_sold = job["sold_quantity"] + sold_delta
+            new_status = "sold" if current_stock == 0 else "listed"
+            await db.execute(
+                """UPDATE marketplace_post_jobs
+                   SET last_known_stock = ?, sold_quantity = ?, status = ?,
+                       updated_at = datetime('now') WHERE id = ?""",
+                (current_stock, new_sold, new_status, job_id),
+            )
+            await db.commit()
+            return {
+                "sold_delta": sold_delta,
+                "remaining": current_stock,
+                "status": new_status,
+                "inventory_id": job["inventory_id"],
+                "user_id": job["user_id"],
+            }
+
+    async def mark_inventory_post_needs_confirmation(self, job_id: int, reason: str) -> None:
+        async with self.connect() as db:
+            await db.execute(
+                """UPDATE marketplace_post_jobs
+                   SET status = 'needs_confirmation', last_error = ?, updated_at = datetime('now')
+                   WHERE id = ? AND status = 'listed'""",
+                (reason[:1000], job_id),
+            )
+            await db.commit()
+
+    async def record_inventory_deal_value(
+        self,
+        listing_id: int,
+        *,
+        deal_value: float,
+        currency: str | None,
+        date_closed: int | None,
+    ) -> None:
+        async with self.connect() as db:
+            await db.execute(
+                """UPDATE marketplace_post_jobs
+                   SET deal_value = ?, deal_value_currency = ?, date_closed = ?,
+                       updated_at = datetime('now')
+                   WHERE listing_id = ?""",
+                (deal_value, currency, date_closed, listing_id),
+            )
+            await db.commit()
+
+    async def expire_and_relist_inventory_post(
+        self, job_id: int, scheduled_for: datetime
+    ) -> int | None:
+        """Replace an expired job only when UEX most recently gave explicit stock."""
+        async with self.connect() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            cursor = await db.execute(
+                """SELECT * FROM marketplace_post_jobs
+                   WHERE id = ? AND status = 'listed' AND auto_relist = 1""",
+                (job_id,),
+            )
+            job = await cursor.fetchone()
+            if not job or job["last_known_stock"] is None or job["last_known_stock"] <= 0:
+                await db.rollback()
+                return None
+            await db.execute(
+                """UPDATE marketplace_post_jobs
+                   SET status = 'expired', updated_at = datetime('now') WHERE id = ?""",
+                (job_id,),
+            )
+            cursor = await db.execute(
+                """INSERT INTO marketplace_post_jobs
+                   (inventory_id, user_id, quantity, minimum_price, scheduled_for,
+                    timezone_name, auto_relist, relist_count)
+                   VALUES (?, ?, ?, ?, ?, ?, 1, ?)""",
+                (
+                    job["inventory_id"], job["user_id"], job["last_known_stock"],
+                    job["minimum_price"], self._utc_text(scheduled_for),
+                    job["timezone_name"], job["relist_count"] + 1,
+                ),
+            )
+            new_id = cursor.lastrowid
+            # The stock was already reserved by the old listing; ownership transfers to
+            # the replacement job without changing reserved_quantity.
+            await db.commit()
+            return new_id
+
+    async def cancel_tracked_inventory_listing(self, user_id: int, listing_id: int) -> bool:
+        async with self.connect() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            cursor = await db.execute(
+                """SELECT inventory_id, last_known_stock, quantity, sold_quantity
+                   FROM marketplace_post_jobs
+                   WHERE user_id = ? AND listing_id = ?
+                     AND status IN ('listed', 'needs_confirmation')""",
+                (user_id, listing_id),
+            )
+            job = await cursor.fetchone()
+            if not job:
+                await db.rollback()
+                return False
+            remaining = job["last_known_stock"]
+            if remaining is None:
+                remaining = max(job["quantity"] - job["sold_quantity"], 0)
+            await db.execute(
+                """UPDATE marketplace_post_jobs
+                   SET status = 'cancelled', updated_at = datetime('now')
+                   WHERE user_id = ? AND listing_id = ?""",
+                (user_id, listing_id),
+            )
+            await db.execute(
+                """UPDATE personal_inventory
+                   SET reserved_quantity = MAX(reserved_quantity - ?, 0), updated_at = datetime('now')
+                   WHERE id = ?""",
+                (remaining, job["inventory_id"]),
+            )
+            await db.commit()
+            return True
+
+    async def get_inventory_post_job(self, user_id: int, job_id: int) -> dict[str, Any] | None:
+        async with self.connect() as db:
+            cursor = await db.execute(
+                """SELECT jobs.*, inventory.item_name, inventory.id_item, inventory.unit
+                   FROM marketplace_post_jobs jobs
+                   JOIN personal_inventory inventory ON inventory.id = jobs.inventory_id
+                   WHERE jobs.user_id = ? AND jobs.id = ?""",
+                (user_id, job_id),
+            )
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+    async def get_inventory_post_job_by_listing(
+        self, user_id: int, listing_id: int
+    ) -> dict[str, Any] | None:
+        async with self.connect() as db:
+            cursor = await db.execute(
+                """SELECT jobs.*, inventory.item_name, inventory.id_item, inventory.unit
+                   FROM marketplace_post_jobs jobs
+                   JOIN personal_inventory inventory ON inventory.id = jobs.inventory_id
+                   WHERE jobs.user_id = ? AND jobs.listing_id = ?
+                     AND jobs.status IN ('listed', 'needs_confirmation')""",
+                (user_id, listing_id),
+            )
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+    async def cancel_pending_inventory_post(self, user_id: int, job_id: int) -> bool:
+        async with self.connect() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            cursor = await db.execute(
+                """SELECT inventory_id, quantity FROM marketplace_post_jobs
+                   WHERE user_id = ? AND id = ? AND status = 'pending'""",
+                (user_id, job_id),
+            )
+            job = await cursor.fetchone()
+            if not job:
+                await db.rollback()
+                return False
+            await db.execute(
+                """UPDATE marketplace_post_jobs
+                   SET status = 'cancelled', updated_at = datetime('now') WHERE id = ?""",
+                (job_id,),
+            )
+            await db.execute(
+                """UPDATE personal_inventory
+                   SET reserved_quantity = MAX(reserved_quantity - ?, 0), updated_at = datetime('now')
+                   WHERE id = ?""",
+                (job["quantity"], job["inventory_id"]),
+            )
+            await db.commit()
+            return True
+
+    async def confirm_ambiguous_inventory_sale(
+        self, user_id: int, job_id: int, quantity_sold: int
+    ) -> dict[str, Any] | None:
+        """Resolve an ambiguous disappearance and release any unsold remainder."""
+        async with self.connect() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            cursor = await db.execute(
+                """SELECT * FROM marketplace_post_jobs
+                   WHERE id = ? AND user_id = ? AND status = 'needs_confirmation'""",
+                (job_id, user_id),
+            )
+            job = await cursor.fetchone()
+            if not job:
+                await db.rollback()
+                return None
+            remaining_before = job["last_known_stock"]
+            if remaining_before is None:
+                remaining_before = max(job["quantity"] - job["sold_quantity"], 0)
+            if quantity_sold < 0 or quantity_sold > remaining_before:
+                await db.rollback()
+                raise ValueError(f"sold quantity must be between 0 and {remaining_before}")
+            unsold = remaining_before - quantity_sold
+            if quantity_sold:
+                await db.execute(
+                    """UPDATE personal_inventory
+                       SET quantity = MAX(quantity - ?, 0), updated_at = datetime('now')
+                       WHERE id = ?""",
+                    (quantity_sold, job["inventory_id"]),
+                )
+            await db.execute(
+                """UPDATE personal_inventory
+                   SET reserved_quantity = MAX(reserved_quantity - ?, 0), updated_at = datetime('now')
+                   WHERE id = ?""",
+                (remaining_before, job["inventory_id"]),
+            )
+            status = "sold" if unsold == 0 else "expired"
+            await db.execute(
+                """UPDATE marketplace_post_jobs
+                   SET status = ?, sold_quantity = sold_quantity + ?, last_known_stock = ?,
+                       updated_at = datetime('now') WHERE id = ?""",
+                (status, quantity_sold, unsold, job_id),
+            )
+            await db.commit()
+            return {
+                "inventory_id": job["inventory_id"],
+                "unsold": unsold,
+                "sold": quantity_sold,
+                "auto_relist": bool(job["auto_relist"]),
+                "relist_count": job["relist_count"] + 1,
+            }
+
+    @staticmethod
+    def _utc_text(value: Any) -> str:
+        if isinstance(value, datetime):
+            parsed = value
+        else:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
     # -- commodity restock (stock) alerts ------------------------------------
     # Persistent watches, like marketplace alerts - see stock_alert_terminal_state above for

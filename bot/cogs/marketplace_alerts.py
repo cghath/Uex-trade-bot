@@ -146,11 +146,15 @@ class MarketplaceAlerts(commands.Cog):
         if not alerts:
             return
 
-        try:
-            items = await self.bot.uex.get_items()
-        except UexApiError as exc:
-            logger.warning("Failed to load items for marketplace alert matching: %s", exc)
-            items = []
+        # Alert names normally come from the Marketplace activity autocomplete, which
+        # already persists id_item. UEX's /items endpoint requires a category and an
+        # unfiltered call returns no rows, so reuse this local index instead of making a
+        # 66-category catalog sweep on every background poll.
+        activity = await self.bot.db.list_marketplace_item_activity()
+        items = [
+            {"id": row.get("id_item"), "name": row.get("item_name")}
+            for row in activity
+        ]
 
         # Group alerts by (keyword, operation) so identical watches from different users
         # share one API call instead of one per alert.

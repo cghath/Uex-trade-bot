@@ -82,6 +82,8 @@ class UexClient:
         self._client = httpx.AsyncClient(timeout=timeout)
         self._cache: dict[tuple, tuple[float, Any]] = {}
         self._cache_lock = asyncio.Lock()
+        self._item_catalog: tuple[float, list[dict[str, Any]]] | None = None
+        self._item_catalog_lock = asyncio.Lock()
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -285,7 +287,76 @@ class UexClient:
         return await self._get("commodities_prices_history", params=filters) or []
 
     async def get_items(self, **filters: Any) -> list[dict[str, Any]]:
+        """Items from one UEX-supported filter.
+
+        UEX currently returns ``requires_id_category`` and no rows for an unfiltered call.
+        Use :meth:`get_item_catalog` when a caller genuinely needs the whole catalog.
+        """
         return await self._get("items", params=filters) or []
+
+    async def get_item_catalog(self) -> list[dict[str, Any]]:
+        """Load every item category once and cache the combined catalog for 12 hours.
+
+        `/items` documents and enforces a category/filter requirement, so an unfiltered
+        request silently produces no catalog. The bounded batches stay below UEX's
+        120-request/minute ceiling even when all current item categories must be fetched.
+        """
+        now = time.monotonic()
+        if self._item_catalog and self._item_catalog[0] > now:
+            return list(self._item_catalog[1])
+
+        async with self._item_catalog_lock:
+            now = time.monotonic()
+            if self._item_catalog and self._item_catalog[0] > now:
+                return list(self._item_catalog[1])
+
+            categories = await self.get_categories(type="item")
+            category_ids = [
+                int(category["id"])
+                for category in categories
+                if category.get("id") is not None
+            ]
+            if not category_ids:
+                raise UexApiError("UEX returned no item categories for the catalog")
+
+            rows: list[dict[str, Any]] = []
+            failures = 0
+            batch_size = 8
+            for start in range(0, len(category_ids), batch_size):
+                results = await asyncio.gather(
+                    *(self.get_items(id_category=category_id) for category_id in category_ids[start : start + batch_size]),
+                    return_exceptions=True,
+                )
+                for result in results:
+                    if isinstance(result, Exception):
+                        failures += 1
+                        logger.warning("Failed to load one UEX item category: %s", result)
+                    else:
+                        rows.extend(result)
+
+            deduplicated: dict[int, dict[str, Any]] = {}
+            for row in rows:
+                try:
+                    id_item = int(row.get("id"))
+                except (TypeError, ValueError):
+                    continue
+                deduplicated[id_item] = row
+            catalog = sorted(
+                deduplicated.values(), key=lambda row: (str(row.get("name") or "").lower(), int(row.get("id") or 0))
+            )
+            if not catalog:
+                raise UexApiError(
+                    f"UEX item catalog was empty after {failures} category request failure(s)"
+                )
+            ttl = _DEFAULT_CACHE_TTL if failures else _ENDPOINT_CACHE_TTL["items"]
+            self._item_catalog = (time.monotonic() + ttl, catalog)
+            return list(catalog)
+
+    def get_cached_item_catalog(self) -> list[dict[str, Any]]:
+        """Return the catalog only if already warm; safe for Discord autocomplete."""
+        if self._item_catalog and self._item_catalog[0] > time.monotonic():
+            return list(self._item_catalog[1])
+        return []
 
     async def get_items_prices(self, **filters: Any) -> list[dict[str, Any]]:
         return await self._get("items_prices", params=filters) or []
@@ -349,8 +420,9 @@ class UexClient:
 
     async def post_marketplace_advertise(self, secret_key: str, **fields: Any) -> dict[str, Any]:
         """Create a REAL, public UEX marketplace listing as the given player. This is not
-        reversible by the bot alone - the caller should confirm with the user before calling
-        this. Required fields: id_category, operation ('buy'|'sell'), type
+        reversible by the bot alone - the caller must either confirm this exact post or have
+        a stored, explicit scheduling authorization with a hard price floor. Required fields:
+        id_category, operation ('buy'|'sell'), type
         ('item'|'service'|'contract'), unit, title, description, price, currency, language.
         """
         return await self._post("marketplace_advertise", json_body=fields, secret_key=secret_key)

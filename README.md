@@ -15,6 +15,10 @@ Current features:
   Materials Deal Scanner**: it compares only Commodities and Harvestables with a reported quality
   against the matching 30-day quality tier, currency, and unit. Crafted gear is deliberately
   excluded because UEX does not expose its modifiers as structured pricing data.
+- **Personal inventory and timed selling** — manually record catalogued, game-earned item stacks;
+  review the same Sellability Rating beside direct UEX item links; estimate the strongest Eastern-
+  time posting window; and explicitly authorize guarded UEC sell listings that reprice above a
+  hard manual floor. Ambiguous UEX results stop for confirmation instead of risking duplicates.
 - **Alerts and digest** — commodity-price alerts, terminal-restock alerts, Marketplace listing
   alerts, and a configurable daily digest.
 - **Personal tools** — a local trade ledger, server leaderboard, saved cargo ship, and private UEX
@@ -64,14 +68,21 @@ different real fields rather than one obvious endpoint:
   `/commodities_routes` doesn't have distance/ROI data for a particular commodity yet, `/best-route`
   quietly falls back to computing routes from raw price rows instead.
 
-### A note on "inventory management"
+### A note on inventory management
 
-UEX's API does not expose a live in-game cargo hold (there's no endpoint that says "you're
-currently carrying 40 SCU of Laranite in your Cutlass"). What it has instead is `/user_trades`,
-a history of trades logged through UEX's own tools. So this bot approximates inventory tracking
-two ways: a local trade ledger you fill in via Discord commands, and a pull of your real UEX trade
-history if you use UEX's own logging tools too. If UEX adds a live fleet/cargo endpoint later,
-this is the natural place to wire it in (`bot/uex/client.py` + a new cog).
+UEX does not expose a live in-game cargo hold, so the bot cannot discover newly looted or crafted
+items automatically. `/inventory-add` is the source of truth for personal Marketplace stock;
+quality and location create separate stacks. `/inventory` shows quantity, reservations, manual
+price floor, Sellability Rating, and a clickable UEX item page. `/inventory-sell` opens a paged
+checklist and an explicit authorization preview. Scheduled posts are catalogued UEC sell listings
+only, expire after 48 hours, and are freshly repriced before a guarded relist.
+
+When UEX explicitly reports a lower `in_stock` value or sold-out state, local quantity is updated.
+If a listing disappears without a final stock value, `/inventory-confirm-sale` asks for the actual
+quantity rather than guessing. Sold-out asking prices can inform a recommendation, but they are not
+misrepresented as verified final transaction prices. Private inventory notes are never posted.
+Every inventory command, checklist, preview, error, and confirmation is ephemeral in Discord;
+background posting/sale updates are delivered only by private DM.
 
 ## 1. Get your UEX credentials
 
@@ -185,6 +196,7 @@ bot/
     trends.py        trade-volume + price-mover aggregation (pure functions, unit tested)
     charts.py        matplotlib price-history chart rendering
     marketplace.py   Marketplace listings + 30-day rolling price averages
+    inventory.py     personal-inventory pricing + Eastern-time window scoring
     scanner.py       Raw Materials Deal Scanner matching logic (pure functions, unit tested)
     ships.py         ship data lookups
     stock_alerts.py  terminal stock-level change detection
@@ -201,6 +213,7 @@ bot/
     trades.py             /trade-log-add, /trade-log, /uex-trades
     trends.py             /trending, /movers, /commodity-history + background trending refresh
     marketplace.py        /marketplace-average and Marketplace lookups
+    personal_inventory.py inventory UI + guarded posting/reconciliation worker
     marketplace_alerts.py Marketplace listing alerts + background poller
     scanner.py             /set-scanner-channel, /scanner-status, /scan-now + background poller
     stock_alerts.py       terminal stock alerts + background poller
