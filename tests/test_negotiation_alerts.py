@@ -19,6 +19,98 @@ def _make_db(tmp_path) -> Database:
     return Database(tmp_path / "negotiation_alerts.sqlite3", Fernet(Fernet.generate_key()))
 
 
+class _FakeResponse:
+    async def defer(self, **kwargs):
+        pass
+
+    async def send_message(self, *args, **kwargs):
+        raise AssertionError("send_message should not be used once deferred")
+
+
+class _FakeFollowup:
+    def __init__(self):
+        self.sent = []
+
+    async def send(self, *args, **kwargs):
+        self.sent.append((args, kwargs))
+
+
+class _FakeInteraction:
+    def __init__(self, user_id):
+        self.user = type("U", (), {"id": user_id})()
+        self.response = _FakeResponse()
+        self.followup = _FakeFollowup()
+
+
+async def _cog_with_client(tmp_path, handler):
+    db = _make_db(tmp_path)
+    await db.init()
+    client = UexClient(app_token="test", base_url="https://uex.test")
+    await client._client.aclose()
+    client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    bot = type("FakeBot", (), {})()
+    bot.db = db
+    bot.uex = client
+    cog = NegotiationAlerts.__new__(NegotiationAlerts)
+    cog.bot = bot
+    return db, client, cog
+
+
+def test_enabling_does_not_turn_on_when_the_baseline_fetch_fails(tmp_path):
+    """The exact bug this guards: an invalid secret key must not leave the feature
+    enabled with an empty baseline, or the first later poll with a valid key floods
+    the user's entire negotiation history as if it were all brand new."""
+    async def run():
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(400, json={"status": "user_not_found", "message": "user_not_found", "http_code": 400})
+
+        db, client, cog = await _cog_with_client(tmp_path, handler)
+        try:
+            user_id = 42
+            await db.set_user_secret_key(user_id, "sk_bad")
+            interaction = _FakeInteraction(user_id)
+
+            await cog.negotiation_alerts.callback(cog, interaction, True)
+
+            assert await db.list_negotiation_alert_user_ids() == [], (
+                "enabling must not stick when the baseline fetch fails"
+            )
+            (message,), _ = interaction.followup.sent[0]
+            assert "couldn't enable" in message.lower()
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_enabling_turns_on_only_after_a_successful_baseline_seed(tmp_path):
+    async def run():
+        def handler(request: httpx.Request) -> httpx.Response:
+            if "marketplace_negotiations_messages" in request.url.path:
+                return httpx.Response(200, json={"status": "ok", "data": []})
+            return httpx.Response(
+                200,
+                json={"status": "ok", "data": [{"id": 1, "date_modified": 1000, "listing_title": "x"}]},
+            )
+
+        db, client, cog = await _cog_with_client(tmp_path, handler)
+        try:
+            user_id = 43
+            await db.set_user_secret_key(user_id, "sk_good")
+            interaction = _FakeInteraction(user_id)
+
+            await cog.negotiation_alerts.callback(cog, interaction, True)
+
+            assert await db.list_negotiation_alert_user_ids() == [user_id]
+            (message,), _ = interaction.followup.sent[0]
+            assert "now **on**" in message
+            assert "Checked 1 existing negotiation" in message
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
 def test_negotiation_alerts_cog_is_registered_and_exposes_its_command():
     async def run():
         bot = commands.Bot(command_prefix="!unused", intents=discord.Intents.none())

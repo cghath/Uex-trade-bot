@@ -15,6 +15,7 @@ from discord.ext import commands, tasks
 from bot.uex.exceptions import UexApiError
 from bot.uex.inventory import (
     DEFAULT_MARKETPLACE_TIMEZONE,
+    PriceRecommendation,
     _flag,
     _integer,
     build_inventory_listing_payload,
@@ -328,6 +329,153 @@ class AuthorizeScheduleView(discord.ui.View):
         await interaction.followup.send("Cancelled—no inventory was reserved or scheduled.", ephemeral=True)
 
 
+class CustomPriceModal(discord.ui.Modal, title="Enter a custom price"):
+    price_input: discord.ui.TextInput = discord.ui.TextInput(
+        label="Price per unit (UEC)",
+        placeholder="e.g. 1750000",
+        style=discord.TextStyle.short,
+        max_length=15,
+    )
+
+    def __init__(self, view: "PostNowView") -> None:
+        super().__init__()
+        self.view = view
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        raw = self.price_input.value.strip().replace(",", "")
+        try:
+            price = int(raw)
+        except ValueError:
+            await interaction.response.send_message("That's not a whole number - try again.", ephemeral=True)
+            return
+        if price <= 0:
+            await interaction.response.send_message("Price must be a positive whole number.", ephemeral=True)
+            return
+        minimum_price = int(self.view.entry["minimum_price"])
+        if price < minimum_price:
+            await interaction.response.send_message(
+                f"That's below your minimum of **{minimum_price:,}** UEC - raise the price, or lower your "
+                "minimum first with `/inventory-set-minimum`.",
+                ephemeral=True,
+            )
+            return
+        self.view.pricing_strategy = "custom"
+        self.view.custom_price = price
+        for option in self.view.choose_pricing_strategy.options:
+            option.default = option.value == "custom"
+        await interaction.response.edit_message(
+            content=f"Pricing strategy: **custom — {price:,} UEC/unit**.", view=self.view,
+        )
+
+
+class PostNowView(discord.ui.View):
+    def __init__(self, cog: "PersonalInventory", author_id: int, entry: dict[str, Any], quantity: int) -> None:
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.author_id = author_id
+        self.entry = entry
+        self.quantity = quantity
+        self.pricing_strategy = "balanced"
+        self.custom_price: int | None = None
+        self.resolved = False
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("Only the inventory owner can confirm this.", ephemeral=True)
+            return False
+        return True
+
+    def disable(self) -> None:
+        self.resolved = True
+        for child in self.children:
+            child.disabled = True
+
+    @discord.ui.select(
+        placeholder="Pricing strategy: at the recommended price (default)",
+        options=[
+            discord.SelectOption(label="Post at the recommended price", value="balanced", default=True),
+            discord.SelectOption(label="Post 10% below the recommended price", value="undercut"),
+            discord.SelectOption(label="Post 10% above the recommended price", value="premium"),
+            discord.SelectOption(label="Enter a custom price...", value="custom"),
+        ],
+    )
+    async def choose_pricing_strategy(self, interaction: discord.Interaction, select: discord.ui.Select) -> None:
+        chosen = select.values[0]
+        if chosen == "custom":
+            await interaction.response.send_modal(CustomPriceModal(self))
+            return
+        self.pricing_strategy = chosen
+        self.custom_price = None
+        for option in select.options:
+            option.default = option.value == self.pricing_strategy
+        await interaction.response.edit_message(
+            content=f"Pricing strategy: **{PRICING_STRATEGY_LABELS[self.pricing_strategy]}** shown above.",
+            view=self,
+        )
+
+    @discord.ui.button(label="Post now", style=discord.ButtonStyle.green)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        self.disable()
+        await interaction.response.edit_message(view=self)
+        spec: dict[str, Any] = {
+            "inventory_id": int(self.entry["id"]),
+            "quantity": self.quantity,
+            "scheduled_for": datetime.now(timezone.utc),
+            "auto_relist": True,
+            "pricing_strategy": self.pricing_strategy,
+        }
+        if self.pricing_strategy == "custom":
+            spec["custom_price"] = self.custom_price
+        try:
+            job_ids = await self.cog.bot.db.create_inventory_post_jobs(self.author_id, [spec])
+        except ValueError as exc:
+            await interaction.followup.send(f"Nothing was posted: {exc}", ephemeral=True)
+            return
+        job_id = job_ids[0]
+
+        if not await self.cog.bot.db.claim_inventory_post_job(job_id):
+            await interaction.followup.send(
+                f"Job #{job_id} was created but something else already claimed it - check `/inventory-cancel-post`.",
+                ephemeral=True,
+            )
+            return
+
+        job = await self.cog.bot.db.get_inventory_post_job(self.author_id, job_id)
+        result = await self.cog._post_one_job(job, notify=False)
+        await interaction.followup.send(_format_post_now_result(job_id, job, result), ephemeral=True)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        self.disable()
+        await interaction.response.edit_message(view=self)
+        await interaction.followup.send("Cancelled - nothing was posted.", ephemeral=True)
+
+
+def _format_post_now_result(job_id: int, job: dict[str, Any], result: dict[str, Any]) -> str:
+    if result["success"]:
+        floor_note = " · raised to your minimum" if result["floor_applied"] else ""
+        confidence_note = "" if result["confidence"] == "Custom" else f" · pricing confidence {result['confidence'].lower()}"
+        listing_note = f" · [listing #{result['listing_id']}]({result['listing_url']})" if result.get("listing_url") else f" · listing #{result['listing_id']}"
+        return (
+            f"Posted **{job['item_name']}** to UEX: qty **{job['quantity']}** at **{result['price']:,} UEC/{job['unit']}**"
+            f"{confidence_note}{floor_note}{listing_note}."
+        )
+    reason = result["reason"]
+    if reason == "not_linked":
+        return f"Not posted: {result['message']}"
+    if reason == "pricing_failed":
+        return f"Not posted - couldn't prepare fresh pricing, nothing was reserved or sent to UEX.\n{result['message'][:500]}"
+    if reason == "post_failed" and result.get("ambiguous"):
+        return (
+            f"UEX may have received job #{job_id}, so it was NOT retried automatically. Check the linked item page, "
+            f"then use `/inventory-confirm-sale job_id:{job_id}` with the actual quantity sold if it went through.\n"
+            f"{result['message'][:500]}"
+        )
+    if reason == "post_failed":
+        return f"UEX rejected the post; nothing will retry automatically and the reservation was released.\n{result['message'][:500]}"
+    return f"Job #{job_id} was posted, but UEX didn't confirm a listing id - check manually.\n{result['message'][:500]}"
+
+
 class PersonalInventory(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
@@ -503,6 +651,58 @@ class PersonalInventory(commands.Cog):
             return
         view = InventorySelectionView(self, interaction.user.id, available)
         await interaction.response.send_message(content=view.status_text, view=view, ephemeral=True)
+
+    @app_commands.command(
+        name="inventory-post-now",
+        description="Skip the scheduled window and post one inventory stack for sale on UEX right now.",
+    )
+    @app_commands.describe(inventory_id="The inventory stack number, shown by /inventory")
+    async def inventory_post_now(self, interaction: discord.Interaction, inventory_id: int) -> None:
+        if not await self.bot.db.has_linked_uex_account(interaction.user.id):
+            await interaction.response.send_message(
+                "Link your own UEX account with `/link-uex-account` before posting public listings.",
+                ephemeral=True,
+            )
+            return
+        entry = await self.bot.db.get_inventory_item(interaction.user.id, inventory_id)
+        if not entry:
+            await interaction.response.send_message(f"Inventory entry #{inventory_id} was not found.", ephemeral=True)
+            return
+        available = int(entry["quantity"]) - int(entry["reserved_quantity"])
+        if available <= 0:
+            await interaction.response.send_message(
+                f"#{inventory_id} has no unreserved quantity available to post.", ephemeral=True
+            )
+            return
+        if not entry.get("minimum_price"):
+            await interaction.response.send_message(
+                f"Set a manual minimum price first for #{inventory_id}. Use `/inventory-set-minimum`.", ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        # Live, same-source preview: this calls the exact function _post_one_job will call
+        # moments later (not a cached/offline estimate), so what you see here is what
+        # actually posts unless the market genuinely moves in the next few seconds.
+        recommendation = await self._fetch_live_price(
+            id_item=int(entry["id_item"]),
+            quality=int(entry["quality"]),
+            unit=str(entry["unit"]),
+            minimum_price=int(entry["minimum_price"]),
+            user_id=interaction.user.id,
+        )
+        embed = discord.Embed(
+            title="Post now?",
+            description=(
+                f"**#{inventory_id} · {entry['item_name']}** — qty **{available}**\n"
+                f"Recommended price: **{recommendation.price:,} UEC/{entry['unit']}** "
+                f"(confidence {recommendation.confidence.lower()} · minimum {int(entry['minimum_price']):,})\n\n"
+                "This posts a REAL public UEX listing immediately, not a scheduled one. Pick a pricing strategy "
+                "below - at/below/above this recommendation, or enter your own exact price - then confirm."
+            ),
+            color=discord.Color.orange(),
+        )
+        await interaction.followup.send(embed=embed, view=PostNowView(self, interaction.user.id, entry, available), ephemeral=True)
 
     @app_commands.command(name="best-posting-time", description="Estimate the strongest Marketplace posting window from collected history.")
     @app_commands.describe(item="Optional exact catalogued item; otherwise show the overall market window")
@@ -715,36 +915,65 @@ class PersonalInventory(commands.Cog):
                 continue
             await self._post_one_job(job)
 
-    async def _post_one_job(self, job: dict[str, Any]) -> None:
+    async def _fetch_live_price(
+        self, *, id_item: int, quality: int, unit: str, minimum_price: int, user_id: int, strategy: str = "balanced",
+    ) -> PriceRecommendation:
+        """The one place that computes a live, evidence-based price recommendation - used
+        both for /inventory-post-now's preview and for the actual post moments later, so
+        the two can never silently diverge the way they would if each built its own fetch."""
+        sell_rows, buy_rows, average_rows = await asyncio.gather(
+            self.bot.uex.get_marketplace_listings(id_item=id_item, operation="sell"),
+            self.bot.uex.get_marketplace_listings(id_item=id_item, operation="buy"),
+            self.bot.uex.get_marketplace_prices_averages(id_item=id_item, operation="sell", currency="UEC"),
+        )
+        own_prices = await self.bot.db.get_inventory_completed_unit_prices(
+            user_id=user_id, id_item=id_item, quality=quality, unit=unit,
+        )
+        return recommend_balanced_price(
+            listings=sell_rows + buy_rows,
+            average_rows=average_rows,
+            quality=quality,
+            unit=unit,
+            minimum_price=minimum_price,
+            own_completed_unit_prices=own_prices,
+            strategy=strategy,
+        )
+
+    async def _post_one_job(self, job: dict[str, Any], *, notify: bool = True) -> dict[str, Any]:
+        """Actually POST one due job to UEX. Returns a result dict describing the outcome
+        (used directly by /inventory-post-now); notify=True (the background loop's default)
+        also DMs the user the same information, which a synchronous caller with its own
+        interaction response open should suppress to avoid saying the same thing twice."""
         secret_key = await self.bot.db.get_user_secret_key(int(job["user_id"]))
         if not secret_key:
             await self.bot.db.mark_inventory_post_failed(int(job["id"]), "UEX account is no longer linked")
-            await self._notify_user(
-                int(job["user_id"]), f"Inventory job #{job['id']} was not posted because your UEX account is no longer linked."
-            )
-            return
+            message = f"Inventory job #{job['id']} was not posted because your UEX account is no longer linked."
+            if notify:
+                await self._notify_user(int(job["user_id"]), message)
+            return {"success": False, "reason": "not_linked", "message": message}
 
         try:
-            sell_rows, buy_rows, average_rows = await asyncio.gather(
-                self.bot.uex.get_marketplace_listings(id_item=job["id_item"], operation="sell"),
-                self.bot.uex.get_marketplace_listings(id_item=job["id_item"], operation="buy"),
-                self.bot.uex.get_marketplace_prices_averages(
-                    id_item=job["id_item"], operation="sell", currency="UEC"
-                ),
-            )
-            own_prices = await self.bot.db.get_inventory_completed_unit_prices(
-                user_id=int(job["user_id"]),
-                id_item=int(job["id_item"]), quality=int(job["quality"]), unit=str(job["unit"])
-            )
-            recommendation = recommend_balanced_price(
-                listings=sell_rows + buy_rows,
-                average_rows=average_rows,
-                quality=int(job["quality"]),
-                unit=str(job["unit"]),
-                minimum_price=int(job["minimum_price"]),
-                own_completed_unit_prices=own_prices,
-                strategy=job.get("pricing_strategy", "balanced"),
-            )
+            if job.get("pricing_strategy") == "custom":
+                # A deliberately typed price, not an algorithmic one - the floor is still
+                # enforced (create_inventory_post_jobs already rejected a too-low value at
+                # authorization time; this is the same guarantee re-applied defensively in
+                # case of any drift between then and now), but there's no "evidence" to
+                # report and confidence doesn't apply the way it does for a computed price.
+                minimum_price = int(job["minimum_price"])
+                custom_price = int(job["custom_price"])
+                price = max(custom_price, minimum_price)
+                recommendation = PriceRecommendation(
+                    price=price, confidence="Custom", evidence=(), floor_applied=price > custom_price,
+                )
+            else:
+                recommendation = await self._fetch_live_price(
+                    id_item=int(job["id_item"]),
+                    quality=int(job["quality"]),
+                    unit=str(job["unit"]),
+                    minimum_price=int(job["minimum_price"]),
+                    user_id=int(job["user_id"]),
+                    strategy=job.get("pricing_strategy", "balanced"),
+                )
             payload = build_inventory_listing_payload(
                 job, quantity=int(job["quantity"]), price=recommendation.price
             )
@@ -752,12 +981,13 @@ class PersonalInventory(commands.Cog):
             # No write has happened yet, so this failure is known-safe to release.
             message = str(exc)
             await self.bot.db.mark_inventory_post_failed(int(job["id"]), message, ambiguous=False)
-            await self._notify_user(
-                int(job["user_id"]),
+            full_message = (
                 f"Inventory job #{job['id']} for **{job['item_name']}** could not prepare fresh pricing. "
-                f"Nothing was posted and its reservation was released.\n{message[:500]}",
+                f"Nothing was posted and its reservation was released.\n{message[:500]}"
             )
-            return
+            if notify:
+                await self._notify_user(int(job["user_id"]), full_message)
+            return {"success": False, "reason": "pricing_failed", "message": message}
 
         try:
             created = await self.bot.uex.post_marketplace_advertise(secret_key=secret_key, **payload)
@@ -777,23 +1007,23 @@ class PersonalInventory(commands.Cog):
                 if ambiguous
                 else "Nothing will retry automatically; the reserved quantity has been released."
             )
-            await self._notify_user(
-                int(job["user_id"]),
-                f"Inventory job #{job['id']} for **{job['item_name']}** could not be posted. {action}\n{message[:500]}",
-            )
-            return
+            full_message = f"Inventory job #{job['id']} for **{job['item_name']}** could not be posted. {action}\n{message[:500]}"
+            if notify:
+                await self._notify_user(int(job["user_id"]), full_message)
+            return {"success": False, "reason": "post_failed", "ambiguous": ambiguous, "message": message}
 
         listing_id = extract_listing_id(created)
         if listing_id is None:
             await self.bot.db.mark_inventory_post_failed(
                 int(job["id"]), "UEX returned no id_listing after POST", ambiguous=True
             )
-            await self._notify_user(
-                int(job["user_id"]),
+            full_message = (
                 f"UEX did not return a listing id for inventory job #{job['id']}. The bot stopped without retrying; "
-                f"check [{job['item_name']}]({marketplace_item_url(int(job['id_item']))}) manually.",
+                f"check [{job['item_name']}]({marketplace_item_url(int(job['id_item']))}) manually."
             )
-            return
+            if notify:
+                await self._notify_user(int(job["user_id"]), full_message)
+            return {"success": False, "reason": "no_listing_id", "message": "UEX returned no id_listing after POST"}
 
         listing_url = created.get("url") if isinstance(created, dict) else None
         date_expiration = _integer(created.get("date_expiration")) if isinstance(created, dict) else None
@@ -805,12 +1035,21 @@ class PersonalInventory(commands.Cog):
             date_expiration=date_expiration,
         )
         floor_note = " · manual floor applied" if recommendation.floor_applied else ""
-        await self._notify_user(
-            int(job["user_id"]),
-            f"Posted **{job['item_name']}** to UEX: qty **{job['quantity']}** at "
-            f"**{recommendation.price:,} UEC/{job['unit']}** · listing #{listing_id} · "
-            f"pricing confidence {recommendation.confidence.lower()}{floor_note}.",
-        )
+        if notify:
+            await self._notify_user(
+                int(job["user_id"]),
+                f"Posted **{job['item_name']}** to UEX: qty **{job['quantity']}** at "
+                f"**{recommendation.price:,} UEC/{job['unit']}** · listing #{listing_id} · "
+                f"pricing confidence {recommendation.confidence.lower()}{floor_note}.",
+            )
+        return {
+            "success": True,
+            "listing_id": listing_id,
+            "listing_url": listing_url,
+            "price": recommendation.price,
+            "confidence": recommendation.confidence,
+            "floor_applied": recommendation.floor_applied,
+        }
 
     async def _reconcile_listed_jobs(self) -> None:
         # Fifty listing reads plus at most ten due jobs' three pricing reads stays below

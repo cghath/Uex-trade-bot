@@ -27,6 +27,7 @@ from bot.uex.marketplace import (
     filter_listings_by_keyword,
     filter_listings_by_quality,
     find_item_id_by_name,
+    marketplace_item_url,
     match_traded_items,
     parse_listing_quality,
     parse_marketplace_average_rows,
@@ -711,6 +712,57 @@ class Marketplace(commands.Cog):
                 base_payload["id_item"] = id_item
 
         await interaction.response.send_modal(ListingDetailsModal(self.bot, base_payload))
+
+    @app_commands.command(name="marketplace-listing", description="Show full details for one UEX Marketplace listing by id.")
+    @app_commands.describe(listing_id="The listing id (shown when it was created, via /marketplace-search, or /inventory-post-now)")
+    async def marketplace_listing(self, interaction: discord.Interaction, listing_id: int) -> None:
+        await interaction.response.defer()
+        try:
+            rows = await self.bot.uex.get_marketplace_listings(id=listing_id, use_cache=False)
+        except UexApiError as exc:
+            await interaction.followup.send(f"UEX API error: {exc}")
+            return
+        if not rows:
+            await interaction.followup.send(
+                f"No active listing found with id **{listing_id}**. It may still be pending UEX approval, or has "
+                "expired, sold out, or been deleted."
+            )
+            return
+
+        listing = rows[0]
+        price = parse_uex_number(listing.get("price"))
+        currency = listing.get("currency", "UEC")
+        operation = (listing.get("operation") or "?").title()
+        seller = listing.get("user_username") or listing.get("user_name") or "unknown seller"
+        location = listing.get("location") or "location not listed"
+        quality = parse_listing_quality(listing.get("quality"))
+        stock = listing.get("in_stock")
+        sold_out = bool(listing.get("is_sold_out"))
+        id_item = parse_uex_number(listing.get("id_item"))
+
+        embed = discord.Embed(
+            title=str(listing.get("title") or "Untitled listing")[:256],
+            description=(str(listing.get("description") or "")[:2048]) or None,
+            color=discord.Color.teal(),
+            url=marketplace_item_url(int(id_item)) if id_item is not None else None,
+        )
+        price_text = f"{price:,.0f} {currency}/{listing.get('unit') or 'unit'}" if price is not None else "n/a"
+        embed.add_field(name="Price", value=f"{operation} · {price_text}", inline=True)
+        stock_text = "Sold out" if sold_out else (str(stock) if stock is not None else "n/a")
+        embed.add_field(name="Stock", value=stock_text, inline=True)
+        embed.add_field(name="Quality", value=f"{quality:.0f}" if quality is not None else "not set", inline=True)
+        embed.add_field(name="Seller", value=seller, inline=True)
+        embed.add_field(name="Location", value=location, inline=True)
+
+        date_approved = parse_uex_number(listing.get("date_approved"))
+        embed.add_field(name="Approved", value="Yes" if date_approved else "Pending UEX staff review", inline=True)
+
+        date_expiration = parse_uex_number(listing.get("date_expiration"))
+        if date_expiration:
+            embed.add_field(name="Expires", value=f"<t:{int(date_expiration)}:R>", inline=True)
+
+        embed.set_footer(text=f"Listing #{listing_id} · UEX Marketplace")
+        await interaction.followup.send(embed=embed)
 
     @app_commands.command(name="marketplace-delete-listing", description="Delete one of your own UEX Marketplace listings.")
     @app_commands.describe(listing_id="The listing id to delete (shown when it was created, or via /marketplace-search)")

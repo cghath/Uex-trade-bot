@@ -37,11 +37,12 @@ CATEGORIES: list[tuple[str, str, list[str]]] = [
     ("🛒 UEX Marketplace", "Search and analyze listings, or manage your own Marketplace activity.", [
         "marketplace-search", "marketplace-trending", "marketplace-movers", "marketplace-average",
         "marketplace-history", "my-negotiations", "my-favorites", "marketplace-post",
-        "marketplace-delete-listing",
+        "marketplace-listing", "marketplace-delete-listing",
     ]),
     ("🎒 Personal Inventory", "Track game-earned items, sellability, timing, and guarded automatic posts.", [
         "inventory", "inventory-add", "inventory-set-minimum", "inventory-remove",
-        "best-posting-time", "inventory-sell", "inventory-confirm-sale", "inventory-cancel-post",
+        "best-posting-time", "inventory-sell", "inventory-post-now",
+        "inventory-confirm-sale", "inventory-cancel-post",
     ]),
     ("🔥 Marketplace Intelligence", "Sellability rankings and history for all items, plus quality-matched raw-material deal scans.", [
         "liquidity-rank", "liquidity-trends", "scan-now", "scanner-status", "set-scanner-channel",

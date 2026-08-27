@@ -6,12 +6,13 @@ import ast
 from datetime import datetime, timedelta, timezone
 import inspect
 
+import aiosqlite
 from cryptography.fernet import Fernet
 import discord
 from discord.ext import commands
 import httpx
 
-from bot.cogs.personal_inventory import PersonalInventory
+from bot.cogs.personal_inventory import CustomPriceModal, PersonalInventory, PostNowView
 import bot.cogs.personal_inventory as personal_inventory_module
 from bot.db.database import Database
 from bot.main import INITIAL_COGS
@@ -40,6 +41,7 @@ def test_personal_inventory_cog_is_registered_and_exposes_its_commands():
                 "inventory-set-minimum",
                 "inventory-remove",
                 "inventory-sell",
+                "inventory-post-now",
                 "best-posting-time",
                 "inventory-confirm-sale",
                 "inventory-cancel-post",
@@ -479,5 +481,335 @@ def test_completed_deal_pricing_evidence_is_private_to_inventory_owner(tmp_path)
         assert await db.get_inventory_completed_unit_prices(
             user_id=2, id_item=77, quality=0, unit="unit"
         ) == [900.0]
+
+    asyncio.run(run())
+
+
+class _FakeResponse:
+    def __init__(self):
+        self.edits = []
+        self.messages = []
+
+    async def edit_message(self, **kwargs):
+        self.edits.append(kwargs)
+
+    async def send_message(self, *args, **kwargs):
+        self.messages.append((args, kwargs))
+
+
+class _FakeFollowup:
+    def __init__(self):
+        self.sent = []
+
+    async def send(self, *args, **kwargs):
+        self.sent.append((args, kwargs))
+
+
+class _FakeInteraction:
+    def __init__(self, user_id):
+        self.user = type("U", (), {"id": user_id})()
+        self.response = _FakeResponse()
+        self.followup = _FakeFollowup()
+
+
+def _post_now_client(tmp_path, *, advertise_response):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/marketplace_advertise"):
+            return httpx.Response(200, json=advertise_response)
+        if "marketplace_prices_averages" in request.url.path:
+            return httpx.Response(200, json={"status": "ok", "data": []})
+        if "marketplace_listings" in request.url.path:
+            return httpx.Response(200, json={"status": "ok", "data": []})
+        raise AssertionError(f"unexpected request: {request.url}")
+
+    client = UexClient(app_token="test", base_url="https://uex.test")
+    return client, handler
+
+
+async def _setup_post_now(tmp_path, *, advertise_response):
+    db = _make_db(tmp_path)
+    await db.init()
+    user_id = 777
+    await db.set_user_secret_key(user_id, "sk_test")
+    inventory_id = await db.add_inventory_item(
+        user_id=user_id, id_item=55, id_category=9, item_name="Laranite",
+        item_slug="laranite", quantity=10, quality=0, location="Area18",
+        unit="unit", minimum_price=100,
+    )
+    entry = await db.get_inventory_item(user_id, inventory_id)
+
+    client, handler = _post_now_client(tmp_path, advertise_response=advertise_response)
+    await client._client.aclose()
+    client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    bot = type("FakeBot", (), {})()
+    bot.db = db
+    bot.uex = client
+    cog = PersonalInventory.__new__(PersonalInventory)
+    cog.bot = bot
+    return db, client, cog, user_id, entry
+
+
+def test_post_now_confirm_creates_claims_and_posts_the_job_immediately(tmp_path):
+    async def run():
+        db, client, cog, user_id, entry = await _setup_post_now(
+            tmp_path,
+            advertise_response={"status": "ok", "data": {"id_listing": 4242, "url": "https://uex.test/l/4242"}},
+        )
+        try:
+            view = PostNowView(cog, user_id, entry, 10)
+            interaction = _FakeInteraction(user_id)
+
+            await view.confirm.callback(interaction)
+
+            assert view.resolved is True
+            assert all(child.disabled for child in view.children)
+            assert len(interaction.followup.sent) == 1
+            (message,), _ = interaction.followup.sent[0]
+            assert "Posted **Laranite**" in message
+            assert "listing #4242" in message
+
+            jobs = await db.list_tracked_inventory_posts()
+            assert len(jobs) == 1
+            assert jobs[0]["status"] == "listed"
+            assert jobs[0]["listing_id"] == 4242
+
+            inventory_row = await db.get_inventory_item(user_id, int(entry["id"]))
+            assert inventory_row["reserved_quantity"] == 10
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_post_now_reports_definite_rejection_without_dming_twice(tmp_path):
+    async def run():
+        db, client, cog, user_id, entry = await _setup_post_now(
+            tmp_path,
+            advertise_response={"status": "error", "message": "invalid_type", "http_code": 400},
+        )
+        try:
+            view = PostNowView(cog, user_id, entry, 10)
+            interaction = _FakeInteraction(user_id)
+
+            dmed = []
+
+            async def _fake_notify(uid, msg):
+                dmed.append((uid, msg))
+
+            cog._notify_user = _fake_notify
+
+            await view.confirm.callback(interaction)
+
+            assert dmed == []  # notify=False must suppress the usual DM
+            (message,), _ = interaction.followup.sent[0]
+            assert "rejected" in message.lower() or "not" in message.lower()
+
+            jobs = await db.list_tracked_inventory_posts()
+            assert jobs == []  # failed jobs aren't "listed", so nothing is tracked
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_post_now_view_rejects_a_non_owner_interaction(tmp_path):
+    async def run():
+        db, client, cog, user_id, entry = await _setup_post_now(
+            tmp_path, advertise_response={"status": "ok", "data": {"id_listing": 1}}
+        )
+        try:
+            view = PostNowView(cog, user_id, entry, 10)
+            interaction = _FakeInteraction(user_id + 1)
+            allowed = await view.interaction_check(interaction)
+            assert allowed is False
+            assert len(interaction.response.messages) == 1
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_pricing_strategy_check_migration_preserves_data_and_is_idempotent(tmp_path):
+    """A database created before 'custom' existed has pricing_strategy's old 3-value CHECK
+    baked into the table - SQLite can't ALTER a CHECK constraint, so this needs a real
+    rebuild. This is the highest-risk new code in this change: verify it actually preserves
+    existing rows, that a second run doesn't error or duplicate, and that 'custom' really
+    is insertable afterward."""
+    async def run():
+        db_path = tmp_path / "migration.sqlite3"
+        # Seed a real personal_inventory row first - list_tracked_inventory_posts INNER
+        # JOINs on it, so a job row with no matching inventory row would be silently
+        # excluded regardless of the migration, masking what this test is actually checking.
+        seed_db = Database(db_path, Fernet(Fernet.generate_key()))
+        await seed_db.init()
+        inventory_id = await seed_db.add_inventory_item(
+            user_id=999, id_item=1, id_category=1, item_name="Gold",
+            item_slug="gold", quantity=5, quality=0, location="Area18",
+            unit="unit", minimum_price=1000,
+        )
+
+        # Now drop back to the pre-'custom' shape by hand: same table, no custom_price
+        # column, and the old 3-value CHECK - i.e. exactly what this diff's schema looked
+        # like before today - and re-seed one job row against it.
+        async with aiosqlite.connect(db_path) as raw:
+            await raw.execute("DROP TABLE marketplace_post_jobs")
+            await raw.execute(
+                """CREATE TABLE marketplace_post_jobs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    inventory_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    quantity INTEGER NOT NULL CHECK (quantity > 0),
+                    minimum_price INTEGER NOT NULL CHECK (minimum_price > 0),
+                    pricing_strategy TEXT NOT NULL DEFAULT 'balanced' CHECK (
+                        pricing_strategy IN ('balanced', 'undercut', 'premium')
+                    ),
+                    scheduled_for TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending' CHECK (
+                        status IN ('pending', 'posting', 'listed', 'expired', 'sold',
+                                   'cancelled', 'failed', 'needs_confirmation')
+                    ),
+                    listing_id INTEGER,
+                    listing_url TEXT,
+                    posted_price INTEGER,
+                    last_known_stock INTEGER,
+                    sold_quantity INTEGER NOT NULL DEFAULT 0,
+                    deal_value REAL,
+                    deal_value_currency TEXT,
+                    date_closed INTEGER,
+                    date_expiration INTEGER,
+                    auto_relist INTEGER NOT NULL DEFAULT 1,
+                    relist_count INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+                )"""
+            )
+            await raw.execute(
+                """INSERT INTO marketplace_post_jobs
+                   (id, inventory_id, user_id, quantity, minimum_price, pricing_strategy,
+                    scheduled_for, status, listing_id, posted_price)
+                   VALUES (5, ?, 999, 3, 1500000, 'premium', '2026-08-27 00:00:00', 'listed', 4242, 1600000)""",
+                (inventory_id,),
+            )
+            await raw.commit()
+
+        db = seed_db
+        await db.init()
+
+        rows = await db.list_tracked_inventory_posts()
+        assert len(rows) == 1
+        assert rows[0]["id"] == 5
+        assert rows[0]["pricing_strategy"] == "premium"
+        assert rows[0]["listing_id"] == 4242
+        assert rows[0]["posted_price"] == 1600000
+        assert rows[0]["custom_price"] is None
+
+        # 'custom' must now actually be insertable against the rebuilt table.
+        async with db.connect() as conn:
+            await conn.execute(
+                """INSERT INTO marketplace_post_jobs
+                   (inventory_id, user_id, quantity, minimum_price, pricing_strategy,
+                    custom_price, scheduled_for, status)
+                   VALUES (?, 999, 1, 100, 'custom', 500, '2026-08-27 00:00:00', 'listed')""",
+                (inventory_id,),
+            )
+            await conn.commit()
+
+        # Running init() again (as a normal bot restart would) must be a no-op, not an error.
+        await db.init()
+        rows_after_second_init = await db.list_tracked_inventory_posts()
+        assert len(rows_after_second_init) == 2
+
+    asyncio.run(run())
+
+
+def test_create_inventory_post_jobs_rejects_custom_price_below_minimum(tmp_path):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        user_id = 88
+        inventory_id = await db.add_inventory_item(
+            user_id=user_id, id_item=1, id_category=1, item_name="Gold",
+            item_slug="gold", quantity=5, quality=0, location="Area18",
+            unit="unit", minimum_price=1000,
+        )
+        try:
+            await db.create_inventory_post_jobs(
+                user_id,
+                [{
+                    "inventory_id": inventory_id, "quantity": 5, "scheduled_for": datetime.now(timezone.utc),
+                    "auto_relist": True, "pricing_strategy": "custom", "custom_price": 500,
+                }],
+            )
+            assert False, "expected a ValueError for a below-minimum custom price"
+        except ValueError as exc:
+            assert "below" in str(exc).lower()
+
+        # A valid custom price (at or above minimum) must succeed.
+        job_ids = await db.create_inventory_post_jobs(
+            user_id,
+            [{
+                "inventory_id": inventory_id, "quantity": 5, "scheduled_for": datetime.now(timezone.utc),
+                "auto_relist": True, "pricing_strategy": "custom", "custom_price": 1234,
+            }],
+        )
+        job = await db.get_inventory_post_job(user_id, job_ids[0])
+        assert job["pricing_strategy"] == "custom"
+        assert job["custom_price"] == 1234
+
+    asyncio.run(run())
+
+
+def test_post_one_job_uses_the_custom_price_directly_not_the_algorithm(tmp_path):
+    async def run():
+        db, client, cog, user_id, entry = await _setup_post_now(
+            tmp_path,
+            advertise_response={"status": "ok", "data": {"id_listing": 777, "url": "https://uex.test/l/777"}},
+        )
+        try:
+            job_ids = await db.create_inventory_post_jobs(
+                user_id,
+                [{
+                    "inventory_id": int(entry["id"]), "quantity": 10, "scheduled_for": datetime.now(timezone.utc),
+                    "auto_relist": True, "pricing_strategy": "custom", "custom_price": 250,
+                }],
+            )
+            assert await db.claim_inventory_post_job(job_ids[0])
+            job = await db.get_inventory_post_job(user_id, job_ids[0])
+
+            result = await cog._post_one_job(job, notify=False)
+
+            assert result["success"] is True
+            assert result["price"] == 250  # exactly what was typed, not a recomputed figure
+            assert result["confidence"] == "Custom"
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_custom_price_modal_rejects_below_minimum_and_accepts_a_valid_price():
+    async def run():
+        cog = PersonalInventory.__new__(PersonalInventory)
+        entry = {"id": 1, "minimum_price": 1000}
+        view = PostNowView(cog, 42, entry, 5)
+        modal = CustomPriceModal(view)
+        modal.price_input._value = "500"
+
+        interaction = _FakeInteraction(42)
+        await modal.on_submit(interaction)
+        assert view.pricing_strategy == "balanced"  # rejected - must not have changed
+        assert view.custom_price is None
+        (message,), _ = interaction.response.messages[0]
+        assert "below your minimum" in message
+
+        modal2 = CustomPriceModal(view)
+        modal2.price_input._value = "1,750,000"
+        interaction2 = _FakeInteraction(42)
+        await modal2.on_submit(interaction2)
+        assert view.pricing_strategy == "custom"
+        assert view.custom_price == 1750000
+        assert view.choose_pricing_strategy.options[-1].default is True
 
     asyncio.run(run())

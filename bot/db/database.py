@@ -7,11 +7,14 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+import logging
 from pathlib import Path
 from typing import Any, AsyncIterator
 
 import aiosqlite
 from cryptography.fernet import Fernet, InvalidToken
+
+logger = logging.getLogger("uexbot.database")
 
 from bot.uex.marketplace import compute_liquidity_score
 from bot.uex.route_confidence import coalesce_report_count
@@ -441,8 +444,9 @@ CREATE TABLE IF NOT EXISTS marketplace_post_jobs (
     quantity INTEGER NOT NULL CHECK (quantity > 0),
     minimum_price INTEGER NOT NULL CHECK (minimum_price > 0),
     pricing_strategy TEXT NOT NULL DEFAULT 'balanced' CHECK (
-        pricing_strategy IN ('balanced', 'undercut', 'premium')
+        pricing_strategy IN ('balanced', 'undercut', 'premium', 'custom')
     ),
+    custom_price INTEGER,
     scheduled_for TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending' CHECK (
         status IN ('pending', 'posting', 'listed', 'expired', 'sold',
@@ -486,7 +490,79 @@ class Database:
             await db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_liquidity_scores_id_item ON liquidity_scores (id_item)"
             )
+            await self._migrate_pricing_strategy_check(db)
             await db.commit()
+
+    async def _migrate_pricing_strategy_check(self, db: aiosqlite.Connection) -> None:
+        """SQLite has no ALTER TABLE for CHECK constraints - adding 'custom' to
+        pricing_strategy's allowed values on a table that already exists (created before
+        this diff) needs a full rebuild, not an ADD COLUMN. Detected via the stored CREATE
+        TABLE text so this only ever runs once per database, never on a fresh one (which
+        already has 'custom' from SCHEMA) and never twice on an already-migrated one.
+        """
+        cursor = await db.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'marketplace_post_jobs'"
+        )
+        row = await cursor.fetchone()
+        if row is None or "'custom'" in row[0]:
+            return
+        await db.execute("PRAGMA foreign_keys=off")
+        await db.execute("ALTER TABLE marketplace_post_jobs RENAME TO marketplace_post_jobs_pre_custom")
+        await db.execute(
+            """CREATE TABLE marketplace_post_jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                inventory_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                quantity INTEGER NOT NULL CHECK (quantity > 0),
+                minimum_price INTEGER NOT NULL CHECK (minimum_price > 0),
+                pricing_strategy TEXT NOT NULL DEFAULT 'balanced' CHECK (
+                    pricing_strategy IN ('balanced', 'undercut', 'premium', 'custom')
+                ),
+                custom_price INTEGER,
+                scheduled_for TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending' CHECK (
+                    status IN ('pending', 'posting', 'listed', 'expired', 'sold',
+                               'cancelled', 'failed', 'needs_confirmation')
+                ),
+                listing_id INTEGER,
+                listing_url TEXT,
+                posted_price INTEGER,
+                last_known_stock INTEGER,
+                sold_quantity INTEGER NOT NULL DEFAULT 0,
+                deal_value REAL,
+                deal_value_currency TEXT,
+                date_closed INTEGER,
+                date_expiration INTEGER,
+                auto_relist INTEGER NOT NULL DEFAULT 1,
+                relist_count INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )"""
+        )
+        await db.execute(
+            """INSERT INTO marketplace_post_jobs
+               (id, inventory_id, user_id, quantity, minimum_price, pricing_strategy,
+                custom_price, scheduled_for, status, listing_id, listing_url, posted_price,
+                last_known_stock, sold_quantity, deal_value, deal_value_currency,
+                date_closed, date_expiration, auto_relist, relist_count, last_error,
+                created_at, updated_at)
+               SELECT id, inventory_id, user_id, quantity, minimum_price, pricing_strategy,
+                      custom_price, scheduled_for, status, listing_id, listing_url, posted_price,
+                      last_known_stock, sold_quantity, deal_value, deal_value_currency,
+                      date_closed, date_expiration, auto_relist, relist_count, last_error,
+                      created_at, updated_at
+               FROM marketplace_post_jobs_pre_custom"""
+        )
+        await db.execute("DROP TABLE marketplace_post_jobs_pre_custom")
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_marketplace_post_jobs_due ON marketplace_post_jobs (status, scheduled_for)"
+        )
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_marketplace_post_jobs_listing ON marketplace_post_jobs (listing_id)"
+        )
+        await db.execute("PRAGMA foreign_keys=on")
+        logger.info("Migrated marketplace_post_jobs to allow pricing_strategy='custom'")
 
     async def _run_migrations(self, db: aiosqlite.Connection) -> None:
         """Additive-only migrations for columns added to a table after it may have already
@@ -520,6 +596,7 @@ class Database:
             "ALTER TABLE terminal_data_health_state ADD COLUMN last_update_days_percentage INTEGER",
             "ALTER TABLE terminal_data_health_observations ADD COLUMN last_update_days_limit INTEGER",
             "ALTER TABLE terminal_data_health_observations ADD COLUMN last_update_days_percentage INTEGER",
+            "ALTER TABLE marketplace_post_jobs ADD COLUMN custom_price INTEGER",
         ]
         for statement in migrations:
             try:
@@ -1899,16 +1976,24 @@ class Database:
                         )
                     scheduled_for = self._utc_text(job["scheduled_for"])
                     pricing_strategy = job.get("pricing_strategy") or "balanced"
-                    if pricing_strategy not in ("balanced", "undercut", "premium"):
+                    if pricing_strategy not in ("balanced", "undercut", "premium", "custom"):
                         raise ValueError(f"invalid pricing_strategy '{pricing_strategy}'")
+                    custom_price = None
+                    if pricing_strategy == "custom":
+                        custom_price = int(job.get("custom_price") or 0)
+                        if custom_price < minimum_price:
+                            raise ValueError(
+                                f"custom price {custom_price:,} is below inventory entry #{inventory_id}'s "
+                                f"minimum of {minimum_price:,}"
+                            )
                     cursor = await db.execute(
                         """INSERT INTO marketplace_post_jobs
                            (inventory_id, user_id, quantity, minimum_price, pricing_strategy,
-                            scheduled_for, auto_relist, relist_count)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                            custom_price, scheduled_for, auto_relist, relist_count)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                         (
                             inventory_id, user_id, quantity, minimum_price, pricing_strategy,
-                            scheduled_for,
+                            custom_price, scheduled_for,
                             1 if job.get("auto_relist", True) else 0,
                             int(job.get("relist_count") or 0),
                         ),
@@ -2190,7 +2275,9 @@ class Database:
     async def get_inventory_post_job(self, user_id: int, job_id: int) -> dict[str, Any] | None:
         async with self.connect() as db:
             cursor = await db.execute(
-                """SELECT jobs.*, inventory.item_name, inventory.id_item, inventory.unit
+                """SELECT jobs.*, inventory.id_item, inventory.id_category,
+                          inventory.item_name, inventory.item_slug, inventory.quality,
+                          inventory.location, inventory.unit, inventory.notes
                    FROM marketplace_post_jobs jobs
                    JOIN personal_inventory inventory ON inventory.id = jobs.inventory_id
                    WHERE jobs.user_id = ? AND jobs.id = ?""",

@@ -54,8 +54,22 @@ class NegotiationAlerts(commands.Cog):
             return
 
         await interaction.response.defer(ephemeral=True)
+        # Enabling and successfully baselining are not the same thing - if the seed can't
+        # even fetch a negotiation list (e.g. an invalid secret key), the feature must not
+        # turn on with an empty baseline, or the first successful poll later floods every
+        # negotiation's entire prior history as if it just happened.
+        try:
+            seeded = await self._seed_baseline(interaction.user.id, secret_key)
+        except UexApiError as exc:
+            await interaction.followup.send(
+                f"Couldn't enable negotiation alerts - UEX rejected the check: {exc}\n"
+                "This usually means your linked secret key isn't valid. Check `/uex-account-status`, "
+                "re-link with `/link-uex-account` if needed, then try again.",
+                ephemeral=True,
+            )
+            return
+
         await self.bot.db.set_negotiation_alerts_enabled(interaction.user.id, True)
-        seeded = await self._seed_baseline(interaction.user.id, secret_key)
         await interaction.followup.send(
             f"Negotiation-message DMs are now **on**. Checked {seeded} existing negotiation(s) as a starting "
             f"point - only messages from here on will DM you, checked every {POLL_INTERVAL_MINUTES} min.",
@@ -64,12 +78,14 @@ class NegotiationAlerts(commands.Cog):
 
     async def _seed_baseline(self, user_id: int, secret_key: str) -> int:
         """Mark everything that already exists as seen, without notifying, so enabling this
-        doesn't dump a negotiation's entire prior history as if it just happened."""
-        try:
-            negotiations = await self.bot.uex.get_marketplace_negotiations(secret_key=secret_key)
-        except UexApiError as exc:
-            logger.warning("Failed to seed negotiation baseline for user %s: %s", user_id, exc)
-            return 0
+        doesn't dump a negotiation's entire prior history as if it just happened.
+
+        Raises UexApiError if the initial fetch fails - the caller must not enable the
+        feature on a failed seed. A per-negotiation messages fetch failing is tolerated
+        (that negotiation just won't be fully baselined), since it's a narrower miss than
+        blocking the whole enable over one flaky call.
+        """
+        negotiations = await self.bot.uex.get_marketplace_negotiations(secret_key=secret_key)
         for negotiation in negotiations:
             id_negotiation = _as_int(negotiation.get("id"))
             if id_negotiation is None:
