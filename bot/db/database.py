@@ -81,6 +81,35 @@ CREATE TABLE IF NOT EXISTS marketplace_alert_seen_listings (
     PRIMARY KEY (alert_id, listing_id)
 );
 
+-- Opt-in per-user toggle: DM me when someone else sends a new message in one of my UEX
+-- negotiations (any listing, not just ones this bot posted). Enabling seeds a baseline
+-- (negotiation_last_seen + negotiation_message_seen) from current state so existing
+-- history never floods as if it were new.
+CREATE TABLE IF NOT EXISTS negotiation_alert_settings (
+    user_id INTEGER PRIMARY KEY,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_negotiation_alert_settings_enabled
+    ON negotiation_alert_settings (enabled);
+
+-- Per (user, negotiation) high-water mark, purely an optimization: skip re-fetching a
+-- negotiation's messages when UEX's own date_modified hasn't advanced since last checked.
+CREATE TABLE IF NOT EXISTS negotiation_last_seen (
+    user_id INTEGER NOT NULL,
+    id_negotiation INTEGER NOT NULL,
+    last_date_modified INTEGER NOT NULL,
+    PRIMARY KEY (user_id, id_negotiation)
+);
+
+-- The actual notify-dedup source of truth. A message only ever needs notifying to its one
+-- non-sending party, so a bare message id (not scoped per-user) is unambiguous.
+CREATE TABLE IF NOT EXISTS negotiation_message_seen (
+    message_id INTEGER PRIMARY KEY,
+    seen_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS guild_digest_config (
     guild_id INTEGER PRIMARY KEY,
     channel_id INTEGER NOT NULL,
@@ -411,9 +440,10 @@ CREATE TABLE IF NOT EXISTS marketplace_post_jobs (
     user_id INTEGER NOT NULL,
     quantity INTEGER NOT NULL CHECK (quantity > 0),
     minimum_price INTEGER NOT NULL CHECK (minimum_price > 0),
-    pricing_strategy TEXT NOT NULL DEFAULT 'balanced',
+    pricing_strategy TEXT NOT NULL DEFAULT 'balanced' CHECK (
+        pricing_strategy IN ('balanced', 'undercut', 'premium')
+    ),
     scheduled_for TEXT NOT NULL,
-    timezone_name TEXT NOT NULL DEFAULT 'America/New_York',
     status TEXT NOT NULL DEFAULT 'pending' CHECK (
         status IN ('pending', 'posting', 'listed', 'expired', 'sold',
                    'cancelled', 'failed', 'needs_confirmation')
@@ -450,6 +480,12 @@ class Database:
         async with aiosqlite.connect(self._path) as db:
             await db.executescript(SCHEMA)
             await self._run_migrations(db)
+            # Must run after _run_migrations: on a database old enough to still need the
+            # id_item backfill above, the column (and therefore this index) doesn't exist
+            # until that migration adds it.
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_liquidity_scores_id_item ON liquidity_scores (id_item)"
+            )
             await db.commit()
 
     async def _run_migrations(self, db: aiosqlite.Connection) -> None:
@@ -1234,6 +1270,57 @@ class Database:
             )
             await db.commit()
 
+    # -- opt-in negotiation-message DM alerts --------------------------------
+
+    async def set_negotiation_alerts_enabled(self, user_id: int, enabled: bool) -> None:
+        async with self.connect() as db:
+            await db.execute(
+                """INSERT INTO negotiation_alert_settings (user_id, enabled, updated_at)
+                   VALUES (?, ?, datetime('now'))
+                   ON CONFLICT(user_id) DO UPDATE SET enabled = excluded.enabled, updated_at = excluded.updated_at""",
+                (user_id, 1 if enabled else 0),
+            )
+            await db.commit()
+
+    async def list_negotiation_alert_user_ids(self) -> list[int]:
+        async with self.connect() as db:
+            cursor = await db.execute("SELECT user_id FROM negotiation_alert_settings WHERE enabled = 1")
+            rows = await cursor.fetchall()
+            return [int(row["user_id"]) for row in rows]
+
+    async def get_negotiation_last_modified(self, user_id: int) -> dict[int, int]:
+        async with self.connect() as db:
+            cursor = await db.execute(
+                "SELECT id_negotiation, last_date_modified FROM negotiation_last_seen WHERE user_id = ?",
+                (user_id,),
+            )
+            rows = await cursor.fetchall()
+            return {int(row["id_negotiation"]): int(row["last_date_modified"]) for row in rows}
+
+    async def set_negotiation_last_modified(self, user_id: int, id_negotiation: int, date_modified: int) -> None:
+        async with self.connect() as db:
+            await db.execute(
+                """INSERT INTO negotiation_last_seen (user_id, id_negotiation, last_date_modified)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(user_id, id_negotiation) DO UPDATE SET last_date_modified = excluded.last_date_modified""",
+                (user_id, id_negotiation, date_modified),
+            )
+            await db.commit()
+
+    async def is_negotiation_message_seen(self, message_id: int) -> bool:
+        async with self.connect() as db:
+            cursor = await db.execute(
+                "SELECT 1 FROM negotiation_message_seen WHERE message_id = ?", (message_id,)
+            )
+            return await cursor.fetchone() is not None
+
+    async def mark_negotiation_message_seen(self, message_id: int) -> None:
+        async with self.connect() as db:
+            await db.execute(
+                "INSERT OR IGNORE INTO negotiation_message_seen (message_id) VALUES (?)", (message_id,)
+            )
+            await db.commit()
+
     # -- per-guild daily digest config ---------------------------------------
 
     async def set_guild_digest_config(self, *, guild_id: int, channel_id: int, hour_utc: int) -> None:
@@ -1662,7 +1749,12 @@ class Database:
                              AND jobs.status IN ('pending', 'posting', 'listed', 'needs_confirmation'))
                               AS active_job_count
                    FROM personal_inventory inventory
-                   LEFT JOIN liquidity_scores liquidity ON liquidity.id_item = inventory.id_item
+                   LEFT JOIN liquidity_scores liquidity
+                       ON liquidity.id_item = inventory.id_item
+                       AND liquidity.last_updated = (
+                           SELECT MAX(l2.last_updated) FROM liquidity_scores l2
+                           WHERE l2.id_item = inventory.id_item
+                       )
                    WHERE inventory.user_id = ?
                    ORDER BY inventory.item_name COLLATE NOCASE, inventory.quality DESC,
                             inventory.location COLLATE NOCASE, inventory.id""",
@@ -1675,7 +1767,12 @@ class Database:
             cursor = await db.execute(
                 """SELECT inventory.*, liquidity.score AS sellability_score
                    FROM personal_inventory inventory
-                   LEFT JOIN liquidity_scores liquidity ON liquidity.id_item = inventory.id_item
+                   LEFT JOIN liquidity_scores liquidity
+                       ON liquidity.id_item = inventory.id_item
+                       AND liquidity.last_updated = (
+                           SELECT MAX(l2.last_updated) FROM liquidity_scores l2
+                           WHERE l2.id_item = inventory.id_item
+                       )
                    WHERE inventory.user_id = ? AND inventory.id = ?""",
                 (user_id, inventory_id),
             )
@@ -1801,14 +1898,17 @@ class Database:
                             f"inventory entry #{inventory_id} needs a minimum price first"
                         )
                     scheduled_for = self._utc_text(job["scheduled_for"])
+                    pricing_strategy = job.get("pricing_strategy") or "balanced"
+                    if pricing_strategy not in ("balanced", "undercut", "premium"):
+                        raise ValueError(f"invalid pricing_strategy '{pricing_strategy}'")
                     cursor = await db.execute(
                         """INSERT INTO marketplace_post_jobs
-                           (inventory_id, user_id, quantity, minimum_price, scheduled_for,
-                            timezone_name, auto_relist, relist_count)
+                           (inventory_id, user_id, quantity, minimum_price, pricing_strategy,
+                            scheduled_for, auto_relist, relist_count)
                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                         (
-                            inventory_id, user_id, quantity, minimum_price, scheduled_for,
-                            job.get("timezone_name") or "America/New_York",
+                            inventory_id, user_id, quantity, minimum_price, pricing_strategy,
+                            scheduled_for,
                             1 if job.get("auto_relist", True) else 0,
                             int(job.get("relist_count") or 0),
                         ),
@@ -1995,7 +2095,7 @@ class Database:
             await db.execute(
                 """UPDATE marketplace_post_jobs
                    SET status = 'needs_confirmation', last_error = ?, updated_at = datetime('now')
-                   WHERE id = ? AND status = 'listed'""",
+                   WHERE id = ? AND status IN ('listed', 'needs_confirmation')""",
                 (reason[:1000], job_id),
             )
             await db.commit()
@@ -2040,13 +2140,13 @@ class Database:
             )
             cursor = await db.execute(
                 """INSERT INTO marketplace_post_jobs
-                   (inventory_id, user_id, quantity, minimum_price, scheduled_for,
-                    timezone_name, auto_relist, relist_count)
+                   (inventory_id, user_id, quantity, minimum_price, pricing_strategy,
+                    scheduled_for, auto_relist, relist_count)
                    VALUES (?, ?, ?, ?, ?, ?, 1, ?)""",
                 (
                     job["inventory_id"], job["user_id"], job["last_known_stock"],
-                    job["minimum_price"], self._utc_text(scheduled_for),
-                    job["timezone_name"], job["relist_count"] + 1,
+                    job["minimum_price"], job["pricing_strategy"], self._utc_text(scheduled_for),
+                    job["relist_count"] + 1,
                 ),
             )
             new_id = cursor.lastrowid
@@ -2189,6 +2289,7 @@ class Database:
                 "sold": quantity_sold,
                 "auto_relist": bool(job["auto_relist"]),
                 "relist_count": job["relist_count"] + 1,
+                "pricing_strategy": job["pricing_strategy"],
             }
 
     @staticmethod

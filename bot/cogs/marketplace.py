@@ -726,7 +726,7 @@ class Marketplace(commands.Cog):
         )
         if tracked_job:
             try:
-                listing_rows = await self.bot.uex.get_marketplace_listings(id=listing_id)
+                listing_rows = await self.bot.uex.get_marketplace_listings(id=listing_id, use_cache=False)
             except UexApiError as exc:
                 await interaction.followup.send(
                     f"UEX could not verify remaining inventory before deletion: {exc}",

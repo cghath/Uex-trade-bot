@@ -147,14 +147,24 @@ class MarketplaceAlerts(commands.Cog):
             return
 
         # Alert names normally come from the Marketplace activity autocomplete, which
-        # already persists id_item. UEX's /items endpoint requires a category and an
-        # unfiltered call returns no rows, so reuse this local index instead of making a
-        # 66-category catalog sweep on every background poll.
+        # already persists id_item. That index only covers UEX's top ~100 active-negotiation
+        # items though, and an item outside it would otherwise fall through to the unfiltered
+        # get_marketplace_listings() branch below, which the API itself caps at 100 rows -
+        # silently missing a real item's listings forever. Extend with the full item catalog
+        # (already warmed/cached elsewhere, e.g. by autocomplete) so a real id_item is found
+        # whenever possible and the higher-limit, server-filtered id_item= query can be used.
         activity = await self.bot.db.list_marketplace_item_activity()
         items = [
             {"id": row.get("id_item"), "name": row.get("item_name")}
             for row in activity
         ]
+        known_ids = {item.get("id") for item in items}
+        try:
+            catalog = await self.bot.uex.get_item_catalog()
+        except UexApiError as exc:
+            logger.warning("Full item catalog unavailable for alert keyword resolution: %s", exc)
+            catalog = []
+        items.extend(item for item in catalog if item.get("id") not in known_ids)
 
         # Group alerts by (keyword, operation) so identical watches from different users
         # share one API call instead of one per alert.

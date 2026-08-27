@@ -118,16 +118,16 @@ def test_item_catalog_loads_required_categories_once_and_deduplicates():
 def test_balanced_price_uses_matching_evidence_and_never_crosses_manual_floor():
     recommendation = recommend_balanced_price(
         listings=[
-            {"operation": "sell", "price": "1200", "currency": "UEC", "unit": "unit", "quality": 0, "is_sold_out": 0},
-            {"operation": "sell", "price": "1300", "currency": "UEC", "unit": "unit", "quality": 0, "is_sold_out": "0"},
-            {"operation": "sell", "price": "1500", "currency": "UEC", "unit": "unit", "quality": 0, "is_sold_out": "1"},
-            {"operation": "buy", "price": "1000", "currency": "UEC", "unit": "unit", "quality": 0, "is_sold_out": 0},
-            # Wrong quality tier: must not affect a Q0 stack.
+            {"operation": "sell", "price": "1200", "currency": "UEC", "unit": "unit", "quality": 500, "is_sold_out": 0},
+            {"operation": "sell", "price": "1300", "currency": "UEC", "unit": "unit", "quality": 550, "is_sold_out": "0"},
+            {"operation": "sell", "price": "1500", "currency": "UEC", "unit": "unit", "quality": 599, "is_sold_out": "1"},
+            {"operation": "buy", "price": "1000", "currency": "UEC", "unit": "unit", "quality": 500, "is_sold_out": 0},
+            # Wrong quality tier: must not affect a Q500-599 stack.
             {"operation": "sell", "price": "999999", "currency": "UEC", "unit": "unit", "quality": 950, "is_sold_out": 0},
         ],
         average_rows=[
             {
-                "quality_tier": 0,
+                "quality_tier": 2,
                 "operation": "sell",
                 "currency": "UEC",
                 "unit": "unit",
@@ -136,7 +136,7 @@ def test_balanced_price_uses_matching_evidence_and_never_crosses_manual_floor():
                 "price_avg_month": "1500",
             }
         ],
-        quality=0,
+        quality=500,
         unit="unit",
         minimum_price=1425,
     )
@@ -147,6 +147,26 @@ def test_balanced_price_uses_matching_evidence_and_never_crosses_manual_floor():
     assert recommendation.confidence == "High"
 
 
+def test_balanced_price_excludes_listings_with_unset_or_zero_quality_even_for_a_q0_target():
+    # UEX reports both "genuinely Q0" and "seller never set a quality" as the same raw 0
+    # (see parse_listing_quality's docstring), so neither can be trusted as confirmed
+    # evidence for a Q0 item. Before this fix, `parse_uex_number(...) or 0` treated a
+    # missing/zero quality as confirmed tier 0, wrongly matching listings like these.
+    recommendation = recommend_balanced_price(
+        listings=[
+            {"operation": "sell", "price": "50", "currency": "UEC", "unit": "unit", "quality": 0, "is_sold_out": 0},
+            {"operation": "sell", "price": "60", "currency": "UEC", "unit": "unit", "quality": None, "is_sold_out": 0},
+            {"operation": "buy", "price": "5", "currency": "UEC", "unit": "unit", "quality": 0, "is_sold_out": 0},
+        ],
+        average_rows=[],
+        quality=0,
+        unit="unit",
+        minimum_price=1000,
+    )
+    assert recommendation.evidence == ()
+    assert recommendation.price == 1000
+
+
 def test_balanced_price_falls_back_to_manual_floor_when_market_has_no_match():
     recommendation = recommend_balanced_price(
         listings=[], average_rows=[], quality=700, unit="scu", minimum_price=2500
@@ -154,6 +174,37 @@ def test_balanced_price_falls_back_to_manual_floor_when_market_has_no_match():
     assert recommendation.price == 2500
     assert recommendation.confidence == "Low"
     assert recommendation.evidence == ()
+
+
+def test_pricing_strategy_shifts_price_but_never_below_the_manual_floor():
+    average_rows = [
+        {
+            "quality_tier": 0,
+            "operation": "sell",
+            "currency": "UEC",
+            "unit": "unit",
+            "price_avg": "1000",
+        }
+    ]
+    balanced = recommend_balanced_price(
+        listings=[], average_rows=average_rows, quality=0, unit="unit", minimum_price=1,
+    )
+    undercut = recommend_balanced_price(
+        listings=[], average_rows=average_rows, quality=0, unit="unit", minimum_price=1,
+        strategy="undercut",
+    )
+    premium = recommend_balanced_price(
+        listings=[], average_rows=average_rows, quality=0, unit="unit", minimum_price=1,
+        strategy="premium",
+    )
+    assert undercut.price < balanced.price < premium.price
+
+    floored = recommend_balanced_price(
+        listings=[], average_rows=average_rows, quality=0, unit="unit", minimum_price=999,
+        strategy="undercut",
+    )
+    assert floored.price == 999
+    assert floored.floor_applied is True
 
 
 def test_auto_listing_payload_is_catalogued_uec_sell_only_and_expires_in_48_hours():

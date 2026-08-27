@@ -52,6 +52,7 @@ _ENDPOINT_CACHE_TTL = {
     "marketplace_prices_history": 3600,
     "marketplace_prices_averages": 3600,
     "marketplace_prices_averages_all": 3600,
+    "marketplace_listings": 60,
 }
 
 # UEX status strings that specifically mean "the secret_key is missing/wrong/not allowed",
@@ -402,11 +403,15 @@ class UexClient:
 
     # -- marketplace (player-to-player, separate from commodity/terminal trading) --
 
-    async def get_marketplace_listings(self, **filters: Any) -> list[dict[str, Any]]:
+    async def get_marketplace_listings(self, *, use_cache: bool = True, **filters: Any) -> list[dict[str, Any]]:
         """Active public marketplace listings. No auth required. Filters: id, slug,
         username, id_item, operation ('buy'|'sell'). Without id_item, capped at 100 rows.
+
+        Cached briefly (60s) by default. Pass use_cache=False for a stock/status decision
+        that can't tolerate a stale read - e.g. deciding how much of a tracked listing sold
+        before cancelling or relisting it.
         """
-        return await self._get("marketplace_listings", params=filters) or []
+        return await self._get("marketplace_listings", params=filters, use_cache=use_cache) or []
 
     async def get_marketplace_trends(self, **filters: Any) -> list[dict[str, Any]]:
         """Marketplace items with the most negotiation activity right now. No auth required."""
@@ -416,6 +421,18 @@ class UexClient:
         """The calling player's own marketplace deals (as buyer or seller)."""
         return await self._get(
             "marketplace_negotiations", params=filters, require_secret=True, secret_key=secret_key, use_cache=False
+        ) or []
+
+    async def get_marketplace_negotiations_messages(
+        self, secret_key: str | None = None, **filters: Any
+    ) -> list[dict[str, Any]]:
+        """Chat messages within one negotiation. Filters: id_negotiation or hash (one required)."""
+        return await self._get(
+            "marketplace_negotiations_messages",
+            params=filters,
+            require_secret=True,
+            secret_key=secret_key,
+            use_cache=False,
         ) or []
 
     async def post_marketplace_advertise(self, secret_key: str, **fields: Any) -> dict[str, Any]:

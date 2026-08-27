@@ -29,7 +29,7 @@ CATEGORIES: list[tuple[str, str, list[str]]] = [
     ("🔔 Alerts & Notifications", "Price targets, Marketplace matches, restocks, and DM delivery checks.", [
         "alert-add", "alert-list", "alert-remove",
         "marketplace-alert-add", "marketplace-alert-list", "marketplace-alert-remove",
-        "stock-alert-add", "stock-alert-list", "stock-alert-remove", "test-dm",
+        "stock-alert-add", "stock-alert-list", "stock-alert-remove", "negotiation-alerts", "test-dm",
     ]),
     ("🧾 Trade Log & Leaderboard", "Your personal ledger, UEX-recorded history, and server standings.", [
         "trade-log-add", "trade-log", "uex-trades", "leaderboard",

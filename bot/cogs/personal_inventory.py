@@ -15,6 +15,8 @@ from discord.ext import commands, tasks
 from bot.uex.exceptions import UexApiError
 from bot.uex.inventory import (
     DEFAULT_MARKETPLACE_TIMEZONE,
+    _flag,
+    _integer,
     build_inventory_listing_payload,
     extract_listing_id,
     next_posting_time,
@@ -31,6 +33,19 @@ INVENTORY_PAGE_SIZE = 10
 SELECTION_PAGE_SIZE = 25
 MAX_BATCH_POSTS = 10
 MAX_TRACKED_POSTS_PER_CYCLE = 50
+RECONCILE_FETCH_BATCH_SIZE = 10
+
+# Fresh listings may not be visible via GET /marketplace_listings yet if UEX staff approval
+# is still pending. This grace period is an unvalidated guess, not an observed figure - we
+# have no confirmed data on real approval latency. Tune once that's actually been observed;
+# until then, treat the exact duration as a placeholder rather than a load-bearing constant.
+LISTING_APPROVAL_GRACE_SECONDS = 7200
+
+PRICING_STRATEGY_LABELS = {
+    "balanced": "at the recommended price",
+    "undercut": "10% below the recommended price",
+    "premium": "10% above the recommended price",
+}
 
 ITEM_UNIT_CHOICES = [
     app_commands.Choice(name=name.title(), value=name)
@@ -221,7 +236,6 @@ class InventorySelectionView(discord.ui.View):
                     "inventory_id": int(row["id"]),
                     "quantity": available,
                     "scheduled_for": scheduled_for,
-                    "timezone_name": DEFAULT_MARKETPLACE_TIMEZONE,
                     "auto_relist": True,
                 }
             )
@@ -243,7 +257,8 @@ class InventorySelectionView(discord.ui.View):
         embed.set_footer(
             text=(
                 "This one confirmation authorizes posting and guarded 48-hour repricing/relisting until sold or cancelled. "
-                "Ambiguous UEX results stop and ask you; they are never retried blindly."
+                "Ambiguous UEX results stop and ask you; they are never retried blindly. "
+                "Pick a pricing strategy below before authorizing."
             )
         )
         await interaction.followup.send(
@@ -260,6 +275,7 @@ class AuthorizeScheduleView(discord.ui.View):
         self.author_id = author_id
         self.specs = specs
         self.resolved = False
+        self.pricing_strategy = "balanced"
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.author_id:
@@ -272,10 +288,29 @@ class AuthorizeScheduleView(discord.ui.View):
         for child in self.children:
             child.disabled = True
 
+    @discord.ui.select(
+        placeholder="Pricing strategy: at the recommended price (default)",
+        options=[
+            discord.SelectOption(label="Post at the recommended price", value="balanced", default=True),
+            discord.SelectOption(label="Post 10% below the recommended price", value="undercut"),
+            discord.SelectOption(label="Post 10% above the recommended price", value="premium"),
+        ],
+    )
+    async def choose_pricing_strategy(self, interaction: discord.Interaction, select: discord.ui.Select) -> None:
+        self.pricing_strategy = select.values[0]
+        for option in select.options:
+            option.default = option.value == self.pricing_strategy
+        await interaction.response.edit_message(
+            content=f"Pricing strategy: **{PRICING_STRATEGY_LABELS[self.pricing_strategy]}** shown above.",
+            view=self,
+        )
+
     @discord.ui.button(label="Authorize scheduled posts", style=discord.ButtonStyle.green)
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         self.disable()
         await interaction.response.edit_message(view=self)
+        for spec in self.specs:
+            spec["pricing_strategy"] = self.pricing_strategy
         try:
             job_ids = await self.cog.bot.db.create_inventory_post_jobs(self.author_id, self.specs)
         except ValueError as exc:
@@ -549,18 +584,27 @@ class PersonalInventory(commands.Cog):
             window = recommend_posting_window(timing_rows, id_item=int(entry["id_item"])) if entry else None
             if window:
                 scheduled_for = next_posting_time(window)
-                new_jobs = await self.bot.db.create_inventory_post_jobs(
-                    interaction.user.id,
-                    [
-                        {
-                            "inventory_id": result["inventory_id"],
-                            "quantity": result["unsold"],
-                            "scheduled_for": scheduled_for,
-                            "auto_relist": True,
-                            "relist_count": result["relist_count"],
-                        }
-                    ],
-                )
+                try:
+                    new_jobs = await self.bot.db.create_inventory_post_jobs(
+                        interaction.user.id,
+                        [
+                            {
+                                "inventory_id": result["inventory_id"],
+                                "quantity": result["unsold"],
+                                "scheduled_for": scheduled_for,
+                                "auto_relist": True,
+                                "relist_count": result["relist_count"],
+                                "pricing_strategy": result["pricing_strategy"],
+                            }
+                        ],
+                    )
+                except ValueError as exc:
+                    await interaction.response.send_message(
+                        f"Recorded **{result['sold']}** sold for job #{job_id}, but the **{result['unsold']}** "
+                        f"unsold remainder could not be rescheduled: {exc}. Use `/inventory-sell` to reschedule it manually.",
+                        ephemeral=True,
+                    )
+                    return
                 relist_note = f" The **{result['unsold']}** unsold item(s) were safely rescheduled as job #{new_jobs[0]}."
         await interaction.response.send_message(
             f"Recorded **{result['sold']}** sold for job #{job_id}.{relist_note}", ephemeral=True
@@ -591,7 +635,7 @@ class PersonalInventory(commands.Cog):
                 return
             await interaction.response.defer(ephemeral=True)
             try:
-                listing_rows = await self.bot.uex.get_marketplace_listings(id=int(job["listing_id"]))
+                listing_rows = await self.bot.uex.get_marketplace_listings(id=int(job["listing_id"]), use_cache=False)
                 if not listing_rows:
                     await self.bot.db.mark_inventory_post_needs_confirmation(
                         job_id, "Cancellation requested, but UEX no longer exposed final stock"
@@ -610,11 +654,9 @@ class PersonalInventory(commands.Cog):
                         ephemeral=True,
                     )
                     return
-                outcome = await self.bot.db.record_inventory_listing_stock(
-                    job_id,
-                    in_stock=current_stock,
-                    sold_out=_flag(listing_rows[0].get("is_sold_out")),
-                )
+                sold_out = _flag(listing_rows[0].get("is_sold_out"))
+                # Delete on UEX before touching any local state: if this raises, nothing below
+                # has run yet, so there's nothing to leave inconsistent or roll back.
                 await self.bot.uex.delete_marketplace_listing(
                     listing_id=int(job["listing_id"]), secret_key=secret_key
                 )
@@ -624,14 +666,20 @@ class PersonalInventory(commands.Cog):
                     ephemeral=True,
                 )
                 return
+            outcome = await self.bot.db.record_inventory_listing_stock(
+                job_id,
+                in_stock=current_stock,
+                sold_out=sold_out,
+            )
             released = await self.bot.db.cancel_tracked_inventory_listing(
                 interaction.user.id, int(job["listing_id"])
             )
-            stock_note = (
-                " Unsold inventory was released."
-                if released
-                else " UEX had already reported the listing sold out, so no stock was released."
-            )
+            if outcome and outcome["sold_delta"]:
+                stock_note = f" UEX reports **{outcome['sold_delta']}** sold since the last check; the rest was released."
+            elif released:
+                stock_note = " Unsold inventory was released."
+            else:
+                stock_note = " UEX had already reported the listing sold out, so no stock was released."
             await interaction.followup.send(
                 f"Deleted UEX listing #{job['listing_id']} and cancelled job #{job_id}.{stock_note}",
                 ephemeral=True,
@@ -695,6 +743,7 @@ class PersonalInventory(commands.Cog):
                 unit=str(job["unit"]),
                 minimum_price=int(job["minimum_price"]),
                 own_completed_unit_prices=own_prices,
+                strategy=job.get("pricing_strategy", "balanced"),
             )
             payload = build_inventory_listing_payload(
                 job, quantity=int(job["quantity"]), price=recommendation.price
@@ -765,21 +814,27 @@ class PersonalInventory(commands.Cog):
 
     async def _reconcile_listed_jobs(self) -> None:
         # Fifty listing reads plus at most ten due jobs' three pricing reads stays below
-        # UEX's 120-request/minute ceiling even before normal endpoint caching helps.
+        # UEX's 120-request/minute ceiling even before normal endpoint caching helps. Reads
+        # are gathered concurrently in bounded batches; the per-job writes/notifications
+        # below stay sequential since they're cheap local DB calls, not network round trips.
         jobs = await self.bot.db.list_tracked_inventory_posts(limit=MAX_TRACKED_POSTS_PER_CYCLE)
         if not jobs:
             return
-        timing_rows = await self.bot.db.get_marketplace_timing_rows()
-        negotiations_by_user: dict[int, dict[int, dict[str, Any]]] = {}
-        for user_id in {int(job["user_id"]) for job in jobs}:
+
+        async def _fetch_negotiations(user_id: int) -> tuple[int, list[dict[str, Any]]]:
             secret = await self.bot.db.get_user_secret_key(user_id)
             if not secret:
-                negotiations_by_user[user_id] = {}
-                continue
+                return user_id, []
             try:
-                rows = await self.bot.uex.get_marketplace_negotiations(secret_key=secret)
+                return user_id, await self.bot.uex.get_marketplace_negotiations(secret_key=secret)
             except UexApiError:
-                rows = []
+                return user_id, []
+
+        negotiation_results = await asyncio.gather(
+            *(_fetch_negotiations(user_id) for user_id in {int(job["user_id"]) for job in jobs})
+        )
+        negotiations_by_user: dict[int, dict[int, dict[str, Any]]] = {}
+        for user_id, rows in negotiation_results:
             best_by_listing: dict[int, dict[str, Any]] = {}
             for row in rows:
                 listing_id = _integer(row.get("id_listing"))
@@ -798,6 +853,22 @@ class PersonalInventory(commands.Cog):
                     best_by_listing[listing_id] = row
             negotiations_by_user[user_id] = best_by_listing
 
+        async def _fetch_listing(listing_id: int) -> tuple[int, list[dict[str, Any]] | None]:
+            try:
+                rows = await self.bot.uex.get_marketplace_listings(id=listing_id, use_cache=False)
+                return listing_id, rows
+            except UexApiError:
+                return listing_id, None
+
+        listing_ids = sorted({int(job["listing_id"]) for job in jobs if job["status"] != "sold"})
+        listings_by_id: dict[int, list[dict[str, Any]] | None] = {}
+        for start in range(0, len(listing_ids), RECONCILE_FETCH_BATCH_SIZE):
+            batch = listing_ids[start : start + RECONCILE_FETCH_BATCH_SIZE]
+            for listing_id, rows in await asyncio.gather(*(_fetch_listing(lid) for lid in batch)):
+                listings_by_id[listing_id] = rows
+
+        timing_rows: list[dict[str, Any]] | None = None
+
         for job in jobs:
             job_id = int(job["id"])
             listing_id = int(job["listing_id"])
@@ -813,16 +884,15 @@ class PersonalInventory(commands.Cog):
                 )
             if job["status"] == "sold":
                 continue
-            try:
-                rows = await self.bot.uex.get_marketplace_listings(id=listing_id)
-            except UexApiError:
+            rows = listings_by_id.get(listing_id)
+            if rows is None:
                 continue
             if not rows:
                 # Fresh listings may be awaiting UEX approval and therefore not visible yet.
-                # Give that path two hours; after that, disappearance is ambiguous (sold,
+                # Give that path a grace period; after that, disappearance is ambiguous (sold,
                 # deleted, or expired) and must never trigger a blind duplicate relist.
                 updated = _parse_db_time(job.get("updated_at"))
-                if updated and (datetime.now(timezone.utc) - updated).total_seconds() < 7200:
+                if updated and (datetime.now(timezone.utc) - updated).total_seconds() < LISTING_APPROVAL_GRACE_SECONDS:
                     continue
                 await self.bot.db.mark_inventory_post_needs_confirmation(
                     job_id, "Listing disappeared from UEX without a final remaining-stock value"
@@ -852,6 +922,8 @@ class PersonalInventory(commands.Cog):
 
             expiration = _integer(listing.get("date_expiration")) or _integer(job.get("date_expiration"))
             if expiration and time.time() >= expiration and stock is not None and stock > 0:
+                if timing_rows is None:
+                    timing_rows = await self.bot.db.get_marketplace_timing_rows()
                 window = recommend_posting_window(timing_rows, id_item=int(job["id_item"]))
                 if not window:
                     continue
@@ -871,17 +943,6 @@ class PersonalInventory(commands.Cog):
             await user.send(message)
         except (discord.HTTPException, AttributeError):
             logger.warning("Could not DM inventory update to user %s", user_id)
-
-
-def _integer(raw: Any) -> int | None:
-    value = parse_uex_number(raw)
-    return int(value) if value is not None else None
-
-
-def _flag(raw: Any) -> bool:
-    if isinstance(raw, str):
-        return raw.strip().lower() in {"1", "true", "yes"}
-    return bool(raw)
 
 
 def _parse_db_time(raw: Any) -> datetime | None:

@@ -129,16 +129,26 @@ class Prices(commands.Cog):
         top_sell = best_sell_locations(rows, limit=MAX_FIELD_ROWS)
         top_buy = best_buy_locations(rows, limit=MAX_FIELD_ROWS)
         status_lookup = await self._get_status_lookup()
-        health_notes = await self._get_health_notes(
-            [r.get("terminal_name", "") for r in [*top_sell, *top_buy]]
-        )
+
+        terminal_ids = [
+            terminal_id
+            for r in [*top_sell, *top_buy]
+            if (terminal_id := _positive_int(r.get("id_terminal"))) is not None
+        ]
+        health_rows = await self.bot.db.get_terminal_data_health_by_ids(terminal_ids)
+        health_notes = {
+            terminal_id: note
+            for terminal_id, row in health_rows.items()
+            if (note := format_health_note(classify_terminal_health(row)))
+        }
 
         if top_sell:
             lines = []
             for r in top_sell:
                 label = resolve_status_label(status_lookup, "sell", r.get("status_sell"))
                 label_text = f" · {label}" if label else ""
-                health_text = f" · {health_notes[r['terminal_name'].casefold()]}" if r['terminal_name'].casefold() in health_notes else ""
+                health_note = health_notes.get(_positive_int(r.get("id_terminal")))
+                health_text = f" · {health_note}" if health_note else ""
                 lines.append(f"**{r['terminal_name']}** — {r['price_sell']:.2f} aUEC/unit{label_text}{health_text}")
             embed.add_field(name="Best places to SELL", value="\n".join(lines), inline=False)
         if top_buy:
@@ -146,7 +156,8 @@ class Prices(commands.Cog):
             for r in top_buy:
                 label = resolve_status_label(status_lookup, "buy", r.get("status_buy"))
                 label_text = f" · {label}" if label else ""
-                health_text = f" · {health_notes[r['terminal_name'].casefold()]}" if r['terminal_name'].casefold() in health_notes else ""
+                health_note = health_notes.get(_positive_int(r.get("id_terminal")))
+                health_text = f" · {health_note}" if health_note else ""
                 lines.append(f"**{r['terminal_name']}** — {r['price_buy']:.2f} aUEC/unit{label_text}{health_text}")
             embed.add_field(name="Best places to BUY", value="\n".join(lines), inline=False)
 

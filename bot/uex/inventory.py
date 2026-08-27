@@ -9,10 +9,15 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
 from zoneinfo import ZoneInfo
 
-from bot.uex.marketplace import parse_uex_number, quality_to_tier
+from bot.uex.marketplace import parse_listing_quality, parse_uex_number, quality_to_tier
 
 DEFAULT_MARKETPLACE_TIMEZONE = "America/New_York"
 POSTING_WINDOW_HOURS = 4
+
+# 'balanced' matches the schema default (no schema change needed for the common case).
+# 'undercut'/'premium' let a user deliberately price off the recommended figure by a
+# fixed spread rather than accepting the raw evidence-weighted number as-is.
+PRICING_STRATEGY_MULTIPLIERS = {"balanced": 1.0, "undercut": 0.9, "premium": 1.1}
 
 
 @dataclass(frozen=True)
@@ -178,12 +183,18 @@ def recommend_balanced_price(
     unit: str,
     minimum_price: int,
     own_completed_unit_prices: Iterable[float] = (),
+    strategy: str = "balanced",
 ) -> PriceRecommendation:
     """Recommend a robust balanced UEC sell price for one exact item/quality/unit.
 
     Sold-out rows are useful evidence about an asking price that cleared its available
     stock, but are deliberately weaker than the user's own known single-unit completed
     deals and are never described as verified transaction prices.
+
+    ``strategy`` shifts the evidence-based price by a fixed spread ('undercut'/'premium',
+    see PRICING_STRATEGY_MULTIPLIERS) before the manual floor is applied, so a deliberate
+    undercut can never be pushed back out below the user's minimum. It has no effect when
+    there's no evidence at all (the price is just the floor in that case).
     """
     target_tier = quality_to_tier(quality)
     target_unit = unit.strip().lower()
@@ -196,8 +207,8 @@ def recommend_balanced_price(
             continue
         if (listing.get("unit") or "unit").strip().lower() != target_unit:
             continue
-        listing_quality = parse_uex_number(listing.get("quality")) or 0
-        if quality_to_tier(listing_quality) != target_tier:
+        listing_quality = parse_listing_quality(listing.get("quality"))
+        if listing_quality is None or quality_to_tier(listing_quality) != target_tier:
             continue
         price = parse_uex_number(listing.get("price"))
         if price is None or price <= 0:
@@ -246,7 +257,8 @@ def recommend_balanced_price(
 
     if weighted_signals:
         raw_price = _weighted_median((value, weight) for value, weight, _ in weighted_signals)
-        rounded = _round_market_price(raw_price)
+        multiplier = PRICING_STRATEGY_MULTIPLIERS.get(strategy, 1.0)
+        rounded = _round_market_price(raw_price * multiplier)
     else:
         rounded = minimum_price
 
