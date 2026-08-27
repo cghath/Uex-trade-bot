@@ -77,9 +77,9 @@ def test_data_health_and_fuel_snapshots_are_change_only(tmp_path):
         }
         assert await db.record_terminal_data_health_snapshot([health]) == (1, 1)
         assert await db.record_terminal_data_health_snapshot([health]) == (0, 1)
-        stored_health = await db.get_terminal_data_health(["Port Tressler"])
-        assert stored_health["port tressler"]["last_update_days_limit"] == 2
-        assert stored_health["port tressler"]["last_update_days_percentage"] == 50
+        stored_health = await db.get_terminal_data_health_by_ids([9])
+        assert stored_health[9]["last_update_days_limit"] == 2
+        assert stored_health[9]["last_update_days_percentage"] == 50
         assert await db.record_fuel_price_snapshot([fuel]) == (1, 1)
         assert await db.record_fuel_price_snapshot([fuel]) == (0, 1)
 
@@ -203,10 +203,10 @@ def test_terminal_health_lookup_and_classification_keep_freshness_separate_from_
                 },
             ]
         )
-        rows = await db.get_terminal_data_health(["port tressler", "AREA18 TDD"])
+        rows = await db.get_terminal_data_health_by_ids([9, 10])
 
-        stale = classify_terminal_health(rows["port tressler"])
-        limited = classify_terminal_health(rows["area18 tdd"])
+        stale = classify_terminal_health(rows[9])
+        limited = classify_terminal_health(rows[10])
         assert stale.status == "stale"
         assert "14d old" in format_health_note(stale)
         assert limited.status == "limited"

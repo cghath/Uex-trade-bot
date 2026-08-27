@@ -40,10 +40,13 @@ def classify_terminal_health(row: dict[str, Any]) -> TerminalDataHealth:
     ttl_known = ttl_remaining is not None or (age is not None and age_limit is not None)
     if ttl_remaining is not None:
         expired = ttl_remaining <= 0
+        is_recent = ttl_remaining <= 50
     elif age is not None and age_limit is not None:
         expired = age >= age_limit
+        is_recent = age >= age_limit * 0.5
     else:
         expired = False
+        is_recent = False
 
     if not ttl_known:
         status = "unknown"
@@ -51,7 +54,7 @@ def classify_terminal_health(row: dict[str, Any]) -> TerminalDataHealth:
         status = "stale"
     elif coverage is not None and coverage < 50:
         status = "limited"
-    elif (ttl_remaining is not None and ttl_remaining < 50) or (age is not None and age > 0):
+    elif is_recent:
         status = "recent"
     else:
         status = "fresh"

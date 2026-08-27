@@ -42,6 +42,13 @@ RECONCILE_FETCH_BATCH_SIZE = 10
 # until then, treat the exact duration as a placeholder rather than a load-bearing constant.
 LISTING_APPROVAL_GRACE_SECONDS = 7200
 
+# No-interest discount cycle: a listing that's been up this long with unsold stock and no
+# open negotiation gets relisted 5% below its current price, compounding each cycle, down
+# to (never below) its minimum_price. UEX's own listings run 60 days, so this is the bot
+# proactively deleting and reposting well before natural expiration - not waiting on UEX.
+RELIST_DISCOUNT_INTERVAL_HOURS = 48
+RELIST_DISCOUNT_RATE = 0.95
+
 PRICING_STRATEGY_LABELS = {
     "balanced": "at the recommended price",
     "undercut": "10% below the recommended price",
@@ -451,6 +458,84 @@ class PostNowView(discord.ui.View):
         await interaction.followup.send("Cancelled - nothing was posted.", ephemeral=True)
 
 
+class LowerFloorModal(discord.ui.Modal, title="Set a new minimum price"):
+    price_input: discord.ui.TextInput = discord.ui.TextInput(
+        label="New minimum price per unit (UEC)",
+        placeholder="e.g. 800000",
+        style=discord.TextStyle.short,
+        max_length=15,
+    )
+
+    def __init__(self, view: "FloorReachedView") -> None:
+        super().__init__()
+        self.view = view
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        raw = self.price_input.value.strip().replace(",", "")
+        try:
+            price = int(raw)
+        except ValueError:
+            await interaction.response.send_message("That's not a whole number - try again.", ephemeral=True)
+            return
+        if price <= 0:
+            await interaction.response.send_message("Minimum price must be a positive whole number.", ephemeral=True)
+            return
+        ok = await self.view.cog.bot.db.resume_auto_relist_with_new_floor(
+            self.view.job_id, self.view.user_id, price
+        )
+        self.view.disable()
+        content = (
+            f"New minimum set to **{price:,}** UEC/unit. Automatic discounting has resumed."
+            if ok
+            else "Couldn't update that job - it may no longer be listed."
+        )
+        await interaction.response.edit_message(content=content, embed=None, view=self.view)
+
+
+class FloorReachedView(discord.ui.View):
+    """Sent as a plain DM (not an interaction followup), so it can arrive whenever the 48h
+    discount cycle actually hits the floor - possibly hours after any command was run."""
+
+    def __init__(self, cog: "PersonalInventory", job: dict[str, Any]) -> None:
+        super().__init__(timeout=None)
+        self.cog = cog
+        self.job_id = int(job["id"])
+        self.user_id = int(job["user_id"])
+
+    def disable(self) -> None:
+        for child in self.children:
+            child.disabled = True
+
+    @discord.ui.button(label="Keep at floor", style=discord.ButtonStyle.secondary)
+    async def keep(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        self.disable()
+        await interaction.response.edit_message(
+            content="Left as-is at the floor price. Automatic discounting stays off for this listing.",
+            embed=None, view=self,
+        )
+
+    @discord.ui.button(label="Lower floor & resume", style=discord.ButtonStyle.primary)
+    async def lower_floor(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await interaction.response.send_modal(LowerFloorModal(self))
+
+    @discord.ui.button(label="Cancel listing", style=discord.ButtonStyle.danger)
+    async def cancel_listing(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        self.disable()
+        await interaction.response.edit_message(view=self)
+        secret_key = await self.cog.bot.db.get_user_secret_key(self.user_id)
+        if not secret_key:
+            await interaction.followup.send(
+                "Relink your UEX account before cancelling the public listing.", ephemeral=True
+            )
+            return
+        job = await self.cog.bot.db.get_inventory_post_job(self.user_id, self.job_id)
+        if not job or job["status"] != "listed":
+            await interaction.followup.send("This job is no longer active.", ephemeral=True)
+            return
+        _, message = await self.cog._cancel_listed_job(job, secret_key=secret_key)
+        await interaction.followup.send(message, ephemeral=True)
+
+
 def _format_post_now_result(job_id: int, job: dict[str, Any], result: dict[str, Any]) -> str:
     if result["success"]:
         floor_note = " · raised to your minimum" if result["floor_applied"] else ""
@@ -684,13 +769,20 @@ class PersonalInventory(commands.Cog):
         # Live, same-source preview: this calls the exact function _post_one_job will call
         # moments later (not a cached/offline estimate), so what you see here is what
         # actually posts unless the market genuinely moves in the next few seconds.
-        recommendation = await self._fetch_live_price(
-            id_item=int(entry["id_item"]),
-            quality=int(entry["quality"]),
-            unit=str(entry["unit"]),
-            minimum_price=int(entry["minimum_price"]),
-            user_id=interaction.user.id,
-        )
+        try:
+            recommendation = await self._fetch_live_price(
+                id_item=int(entry["id_item"]),
+                quality=int(entry["quality"]),
+                unit=str(entry["unit"]),
+                minimum_price=int(entry["minimum_price"]),
+                user_id=interaction.user.id,
+            )
+        except UexApiError as exc:
+            await interaction.followup.send(
+                f"UEX could not price #{inventory_id} right now: {exc}\nNothing was posted - try again shortly.",
+                ephemeral=True,
+            )
+            return
         embed = discord.Embed(
             title="Post now?",
             description=(
@@ -834,61 +926,78 @@ class PersonalInventory(commands.Cog):
                 )
                 return
             await interaction.response.defer(ephemeral=True)
-            try:
-                listing_rows = await self.bot.uex.get_marketplace_listings(id=int(job["listing_id"]), use_cache=False)
-                if not listing_rows:
-                    await self.bot.db.mark_inventory_post_needs_confirmation(
-                        job_id, "Cancellation requested, but UEX no longer exposed final stock"
-                    )
-                    await interaction.followup.send(
-                        "UEX no longer exposes that listing, so the bot cannot safely decide what remains. "
-                        f"Nothing was relisted or released; resolve job #{job_id} with `/inventory-confirm-sale`.",
-                        ephemeral=True,
-                    )
-                    return
-                current_stock = _integer(listing_rows[0].get("in_stock"))
-                if current_stock is None:
-                    await interaction.followup.send(
-                        "UEX returned the listing without a remaining-stock value. Cancellation stopped so your "
-                        "local inventory is not guessed; try again later or use `/inventory-confirm-sale` if it disappears.",
-                        ephemeral=True,
-                    )
-                    return
-                sold_out = _flag(listing_rows[0].get("is_sold_out"))
-                # Delete on UEX before touching any local state: if this raises, nothing below
-                # has run yet, so there's nothing to leave inconsistent or roll back.
-                await self.bot.uex.delete_marketplace_listing(
-                    listing_id=int(job["listing_id"]), secret_key=secret_key
-                )
-            except UexApiError as exc:
-                await interaction.followup.send(
-                    f"UEX could not confirm deletion of listing #{job['listing_id']}: {exc}",
-                    ephemeral=True,
-                )
-                return
-            outcome = await self.bot.db.record_inventory_listing_stock(
-                job_id,
-                in_stock=current_stock,
-                sold_out=sold_out,
-            )
-            released = await self.bot.db.cancel_tracked_inventory_listing(
-                interaction.user.id, int(job["listing_id"])
-            )
-            if outcome and outcome["sold_delta"]:
-                stock_note = f" UEX reports **{outcome['sold_delta']}** sold since the last check; the rest was released."
-            elif released:
-                stock_note = " Unsold inventory was released."
-            else:
-                stock_note = " UEX had already reported the listing sold out, so no stock was released."
-            await interaction.followup.send(
-                f"Deleted UEX listing #{job['listing_id']} and cancelled job #{job_id}.{stock_note}",
-                ephemeral=True,
-            )
+            _, message = await self._cancel_listed_job(job, secret_key=secret_key)
+            await interaction.followup.send(message, ephemeral=True)
             return
         await interaction.response.send_message(
             f"Job #{job_id} is **{job['status']}** and has no cancellable public or pending post.",
             ephemeral=True,
         )
+
+    @app_commands.command(
+        name="inventory-resolve-floor",
+        description="Resend a working prompt for a listing paused at its floor price with no interest.",
+    )
+    @app_commands.describe(job_id="Posting job number shown in the original floor-reached DM")
+    async def inventory_resolve_floor(self, interaction: discord.Interaction, job_id: int) -> None:
+        job = await self.bot.db.get_inventory_post_job(interaction.user.id, job_id)
+        if not job:
+            await interaction.response.send_message(f"Inventory job #{job_id} was not found.", ephemeral=True)
+            return
+        if job["status"] != "listed" or job.get("auto_relist"):
+            await interaction.response.send_message(
+                f"Job #{job_id} isn't currently paused waiting on a decision - nothing to resolve.",
+                ephemeral=True,
+            )
+            return
+        embed = discord.Embed(
+            title="No interest at your floor price",
+            description=(
+                f"**{job['item_name']}** (job #{job_id}) is still paused at your minimum of "
+                f"**{int(job['minimum_price']):,} UEC/unit** with no negotiation. Pick one below."
+            ),
+            color=discord.Color.orange(),
+        )
+        await interaction.response.send_message(embed=embed, view=FloorReachedView(self, job), ephemeral=True)
+
+    async def _cancel_listed_job(self, job: dict[str, Any], *, secret_key: str) -> tuple[bool, str]:
+        """Delete a listed job's public UEX listing and release local state. Shared by
+        /inventory-cancel-post and the floor-reached DM prompt's Cancel button."""
+        job_id = int(job["id"])
+        try:
+            listing_rows = await self.bot.uex.get_marketplace_listings(id=int(job["listing_id"]), use_cache=False)
+            if not listing_rows:
+                await self.bot.db.mark_inventory_post_needs_confirmation(
+                    job_id, "Cancellation requested, but UEX no longer exposed final stock"
+                )
+                return False, (
+                    "UEX no longer exposes that listing, so the bot cannot safely decide what remains. "
+                    f"Nothing was relisted or released; resolve job #{job_id} with `/inventory-confirm-sale`."
+                )
+            current_stock = _integer(listing_rows[0].get("in_stock"))
+            if current_stock is None:
+                return False, (
+                    "UEX returned the listing without a remaining-stock value. Cancellation stopped so your "
+                    "local inventory is not guessed; try again later or use `/inventory-confirm-sale` if it disappears."
+                )
+            sold_out = _flag(listing_rows[0].get("is_sold_out"))
+            # Delete on UEX before touching any local state: if this raises, nothing below
+            # has run yet, so there's nothing to leave inconsistent or roll back.
+            await self.bot.uex.delete_marketplace_listing(
+                listing_id=int(job["listing_id"]), secret_key=secret_key
+            )
+        except UexApiError as exc:
+            return False, f"UEX could not confirm deletion of listing #{job['listing_id']}: {exc}"
+
+        outcome = await self.bot.db.record_inventory_listing_stock(job_id, in_stock=current_stock, sold_out=sold_out)
+        released = await self.bot.db.cancel_tracked_inventory_listing(int(job["user_id"]), int(job["listing_id"]))
+        if outcome and outcome["sold_delta"]:
+            stock_note = f" UEX reports **{outcome['sold_delta']}** sold since the last check; the rest was released."
+        elif released:
+            stock_note = " Unsold inventory was released."
+        else:
+            stock_note = " UEX had already reported the listing sold out, so no stock was released."
+        return True, f"Deleted UEX listing #{job['listing_id']} and cancelled job #{job_id}.{stock_note}"
 
     @tasks.loop(minutes=POST_CHECK_MINUTES)
     async def process_inventory_posts(self) -> None:
@@ -1159,6 +1268,57 @@ class PersonalInventory(commands.Cog):
                 if outcome and outcome["status"] == "sold":
                     continue
 
+            if job.get("auto_relist") and stock is not None and stock > 0:
+                posted_at = _parse_db_time(job.get("created_at"))
+                price_age_hours = (
+                    (datetime.now(timezone.utc) - posted_at).total_seconds() / 3600 if posted_at else 0
+                )
+                if price_age_hours >= RELIST_DISCOUNT_INTERVAL_HOURS:
+                    has_open_negotiation = negotiation is not None and not _integer(negotiation.get("date_closed"))
+                    if has_open_negotiation:
+                        await self.bot.db.disable_auto_relist(job_id)
+                        await self._notify_user(
+                            int(job["user_id"]),
+                            f"A negotiation has opened on listing #{listing_id} for **{job['item_name']}** - "
+                            "automatic discounting and relisting has paused so it isn't disrupted.",
+                        )
+                        continue
+                    current_price = int(job.get("posted_price") or job["minimum_price"])
+                    minimum_price = int(job["minimum_price"])
+                    if current_price <= minimum_price:
+                        await self.bot.db.disable_auto_relist(job_id)
+                        await self._send_floor_reached_prompt(job)
+                        continue
+                    secret_key = await self.bot.db.get_user_secret_key(int(job["user_id"]))
+                    if not secret_key:
+                        continue  # can't safely delete the old listing; retry next cycle
+                    # Unlike the natural-60-day-expiration path below, this listing is still
+                    # genuinely live on UEX - it must be explicitly deleted, not just replaced
+                    # locally, or the item ends up double-listed at two different prices.
+                    try:
+                        await self.bot.uex.delete_marketplace_listing(
+                            listing_id=listing_id, secret_key=secret_key
+                        )
+                    except UexApiError as exc:
+                        logger.warning(
+                            "Could not delete listing %s for the 48h no-interest relist: %s", listing_id, exc
+                        )
+                        continue
+                    next_price = max(round(current_price * RELIST_DISCOUNT_RATE), minimum_price)
+                    new_id = await self.bot.db.expire_and_relist_inventory_post(
+                        job_id, datetime.now(timezone.utc), price_override=next_price
+                    )
+                    if new_id:
+                        new_job = await self.bot.db.get_inventory_post_job(int(job["user_id"]), new_id)
+                        if new_job and await self.bot.db.claim_inventory_post_job(new_id):
+                            await self._post_one_job(new_job, notify=False)
+                        await self._notify_user(
+                            int(job["user_id"]),
+                            f"No interest yet on **{job['item_name']}** after {RELIST_DISCOUNT_INTERVAL_HOURS}h - "
+                            f"relisted as job #{new_id} at **{next_price:,}** UEC/unit (was {current_price:,}).",
+                        )
+                    continue
+
             expiration = _integer(listing.get("date_expiration")) or _integer(job.get("date_expiration"))
             if expiration and time.time() >= expiration and stock is not None and stock > 0:
                 if timing_rows is None:
@@ -1182,6 +1342,28 @@ class PersonalInventory(commands.Cog):
             await user.send(message)
         except (discord.HTTPException, AttributeError):
             logger.warning("Could not DM inventory update to user %s", user_id)
+
+    async def _send_floor_reached_prompt(self, job: dict[str, Any]) -> None:
+        user_id = int(job["user_id"])
+        try:
+            user = self.bot.get_user(user_id) or await self.bot.fetch_user(user_id)
+        except (discord.HTTPException, AttributeError):
+            logger.warning("Could not DM floor-reached prompt to user %s", user_id)
+            return
+        embed = discord.Embed(
+            title="No interest at your floor price",
+            description=(
+                f"**{job['item_name']}** (job #{job['id']}) has been relisted down to your minimum of "
+                f"**{int(job['minimum_price']):,} UEC/unit** with no negotiation yet. Automatic discounting "
+                "has stopped - pick one below.\n\nIf these buttons ever stop responding (e.g. after a bot "
+                f"restart), run `/inventory-resolve-floor job_id:{job['id']}` for a fresh working prompt."
+            ),
+            color=discord.Color.orange(),
+        )
+        try:
+            await user.send(embed=embed, view=FloorReachedView(self, job))
+        except discord.HTTPException:
+            logger.warning("Could not DM floor-reached prompt to user %s", user_id)
 
 
 def _parse_db_time(raw: Any) -> datetime | None:

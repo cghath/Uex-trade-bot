@@ -42,7 +42,7 @@ CATEGORIES: list[tuple[str, str, list[str]]] = [
     ("🎒 Personal Inventory", "Track game-earned items, sellability, timing, and guarded automatic posts.", [
         "inventory", "inventory-add", "inventory-set-minimum", "inventory-remove",
         "best-posting-time", "inventory-sell", "inventory-post-now",
-        "inventory-confirm-sale", "inventory-cancel-post",
+        "inventory-confirm-sale", "inventory-cancel-post", "inventory-resolve-floor",
     ]),
     ("🔥 Marketplace Intelligence", "Sellability rankings and history for all items, plus quality-matched raw-material deal scans.", [
         "liquidity-rank", "liquidity-trends", "scan-now", "scanner-status", "set-scanner-channel",

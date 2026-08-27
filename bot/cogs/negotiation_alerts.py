@@ -128,12 +128,15 @@ class NegotiationAlerts(commands.Cog):
                     continue
                 if date_modified <= last_modified.get(id_negotiation, 0):
                     continue
-                await self._check_negotiation(user_id, secret_key, negotiation, id_negotiation)
-                await self.bot.db.set_negotiation_last_modified(user_id, id_negotiation, date_modified)
+                if await self._check_negotiation(user_id, secret_key, negotiation, id_negotiation):
+                    await self.bot.db.set_negotiation_last_modified(user_id, id_negotiation, date_modified)
 
     async def _check_negotiation(
         self, user_id: int, secret_key: str, negotiation: dict[str, Any], id_negotiation: int
-    ) -> None:
+    ) -> bool:
+        """Returns False, without advancing the caller's checkpoint, when the messages fetch
+        itself failed - otherwise a transient error would look identical to "nothing new
+        happened" and whatever arrived right around the failure would never be checked again."""
         is_advertiser = bool(negotiation.get("is_listing_advertiser"))
         own_username = negotiation.get("advertiser_username") if is_advertiser else negotiation.get("client_username")
         try:
@@ -142,7 +145,7 @@ class NegotiationAlerts(commands.Cog):
             )
         except UexApiError as exc:
             logger.warning("Failed to fetch messages for negotiation %s: %s", id_negotiation, exc)
-            return
+            return False
         for row in sorted(messages, key=lambda r: _as_int(r.get("date_added")) or 0):
             message_id = _as_int(row.get("id"))
             text = row.get("message")
@@ -159,6 +162,7 @@ class NegotiationAlerts(commands.Cog):
                 f"from **{sender}**: {text}",
             )
             await self.bot.db.mark_negotiation_message_seen(message_id)
+        return True
 
     async def _notify_user(self, user_id: int, message: str) -> None:
         try:

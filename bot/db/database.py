@@ -764,23 +764,6 @@ class Database:
             await db.commit()
         return (len(changed), len(normalized))
 
-    async def get_terminal_data_health(
-        self, terminal_names: list[str], data_type: str = "commodity"
-    ) -> dict[str, dict[str, Any]]:
-        """Legacy name lookup for non-route callers without terminal ids."""
-        names = sorted({name.strip().casefold() for name in terminal_names if name and name.strip()})
-        if not names:
-            return {}
-        placeholders = ",".join("?" for _ in names)
-        async with self.connect() as db:
-            cursor = await db.execute(
-                f"""SELECT * FROM terminal_data_health_state
-                    WHERE data_type = ? AND lower(terminal_name) IN ({placeholders})""",
-                [data_type, *names],
-            )
-            rows = await cursor.fetchall()
-            return {row["terminal_name"].casefold(): dict(row) for row in rows}
-
     async def get_terminal_data_health_by_ids(
         self, terminal_ids: list[int], data_type: str = "commodity"
     ) -> dict[int, dict[str, Any]]:
@@ -800,26 +783,6 @@ class Database:
             )
             rows = await cursor.fetchall()
             return {int(row["id_terminal"]): dict(row) for row in rows}
-
-    async def get_route_market_signals(
-        self, commodity_ids: list[int], terminal_names: list[str]
-    ) -> dict[tuple[int, str], dict[str, Any]]:
-        """Current report-depth and volatility signals for route-confidence scoring."""
-        ids = sorted(set(commodity_ids))
-        names = sorted({name.casefold() for name in terminal_names if name})
-        if not ids or not names:
-            return {}
-        id_marks = ",".join("?" for _ in ids)
-        name_marks = ",".join("?" for _ in names)
-        async with self.connect() as db:
-            cursor = await db.execute(
-                f"""SELECT * FROM terminal_market_state
-                    WHERE id_commodity IN ({id_marks})
-                      AND lower(terminal_name) IN ({name_marks})""",
-                [*ids, *names],
-            )
-            rows = await cursor.fetchall()
-            return {(row["id_commodity"], row["terminal_name"].casefold()): dict(row) for row in rows}
 
     async def get_route_market_signals_by_ids(
         self, commodity_terminal_ids: list[tuple[int, int]]
@@ -872,35 +835,6 @@ class Database:
                    LEFT JOIN commodity_reference AS c ON c.id_commodity = m.id_commodity"""
             )
             return [dict(row) for row in await cursor.fetchall()]
-
-    async def get_route_terminal_references(
-        self, commodity_ids: list[int], terminal_names: list[str]
-    ) -> dict[tuple[int, str], dict[str, Any]]:
-        """Resolve route terminal metadata through market-state terminal ids.
-
-        Reference names can include role prefixes that route names omit, so joining by the
-        shared UEX terminal id is materially safer than matching terminal_reference names.
-        """
-        ids = sorted(set(commodity_ids))
-        names = sorted({name.casefold() for name in terminal_names if name})
-        if not ids or not names:
-            return {}
-        id_marks = ",".join("?" for _ in ids)
-        name_marks = ",".join("?" for _ in names)
-        async with self.connect() as db:
-            cursor = await db.execute(
-                f"""SELECT m.id_commodity, m.terminal_name AS market_terminal_name, r.*
-                    FROM terminal_market_state AS m
-                    JOIN terminal_reference AS r ON r.id_terminal = m.id_terminal
-                    WHERE m.id_commodity IN ({id_marks})
-                      AND lower(m.terminal_name) IN ({name_marks})""",
-                [*ids, *names],
-            )
-            rows = await cursor.fetchall()
-            return {
-                (row["id_commodity"], row["market_terminal_name"].casefold()): dict(row)
-                for row in rows
-            }
 
     async def get_terminal_references_by_ids(
         self, terminal_ids: list[int]
@@ -2204,9 +2138,16 @@ class Database:
             await db.commit()
 
     async def expire_and_relist_inventory_post(
-        self, job_id: int, scheduled_for: datetime
+        self, job_id: int, scheduled_for: datetime, *, price_override: int | None = None
     ) -> int | None:
-        """Replace an expired job only when UEX most recently gave explicit stock."""
+        """Replace an expired job only when UEX most recently gave explicit stock.
+
+        By default the replacement keeps the old job's pricing_strategy/custom_price
+        unchanged. Passing price_override (used by the 48h no-interest discount cycle in
+        PersonalInventory._reconcile_listed_jobs) instead pins the replacement to that exact
+        price via pricing_strategy='custom', regardless of what strategy produced the
+        original price - there's no "recommended price" for "5% off what didn't sell."
+        """
         async with self.connect() as db:
             await db.execute("BEGIN IMMEDIATE")
             cursor = await db.execute(
@@ -2223,15 +2164,17 @@ class Database:
                    SET status = 'expired', updated_at = datetime('now') WHERE id = ?""",
                 (job_id,),
             )
+            pricing_strategy = "custom" if price_override is not None else job["pricing_strategy"]
+            custom_price = price_override if price_override is not None else job["custom_price"]
             cursor = await db.execute(
                 """INSERT INTO marketplace_post_jobs
-                   (inventory_id, user_id, quantity, minimum_price, pricing_strategy,
+                   (inventory_id, user_id, quantity, minimum_price, pricing_strategy, custom_price,
                     scheduled_for, auto_relist, relist_count)
-                   VALUES (?, ?, ?, ?, ?, ?, 1, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)""",
                 (
                     job["inventory_id"], job["user_id"], job["last_known_stock"],
-                    job["minimum_price"], job["pricing_strategy"], self._utc_text(scheduled_for),
-                    job["relist_count"] + 1,
+                    job["minimum_price"], pricing_strategy, custom_price,
+                    self._utc_text(scheduled_for), job["relist_count"] + 1,
                 ),
             )
             new_id = cursor.lastrowid
@@ -2239,6 +2182,32 @@ class Database:
             # the replacement job without changing reserved_quantity.
             await db.commit()
             return new_id
+
+    async def disable_auto_relist(self, job_id: int) -> None:
+        """Pause the automatic relist/discount cycle for one job - used once it either hits
+        an open negotiation or its own minimum_price with still no interest, both of which
+        hand the decision back to the user rather than the bot continuing to act on its own."""
+        async with self.connect() as db:
+            await db.execute(
+                "UPDATE marketplace_post_jobs SET auto_relist = 0, updated_at = datetime('now') WHERE id = ?",
+                (job_id,),
+            )
+            await db.commit()
+
+    async def resume_auto_relist_with_new_floor(
+        self, job_id: int, user_id: int, new_minimum_price: int
+    ) -> bool:
+        """User-authorized response to a floor-reached prompt: lower the floor and let the
+        48h discount cycle continue from here."""
+        async with self.connect() as db:
+            cursor = await db.execute(
+                """UPDATE marketplace_post_jobs
+                   SET minimum_price = ?, auto_relist = 1, updated_at = datetime('now')
+                   WHERE id = ? AND user_id = ? AND status = 'listed'""",
+                (new_minimum_price, job_id, user_id),
+            )
+            await db.commit()
+            return cursor.rowcount > 0
 
     async def cancel_tracked_inventory_listing(self, user_id: int, listing_id: int) -> bool:
         async with self.connect() as db:

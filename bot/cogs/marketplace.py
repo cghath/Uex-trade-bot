@@ -776,6 +776,8 @@ class Marketplace(commands.Cog):
         tracked_job = await self.bot.db.get_inventory_post_job_by_listing(
             interaction.user.id, listing_id
         )
+        current_stock = None
+        sold_out = False
         if tracked_job:
             try:
                 listing_rows = await self.bot.uex.get_marketplace_listings(id=listing_id, use_cache=False)
@@ -805,17 +807,19 @@ class Marketplace(commands.Cog):
                     ephemeral=True,
                 )
                 return
-            await self.bot.db.record_inventory_listing_stock(
-                int(tracked_job["id"]),
-                in_stock=int(current_stock),
-                sold_out=_uex_flag(listing_rows[0].get("is_sold_out")),
-            )
+            sold_out = _uex_flag(listing_rows[0].get("is_sold_out"))
+        # Delete on UEX before touching any local state: if this raises, nothing below has
+        # run yet, so there's nothing to leave inconsistent or roll back.
         try:
             await self.bot.uex.delete_marketplace_listing(listing_id=listing_id, secret_key=secret_key)
         except UexApiError as exc:
             await interaction.followup.send(f"Couldn't delete listing #{listing_id}: {exc}", ephemeral=True)
             return
 
+        if tracked_job:
+            await self.bot.db.record_inventory_listing_stock(
+                int(tracked_job["id"]), in_stock=int(current_stock), sold_out=sold_out
+            )
         released = await self.bot.db.cancel_tracked_inventory_listing(interaction.user.id, listing_id)
         inventory_note = " Its unsold reserved inventory is available again." if released else ""
         await interaction.followup.send(

@@ -12,7 +12,13 @@ import discord
 from discord.ext import commands
 import httpx
 
-from bot.cogs.personal_inventory import CustomPriceModal, PersonalInventory, PostNowView
+from bot.cogs.personal_inventory import (
+    CustomPriceModal,
+    FloorReachedView,
+    LowerFloorModal,
+    PersonalInventory,
+    PostNowView,
+)
 import bot.cogs.personal_inventory as personal_inventory_module
 from bot.db.database import Database
 from bot.main import INITIAL_COGS
@@ -45,6 +51,7 @@ def test_personal_inventory_cog_is_registered_and_exposes_its_commands():
                 "best-posting-time",
                 "inventory-confirm-sale",
                 "inventory-cancel-post",
+                "inventory-resolve-floor",
             }
         finally:
             await bot.remove_cog("PersonalInventory")
@@ -485,10 +492,109 @@ def test_completed_deal_pricing_evidence_is_private_to_inventory_owner(tmp_path)
     asyncio.run(run())
 
 
+def test_expire_and_relist_carries_custom_price_forward(tmp_path):
+    """Without this, a relisted 'custom' job keeps pricing_strategy='custom' but gets
+    custom_price=NULL, and _post_one_job's custom branch does int(job["custom_price"]) -
+    a straight crash the next time the background loop tries to post it."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        inventory_id = await db.add_inventory_item(
+            user_id=1, id_item=2, id_category=3, item_name="Custom-priced item",
+            item_slug=None, quantity=5, quality=0, location="Orison", minimum_price=1000,
+        )
+        job_id = (await db.create_inventory_post_jobs(
+            1,
+            [{
+                "inventory_id": inventory_id, "quantity": 5,
+                "scheduled_for": datetime.now(timezone.utc),
+                "pricing_strategy": "custom", "custom_price": 1500,
+            }],
+        ))[0]
+        assert await db.claim_inventory_post_job(job_id)
+        await db.mark_inventory_post_listed(
+            job_id, listing_id=555, listing_url=None, posted_price=1500, date_expiration=None
+        )
+        await db.record_inventory_listing_stock(job_id, in_stock=3, sold_out=False)
+
+        new_id = await db.expire_and_relist_inventory_post(job_id, datetime.now(timezone.utc))
+        assert new_id is not None
+        new_job = await db.get_inventory_post_job(1, new_id)
+        assert new_job["pricing_strategy"] == "custom"
+        assert new_job["custom_price"] == 1500
+
+    asyncio.run(run())
+
+
+def test_expire_and_relist_with_price_override_uses_custom_pricing(tmp_path):
+    """price_override must win regardless of the original strategy - there's no 'recommended
+    price' for '5% off what didn't sell', so the replacement always becomes an exact custom
+    price rather than trying to recompute a live one."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        inventory_id = await db.add_inventory_item(
+            user_id=1, id_item=2, id_category=3, item_name="Balanced-strategy item",
+            item_slug=None, quantity=5, quality=0, location="Orison", minimum_price=1000,
+        )
+        job_id = (await db.create_inventory_post_jobs(
+            1,
+            [{"inventory_id": inventory_id, "quantity": 5, "scheduled_for": datetime.now(timezone.utc),
+              "pricing_strategy": "balanced"}],
+        ))[0]
+        assert await db.claim_inventory_post_job(job_id)
+        await db.mark_inventory_post_listed(
+            job_id, listing_id=1, listing_url=None, posted_price=2000, date_expiration=None
+        )
+        await db.record_inventory_listing_stock(job_id, in_stock=3, sold_out=False)
+
+        new_id = await db.expire_and_relist_inventory_post(
+            job_id, datetime.now(timezone.utc), price_override=1900
+        )
+        new_job = await db.get_inventory_post_job(1, new_id)
+        assert new_job["pricing_strategy"] == "custom"
+        assert new_job["custom_price"] == 1900
+
+    asyncio.run(run())
+
+
+def test_disable_and_resume_auto_relist(tmp_path):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        inventory_id = await db.add_inventory_item(
+            user_id=1, id_item=2, id_category=3, item_name="Floor test item",
+            item_slug=None, quantity=5, quality=0, location="Orison", minimum_price=1000,
+        )
+        job_id = (await db.create_inventory_post_jobs(
+            1,
+            [{"inventory_id": inventory_id, "quantity": 5, "scheduled_for": datetime.now(timezone.utc)}],
+        ))[0]
+        assert await db.claim_inventory_post_job(job_id)
+        await db.mark_inventory_post_listed(
+            job_id, listing_id=1, listing_url=None, posted_price=1000, date_expiration=None
+        )
+
+        await db.disable_auto_relist(job_id)
+        assert (await db.get_inventory_post_job(1, job_id))["auto_relist"] == 0
+
+        # Wrong user must not be able to resume someone else's job.
+        assert await db.resume_auto_relist_with_new_floor(job_id, 999, 800) is False
+        assert await db.resume_auto_relist_with_new_floor(job_id, 1, 800) is True
+        job = await db.get_inventory_post_job(1, job_id)
+        assert job["auto_relist"] == 1
+        assert job["minimum_price"] == 800
+
+    asyncio.run(run())
+
+
 class _FakeResponse:
     def __init__(self):
         self.edits = []
         self.messages = []
+
+    async def defer(self, **kwargs):
+        pass
 
     async def edit_message(self, **kwargs):
         self.edits.append(kwargs)
@@ -811,5 +917,295 @@ def test_custom_price_modal_rejects_below_minimum_and_accepts_a_valid_price():
         assert view.pricing_strategy == "custom"
         assert view.custom_price == 1750000
         assert view.choose_pricing_strategy.options[-1].default is True
+
+
+def test_post_now_reports_a_friendly_error_when_live_pricing_fails(tmp_path):
+    """Without a try/except here, a transient UEX failure while building the preview
+    propagates out of the command callback uncaught instead of a normal ephemeral reply."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        user_id = 888
+        await db.set_user_secret_key(user_id, "sk_test")
+        inventory_id = await db.add_inventory_item(
+            user_id=user_id, id_item=55, id_category=9, item_name="Laranite",
+            item_slug="laranite", quantity=10, quality=0, location="Area18",
+            unit="unit", minimum_price=100,
+        )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if "marketplace_listings" in request.url.path:
+                return httpx.Response(500, json={"status": "error", "message": "boom", "http_code": 500})
+            if "marketplace_prices_averages" in request.url.path:
+                return httpx.Response(200, json={"status": "ok", "data": []})
+            raise AssertionError(f"unexpected request: {request.url}")
+
+        client = UexClient(app_token="test", base_url="https://uex.test")
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+        bot = type("FakeBot", (), {})()
+        bot.db = db
+        bot.uex = client
+        cog = PersonalInventory.__new__(PersonalInventory)
+        cog.bot = bot
+        interaction = _FakeInteraction(user_id)
+
+        try:
+            await cog.inventory_post_now.callback(cog, interaction, inventory_id)
+
+            assert interaction.followup.sent, "should reply with a friendly error, not raise"
+            (message,), kwargs = interaction.followup.sent[0]
+            assert "could not price" in message.lower()
+            assert kwargs.get("ephemeral") is True
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+async def _setup_reconcile(
+    tmp_path, *, hours_old, minimum_price=850_000, posted_price=1_000_000,
+    negotiation_rows=None,
+):
+    db = _make_db(tmp_path)
+    await db.init()
+    user_id = 777
+    await db.set_user_secret_key(user_id, "sk_test")
+    inventory_id = await db.add_inventory_item(
+        user_id=user_id, id_item=55, id_category=9, item_name="Laranite",
+        item_slug="laranite", quantity=10, quality=0, location="Area18",
+        unit="unit", minimum_price=minimum_price,
+    )
+    job_id = (await db.create_inventory_post_jobs(
+        user_id,
+        [{"inventory_id": inventory_id, "quantity": 10, "scheduled_for": datetime.now(timezone.utc)}],
+    ))[0]
+    assert await db.claim_inventory_post_job(job_id)
+    await db.mark_inventory_post_listed(
+        job_id, listing_id=555, listing_url=None, posted_price=posted_price, date_expiration=None
+    )
+    async with db.connect() as sqlite:
+        await sqlite.execute(
+            "UPDATE marketplace_post_jobs SET created_at = datetime('now', ?) WHERE id = ?",
+            (f"-{hours_old} hours", job_id),
+        )
+        await sqlite.commit()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "DELETE" and "marketplace_listings" in request.url.path:
+            return httpx.Response(200, json={"status": "ok"})
+        if request.url.path.endswith("/marketplace_advertise"):
+            return httpx.Response(200, json={"status": "ok", "data": {"id_listing": 556, "url": "https://uex.test/l/556"}})
+        if "marketplace_prices_averages" in request.url.path:
+            return httpx.Response(200, json={"status": "ok", "data": []})
+        if "marketplace_listings" in request.url.path:
+            return httpx.Response(200, json={"status": "ok", "data": [
+                {"id": 555, "in_stock": 10, "is_sold_out": False},
+            ]})
+        if "marketplace_negotiations" in request.url.path:
+            return httpx.Response(200, json={"status": "ok", "data": negotiation_rows or []})
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    client = UexClient(app_token="test", base_url="https://uex.test")
+    await client._client.aclose()
+    client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    bot = type("FakeBot", (), {})()
+    bot.db = db
+    bot.uex = client
+    cog = PersonalInventory.__new__(PersonalInventory)
+    cog.bot = bot
+
+    dmed: list[tuple[int, str]] = []
+
+    async def _fake_notify(uid, msg):
+        dmed.append((uid, msg))
+
+    cog._notify_user = _fake_notify
+
+    return db, client, cog, user_id, job_id, dmed
+
+
+def test_reconcile_discounts_an_unsold_listing_after_48_hours(tmp_path):
+    async def run():
+        db, client, cog, user_id, job_id, dmed = await _setup_reconcile(
+            tmp_path, hours_old=49, minimum_price=850_000, posted_price=1_000_000,
+        )
+        try:
+            await cog._reconcile_listed_jobs()
+
+            old_job = await db.get_inventory_post_job(user_id, job_id)
+            assert old_job["status"] == "expired"
+
+            jobs = await db.list_tracked_inventory_posts()
+            assert len(jobs) == 1
+            new_job = jobs[0]
+            assert new_job["pricing_strategy"] == "custom"
+            assert new_job["custom_price"] == 950_000  # 1,000,000 * 0.95
+            assert new_job["auto_relist"] == 1
+            assert len(dmed) == 1
+            assert "950,000" in dmed[0][1]
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_reconcile_clamps_the_discount_at_the_minimum_price(tmp_path):
+    async def run():
+        db, client, cog, user_id, job_id, dmed = await _setup_reconcile(
+            tmp_path, hours_old=49, minimum_price=850_000, posted_price=857_375,
+        )
+        try:
+            await cog._reconcile_listed_jobs()
+            jobs = await db.list_tracked_inventory_posts()
+            assert jobs[0]["custom_price"] == 850_000  # would-be 814,506 clamped to the floor
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_reconcile_stops_and_prompts_at_the_floor_with_no_interest(tmp_path):
+    async def run():
+        db, client, cog, user_id, job_id, dmed = await _setup_reconcile(
+            tmp_path, hours_old=49, minimum_price=850_000, posted_price=850_000,
+        )
+        sent_views = []
+
+        class _FakeDiscordUser:
+            async def send(self, *args, **kwargs):
+                sent_views.append((args, kwargs))
+
+        cog.bot.get_user = lambda uid: _FakeDiscordUser()
+        try:
+            await cog._reconcile_listed_jobs()
+
+            job = await db.get_inventory_post_job(user_id, job_id)
+            assert job["status"] == "listed"  # never touched - already at the floor
+            assert job["auto_relist"] == 0
+            assert dmed == []  # this path uses the interactive DM, not plain _notify_user
+            assert len(sent_views) == 1
+            _, kwargs = sent_views[0]
+            assert "view" in kwargs
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_reconcile_pauses_without_discounting_when_a_negotiation_is_open(tmp_path):
+    async def run():
+        db, client, cog, user_id, job_id, dmed = await _setup_reconcile(
+            tmp_path, hours_old=49, minimum_price=850_000, posted_price=1_000_000,
+            negotiation_rows=[{
+                "id": 9, "id_listing": 555, "date_modified": 100, "date_closed": None,
+                "listing_title": "Laranite",
+            }],
+        )
+        try:
+            await cog._reconcile_listed_jobs()
+
+            job = await db.get_inventory_post_job(user_id, job_id)
+            assert job["status"] == "listed"
+            assert job["posted_price"] == 1_000_000  # untouched, not discounted
+            assert job["auto_relist"] == 0
+            assert len(dmed) == 1
+            assert "negotiation" in dmed[0][1].lower()
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_reconcile_does_nothing_before_48_hours(tmp_path):
+    async def run():
+        db, client, cog, user_id, job_id, dmed = await _setup_reconcile(
+            tmp_path, hours_old=1, minimum_price=850_000, posted_price=1_000_000,
+        )
+        try:
+            await cog._reconcile_listed_jobs()
+
+            job = await db.get_inventory_post_job(user_id, job_id)
+            assert job["status"] == "listed"
+            assert job["auto_relist"] == 1
+            assert dmed == []
+            assert len(await db.list_tracked_inventory_posts()) == 1
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_lower_floor_modal_rejects_invalid_input_and_resumes_on_success(tmp_path):
+    async def run():
+        db, client, cog, user_id, job_id, dmed = await _setup_reconcile(
+            tmp_path, hours_old=49, minimum_price=850_000, posted_price=850_000,
+        )
+        try:
+            await db.disable_auto_relist(job_id)
+            job = await db.get_inventory_post_job(user_id, job_id)
+            view = FloorReachedView(cog, job)
+            modal = LowerFloorModal(view)
+            modal.price_input._value = "not a number"
+
+            interaction = _FakeInteraction(user_id)
+            await modal.on_submit(interaction)
+            (message,), _ = interaction.response.messages[0]
+            assert "not a whole number" in message
+
+            modal2 = LowerFloorModal(view)
+            modal2.price_input._value = "700,000"
+            interaction2 = _FakeInteraction(user_id)
+            await modal2.on_submit(interaction2)
+            assert interaction2.response.edits, "should edit the original DM message, not send a new one"
+
+            updated = await db.get_inventory_post_job(user_id, job_id)
+            assert updated["minimum_price"] == 700_000
+            assert updated["auto_relist"] == 1
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_resolve_floor_command_resends_a_working_prompt_for_a_paused_job(tmp_path):
+    async def run():
+        db, client, cog, user_id, job_id, dmed = await _setup_reconcile(
+            tmp_path, hours_old=49, minimum_price=850_000, posted_price=850_000,
+        )
+        try:
+            await db.disable_auto_relist(job_id)
+            interaction = _FakeInteraction(user_id)
+
+            await cog.inventory_resolve_floor.callback(cog, interaction, job_id)
+
+            _, kwargs = interaction.response.messages[0]
+            assert kwargs.get("ephemeral") is True
+            assert isinstance(kwargs.get("view"), FloorReachedView)
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_resolve_floor_command_rejects_a_job_that_is_not_paused(tmp_path):
+    async def run():
+        db, client, cog, user_id, job_id, dmed = await _setup_reconcile(
+            tmp_path, hours_old=1, minimum_price=850_000, posted_price=1_000_000,
+        )
+        try:
+            interaction = _FakeInteraction(user_id)
+
+            await cog.inventory_resolve_floor.callback(cog, interaction, job_id)
+
+            (message,), kwargs = interaction.response.messages[0]
+            assert "isn't currently paused" in message
+            assert kwargs.get("ephemeral") is True
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
 
     asyncio.run(run())

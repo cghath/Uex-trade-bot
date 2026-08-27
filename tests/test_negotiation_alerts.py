@@ -257,3 +257,56 @@ def test_enable_seeds_baseline_then_only_new_messages_from_the_other_party_notif
             await client.aclose()
 
     asyncio.run(run())
+
+
+def test_a_failed_messages_fetch_does_not_advance_the_checkpoint_and_is_retried(tmp_path):
+    """The exact bug this guards: if the per-negotiation messages fetch fails on one poll
+    while date_modified has already advanced, the checkpoint must not advance to match it -
+    otherwise the next poll sees date_modified <= checkpoint, skips the negotiation entirely,
+    and whatever arrived during the failure is never checked again."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        user_id = 900
+        await db.set_user_secret_key(user_id, "sk_test")
+        await db.set_negotiation_alerts_enabled(user_id, True)
+        await db.set_negotiation_last_modified(user_id, 77, 1000)
+
+        negotiation_row = {
+            "id": 77, "listing_title": "Test listing", "is_listing_advertiser": 1,
+            "advertiser_username": "me", "client_username": "buyer", "date_modified": 2000,
+        }
+        state = {"messages_should_fail": True}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if "marketplace_negotiations_messages" in request.url.path:
+                if state["messages_should_fail"]:
+                    return httpx.Response(500, json={"status": "error", "message": "boom", "http_code": 500})
+                return httpx.Response(200, json={"status": "ok", "data": [
+                    {"id": 1, "message": "1000 UEC?", "user_username": "buyer", "date_added": 50},
+                ]})
+            if "marketplace_negotiations" in request.url.path:
+                return httpx.Response(200, json={"status": "ok", "data": [negotiation_row]})
+            raise AssertionError(f"unexpected request: {request.url}")
+
+        client = UexClient(app_token="test", base_url="https://uex.test")
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+        bot = type("FakeBot", (), {})()
+        bot.db = db
+        bot.uex = client
+        cog = NegotiationAlerts.__new__(NegotiationAlerts)
+        cog.bot = bot
+
+        try:
+            await cog.poll_negotiation_messages()
+            assert (await db.get_negotiation_last_modified(user_id))[77] == 1000
+
+            state["messages_should_fail"] = False
+            await cog.poll_negotiation_messages()
+            assert (await db.get_negotiation_last_modified(user_id))[77] == 2000
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
