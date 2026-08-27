@@ -26,9 +26,7 @@ from bot.uex.client import UexClient
 from bot.uex.inventory import (
     build_inventory_listing_payload,
     extract_listing_id,
-    next_posting_time,
     recommend_balanced_price,
-    recommend_posting_window,
 )
 
 
@@ -48,7 +46,6 @@ def test_personal_inventory_cog_is_registered_and_exposes_its_commands():
                 "inventory-remove",
                 "inventory-sell",
                 "inventory-post-now",
-                "best-posting-time",
                 "inventory-confirm-sale",
                 "inventory-cancel-post",
                 "inventory-resolve-floor",
@@ -240,66 +237,6 @@ def test_auto_listing_payload_is_catalogued_uec_sell_only_and_expires_in_48_hour
     assert "(" not in payload["title"]
     assert "acquisition" not in str(payload).lower()
     assert "Meet at the cargo deck" not in payload["description"]
-
-
-def _timing_rows(days: int, *, id_item: int = 1) -> list[dict]:
-    rows = []
-    successful = 0
-    opened = 0
-    listings = 10
-    # January is UTC-5 in New York. Store local hourly observations as UTC.
-    start_local_as_utc = datetime(2026, 1, 1, 5, tzinfo=timezone.utc)
-    for hour_index in range(days * 24):
-        utc_time = start_local_as_utc + timedelta(hours=hour_index)
-        local_hour = (utc_time.hour - 5) % 24
-        if local_hour == 16:
-            successful += 5
-            opened += 4
-        elif local_hour == 12:
-            successful += 2
-            listings += 4
-        rows.append(
-            {
-                "id_item": id_item,
-                "recorded_hour": utc_time.isoformat(),
-                "negotiations_success": successful,
-                "negotiations_open": opened,
-                "listings_count_sell": listings,
-            }
-        )
-    return rows
-
-
-def test_posting_window_uses_item_history_after_seven_days_and_handles_eastern_time():
-    rows = _timing_rows(7)
-    window = recommend_posting_window(rows, id_item=1)
-    assert window is not None
-    assert window.scope == "item-specific"
-    assert window.start_hour == 16
-    assert window.label == "4 PM–8 PM"
-    assert window.confidence == "Low"
-
-    scheduled = next_posting_time(
-        window, now=datetime(2026, 1, 8, 18, tzinfo=timezone.utc)
-    )
-    # 18:00 UTC is 1 PM Eastern, so the next 4 PM window begins at 21:00 UTC.
-    assert scheduled == datetime(2026, 1, 8, 21, tzinfo=timezone.utc)
-
-
-def test_posting_window_labels_short_item_history_as_market_wide_fallback():
-    rows = _timing_rows(3, id_item=1) + _timing_rows(3, id_item=2)
-    window = recommend_posting_window(rows, id_item=1)
-    assert window is not None
-    assert window.scope == "market-wide fallback"
-    assert window.days_observed == 3
-
-
-def test_posting_window_does_not_invent_a_best_time_without_any_demand_change():
-    rows = _timing_rows(3)
-    for row in rows:
-        row["negotiations_success"] = 0
-        row["negotiations_open"] = 0
-    assert recommend_posting_window(rows, id_item=1) is None
 
 
 def test_inventory_reservation_listing_stock_and_cancellation_are_consistent(tmp_path):
@@ -586,6 +523,61 @@ def test_disable_and_resume_auto_relist(tmp_path):
         assert job["minimum_price"] == 800
 
     asyncio.run(run())
+
+
+def test_list_active_inventory_jobs_returns_only_in_progress_statuses(tmp_path):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        inventory_id = await db.add_inventory_item(
+            user_id=1, id_item=2, id_category=3, item_name="Multi-job item",
+            item_slug=None, quantity=10, quality=0, location="Orison", minimum_price=1000,
+        )
+        pending_id, listed_id, sold_id = await db.create_inventory_post_jobs(
+            1,
+            [
+                {"inventory_id": inventory_id, "quantity": 2, "scheduled_for": datetime.now(timezone.utc)},
+                {"inventory_id": inventory_id, "quantity": 3, "scheduled_for": datetime.now(timezone.utc)},
+                {"inventory_id": inventory_id, "quantity": 1, "scheduled_for": datetime.now(timezone.utc)},
+            ],
+        )
+        # pending_id is left untouched (never claimed).
+        assert await db.claim_inventory_post_job(listed_id)
+        await db.mark_inventory_post_listed(
+            listed_id, listing_id=1, listing_url=None, posted_price=1000, date_expiration=None
+        )
+        assert await db.claim_inventory_post_job(sold_id)
+        await db.mark_inventory_post_listed(
+            sold_id, listing_id=2, listing_url=None, posted_price=1000, date_expiration=None
+        )
+        await db.record_inventory_listing_stock(sold_id, in_stock=0, sold_out=True)
+
+        jobs = await db.list_active_inventory_jobs(1)
+        statuses = {job["id"]: job["status"] for job in jobs}
+        assert statuses == {pending_id: "pending", listed_id: "listed"}  # sold must not appear
+
+    asyncio.run(run())
+
+
+def test_format_job_status_covers_each_active_state():
+    fmt = personal_inventory_module._format_job_status
+
+    pending = fmt({"status": "pending", "scheduled_for": "2026-09-01 15:00:00"})
+    assert "Scheduled" in pending and "ET" in pending
+
+    assert fmt({"status": "posting"}) == "Posting to UEX now..."
+    assert "inventory-confirm-sale" in fmt({"status": "needs_confirmation"})
+
+    paused = fmt({"status": "listed", "auto_relist": 0})
+    assert "paused" in paused.lower()
+
+    fresh_created = (datetime.now(timezone.utc)).isoformat()
+    live_fresh = fmt({"status": "listed", "auto_relist": 1, "created_at": fresh_created})
+    assert "reprices in ~48h" in live_fresh
+
+    stale_created = (datetime.now(timezone.utc) - timedelta(hours=50)).isoformat()
+    live_due = fmt({"status": "listed", "auto_relist": 1, "created_at": stale_created})
+    assert "due for a reprice check" in live_due
 
 
 class _FakeResponse:

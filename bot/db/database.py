@@ -1754,11 +1754,7 @@ class Database:
         async with self.connect() as db:
             cursor = await db.execute(
                 """SELECT inventory.*, liquidity.score AS sellability_score,
-                          liquidity.last_updated AS sellability_updated,
-                          (SELECT COUNT(*) FROM marketplace_post_jobs jobs
-                           WHERE jobs.inventory_id = inventory.id
-                             AND jobs.status IN ('pending', 'posting', 'listed', 'needs_confirmation'))
-                              AS active_job_count
+                          liquidity.last_updated AS sellability_updated
                    FROM personal_inventory inventory
                    LEFT JOIN liquidity_scores liquidity
                        ON liquidity.id_item = inventory.id_item
@@ -1769,6 +1765,20 @@ class Database:
                    WHERE inventory.user_id = ?
                    ORDER BY inventory.item_name COLLATE NOCASE, inventory.quality DESC,
                             inventory.location COLLATE NOCASE, inventory.id""",
+                (user_id,),
+            )
+            return [dict(row) for row in await cursor.fetchall()]
+
+    async def list_active_inventory_jobs(self, user_id: int) -> list[dict[str, Any]]:
+        """Every job still in play for a user's inventory (not just 'listed'), so /inventory
+        can show real status/timing per stack instead of a bare count."""
+        async with self.connect() as db:
+            cursor = await db.execute(
+                """SELECT jobs.* FROM marketplace_post_jobs jobs
+                   JOIN personal_inventory inventory ON inventory.id = jobs.inventory_id
+                   WHERE inventory.user_id = ?
+                     AND jobs.status IN ('pending', 'posting', 'listed', 'needs_confirmation')
+                   ORDER BY jobs.inventory_id, jobs.created_at""",
                 (user_id,),
             )
             return [dict(row) for row in await cursor.fetchall()]
@@ -1844,18 +1854,6 @@ class Database:
             )
             await db.commit()
             return new_quantity
-
-    async def get_marketplace_timing_rows(self, hours: int = 24 * 56) -> list[dict[str, Any]]:
-        async with self.connect() as db:
-            cursor = await db.execute(
-                """SELECT id_item, recorded_hour, negotiations_success, negotiations_open,
-                          listings_count_sell
-                   FROM liquidity_score_snapshots
-                   WHERE recorded_hour >= datetime('now', ?)
-                   ORDER BY id_item, recorded_hour""",
-                (f"-{hours} hours",),
-            )
-            return [dict(row) for row in await cursor.fetchall()]
 
     async def get_inventory_completed_unit_prices(
         self, *, user_id: int, id_item: int, quality: int, unit: str, limit: int = 20

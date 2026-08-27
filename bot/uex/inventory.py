@@ -1,39 +1,20 @@
-"""Pure helpers for personal inventory pricing and posting-time recommendations."""
+"""Pure helpers for personal inventory pricing."""
 from __future__ import annotations
 
-import math
 import re
 import statistics
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any, Iterable
-from zoneinfo import ZoneInfo
 
 from bot.uex.marketplace import parse_listing_quality, parse_uex_number, quality_to_tier
 
 DEFAULT_MARKETPLACE_TIMEZONE = "America/New_York"
-POSTING_WINDOW_HOURS = 4
 
 # 'balanced' matches the schema default (no schema change needed for the common case).
 # 'undercut'/'premium' let a user deliberately price off the recommended figure by a
 # fixed spread rather than accepting the raw evidence-weighted number as-is.
 PRICING_STRATEGY_MULTIPLIERS = {"balanced": 1.0, "undercut": 0.9, "premium": 1.1}
-
-
-@dataclass(frozen=True)
-class PostingWindow:
-    start_hour: int
-    end_hour: int
-    scope: str
-    confidence: str
-    observation_count: int
-    days_observed: int
-    demand_events: float
-    new_sell_listings: float
-
-    @property
-    def label(self) -> str:
-        return f"{_format_hour(self.start_hour)}–{_format_hour(self.end_hour)}"
 
 
 @dataclass(frozen=True)
@@ -58,121 +39,6 @@ def quality_label(quality: int) -> str:
         7: "Q950–1000",
     }
     return f"{quality} ({boundaries[tier]})"
-
-
-def recommend_posting_window(
-    rows: list[dict[str, Any]],
-    *,
-    id_item: int | None = None,
-    timezone_name: str = DEFAULT_MARKETPLACE_TIMEZONE,
-) -> PostingWindow | None:
-    """Rank four-hour local-time windows from successive hourly trend snapshots.
-
-    Positive changes in successful/open negotiations are demand evidence. A positive
-    change in competing sell listings is treated as new competition. Item-specific timing
-    is only used after at least seven local dates and 48 transitions; until then the much
-    larger market-wide sample is used and clearly labelled as a fallback.
-    """
-    if not rows:
-        return None
-
-    if id_item is not None:
-        item_rows = [row for row in rows if _integer(row.get("id_item")) == id_item]
-        item_result = _rank_windows(item_rows, timezone_name=timezone_name, scope="item-specific")
-        if (
-            item_result
-            and item_result.demand_events > 0
-            and item_result.days_observed >= 7
-            and item_result.observation_count >= 48
-        ):
-            return item_result
-
-    market_result = _rank_windows(rows, timezone_name=timezone_name, scope="market-wide fallback")
-    return market_result if market_result and market_result.demand_events > 0 else None
-
-
-def _rank_windows(
-    rows: list[dict[str, Any]], *, timezone_name: str, scope: str
-) -> PostingWindow | None:
-    local_tz = ZoneInfo(timezone_name)
-    grouped: dict[int, list[tuple[datetime, dict[str, Any]]]] = {}
-    for row in rows:
-        id_item = _integer(row.get("id_item"))
-        observed_at = _parse_utc(row.get("recorded_hour"))
-        if id_item is None or observed_at is None:
-            continue
-        grouped.setdefault(id_item, []).append((observed_at, row))
-
-    metrics: dict[int, dict[str, Any]] = {}
-    for observations in grouped.values():
-        observations.sort(key=lambda pair: pair[0])
-        for (previous_at, previous), (current_at, current) in zip(observations, observations[1:]):
-            gap_hours = (current_at - previous_at).total_seconds() / 3600
-            if not 0.5 <= gap_hours <= 2.5:
-                continue
-            local = current_at.astimezone(local_tz)
-            bucket = (local.hour // POSTING_WINDOW_HOURS) * POSTING_WINDOW_HOURS
-            slot = metrics.setdefault(
-                bucket,
-                {"transitions": 0, "dates": set(), "successful": 0.0, "open": 0.0, "competition": 0.0},
-            )
-            slot["transitions"] += 1
-            slot["dates"].add(local.date())
-            slot["successful"] += _positive_delta(previous, current, "negotiations_success")
-            slot["open"] += _positive_delta(previous, current, "negotiations_open")
-            slot["competition"] += _positive_delta(previous, current, "listings_count_sell")
-
-    if not metrics:
-        return None
-
-    def rank_value(slot: dict[str, Any]) -> float:
-        # Successful negotiations carry twice the weight of newly-opened ones. The
-        # efficiency term favors demand that is not accompanied by a flood of competing
-        # posts, while sqrt(volume) prevents a tiny overnight sample from winning on ratio
-        # alone.
-        demand = slot["successful"] + (0.5 * slot["open"])
-        efficiency = demand / (slot["competition"] + 5.0)
-        return efficiency * math.sqrt(max(demand, 0.0))
-
-    start_hour, best = max(metrics.items(), key=lambda pair: (rank_value(pair[1]), pair[1]["transitions"]))
-    all_dates = {
-        date
-        for slot in metrics.values()
-        for date in slot["dates"]
-    }
-    days = len(all_dates)
-    confidence = "High" if days >= 28 else "Medium" if days >= 14 else "Low"
-    return PostingWindow(
-        start_hour=start_hour,
-        end_hour=(start_hour + POSTING_WINDOW_HOURS) % 24,
-        scope=scope,
-        confidence=confidence,
-        observation_count=sum(slot["transitions"] for slot in metrics.values()),
-        days_observed=days,
-        demand_events=best["successful"] + (0.5 * best["open"]),
-        new_sell_listings=best["competition"],
-    )
-
-
-def next_posting_time(
-    window: PostingWindow,
-    *,
-    now: datetime | None = None,
-    timezone_name: str = DEFAULT_MARKETPLACE_TIMEZONE,
-) -> datetime:
-    """Return the next time inside the recommended window, as an aware UTC datetime."""
-    local_tz = ZoneInfo(timezone_name)
-    current = now or datetime.now(timezone.utc)
-    if current.tzinfo is None:
-        current = current.replace(tzinfo=timezone.utc)
-    local_now = current.astimezone(local_tz)
-    if window.start_hour <= local_now.hour < window.start_hour + POSTING_WINDOW_HOURS:
-        return (current + timedelta(minutes=1)).astimezone(timezone.utc)
-
-    candidate = local_now.replace(hour=window.start_hour, minute=0, second=0, microsecond=0)
-    if candidate <= local_now:
-        candidate += timedelta(days=1)
-    return candidate.astimezone(timezone.utc)
 
 
 def recommend_balanced_price(
@@ -335,25 +201,6 @@ def _safe_title(value: str) -> str:
     return re.sub(r"\s+", " ", cleaned).strip()[:140]
 
 
-def _positive_delta(previous: dict[str, Any], current: dict[str, Any], key: str) -> float:
-    before = parse_uex_number(previous.get(key)) or 0.0
-    after = parse_uex_number(current.get(key)) or 0.0
-    return max(after - before, 0.0)
-
-
-def _parse_utc(raw: Any) -> datetime | None:
-    if isinstance(raw, datetime):
-        value = raw
-    elif raw:
-        try:
-            value = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
-        except ValueError:
-            return None
-    else:
-        return None
-    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
-
-
 def _integer(raw: Any) -> int | None:
     number = parse_uex_number(raw)
     return int(number) if number is not None else None
@@ -363,10 +210,3 @@ def _flag(raw: Any) -> bool:
     if isinstance(raw, str):
         return raw.strip().lower() in {"1", "true", "yes"}
     return bool(raw)
-
-
-def _format_hour(hour: int) -> str:
-    normalized = hour % 24
-    suffix = "AM" if normalized < 12 else "PM"
-    display = normalized % 12 or 12
-    return f"{display} {suffix}"

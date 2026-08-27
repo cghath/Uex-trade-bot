@@ -20,10 +20,8 @@ from bot.uex.inventory import (
     _integer,
     build_inventory_listing_payload,
     extract_listing_id,
-    next_posting_time,
     quality_label,
     recommend_balanced_price,
-    recommend_posting_window,
 )
 from bot.uex.marketplace import find_item_id_by_name, marketplace_item_url, parse_uex_number
 
@@ -204,13 +202,14 @@ class InventorySelectionView(discord.ui.View):
             )
             return
 
-        timing_rows = await self.cog.bot.db.get_marketplace_timing_rows()
+        scheduled_for = datetime.now(timezone.utc)
         specs: list[dict[str, Any]] = []
         embed = discord.Embed(
             title="Authorize automatic UEX posting",
             description=(
-                "Each stack will post in its next recommended Eastern-time window. The price is recalculated "
-                "immediately before posting and can never go below your manual minimum."
+                "Each stack posts within the next few minutes once you confirm below (UEX staff approval after "
+                "that is outside the bot's control). The price is recalculated right before posting and can "
+                "never go below your manual minimum."
             ),
             color=discord.Color.orange(),
         )
@@ -218,14 +217,6 @@ class InventorySelectionView(discord.ui.View):
             available = int(row["quantity"]) - int(row["reserved_quantity"])
             if available <= 0:
                 continue
-            window = recommend_posting_window(timing_rows, id_item=int(row["id_item"]))
-            if window is None:
-                await interaction.followup.send(
-                    "There is not enough hourly Marketplace history to calculate a posting window yet.",
-                    ephemeral=True,
-                )
-                return
-            scheduled_for = next_posting_time(window)
             average_rows = await self.cog.bot.db.get_item_tier_stats(int(row["id_item"]))
             own_prices = await self.cog.bot.db.get_inventory_completed_unit_prices(
                 user_id=self.author_id,
@@ -247,14 +238,11 @@ class InventorySelectionView(discord.ui.View):
                     "auto_relist": True,
                 }
             )
-            local_time = scheduled_for.astimezone(ZoneInfo(DEFAULT_MARKETPLACE_TIMEZONE))
             embed.add_field(
                 name=f"#{row['id']} · {row['item_name']}"[:256],
                 value=(
                     f"Qty **{available}** · preview **{price.price:,} UEC/{row['unit']}** "
-                    f"(minimum {int(row['minimum_price']):,})\n"
-                    f"Next window: **{window.label} ET** · scheduled {local_time.strftime('%a %b %d, %I:%M %p')} ET "
-                    f"· timing confidence {window.confidence.lower()}"
+                    f"(minimum {int(row['minimum_price']):,})"
                 )[:1024],
                 inline=False,
             )
@@ -641,6 +629,9 @@ class PersonalInventory(commands.Cog):
                 "Your inventory is empty. Add a catalogued item with `/inventory-add`.", ephemeral=True
             )
             return
+        jobs_by_inventory: dict[int, list[dict[str, Any]]] = {}
+        for job in await self.bot.db.list_active_inventory_jobs(interaction.user.id):
+            jobs_by_inventory.setdefault(int(job["inventory_id"]), []).append(job)
         page_count = max(1, (len(rows) + INVENTORY_PAGE_SIZE - 1) // INVENTORY_PAGE_SIZE)
         page = max(1, min(int(page), page_count))
         start = (page - 1) * INVENTORY_PAGE_SIZE
@@ -666,8 +657,8 @@ class PersonalInventory(commands.Cog):
                 f"· {row['location']}\n"
                 f"Sellability {score_text} · minimum **{minimum_text}**"
             )
-            if row.get("active_job_count"):
-                value += f" · active posting jobs **{row['active_job_count']}**"
+            for job in jobs_by_inventory.get(int(row["id"]), []):
+                value += f"\n{_format_job_status(job)}"
             if row.get("notes"):
                 value += f"\nPrivate notes: {str(row['notes'])[:300]}"
             embed.add_field(name=f"Inventory #{row['id']}", value=value[:1024], inline=False)
@@ -796,58 +787,6 @@ class PersonalInventory(commands.Cog):
         )
         await interaction.followup.send(embed=embed, view=PostNowView(self, interaction.user.id, entry, available), ephemeral=True)
 
-    @app_commands.command(name="best-posting-time", description="Estimate the strongest Marketplace posting window from collected history.")
-    @app_commands.describe(item="Optional exact catalogued item; otherwise show the overall market window")
-    @app_commands.autocomplete(item=inventory_item_autocomplete)
-    async def best_posting_time(self, interaction: discord.Interaction, item: str | None = None) -> None:
-        await interaction.response.defer(ephemeral=True)
-        id_item = None
-        if item:
-            try:
-                items = await self.bot.uex.get_item_catalog()
-            except UexApiError as exc:
-                await interaction.followup.send(f"UEX could not load the item catalog: {exc}", ephemeral=True)
-                return
-            id_item = find_item_id_by_name(items, item)
-            if id_item is None:
-                await interaction.followup.send(
-                    "Pick an exact catalogued item from autocomplete and try again.", ephemeral=True
-                )
-                return
-        rows = await self.bot.db.get_marketplace_timing_rows()
-        window = recommend_posting_window(rows, id_item=id_item)
-        if window is None:
-            await interaction.followup.send(
-                "There is not enough hourly Marketplace history yet. Leave the PC collector running and try again later.",
-                ephemeral=True,
-            )
-            return
-        subject = item or "Overall UEX Marketplace"
-        embed = discord.Embed(
-            title=f"{subject} · best posting window",
-            description=f"**{window.label} Eastern Time**",
-            color=discord.Color.teal(),
-        )
-        embed.add_field(name="Evidence scope", value=window.scope.title(), inline=True)
-        embed.add_field(name="Confidence", value=window.confidence, inline=True)
-        embed.add_field(name="History collected", value=f"{window.days_observed} local days", inline=True)
-        embed.add_field(
-            name="Why this window",
-            value=(
-                f"Weighted demand changes: **{window.demand_events:,.1f}** · "
-                f"new competing sell-listing changes: **{window.new_sell_listings:,.0f}**."
-            ),
-            inline=False,
-        )
-        if window.confidence == "Low":
-            embed.add_field(
-                name="⚠️ Early estimate",
-                value="Less than 14 days of history is available. Keep collecting before treating this as a stable pattern.",
-                inline=False,
-            )
-        embed.set_footer(text="Demand uses positive hourly changes in successful/open negotiations; it is not a guarantee of sale.")
-        await interaction.followup.send(embed=embed, ephemeral=True)
-
     @app_commands.command(name="inventory-confirm-sale", description="Resolve a tracked listing when UEX cannot prove how many sold.")
     @app_commands.describe(job_id="Posting job number from the bot's warning", quantity_sold="How many actually sold; use 0 if none sold")
     async def inventory_confirm_sale(
@@ -871,33 +810,28 @@ class PersonalInventory(commands.Cog):
 
         relist_note = ""
         if result["unsold"] and result["auto_relist"]:
-            timing_rows = await self.bot.db.get_marketplace_timing_rows()
-            entry = await self.bot.db.get_inventory_item(interaction.user.id, result["inventory_id"])
-            window = recommend_posting_window(timing_rows, id_item=int(entry["id_item"])) if entry else None
-            if window:
-                scheduled_for = next_posting_time(window)
-                try:
-                    new_jobs = await self.bot.db.create_inventory_post_jobs(
-                        interaction.user.id,
-                        [
-                            {
-                                "inventory_id": result["inventory_id"],
-                                "quantity": result["unsold"],
-                                "scheduled_for": scheduled_for,
-                                "auto_relist": True,
-                                "relist_count": result["relist_count"],
-                                "pricing_strategy": result["pricing_strategy"],
-                            }
-                        ],
-                    )
-                except ValueError as exc:
-                    await interaction.response.send_message(
-                        f"Recorded **{result['sold']}** sold for job #{job_id}, but the **{result['unsold']}** "
-                        f"unsold remainder could not be rescheduled: {exc}. Use `/inventory-sell` to reschedule it manually.",
-                        ephemeral=True,
-                    )
-                    return
-                relist_note = f" The **{result['unsold']}** unsold item(s) were safely rescheduled as job #{new_jobs[0]}."
+            try:
+                new_jobs = await self.bot.db.create_inventory_post_jobs(
+                    interaction.user.id,
+                    [
+                        {
+                            "inventory_id": result["inventory_id"],
+                            "quantity": result["unsold"],
+                            "scheduled_for": datetime.now(timezone.utc),
+                            "auto_relist": True,
+                            "relist_count": result["relist_count"],
+                            "pricing_strategy": result["pricing_strategy"],
+                        }
+                    ],
+                )
+            except ValueError as exc:
+                await interaction.response.send_message(
+                    f"Recorded **{result['sold']}** sold for job #{job_id}, but the **{result['unsold']}** "
+                    f"unsold remainder could not be rescheduled: {exc}. Use `/inventory-sell` to reschedule it manually.",
+                    ephemeral=True,
+                )
+                return
+            relist_note = f" The **{result['unsold']}** unsold item(s) were safely rescheduled as job #{new_jobs[0]}."
         await interaction.response.send_message(
             f"Recorded **{result['sold']}** sold for job #{job_id}.{relist_note}", ephemeral=True
         )
@@ -1215,8 +1149,6 @@ class PersonalInventory(commands.Cog):
             for listing_id, rows in await asyncio.gather(*(_fetch_listing(lid) for lid in batch)):
                 listings_by_id[listing_id] = rows
 
-        timing_rows: list[dict[str, Any]] | None = None
-
         for job in jobs:
             job_id = int(job["id"])
             listing_id = int(job["listing_id"])
@@ -1321,19 +1253,14 @@ class PersonalInventory(commands.Cog):
 
             expiration = _integer(listing.get("date_expiration")) or _integer(job.get("date_expiration"))
             if expiration and time.time() >= expiration and stock is not None and stock > 0:
-                if timing_rows is None:
-                    timing_rows = await self.bot.db.get_marketplace_timing_rows()
-                window = recommend_posting_window(timing_rows, id_item=int(job["id_item"]))
-                if not window:
-                    continue
                 new_id = await self.bot.db.expire_and_relist_inventory_post(
-                    job_id, next_posting_time(window)
+                    job_id, datetime.now(timezone.utc)
                 )
                 if new_id:
                     await self._notify_user(
                         int(job["user_id"]),
                         f"Listing #{listing_id} expired with **{stock}** explicitly remaining. A fresh-price relist "
-                        f"was safely scheduled as job #{new_id} for the next {window.label} ET window.",
+                        f"was safely scheduled as job #{new_id}.",
                     )
 
     async def _notify_user(self, user_id: int, message: str) -> None:
@@ -1374,6 +1301,36 @@ def _parse_db_time(raw: Any) -> datetime | None:
     except ValueError:
         return None
     return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+
+
+def _format_job_status(job: dict[str, Any]) -> str:
+    """One line describing what a posting job is doing right now and when its next
+    automatic action happens - shown on /inventory so that's checkable anytime, not just
+    something you find out about after the fact via DM."""
+    status = job.get("status")
+    if status == "pending":
+        scheduled = _parse_db_time(job.get("scheduled_for"))
+        if scheduled:
+            local_time = scheduled.astimezone(ZoneInfo(DEFAULT_MARKETPLACE_TIMEZONE))
+            return f"Scheduled: posts {local_time.strftime('%a %b %d, %I:%M %p')} ET"
+        return "Scheduled: posting time unknown"
+    if status == "posting":
+        return "Posting to UEX now..."
+    if status == "needs_confirmation":
+        return "Needs your input - see `/inventory-confirm-sale`"
+    if status == "listed":
+        if not job.get("auto_relist"):
+            return "Live, paused - see your DMs or `/inventory-resolve-floor`"
+        created = _parse_db_time(job.get("created_at"))
+        if created:
+            remaining_hours = RELIST_DISCOUNT_INTERVAL_HOURS - (
+                (datetime.now(timezone.utc) - created).total_seconds() / 3600
+            )
+            if remaining_hours > 0:
+                return f"Live · reprices in ~{remaining_hours:.0f}h if no negotiation by then"
+            return "Live · due for a reprice check (next automatic cycle)"
+        return "Live"
+    return f"Status: {status}"
 
 
 async def setup(bot: commands.Bot) -> None:

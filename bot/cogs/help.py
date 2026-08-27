@@ -39,9 +39,9 @@ CATEGORIES: list[tuple[str, str, list[str]]] = [
         "marketplace-history", "my-negotiations", "my-favorites", "marketplace-post",
         "marketplace-listing", "marketplace-delete-listing",
     ]),
-    ("🎒 Personal Inventory", "Track game-earned items, sellability, timing, and guarded automatic posts.", [
+    ("🎒 Personal Inventory", "Track game-earned items, sellability, and guarded automatic posts.", [
         "inventory", "inventory-add", "inventory-set-minimum", "inventory-remove",
-        "best-posting-time", "inventory-sell", "inventory-post-now",
+        "inventory-sell", "inventory-post-now",
         "inventory-confirm-sale", "inventory-cancel-post", "inventory-resolve-floor",
     ]),
     ("🔥 Marketplace Intelligence", "Sellability rankings and history for all items, plus quality-matched raw-material deal scans.", [

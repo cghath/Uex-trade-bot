@@ -117,6 +117,32 @@ they're in sync).
     only from explicit remaining-stock evidence. Network-ambiguous or interrupted POSTs are
     quarantined, never blindly retried. Private notes stay private. The implementation also
     corrected the older manual-post confirmation to read UEX's documented `id_listing` result.
+16. **Negotiation-message DM alerts, custom pricing, and a listing-lookup command added on
+    `TestBranch`**: `/negotiation-alerts` opt-in DMs a user when anyone sends a new message in
+    any of their UEX negotiations (not just bot-posted ones), seeding a baseline on enable so
+    existing history never floods in as new. `/inventory-post-now` gained a live-data
+    "Recommended price" preview (sourced from the same function the real post uses, so preview
+    and post can't diverge) plus a custom-price option, which required a SQLite CHECK-constraint
+    migration (`marketplace_post_jobs.pricing_strategy`) done as a detect-and-rebuild since
+    SQLite can't ALTER a CHECK in place. Added `/marketplace-listing` to look up a listing's
+    details by id. Local and the Pi's live data were fully merged after both had run
+    independently for stretches - not a simple one-way copy, since both sides had accumulated
+    genuinely unique history in places.
+17. **Review-fix pass and a 48-hour no-interest relist-discount cycle added on `TestBranch`**:
+    seven bugs found by review and confirmed against the live code before fixing (worst: a
+    relisted custom-priced job would crash the background poster with `int(None)`, since
+    `custom_price` wasn't carried into `expire_and_relist_inventory_post`'s INSERT). Also added:
+    an unsold listing with no open negotiation now relists 5% below its previous price every 48
+    hours (compounding, never below the manual minimum) instead of sitting at the same
+    unsuccessful price; an open negotiation pauses the cycle entirely; hitting the floor with no
+    interest pauses it and sends an interactive DM (keep / lower the floor & resume / cancel),
+    with `/inventory-resolve-floor` as a fallback since that DM's buttons can't survive a bot
+    restart. `/inventory` now shows each active job's real status/timing instead of a bare
+    count. Finally, `/best-posting-time` and `/inventory-sell`'s "recommended window" scheduling
+    were removed entirely: UEX listings require staff approval before going live on an
+    unpredictable timeline, so precisely timing *submission* never actually controlled when a
+    listing became visible - the premise the feature was built on didn't hold. Posting is now
+    immediate (queued for the next few-minutes cycle) rather than deferred to a computed window.
     Every inventory interaction response is explicitly ephemeral; background worker updates use
     private DMs because Discord cannot make a non-interaction channel post ephemeral.
 
@@ -382,12 +408,13 @@ guessed at.
   after three hours; hourly liquidity and Marketplace data warn after two. The rating-shift
   queries request four gainers and four losers independently so one direction cannot crowd
   out the other, and the fields are separated to stay below Discord's 1,024-character limit.
-- **Current staging state (2026-08-26)**: `TestBranch` contains the mixed-route, digest,
-  intelligence-brief, and route-audit work; the personal-inventory feature is being validated
-  locally before any requested push. The latest Pi database is in the ignored local `data/`
-  folder, the PC bot is still collecting, and the Pi service remains deliberately stopped.
-  The full suite has 131 passing tests after the inventory additions. Re-check live service and
-  branch state rather than assuming this point-in-time operational note is still current.
+- **Current staging state (2026-08-27)**: `TestBranch` is deployed and running live on the
+  Pi (`uex-trade-bot.service`, host `arkwatcher`) - it is no longer just a local-validation
+  branch. Local (PC) and the Pi's databases have been fully merged at least twice now; the
+  established practice is to back up both sides before any such merge and pull the Pi's
+  backup down to the PC afterward, so nothing valuable lives only on the Pi's disk. The full
+  suite has 160 passing tests. Re-check live service and branch state rather than assuming
+  this point-in-time operational note is still current.
 - The data collectors in `bot/cogs/intelligence.py` only pay off once they've been running a
   while - most of the `ROADMAP.md` intelligence backlog depends on accumulated history, so
   those features will look broken/empty if built and tested against a fresh database.
