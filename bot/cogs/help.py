@@ -27,9 +27,8 @@ CATEGORIES: list[tuple[str, str, list[str]]] = [
         "set-default-ship", "clear-default-ship", "my-ship",
     ]),
     ("🔔 Alerts & Notifications", "Price targets, Marketplace matches, restocks, and DM delivery checks.", [
-        "alert-add", "alert-list", "alert-remove",
-        "marketplace-alert-add", "marketplace-alert-list", "marketplace-alert-remove",
-        "stock-alert-add", "stock-alert-list", "stock-alert-remove", "negotiation-alerts", "test-dm",
+        "alert-add", "stock-alert-add", "marketplace-alert-add",
+        "alert-list", "alert-remove", "negotiation-alerts", "test-dm",
     ]),
     ("🧾 Trade Log & Leaderboard", "Your personal ledger, UEX-recorded history, and server standings.", [
         "trade-log-add", "trade-log", "uex-trades", "leaderboard",
@@ -44,7 +43,7 @@ CATEGORIES: list[tuple[str, str, list[str]]] = [
         "inventory-sell", "inventory-post-now",
         "inventory-confirm-sale", "inventory-cancel-post", "inventory-resolve-floor",
     ]),
-    ("🔥 Marketplace Intelligence", "Sellability rankings and history for all items, plus quality-matched raw-material deal scans.", [
+    ("🔥 Sellability Ratings", "The bot's own 0-100 sellability score (not UEX's raw activity numbers) — rankings and history for all items, plus quality-matched raw-material deal scans.", [
         "liquidity-rank", "liquidity-trends", "scan-now", "scanner-status", "set-scanner-channel",
     ]),
     ("🗓️ Daily Digest", "Post a snapshot now or configure the server's scheduled digest.", [

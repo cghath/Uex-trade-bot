@@ -4,7 +4,6 @@ from __future__ import annotations
 import re
 import statistics
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import Any, Iterable
 
 from bot.uex.marketplace import parse_listing_quality, parse_uex_number, quality_to_tier

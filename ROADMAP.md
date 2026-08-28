@@ -16,10 +16,10 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
 - [x] **UEX Data Collection Foundation**: The always-on Pi collector records change-only
   terminal market states, data freshness, fuel prices, refinery yields, reference metadata,
   and Marketplace tier changes so future intelligence features have real history to use.
-- [x] **Personal Inventory and Best-Time Posting**: Discord-managed catalog item stacks,
-  Sellability Ratings, direct UEX links, data-backed Eastern-time posting windows, balanced
-  price recommendations, hard manual floors, guarded automatic posting/relisting, and
-  explicit handling for ambiguous sale quantities.
+- [x] **Personal Inventory and Guarded Relisting**: Discord-managed catalog item stacks,
+  Sellability Ratings, direct UEX links, balanced price recommendations, hard manual floors,
+  automatic no-interest relisting (5% lower every 48h, pausing on open negotiations) down to
+  the floor, and explicit handling for ambiguous sale quantities.
 
 ## Backlog & Ideas
 

@@ -16,7 +16,6 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from bot.cogs.marketplace import OPERATION_CHOICES, traded_item_autocomplete
-from bot.discord_ui import send_alert_remove_picker
 from bot.uex.exceptions import UexApiError
 from bot.uex.marketplace import (
     exclude_sold_out,
@@ -88,56 +87,6 @@ class MarketplaceAlerts(commands.Cog):
             f"'{keyword}'{price_note}{quality_note} appears (checked every {POLL_INTERVAL_MINUTES} min)."
             f"{quality_caveat} This keeps watching - it won't turn off after the first match.",
             ephemeral=True,
-        )
-
-    @app_commands.command(name="marketplace-alert-list", description="List your active marketplace listing alerts.")
-    async def marketplace_alert_list(self, interaction: discord.Interaction) -> None:
-        alerts = await self.bot.db.list_user_marketplace_alerts(interaction.user.id)
-        if not alerts:
-            await interaction.response.send_message("You have no active marketplace alerts.", ephemeral=True)
-            return
-        lines = []
-        for a in alerts:
-            price_note = f" @ target {a['target_price']:,.0f}" if a["target_price"] is not None else ""
-            min_q, max_q = a.get("min_quality"), a.get("max_quality")
-            quality_note = ""
-            if min_q is not None or max_q is not None:
-                lo = f"{min_q:.0f}" if min_q is not None else "0"
-                hi = f"{max_q:.0f}" if max_q is not None else "100"
-                quality_note = f" · quality {lo}-{hi}"
-            lines.append(f"#{a['id']} — {a['operation']} listings matching '{a['keyword']}'{price_note}{quality_note}")
-        await interaction.response.send_message("\n".join(lines), ephemeral=True)
-
-    @app_commands.command(name="marketplace-alert-remove", description="Remove one of your marketplace alerts (pick from a menu).")
-    async def marketplace_alert_remove(self, interaction: discord.Interaction) -> None:
-        alerts = await self.bot.db.list_user_marketplace_alerts(interaction.user.id)
-        picker_items = []
-        for a in alerts:
-            price_note = f" @ {a['target_price']:,.0f}" if a["target_price"] is not None else ""
-            min_q, max_q = a.get("min_quality"), a.get("max_quality")
-            quality_note = ""
-            if min_q is not None or max_q is not None:
-                lo = f"{min_q:.0f}" if min_q is not None else "0"
-                hi = f"{max_q:.0f}" if max_q is not None else "100"
-                quality_note = f" · quality {lo}-{hi}"
-            picker_items.append(
-                {
-                    "id": a["id"],
-                    "label": f"#{a['id']} {a['keyword']}",
-                    "description": f"{a['operation']} listings{price_note}{quality_note}",
-                }
-            )
-
-        async def _remove(picker_interaction: discord.Interaction, alert_id: int) -> str:
-            removed = await self.bot.db.remove_marketplace_alert(alert_id, picker_interaction.user.id)
-            return f"Marketplace alert #{alert_id} removed." if removed else f"Marketplace alert #{alert_id} was already removed."
-
-        await send_alert_remove_picker(
-            interaction,
-            alerts=picker_items,
-            remove_callback=_remove,
-            empty_message="You have no active marketplace alerts.",
-            placeholder_noun="marketplace alert",
         )
 
     @tasks.loop(minutes=POLL_INTERVAL_MINUTES)

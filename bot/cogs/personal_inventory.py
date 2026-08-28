@@ -707,7 +707,7 @@ class PersonalInventory(commands.Cog):
             message = f"Removed **{quantity}** from inventory #{inventory_id}; **{remaining}** remain."
         await interaction.response.send_message(message, ephemeral=True)
 
-    @app_commands.command(name="inventory-sell", description="Check off inventory stacks for best-time automatic UEX posting.")
+    @app_commands.command(name="inventory-sell", description="Check off inventory stacks to schedule guarded automatic UEX posting.")
     async def inventory_sell(self, interaction: discord.Interaction) -> None:
         if not await self.bot.db.has_linked_uex_account(interaction.user.id):
             await interaction.response.send_message(

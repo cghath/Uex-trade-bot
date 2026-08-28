@@ -10,15 +10,18 @@ Current features:
   volume, price movement, and price charts.
 - **UEX Marketplace** — search listings, review current and historical Marketplace prices, manage
   listings/favorites/negotiations, and receive matching-listing alerts.
-- **Marketplace Intelligence** — `/liquidity-rank` and `/liquidity-trends` provide all-item
-  sellability ratings and history. `/scan-now` and its optional channel alerts run the **Raw
-  Materials Deal Scanner**: it compares only Commodities and Harvestables with a reported quality
-  against the matching 30-day quality tier, currency, and unit. Crafted gear is deliberately
-  excluded because UEX does not expose its modifiers as structured pricing data.
-- **Personal inventory and timed selling** — manually record catalogued, game-earned item stacks;
-  review the same Sellability Rating beside direct UEX item links; estimate the strongest Eastern-
-  time posting window; and explicitly authorize guarded UEC sell listings that reprice above a
-  hard manual floor. Ambiguous UEX results stop for confirmation instead of risking duplicates.
+- **Sellability ratings** — `/liquidity-rank` and `/liquidity-trends` provide the bot's own
+  all-item sellability score and history (distinct from the raw UEX activity numbers behind
+  `/marketplace-trending`/`/marketplace-movers` above). `/scan-now` and its optional channel
+  alerts run the **Raw Materials Deal Scanner**: it compares only Commodities and Harvestables
+  with a reported quality against the matching 30-day quality tier, currency, and unit. Crafted
+  gear is deliberately excluded because UEX does not expose its modifiers as structured pricing
+  data.
+- **Personal inventory and guarded relisting** — manually record catalogued, game-earned item
+  stacks; review the same Sellability Rating beside direct UEX item links; and explicitly
+  authorize guarded UEC sell listings. An unsold listing relists 5% lower every 48 hours (pausing
+  instead whenever a negotiation is open) down to a hard manual floor, then asks what to do next.
+  Ambiguous UEX results stop for confirmation instead of risking duplicates.
 - **Alerts and digest** — commodity-price alerts, terminal-restock alerts, Marketplace listing
   alerts, and a configurable daily digest.
 - **Personal tools** — a local trade ledger, server leaderboard, saved cargo ship, and private UEX
@@ -74,8 +77,11 @@ UEX does not expose a live in-game cargo hold, so the bot cannot discover newly 
 items automatically. `/inventory-add` is the source of truth for personal Marketplace stock;
 quality and location create separate stacks. `/inventory` shows quantity, reservations, manual
 price floor, Sellability Rating, and a clickable UEX item page. `/inventory-sell` opens a paged
-checklist and an explicit authorization preview. Scheduled posts are catalogued UEC sell listings
-only, expire after 48 hours, and are freshly repriced before a guarded relist.
+checklist and an explicit authorization preview; posting happens within minutes, though UEX
+staff approval before a listing actually goes live is outside the bot's control. Scheduled posts
+are catalogued UEC sell listings only. An unsold listing with no open negotiation relists 5% lower
+every 48 hours down to its hard floor, then DMs to ask what to do next; an open negotiation pauses
+relisting instead so it isn't disrupted.
 
 When UEX explicitly reports a lower `in_stock` value or sold-out state, local quantity is updated.
 If a listing disappears without a final stock value, `/inventory-confirm-sale` asks for the actual
@@ -196,7 +202,7 @@ bot/
     trends.py        trade-volume + price-mover aggregation (pure functions, unit tested)
     charts.py        matplotlib price-history chart rendering
     marketplace.py   Marketplace listings + 30-day rolling price averages
-    inventory.py     personal-inventory pricing + Eastern-time window scoring
+    inventory.py     personal-inventory pricing
     scanner.py       Raw Materials Deal Scanner matching logic (pure functions, unit tested)
     ships.py         ship data lookups
     stock_alerts.py  terminal stock-level change detection
@@ -209,7 +215,7 @@ bot/
   cogs/
     account.py            /link-uex-account (modal), /unlink-uex-account, /uex-account-status
     prices.py             /price, /best-route
-    alerts.py             /alert-add, /alert-list, /alert-remove + background poller
+    alerts.py             /alert-add, /alert-list, /alert-remove (list/remove cover all 3 alert types) + background poller
     trades.py             /trade-log-add, /trade-log, /uex-trades
     trends.py             /trending, /movers, /commodity-history + background trending refresh
     marketplace.py        /marketplace-average and Marketplace lookups

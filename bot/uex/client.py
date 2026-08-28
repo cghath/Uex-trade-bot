@@ -41,7 +41,6 @@ _ENDPOINT_CACHE_TTL = {
     "commodities_routes": 30 * 60,
     "commodities_prices_history": 3600,
     "items": 12 * 3600,
-    "items_prices": 30 * 60,
     "categories": 24 * 3600,
     "marketplace_trends": 3600,
     "vehicles": 12 * 3600,
@@ -358,12 +357,6 @@ class UexClient:
         if self._item_catalog and self._item_catalog[0] > time.monotonic():
             return list(self._item_catalog[1])
         return []
-
-    async def get_items_prices(self, **filters: Any) -> list[dict[str, Any]]:
-        return await self._get("items_prices", params=filters) or []
-
-    async def get_companies(self, **filters: Any) -> list[dict[str, Any]]:
-        return await self._get("companies", params=filters) or []
 
     async def get_vehicles(self, **filters: Any) -> list[dict[str, Any]]:
         """Ship/vehicle catalog. Includes `scu` (cargo capacity) and `container_sizes`.

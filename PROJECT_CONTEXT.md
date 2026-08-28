@@ -146,6 +146,30 @@ they're in sync).
     Every inventory interaction response is explicitly ephemeral; background worker updates use
     private DMs because Discord cannot make a non-interaction channel post ephemeral.
 
+18. **Cleanup/trim pass on `TestBranch`**: no new features - a user request to reduce bulk for
+    first-time users. Dead-code sweep removed two never-called `UexClient` methods
+    (`get_items_prices`, `get_companies`), their orphaned cache-TTL entry, and a dead
+    `datetime`/`timezone` import in `bot/uex/inventory.py` left over from entry 17's
+    best-posting-time removal. Fixed stale text that removal left behind: `/inventory-sell`'s
+    own description still promised "best-time automatic UEX posting"; README/ROADMAP/
+    `CLAUDE.local.md` still described Eastern-time posting windows and the old two-command
+    `/top-scored-routes` + `/top-in-stock-routes` naming (that merge into one `/top-routes` with
+    a `strict` flag happened before this session but was never written down - see entry 8).
+    Merged the 9-command alerts trio down to 5: `/alert-add`, `/stock-alert-add`, and
+    `/marketplace-alert-add` stay separate (their inputs genuinely differ), but the three
+    `*-list` and three `*-remove` commands became one shared `/alert-list` and `/alert-remove`,
+    living in `bot/cogs/alerts.py` and reaching into all three alert tables via `self.bot.db`.
+    `/alert-remove`'s picker needed a composite `"price:<id>"`/`"stock:<id>"`/`"marketplace:<id>"`
+    key since the three tables auto-increment independently and could collide on a bare int id -
+    `discord_ui.py`'s `AlertRemovePickerView` already treated the id as an opaque value, so it
+    needed no changes. Added `tests/test_alerts.py`, the first test coverage any of the three
+    alert cogs have had. Separately, kept `/liquidity-rank`/`/liquidity-trends` and
+    `/marketplace-trending`/`/marketplace-movers` as four distinct commands (they measure
+    genuinely different things - a bot-computed sellability score vs. UEX's raw negotiation/
+    price-swing activity) but reworded all four descriptions plus the `/intro` category
+    (renamed "Marketplace Intelligence" -> "Sellability Ratings") to say so explicitly, since
+    the similar naming read as duplication. Command count: 59 -> 55. Test count: 160 -> 165.
+
 ## Where to look for what
 
 Five docs, deliberately scoped so they don't duplicate each other:
@@ -413,7 +437,7 @@ guessed at.
   branch. Local (PC) and the Pi's databases have been fully merged at least twice now; the
   established practice is to back up both sides before any such merge and pull the Pi's
   backup down to the PC afterward, so nothing valuable lives only on the Pi's disk. The full
-  suite has 160 passing tests. Re-check live service and branch state rather than assuming
+  suite has 165 passing tests. Re-check live service and branch state rather than assuming
   this point-in-time operational note is still current.
 - The data collectors in `bot/cogs/intelligence.py` only pay off once they've been running a
   while - most of the `ROADMAP.md` intelligence backlog depends on accumulated history, so

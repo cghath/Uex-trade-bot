@@ -62,40 +62,105 @@ class Alerts(commands.Cog):
             f"**{target_price:.2f} aUEC/unit**. (checked every {POLL_INTERVAL_MINUTES} min)"
         )
 
-    @app_commands.command(name="alert-list", description="List your active price alerts.")
+    @app_commands.command(name="alert-list", description="List all your active alerts (price, restock, and marketplace).")
     async def alert_list(self, interaction: discord.Interaction) -> None:
-        alerts = await self.bot.db.list_user_alerts(interaction.user.id)
-        if not alerts:
-            await interaction.response.send_message("You have no active alerts.")
+        price_alerts = await self.bot.db.list_user_alerts(interaction.user.id)
+        stock_alerts = await self.bot.db.list_user_stock_alerts(interaction.user.id)
+        marketplace_alerts = await self.bot.db.list_user_marketplace_alerts(interaction.user.id)
+
+        if not price_alerts and not stock_alerts and not marketplace_alerts:
+            await interaction.response.send_message("You have no active alerts.", ephemeral=True)
             return
-        lines = []
-        for a in alerts:
-            readable = "sell >=" if a["direction"] == "sell_at_least" else "buy <="
-            lines.append(f"#{a['id']} — {a['commodity_name']} {readable} {a['target_price']:.2f}")
-        await interaction.response.send_message("\n".join(lines))
 
-    @app_commands.command(name="alert-remove", description="Remove one of your price alerts (pick from a menu).")
+        sections: list[str] = []
+        if price_alerts:
+            lines = []
+            for a in price_alerts:
+                readable = "sell >=" if a["direction"] == "sell_at_least" else "buy <="
+                lines.append(f"#{a['id']} — {a['commodity_name']} {readable} {a['target_price']:.2f}")
+            sections.append("**Price alerts**\n" + "\n".join(lines))
+        if stock_alerts:
+            lines = []
+            for a in stock_alerts:
+                ship_note = f" · ship: {a['ship_query']}" if a.get("ship_query") else ""
+                scope_note = " · personal (DM)" if a.get("scope") == "personal" else " · global (channel)"
+                lines.append(f"#{a['id']} — {a['commodity_name']}{ship_note}{scope_note}")
+            sections.append("**Stock (restock) alerts**\n" + "\n".join(lines))
+        if marketplace_alerts:
+            lines = []
+            for a in marketplace_alerts:
+                price_note = f" @ target {a['target_price']:,.0f}" if a["target_price"] is not None else ""
+                min_q, max_q = a.get("min_quality"), a.get("max_quality")
+                quality_note = ""
+                if min_q is not None or max_q is not None:
+                    lo = f"{min_q:.0f}" if min_q is not None else "0"
+                    hi = f"{max_q:.0f}" if max_q is not None else "100"
+                    quality_note = f" · quality {lo}-{hi}"
+                lines.append(f"#{a['id']} — {a['operation']} listings matching '{a['keyword']}'{price_note}{quality_note}")
+            sections.append("**Marketplace alerts**\n" + "\n".join(lines))
+
+        await interaction.response.send_message("\n\n".join(sections), ephemeral=True)
+
+    @app_commands.command(
+        name="alert-remove",
+        description="Remove one of your active alerts — price, restock, or marketplace (pick from a menu).",
+    )
     async def alert_remove(self, interaction: discord.Interaction) -> None:
-        alerts = await self.bot.db.list_user_alerts(interaction.user.id)
-        picker_items = [
-            {
-                "id": a["id"],
-                "label": f"#{a['id']} {a['commodity_name']}",
-                "description": ("sell >= " if a["direction"] == "sell_at_least" else "buy <= ") + f"{a['target_price']:.2f}",
-            }
-            for a in alerts
-        ]
+        price_alerts = await self.bot.db.list_user_alerts(interaction.user.id)
+        stock_alerts = await self.bot.db.list_user_stock_alerts(interaction.user.id)
+        marketplace_alerts = await self.bot.db.list_user_marketplace_alerts(interaction.user.id)
 
-        async def _remove(picker_interaction: discord.Interaction, alert_id: int) -> str:
-            removed = await self.bot.db.remove_alert(alert_id, picker_interaction.user.id)
-            return f"Alert #{alert_id} removed." if removed else f"Alert #{alert_id} was already removed."
+        picker_items: list[dict] = []
+        for a in price_alerts:
+            readable = "sell >= " if a["direction"] == "sell_at_least" else "buy <= "
+            picker_items.append({
+                "id": f"price:{a['id']}",
+                "label": f"#{a['id']} {a['commodity_name']} (price)",
+                "description": readable + f"{a['target_price']:.2f}",
+            })
+        for a in stock_alerts:
+            picker_items.append({
+                "id": f"stock:{a['id']}",
+                "label": f"#{a['id']} {a['commodity_name']} (restock)",
+                "description": (
+                    ("personal · " if a.get("scope") == "personal" else "global · ")
+                    + (f"ship: {a['ship_query']}" if a.get("ship_query") else "no ship set")
+                ),
+            })
+        for a in marketplace_alerts:
+            price_note = f" @ {a['target_price']:,.0f}" if a["target_price"] is not None else ""
+            min_q, max_q = a.get("min_quality"), a.get("max_quality")
+            quality_note = ""
+            if min_q is not None or max_q is not None:
+                lo = f"{min_q:.0f}" if min_q is not None else "0"
+                hi = f"{max_q:.0f}" if max_q is not None else "100"
+                quality_note = f" · quality {lo}-{hi}"
+            picker_items.append({
+                "id": f"marketplace:{a['id']}",
+                "label": f"#{a['id']} {a['keyword']} (marketplace)",
+                "description": f"{a['operation']} listings{price_note}{quality_note}",
+            })
+
+        async def _remove(picker_interaction: discord.Interaction, composite_id: str) -> str:
+            kind, _, raw_id = composite_id.partition(":")
+            alert_id = int(raw_id)
+            if kind == "price":
+                removed = await self.bot.db.remove_alert(alert_id, picker_interaction.user.id)
+                noun = "Price alert"
+            elif kind == "stock":
+                removed = await self.bot.db.remove_stock_alert(alert_id, picker_interaction.user.id)
+                noun = "Stock alert"
+            else:
+                removed = await self.bot.db.remove_marketplace_alert(alert_id, picker_interaction.user.id)
+                noun = "Marketplace alert"
+            return f"{noun} #{alert_id} removed." if removed else f"{noun} #{alert_id} was already removed."
 
         await send_alert_remove_picker(
             interaction,
             alerts=picker_items,
             remove_callback=_remove,
             empty_message="You have no active alerts.",
-            placeholder_noun="price alert",
+            placeholder_noun="alert",
         )
 
     @tasks.loop(minutes=POLL_INTERVAL_MINUTES)

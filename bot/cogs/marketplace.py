@@ -381,7 +381,10 @@ class Marketplace(commands.Cog):
         embed.set_footer(text=footer)
         await interaction.followup.send(embed=embed)
 
-    @app_commands.command(name="marketplace-trending", description="Most actively negotiated Marketplace items right now.")
+    @app_commands.command(
+        name="marketplace-trending",
+        description="Most actively negotiated Marketplace items right now (UEX's raw activity, not a sellability score).",
+    )
     async def marketplace_trending(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer()
         try:
@@ -409,7 +412,7 @@ class Marketplace(commands.Cog):
 
     @app_commands.command(
         name="marketplace-movers",
-        description="Marketplace items whose average sell price has swung furthest vs their own trailing-month average.",
+        description="Marketplace price movers: biggest sell-price swing vs trailing-month average (raw, not sellability).",
     )
     async def marketplace_movers(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer()

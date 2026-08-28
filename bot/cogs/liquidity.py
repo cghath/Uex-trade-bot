@@ -58,7 +58,7 @@ class LiquidityCog(commands.Cog):
 
     @app_commands.command(
         name="liquidity-rank",
-        description="Show the top 10 most liquid items in the marketplace (ranked by how fast they sell)."
+        description="The bot's own sellability score: top 10 items ranked by how fast they sell (not UEX's raw activity).",
     )
     async def liquidity_rank(
         self, interaction: discord.Interaction
@@ -113,7 +113,7 @@ class LiquidityCog(commands.Cog):
 
     @app_commands.command(
         name="liquidity-trends",
-        description="Liquidity-score history for one item, or the biggest score movers when no item is selected.",
+        description="Sellability-score history for one item, or its biggest movers (the bot's score, not raw activity).",
     )
     @app_commands.describe(item="Optional Marketplace item to chart")
     @app_commands.autocomplete(item=liquidity_item_autocomplete)
