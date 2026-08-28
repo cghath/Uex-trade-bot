@@ -170,6 +170,39 @@ they're in sync).
     (renamed "Marketplace Intelligence" -> "Sellability Ratings") to say so explicitly, since
     the similar naming read as duplication. Command count: 59 -> 55. Test count: 160 -> 165.
 
+19. **Custom-price parity for `/inventory-sell`'s batch flow**: found by the user testing the
+    live bot right after entry 18 - `/inventory-post-now` (single item) already had a "custom"
+    pricing option added in entry 16, but `AuthorizeScheduleView` (the multi-stack checklist
+    behind `/inventory-sell`) only ever offered balanced/undercut/premium, with no way to enter
+    an exact price. `create_inventory_post_jobs` already supported a per-job `custom_price`
+    (it re-validates against that inventory entry's own minimum_price from the DB, not
+    whatever the caller passes), so this was purely a missing UI path, not a DB gap.
+    `CustomPriceModal` was generalized to take `minimum_price` explicitly instead of reading
+    `view.entry["minimum_price"]`, so the same modal now works for both `PostNowView` and
+    `AuthorizeScheduleView`. An absolute custom price only makes sense for one stack at a time
+    (unlike the percentage strategies, which scale per-item automatically), so choosing
+    "custom" with more than one stack selected explains that and reverts instead of silently
+    misapplying one price across different items. Added direct test coverage for
+    `AuthorizeScheduleView` for the first time (previously only `PostNowView` had any).
+
+20. **`/inventory-add` resolves variant/skin-qualified item names**: also found by the user
+    testing live - typing a real item they own (e.g. "Arlington Rifle Widowmaker") failed to
+    resolve, with the bot suggesting only an exact autocomplete pick would work. Checked UEX's
+    live catalog and marketplace listings directly rather than guessing (`id=8069` is the only
+    "Arlington"-matching catalog entry; 11 of 12 live "arlington"-titled sell listings post
+    against that same id, confirming "Widowmaker"/"Watchpoint"/"Gamekeeper" are seller-chosen
+    listing titles for one base item, not separate catalog entries - this was the "genuinely
+    uncatalogued item" question from earlier in the session, and the answer turned out to be
+    no, so the schema-migration path was never needed). Real listing titles interleave the
+    variant word in the middle sometimes ("Arlington \"Watchpoint\" Rifle") rather than only
+    appending it, so `find_item_id_by_name` (`bot/uex/marketplace.py`, shared by all of
+    inventory/marketplace/marketplace-alerts) gained a third, last-resort tier: word-subset
+    match (every word in a catalog name present in the query, not required contiguous),
+    still gated to a unique result so it never guesses across two plausible candidates.
+    `/inventory-add` also now keeps what was actually typed as the stored/displayed item name
+    instead of collapsing it to the catalog's bare name once resolved, so the variant survives
+    into `/inventory`, the eventual Marketplace listing title, and the confirmation message.
+
 ## Where to look for what
 
 Five docs, deliberately scoped so they don't duplicate each other:
@@ -437,7 +470,7 @@ guessed at.
   branch. Local (PC) and the Pi's databases have been fully merged at least twice now; the
   established practice is to back up both sides before any such merge and pull the Pi's
   backup down to the PC afterward, so nothing valuable lives only on the Pi's disk. The full
-  suite has 165 passing tests. Re-check live service and branch state rather than assuming
+  suite has 171 passing tests. Re-check live service and branch state rather than assuming
   this point-in-time operational note is still current.
 - The data collectors in `bot/cogs/intelligence.py` only pay off once they've been running a
   while - most of the `ROADMAP.md` intelligence backlog depends on accumulated history, so

@@ -13,6 +13,7 @@ from discord.ext import commands
 import httpx
 
 from bot.cogs.personal_inventory import (
+    AuthorizeScheduleView,
     CustomPriceModal,
     FloorReachedView,
     LowerFloorModal,
@@ -28,10 +29,70 @@ from bot.uex.inventory import (
     extract_listing_id,
     recommend_balanced_price,
 )
+from bot.uex.marketplace import find_item_id_by_name
 
 
 def _make_db(tmp_path) -> Database:
     return Database(tmp_path / "inventory.sqlite3", Fernet(Fernet.generate_key()))
+
+
+ARLINGTON_CATALOG = [{"id": 8069, "name": "Arlington Rifle", "id_category": 5, "slug": "arlington-rifle"}]
+
+
+def test_find_item_id_by_name_resolves_a_variant_qualified_query_to_its_base_catalog_item():
+    """Confirmed empirically against live UEX listings: there is no separate catalog entry for
+    a seller-titled variant like 'Arlington Rifle Widowmaker' - it's the same id_item as the
+    plain 'Arlington Rifle'. A query longer/more specific than any exact catalog name should
+    still resolve when exactly one catalog name is contained within it."""
+    assert find_item_id_by_name(ARLINGTON_CATALOG, "Arlington Rifle Widowmaker") == 8069
+    assert find_item_id_by_name(ARLINGTON_CATALOG, 'Arlington "Watchpoint" Rifle') == 8069
+
+
+def test_find_item_id_by_name_reverse_match_stays_unambiguous():
+    catalog = ARLINGTON_CATALOG + [{"id": 1, "name": "Rifle", "id_category": 5, "slug": "rifle"}]
+    # Both "Rifle" and "Arlington Rifle" are contained in this query - must not guess.
+    assert find_item_id_by_name(catalog, "Arlington Rifle Widowmaker") is None
+
+
+def test_find_item_id_by_name_exact_and_forward_substring_are_unaffected():
+    assert find_item_id_by_name(ARLINGTON_CATALOG, "Arlington Rifle") == 8069
+    assert find_item_id_by_name(ARLINGTON_CATALOG, "arlington") == 8069  # forward substring, unique
+
+
+class _FakeUexCatalog:
+    def __init__(self, catalog):
+        self._catalog = catalog
+
+    async def get_item_catalog(self):
+        return self._catalog
+
+
+def test_inventory_add_resolves_a_variant_name_and_keeps_it_as_the_displayed_item_name(tmp_path):
+    """End-to-end guard for the actual user-facing fix: typing a variant/skin name that isn't
+    itself in the catalog must still resolve (via the base item) and must NOT get silently
+    collapsed to the catalog's bare name - the variant is what makes the entry meaningful."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        bot = type("FakeBot", (), {})()
+        bot.db = db
+        bot.uex = _FakeUexCatalog(ARLINGTON_CATALOG)
+        cog = PersonalInventory.__new__(PersonalInventory)
+        cog.bot = bot
+        interaction = _FakeInteraction(user_id=77)
+
+        await cog.inventory_add.callback(
+            cog, interaction, "Arlington Rifle Widowmaker", 1, "Area18",
+        )
+
+        (message,), _ = interaction.followup.sent[0]
+        assert "Arlington Rifle Widowmaker" in message
+        rows = await db.list_inventory(77)
+        assert len(rows) == 1
+        assert rows[0]["item_name"] == "Arlington Rifle Widowmaker"
+        assert rows[0]["id_item"] == 8069
+
+    asyncio.run(run())
 
 
 def test_personal_inventory_cog_is_registered_and_exposes_its_commands():
@@ -892,7 +953,7 @@ def test_custom_price_modal_rejects_below_minimum_and_accepts_a_valid_price():
         cog = PersonalInventory.__new__(PersonalInventory)
         entry = {"id": 1, "minimum_price": 1000}
         view = PostNowView(cog, 42, entry, 5)
-        modal = CustomPriceModal(view)
+        modal = CustomPriceModal(view, minimum_price=entry["minimum_price"])
         modal.price_input._value = "500"
 
         interaction = _FakeInteraction(42)
@@ -902,13 +963,72 @@ def test_custom_price_modal_rejects_below_minimum_and_accepts_a_valid_price():
         (message,), _ = interaction.response.messages[0]
         assert "below your minimum" in message
 
-        modal2 = CustomPriceModal(view)
+        modal2 = CustomPriceModal(view, minimum_price=entry["minimum_price"])
         modal2.price_input._value = "1,750,000"
         interaction2 = _FakeInteraction(42)
         await modal2.on_submit(interaction2)
         assert view.pricing_strategy == "custom"
         assert view.custom_price == 1750000
         assert view.choose_pricing_strategy.options[-1].default is True
+
+
+def test_custom_price_modal_also_works_for_the_batch_authorize_view():
+    """CustomPriceModal is shared between PostNowView (single item) and AuthorizeScheduleView
+    (batch, gated to one selected stack) - this guards the generalization actually applies to
+    both, not just the view it was originally written for."""
+    async def run():
+        cog = PersonalInventory.__new__(PersonalInventory)
+        specs = [{"inventory_id": 1, "quantity": 5, "scheduled_for": datetime.now(timezone.utc),
+                   "auto_relist": True, "minimum_price": 1000}]
+        view = AuthorizeScheduleView(cog, 42, specs)
+        modal = CustomPriceModal(view, minimum_price=specs[0]["minimum_price"])
+        modal.price_input._value = "2,500,000"
+
+        interaction = _FakeInteraction(42)
+        await modal.on_submit(interaction)
+
+        assert view.pricing_strategy == "custom"
+        assert view.custom_price == 2500000
+
+    asyncio.run(run())
+
+
+def test_authorize_schedule_view_confirm_creates_a_custom_priced_job(tmp_path):
+    """The core new-feature guard: confirming a single-stack batch with a custom price must
+    thread that exact price into the created job, not silently fall back to a computed one."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        user_id = 11
+        inventory_id = await db.add_inventory_item(
+            user_id=user_id, id_item=1, id_category=2, item_name="Arlington Rifle",
+            item_slug=None, quantity=1, quality=0, location="Area18", minimum_price=500_000,
+        )
+        bot = type("FakeBot", (), {})()
+        bot.db = db
+        cog = PersonalInventory.__new__(PersonalInventory)
+        cog.bot = bot
+
+        specs = [{
+            "inventory_id": inventory_id, "quantity": 1, "scheduled_for": datetime.now(timezone.utc),
+            "auto_relist": True, "minimum_price": 500_000,
+        }]
+        view = AuthorizeScheduleView(cog, user_id, specs)
+        view.pricing_strategy = "custom"
+        view.custom_price = 6_833_000
+        interaction = _FakeInteraction(user_id)
+
+        await view.confirm.callback(interaction)
+
+        assert view.resolved is True
+        jobs = await db.list_active_inventory_jobs(user_id)
+        assert len(jobs) == 1
+        assert jobs[0]["status"] == "pending"  # AuthorizeScheduleView schedules; a background
+        # loop claims and posts it later - "custom" pricing must survive to that later post.
+        assert jobs[0]["pricing_strategy"] == "custom"
+        assert jobs[0]["custom_price"] == 6_833_000
+
+    asyncio.run(run())
 
 
 def test_post_now_reports_a_friendly_error_when_live_pricing_fails(tmp_path):

@@ -236,6 +236,7 @@ class InventorySelectionView(discord.ui.View):
                     "quantity": available,
                     "scheduled_for": scheduled_for,
                     "auto_relist": True,
+                    "minimum_price": int(row["minimum_price"]),
                 }
             )
             embed.add_field(
@@ -272,6 +273,7 @@ class AuthorizeScheduleView(discord.ui.View):
         self.specs = specs
         self.resolved = False
         self.pricing_strategy = "balanced"
+        self.custom_price: int | None = None
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.author_id:
@@ -290,10 +292,29 @@ class AuthorizeScheduleView(discord.ui.View):
             discord.SelectOption(label="Post at the recommended price", value="balanced", default=True),
             discord.SelectOption(label="Post 10% below the recommended price", value="undercut"),
             discord.SelectOption(label="Post 10% above the recommended price", value="premium"),
+            discord.SelectOption(label="Enter a custom price...", value="custom"),
         ],
     )
     async def choose_pricing_strategy(self, interaction: discord.Interaction, select: discord.ui.Select) -> None:
-        self.pricing_strategy = select.values[0]
+        chosen = select.values[0]
+        if chosen == "custom":
+            if len(self.specs) != 1:
+                for option in select.options:
+                    option.default = option.value == self.pricing_strategy
+                await interaction.response.edit_message(
+                    content=(
+                        "Custom pricing works one stack at a time - re-run `/inventory-sell` and select "
+                        "just this stack to set an exact price."
+                    ),
+                    view=self,
+                )
+                return
+            await interaction.response.send_modal(
+                CustomPriceModal(self, minimum_price=int(self.specs[0]["minimum_price"]))
+            )
+            return
+        self.pricing_strategy = chosen
+        self.custom_price = None
         for option in select.options:
             option.default = option.value == self.pricing_strategy
         await interaction.response.edit_message(
@@ -307,6 +328,8 @@ class AuthorizeScheduleView(discord.ui.View):
         await interaction.response.edit_message(view=self)
         for spec in self.specs:
             spec["pricing_strategy"] = self.pricing_strategy
+            if self.pricing_strategy == "custom":
+                spec["custom_price"] = self.custom_price
         try:
             job_ids = await self.cog.bot.db.create_inventory_post_jobs(self.author_id, self.specs)
         except ValueError as exc:
@@ -325,6 +348,12 @@ class AuthorizeScheduleView(discord.ui.View):
 
 
 class CustomPriceModal(discord.ui.Modal, title="Enter a custom price"):
+    """Shared by PostNowView (single item) and AuthorizeScheduleView (batch, gated to exactly
+    one selected stack - an absolute price doesn't scale across different items the way the
+    undercut/premium percentage strategies do). Either view just needs `.pricing_strategy`,
+    `.custom_price`, and `.choose_pricing_strategy` (the decorated Select); minimum_price is
+    passed in explicitly so this modal doesn't need to know which shape of view it's on.
+    """
     price_input: discord.ui.TextInput = discord.ui.TextInput(
         label="Price per unit (UEC)",
         placeholder="e.g. 1750000",
@@ -332,9 +361,10 @@ class CustomPriceModal(discord.ui.Modal, title="Enter a custom price"):
         max_length=15,
     )
 
-    def __init__(self, view: "PostNowView") -> None:
+    def __init__(self, view: "PostNowView | AuthorizeScheduleView", *, minimum_price: int) -> None:
         super().__init__()
         self.view = view
+        self.minimum_price = minimum_price
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         raw = self.price_input.value.strip().replace(",", "")
@@ -346,10 +376,9 @@ class CustomPriceModal(discord.ui.Modal, title="Enter a custom price"):
         if price <= 0:
             await interaction.response.send_message("Price must be a positive whole number.", ephemeral=True)
             return
-        minimum_price = int(self.view.entry["minimum_price"])
-        if price < minimum_price:
+        if price < self.minimum_price:
             await interaction.response.send_message(
-                f"That's below your minimum of **{minimum_price:,}** UEC - raise the price, or lower your "
+                f"That's below your minimum of **{self.minimum_price:,}** UEC - raise the price, or lower your "
                 "minimum first with `/inventory-set-minimum`.",
                 ephemeral=True,
             )
@@ -397,7 +426,9 @@ class PostNowView(discord.ui.View):
     async def choose_pricing_strategy(self, interaction: discord.Interaction, select: discord.ui.Select) -> None:
         chosen = select.values[0]
         if chosen == "custom":
-            await interaction.response.send_modal(CustomPriceModal(self))
+            await interaction.response.send_modal(
+                CustomPriceModal(self, minimum_price=int(self.entry["minimum_price"]))
+            )
             return
         self.pricing_strategy = chosen
         self.custom_price = None
@@ -559,7 +590,7 @@ class PersonalInventory(commands.Cog):
 
     @app_commands.command(name="inventory-add", description="Add a catalogued item stack to your personal inventory.")
     @app_commands.describe(
-        item="Exact catalogued item name",
+        item="Catalogued item name - a more specific variant/skin name (e.g. a weapon paint) also resolves",
         quantity="How many you currently have",
         location="Where the stack is stored",
         quality="Item quality from 0 to 1000; use 0 when quality does not apply",
@@ -594,11 +625,16 @@ class PersonalInventory(commands.Cog):
                 ephemeral=True,
             )
             return
+        # Keep what was actually typed, not the bare catalog name: UEX sellers routinely title
+        # listings with a variant/skin name (e.g. "Arlington Rifle Widowmaker") layered onto
+        # the base catalogued item, and the resolver above already handles that - collapsing
+        # back to the catalog's plain name here would silently throw the variant away.
+        display_name = item.strip() or str(catalog_item.get("name") or item)
         inventory_id = await self.bot.db.add_inventory_item(
             user_id=interaction.user.id,
             id_item=id_item,
             id_category=int(catalog_item["id_category"]),
-            item_name=str(catalog_item.get("name") or item),
+            item_name=display_name,
             item_slug=catalog_item.get("slug"),
             quantity=int(quantity),
             quality=int(quality),
@@ -614,7 +650,7 @@ class PersonalInventory(commands.Cog):
             else " Set a minimum with `/inventory-set-minimum` before scheduling it."
         )
         await interaction.followup.send(
-            f"Added inventory **#{inventory_id}**: [{catalog_item.get('name')}]({url}) · "
+            f"Added inventory **#{inventory_id}**: [{display_name}]({url}) · "
             f"qty **{quantity}** · quality **{quality_label(int(quality))}** · {location}.{floor_note}",
             ephemeral=True,
         )

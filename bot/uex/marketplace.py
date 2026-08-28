@@ -14,7 +14,12 @@ def find_item_id_by_name(items: list[dict], query: str) -> int | None:
     """Resolve a typed query to a single catalog item's id, if there's an unambiguous match.
 
     Prefers an exact (case-insensitive) name match; falls back to a substring match only
-    if it's unique, so a vague query doesn't silently pick the wrong item.
+    if it's unique, so a vague query doesn't silently pick the wrong item. As a last resort,
+    also tries the reverse direction: UEX sellers routinely title listings with a variant/skin
+    name layered onto the base catalogued item (e.g. 'Arlington Rifle Widowmaker' for the
+    catalogued 'Arlington Rifle' - confirmed empirically against live listings, there is no
+    separate 'Widowmaker' catalog entry), so a query *longer* than any exact catalog name
+    should still resolve when exactly one catalog name is contained within it.
     """
     query_lower = query.strip().lower()
     if not query_lower:
@@ -27,6 +32,18 @@ def find_item_id_by_name(items: list[dict], query: str) -> int | None:
     substring_matches = [item for item in items if query_lower in (item.get("name") or "").lower()]
     if len(substring_matches) == 1:
         return substring_matches[0].get("id")
+
+    # Word-subset, not substring: real UEX sellers sometimes interleave the variant word
+    # in the middle ('Arlington "Watchpoint" Rifle'), not just append it ('Arlington Rifle
+    # Widowmaker'), so the catalog name isn't always a contiguous substring of the query even
+    # when every one of its words is present.
+    query_words = set(query_lower.split())
+    contains_matches = [
+        item for item in items
+        if (catalog_words := set((item.get("name") or "").strip().lower().split())) and catalog_words <= query_words
+    ]
+    if len(contains_matches) == 1:
+        return contains_matches[0].get("id")
     return None
 
 
