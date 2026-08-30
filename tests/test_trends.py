@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from bot.uex.trends import (
     SELL_SIDE_NO_DEMAND_CODE,
-    MoverEntry,
     ScoredRouteEntry,
     TrendingEntry,
     aggregate_commodity_trips,

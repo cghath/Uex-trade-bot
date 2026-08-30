@@ -7,7 +7,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from bot.uex.supply_demand import SELL_SIDE_NO_DEMAND_CODE, has_sell_side_demand
+from bot.uex.supply_demand import SELL_SIDE_NO_DEMAND_CODE as SELL_SIDE_NO_DEMAND_CODE
+from bot.uex.supply_demand import has_sell_side_demand
 
 
 @dataclass
