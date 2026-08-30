@@ -229,7 +229,22 @@ they're in sync).
     `/my-favorites` - UEX's `/marketplace_negotiations` and `/marketplace_favorites`
     don't return `id_item` at all, so linking those needs an extra
     `get_marketplace_listings` lookup per row (a real added-cost decision, a recurring
-    background poller in negotiation_alerts.py's case, not a free fix).
+    background poller in negotiation_alerts.py's case, not a free fix). See entry 23 -
+    this was worked through and closed the same session.
+
+23. **The three deferred Marketplace links from entry 22 added, after a cost check**:
+    worked out the actual burst math for negotiation_alerts.py's 5-min poller (bounded to
+    once per negotiation with a genuinely new message, not once per poll or per message,
+    and `marketplace_listings` has a 60s cache so multiple new messages on one negotiation
+    in the same cycle resolve `id_item` once) - concluded it stays well inside the
+    120 req/min headroom at any realistic scale for a single-server bot, so implemented
+    all three rather than leaving them deferred. `negotiation_alerts.py` resolves lazily
+    inside `_check_negotiation`; `/my-negotiations` and `/my-favorites` are on-demand and
+    already capped at 15 rows, so they resolve concurrently via `asyncio.gather` through a
+    new shared `_resolve_id_item` helper. Every lookup falls back to a plain, unlinked name
+    on failure rather than ever blocking the notification/response. Added direct test
+    coverage for both new code paths, since neither existing negotiation_alerts fixture
+    happened to set `id_listing` and so never actually reached this code before.
 
 ## Where to look for what
 
@@ -416,13 +431,6 @@ guessed at.
   still reference the old path - import from `bot.uex.marketplace` instead.
 - Discord bot token and UEX app token committed in old git history have not been rotated.
   Low urgency (private repo) but still outstanding.
-- **Three Marketplace surfaces still show unlinked item names** (timeline entry 22):
-  `negotiation_alerts.py`'s DM alerts, and `marketplace.py`'s `/my-negotiations` and
-  `/my-favorites`. Fixable, but needs an explicit decision first since UEX's underlying
-  endpoints don't return `id_item` - closing the gap means adding a
-  `get_marketplace_listings(id=id_listing)` lookup per row, which is a real cost on
-  negotiation_alerts.py's 5-min poller specifically (the two `/my-*` commands are
-  on-demand and bounded to 15 rows, so lower-stakes either way).
 - **Auto-load-only route filter needs a live check.** `/best-route auto-load-only:True` and
   `/top-routes auto-load-only:True` (timeline entry 21) were built and unit-tested - including
   the schema migration exercised end-to-end against a real SQLite file - from a sandbox with
