@@ -8,7 +8,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from bot.cogs.ships import ship_name_autocomplete
-from bot.uex.exceptions import UexApiError
+from bot.uex.exceptions import UexApiError, describe_uex_api_error
 from bot.uex.data_health import classify_terminal_health, format_health_note
 from bot.uex.route_confidence import coalesce_report_count, compute_route_confidence
 from bot.uex.practical_routes import route_practical_notes, terminal_supports_auto_load
@@ -116,7 +116,7 @@ class Prices(commands.Cog):
         try:
             rows = await self.bot.uex.get_commodities_prices(commodity_name=commodity)
         except UexApiError as exc:
-            await interaction.followup.send(f"UEX API error: {exc}")
+            await interaction.followup.send(describe_uex_api_error(exc))
             return
 
         if not rows:
@@ -231,7 +231,7 @@ class Prices(commands.Cog):
         try:
             rows = await self.bot.uex.get_commodities_prices(commodity_name=commodity)
         except UexApiError as exc:
-            await interaction.followup.send(f"UEX API error: {exc}")
+            await interaction.followup.send(describe_uex_api_error(exc))
             return
 
         if not rows:
@@ -566,7 +566,7 @@ class Prices(commands.Cog):
         try:
             vehicles = await self.bot.uex.get_vehicles()
         except UexApiError as exc:
-            await interaction.followup.send(f"UEX API error while checking ships: {exc}")
+            await interaction.followup.send(describe_uex_api_error(exc))
             return
         ship_vehicle = resolve_ship(vehicles, ship_query)
         if not ship_vehicle or not ship_vehicle.get("scu"):

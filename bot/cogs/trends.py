@@ -28,7 +28,7 @@ from discord.ext import commands, tasks
 from bot.cogs.prices import _add_chunked_fields, commodity_name_autocomplete
 from bot.cogs.ships import ship_name_autocomplete
 from bot.uex.charts import render_price_history_chart
-from bot.uex.exceptions import UexApiError
+from bot.uex.exceptions import UexApiError, describe_uex_api_error
 from bot.uex.data_health import classify_terminal_health, format_health_note
 from bot.uex.route_confidence import compute_route_confidence
 from bot.uex.practical_routes import route_practical_notes, terminal_supports_auto_load
@@ -457,7 +457,7 @@ class Trends(commands.Cog):
         try:
             rows = await self.bot.uex.get_commodities_prices_all()
         except UexApiError as exc:
-            await interaction.followup.send(f"UEX API error: {exc}")
+            await interaction.followup.send(describe_uex_api_error(exc))
             return
 
         gainers, losers = compute_movers(rows, limit=5)
@@ -501,7 +501,7 @@ class Trends(commands.Cog):
         try:
             price_rows = await self.bot.uex.get_commodities_prices(commodity_name=commodity)
         except UexApiError as exc:
-            await interaction.followup.send(f"UEX API error: {exc}")
+            await interaction.followup.send(describe_uex_api_error(exc))
             return
 
         if not price_rows:
@@ -536,7 +536,7 @@ class Trends(commands.Cog):
                 id_terminal=id_terminal, id_commodity=id_commodity
             )
         except UexApiError as exc:
-            await interaction.followup.send(f"UEX API error fetching history: {exc}")
+            await interaction.followup.send(describe_uex_api_error(exc))
             return
 
         if not history_rows:

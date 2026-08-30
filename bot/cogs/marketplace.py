@@ -18,7 +18,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from bot.uex.charts import render_price_history_chart
-from bot.uex.exceptions import UexApiError
+from bot.uex.exceptions import UexApiError, describe_uex_api_error
 from bot.uex.inventory import extract_listing_id
 from bot.uex.marketplace import (
     MarketplaceAverageEntry,
@@ -350,7 +350,7 @@ class Marketplace(commands.Cog):
                 listings = await self.bot.uex.get_marketplace_listings(operation=operation.value if operation else None)
                 listings = filter_listings_by_keyword(listings, query)
         except UexApiError as exc:
-            await interaction.followup.send(f"UEX API error: {exc}")
+            await interaction.followup.send(describe_uex_api_error(exc))
             return
 
         listings = exclude_sold_out(listings)
@@ -393,7 +393,7 @@ class Marketplace(commands.Cog):
         try:
             rows = await self.bot.uex.get_marketplace_trends()
         except UexApiError as exc:
-            await interaction.followup.send(f"UEX API error: {exc}")
+            await interaction.followup.send(describe_uex_api_error(exc))
             return
 
         if not rows:
@@ -423,7 +423,7 @@ class Marketplace(commands.Cog):
         try:
             rows = await self.bot.uex.get_marketplace_trends()
         except UexApiError as exc:
-            await interaction.followup.send(f"UEX API error: {exc}")
+            await interaction.followup.send(describe_uex_api_error(exc))
             return
 
         gainers, losers = compute_marketplace_movers(rows, limit=10)
@@ -497,7 +497,7 @@ class Marketplace(commands.Cog):
                     quality_tier=quality_tier.value if quality_tier is not None else None,
                 )
         except UexApiError as exc:
-            await interaction.followup.send(f"UEX API error: {exc}")
+            await interaction.followup.send(describe_uex_api_error(exc))
             return
 
         entries = parse_marketplace_average_rows(rows)
@@ -590,7 +590,7 @@ class Marketplace(commands.Cog):
                 operation=operation.value if operation else None,
             )
         except UexApiError as exc:
-            await interaction.followup.send(f"UEX API error: {exc}")
+            await interaction.followup.send(describe_uex_api_error(exc))
             return
 
         if not rows:
@@ -627,7 +627,7 @@ class Marketplace(commands.Cog):
         try:
             rows = await self.bot.uex.get_marketplace_favorites(secret_key=secret_key)
         except UexApiError as exc:
-            await interaction.followup.send(f"UEX API error: {exc}")
+            await interaction.followup.send(describe_uex_api_error(exc))
             return
 
         if not rows:
@@ -656,7 +656,7 @@ class Marketplace(commands.Cog):
         try:
             rows = await self.bot.uex.get_marketplace_negotiations(secret_key=secret_key)
         except UexApiError as exc:
-            await interaction.followup.send(f"UEX API error: {exc}")
+            await interaction.followup.send(describe_uex_api_error(exc))
             return
 
         if not rows:
@@ -746,7 +746,7 @@ class Marketplace(commands.Cog):
         try:
             rows = await self.bot.uex.get_marketplace_listings(id=listing_id, use_cache=False)
         except UexApiError as exc:
-            await interaction.followup.send(f"UEX API error: {exc}")
+            await interaction.followup.send(describe_uex_api_error(exc))
             return
         if not rows:
             await interaction.followup.send(

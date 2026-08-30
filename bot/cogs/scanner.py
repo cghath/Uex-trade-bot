@@ -19,7 +19,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
-from bot.uex.exceptions import UexApiError
+from bot.uex.exceptions import UexApiError, describe_uex_api_error
 from bot.uex.marketplace import marketplace_item_link, marketplace_item_url
 from bot.uex.scanner import StealEntry, build_fair_price_index, find_steals
 
@@ -84,7 +84,7 @@ class Scanner(commands.Cog):
         try:
             steals = await self._find_current_steals()
         except UexApiError as exc:
-            await interaction.followup.send(f"UEX API error: {exc}")
+            await interaction.followup.send(describe_uex_api_error(exc))
             return
 
         if not steals:
