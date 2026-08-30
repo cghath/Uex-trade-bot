@@ -259,6 +259,69 @@ def test_enable_seeds_baseline_then_only_new_messages_from_the_other_party_notif
     asyncio.run(run())
 
 
+def test_new_message_notification_links_the_item_via_the_listing_lookup(tmp_path):
+    """id_item isn't on the negotiation itself - the DM must resolve it from id_listing via
+    get_marketplace_listings, exactly once (not once per message), and never let that lookup
+    block the notification if it fails."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        user_id = 777
+        await db.set_user_secret_key(user_id, "sk_test")
+        await db.set_negotiation_alerts_enabled(user_id, True)
+        await db.set_negotiation_last_modified(user_id, 88, 1000)
+
+        negotiation_row = {
+            "id": 88, "id_listing": 5150, "listing_title": "Laranite - Q0",
+            "is_listing_advertiser": 1, "advertiser_username": "me", "client_username": "buyer",
+            "date_modified": 2000,
+        }
+        listing_lookups = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if "marketplace_negotiations_messages" in request.url.path:
+                return httpx.Response(200, json={"status": "ok", "data": [
+                    {"id": 1, "message": "1000 UEC?", "user_username": "buyer", "date_added": 50},
+                    {"id": 2, "message": "1100 then", "user_username": "buyer", "date_added": 60},
+                ]})
+            if "marketplace_negotiations" in request.url.path:
+                return httpx.Response(200, json={"status": "ok", "data": [negotiation_row]})
+            if "marketplace_listings" in request.url.path:
+                listing_lookups.append(dict(request.url.params))
+                return httpx.Response(200, json={"status": "ok", "data": [{"id": 5150, "id_item": 55}]})
+            raise AssertionError(f"unexpected request: {request.url}")
+
+        client = UexClient(app_token="test", base_url="https://uex.test")
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+        bot = type("FakeBot", (), {})()
+        bot.db = db
+        bot.uex = client
+        sent_dms: list[tuple[int, str]] = []
+
+        cog = NegotiationAlerts.__new__(NegotiationAlerts)
+        cog.bot = bot
+
+        async def _fake_notify(target_user_id: int, message: str) -> None:
+            sent_dms.append((target_user_id, message))
+
+        cog._notify_user = _fake_notify
+
+        try:
+            await cog.poll_negotiation_messages()
+            assert len(sent_dms) == 2, "both new messages from the other party should DM"
+            for _, text in sent_dms:
+                assert "[Laranite - Q0](https://uexcorp.space/marketplace/home/?id_item=55&mode=list)" in text
+            # Two messages in the same negotiation/call must resolve id_item once, not twice.
+            assert len(listing_lookups) == 1
+            assert listing_lookups[0]["id"] == "5150"
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
 def test_a_failed_messages_fetch_does_not_advance_the_checkpoint_and_is_retried(tmp_path):
     """The exact bug this guards: if the per-negotiation messages fetch fails on one poll
     while date_modified has already advanced, the checkpoint must not advance to match it -

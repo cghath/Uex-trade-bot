@@ -9,7 +9,9 @@ before anything is actually posted; nothing here posts automatically.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
+from typing import Any
 
 import discord
 from discord import app_commands
@@ -632,13 +634,15 @@ class Marketplace(commands.Cog):
             await interaction.followup.send("You have no favorited Marketplace listings.")
             return
 
+        favorites = rows[:15]
+        id_items = await asyncio.gather(*(self._resolve_id_item(f.get("id_listing")) for f in favorites))
         lines = []
-        for f in rows[:15]:
+        for f, id_item in zip(favorites, id_items):
             price = parse_uex_number(f.get("price"))
             price_text = f"{price:,.0f} {f.get('currency', 'UEC')}" if price is not None else "price n/a"
             title = f.get("title") or f.get("listing_title") or "Untitled listing"
             sold_note = " (sold out)" if f.get("is_sold_out") else ""
-            lines.append(f"#{f.get('id')} — **{title}** · {price_text}{sold_note}")
+            lines.append(f"#{f.get('id')} — **{marketplace_item_link(title, id_item)}** · {price_text}{sold_note}")
         await interaction.followup.send("\n".join(lines))
 
     @app_commands.command(name="my-negotiations", description="Your own active UEX Marketplace deals.")
@@ -659,17 +663,32 @@ class Marketplace(commands.Cog):
             await interaction.followup.send("No active marketplace negotiations found on your account.")
             return
 
+        negotiations = rows[:15]
+        id_items = await asyncio.gather(*(self._resolve_id_item(n.get("id_listing")) for n in negotiations))
         lines = []
-        for n in rows[:15]:
+        for n, id_item in zip(negotiations, id_items):
             role = "selling" if n.get("is_listing_advertiser") else "buying"
             status = "closed" if n.get("date_closed") else "open"
             price = parse_uex_number(n.get("price"))
             price_text = f"{price:,.0f}" if price is not None else "?"
+            title = marketplace_item_link(n.get("listing_title", "Untitled"), id_item)
             lines.append(
-                f"#{n.get('id')} {role} — {n.get('listing_title', 'Untitled')} · "
+                f"#{n.get('id')} {role} — {title} · "
                 f"{price_text} {n.get('currency', 'UEC')} · {status}"
             )
         await interaction.followup.send("\n".join(lines))
+
+    async def _resolve_id_item(self, id_listing: Any) -> int | None:
+        """UEX's negotiations/favorites don't carry id_item directly - resolve it from the
+        listing. Any failure (network, listing gone) just falls back to a plain, unlinked
+        name; it must never block the command's response."""
+        if id_listing is None:
+            return None
+        try:
+            rows = await self.bot.uex.get_marketplace_listings(id=int(id_listing))
+        except (UexApiError, TypeError, ValueError):
+            return None
+        return rows[0].get("id_item") if rows else None
 
     @app_commands.command(name="marketplace-post", description="Create a new UEX Marketplace listing (opens a form, then asks you to confirm before posting).")
     @app_commands.describe(

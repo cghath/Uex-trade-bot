@@ -15,7 +15,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from bot.uex.exceptions import UexApiError
-from bot.uex.marketplace import parse_uex_number
+from bot.uex.marketplace import marketplace_item_link, parse_uex_number
 
 logger = logging.getLogger("uexbot.negotiation_alerts")
 
@@ -146,6 +146,11 @@ class NegotiationAlerts(commands.Cog):
         except UexApiError as exc:
             logger.warning("Failed to fetch messages for negotiation %s: %s", id_negotiation, exc)
             return False
+        # Resolved lazily (at most once per call, only if there's an actual new message to
+        # DM about) and cached here - id_item isn't on the negotiation itself, so linking it
+        # means one extra lookup by id_listing, not one per message in this negotiation.
+        id_item: int | None = None
+        id_item_resolved = False
         for row in sorted(messages, key=lambda r: _as_int(r.get("date_added")) or 0):
             message_id = _as_int(row.get("id"))
             text = row.get("message")
@@ -156,13 +161,29 @@ class NegotiationAlerts(commands.Cog):
                 continue
             if await self.bot.db.is_negotiation_message_seen(message_id):
                 continue
+            if not id_item_resolved:
+                id_item = await self._resolve_listing_item_id(negotiation.get("id_listing"))
+                id_item_resolved = True
+            listing_name = marketplace_item_link(negotiation.get("listing_title") or "a listing", id_item)
             await self._notify_user(
                 user_id,
-                f"New negotiation message on **{negotiation.get('listing_title') or 'a listing'}** "
-                f"from **{sender}**: {text}",
+                f"New negotiation message on **{listing_name}** from **{sender}**: {text}",
             )
             await self.bot.db.mark_negotiation_message_seen(message_id)
         return True
+
+    async def _resolve_listing_item_id(self, id_listing: Any) -> int | None:
+        """UEX's negotiations don't carry id_item directly - resolve it from the listing.
+        Any failure (network, listing gone) just means the notification falls back to a
+        plain, unlinked name; it must never block the DM itself."""
+        listing_id = _as_int(id_listing)
+        if listing_id is None:
+            return None
+        try:
+            rows = await self.bot.uex.get_marketplace_listings(id=listing_id)
+        except UexApiError:
+            return None
+        return rows[0].get("id_item") if rows else None
 
     async def _notify_user(self, user_id: int, message: str) -> None:
         try:

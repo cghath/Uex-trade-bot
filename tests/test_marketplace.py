@@ -1,4 +1,5 @@
-"""Marketplace cog tests: currently just the delete-listing local-state ordering guard."""
+"""Marketplace cog tests: the delete-listing local-state ordering guard, and
+/my-negotiations' item-link resolution via a per-row listing lookup."""
 from __future__ import annotations
 
 import asyncio
@@ -37,6 +38,57 @@ class _FakeInteraction:
         self.user = type("U", (), {"id": user_id})()
         self.response = _FakeResponse()
         self.followup = _FakeFollowup()
+
+
+def test_my_negotiations_links_item_via_listing_lookup(tmp_path):
+    """/marketplace_negotiations doesn't return id_item - the command must resolve it per
+    row via get_marketplace_listings(id=id_listing) and link the item name, falling back
+    to a plain name for a negotiation whose listing lookup comes back empty."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        user_id = 654
+        await db.set_user_secret_key(user_id, "sk_test")
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if "marketplace_negotiations_messages" in request.url.path:
+                raise AssertionError("should not fetch messages for /my-negotiations")
+            if "marketplace_negotiations" in request.url.path:
+                return httpx.Response(200, json={"status": "ok", "data": [
+                    {"id": 1, "id_listing": 10, "listing_title": "Laranite", "is_listing_advertiser": 1,
+                     "price": "1500", "currency": "UEC", "date_closed": None},
+                    {"id": 2, "id_listing": 20, "listing_title": "Unresolvable Item", "is_listing_advertiser": 0,
+                     "price": "500", "currency": "UEC", "date_closed": 1700000000},
+                ]})
+            if "marketplace_listings" in request.url.path:
+                params = dict(request.url.params)
+                if params.get("id") == "10":
+                    return httpx.Response(200, json={"status": "ok", "data": [{"id": 10, "id_item": 55}]})
+                return httpx.Response(200, json={"status": "ok", "data": []})
+            raise AssertionError(f"unexpected request: {request.url}")
+
+        client = UexClient(app_token="test", base_url="https://uex.test")
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+        bot = type("FakeBot", (), {})()
+        bot.db = db
+        bot.uex = client
+        cog = Marketplace.__new__(Marketplace)
+        cog.bot = bot
+        interaction = _FakeInteraction(user_id)
+
+        try:
+            await cog.my_negotiations.callback(cog, interaction)
+
+            (message,), _ = interaction.followup.sent[0]
+            assert "[Laranite](https://uexcorp.space/marketplace/home/?id_item=55&mode=list)" in message
+            assert "Unresolvable Item" in message
+            assert "[Unresolvable Item]" not in message
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
 
 
 def test_delete_listing_does_not_record_local_stock_when_uex_delete_fails(tmp_path):
