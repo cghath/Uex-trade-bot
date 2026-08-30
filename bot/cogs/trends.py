@@ -31,7 +31,7 @@ from bot.uex.charts import render_price_history_chart
 from bot.uex.exceptions import UexApiError
 from bot.uex.data_health import classify_terminal_health, format_health_note
 from bot.uex.route_confidence import compute_route_confidence
-from bot.uex.practical_routes import route_practical_notes
+from bot.uex.practical_routes import route_practical_notes, terminal_supports_auto_load
 from bot.uex.commodity_risk import format_commodity_risk
 from bot.uex.ships import estimate_route_cargo, resolve_ship
 from bot.uex.status import build_status_lookup, resolve_status_label
@@ -300,6 +300,7 @@ class Trends(commands.Cog):
         title: str,
         footer_note: str,
         log_label: str,
+        auto_load_only: bool = False,
     ) -> None:
         await interaction.response.defer()
 
@@ -319,6 +320,17 @@ class Trends(commands.Cog):
             for terminal_id in (route.origin_terminal_id, route.destination_terminal_id)
             if terminal_id is not None
         ]
+        terminal_references = await self.bot.db.get_terminal_references_by_ids(terminal_ids)
+        if auto_load_only:
+            entries = [
+                route for route in entries
+                if terminal_supports_auto_load(terminal_references.get(route.origin_terminal_id))
+            ]
+            if not entries:
+                await interaction.followup.send(
+                    "No auto-load-capable routes found right now - try again once more route data has been collected."
+                )
+                return
         health_rows = await self.bot.db.get_terminal_data_health_by_ids(terminal_ids)
         health_notes = {
             terminal_id: note
@@ -333,7 +345,6 @@ class Trends(commands.Cog):
                 if terminal_id is not None
             ],
         )
-        terminal_references = await self.bot.db.get_terminal_references_by_ids(terminal_ids)
         commodity_references = await self.bot.db.get_commodity_references(
             [route.id_commodity for route in entries]
         )
@@ -391,13 +402,16 @@ class Trends(commands.Cog):
     @app_commands.describe(
         ship="Optional: check cargo/profit for a specific ship instead of your default (/set-default-ship)",
         strict="Require live stock at the origin and live demand at the destination (safer).",
+        auto_load_only="Only show routes where the origin terminal offers UEX's auto-load at purchase",
     )
+    @app_commands.rename(auto_load_only="auto-load-only")
     @app_commands.autocomplete(ship=ship_name_autocomplete)
     async def top_routes(
         self,
         interaction: discord.Interaction,
         strict: bool = False,
         ship: str | None = None,
+        auto_load_only: bool = False,
     ) -> None:
         if strict:
             async with self._top_in_stock_routes_lock:
@@ -432,6 +446,7 @@ class Trends(commands.Cog):
             title=title,
             footer_note=footer_note,
             log_label="/top-routes",
+            auto_load_only=auto_load_only,
         )
 
     # -- /movers: single bulk call, computed on demand -----------------------

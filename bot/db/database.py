@@ -361,6 +361,7 @@ CREATE TABLE IF NOT EXISTS terminal_reference (
     city_name TEXT,
     max_container_size INTEGER,
     has_loading_dock INTEGER,
+    is_auto_load INTEGER,
     has_freight_elevator INTEGER,
     is_cargo_center INTEGER,
     is_refuel INTEGER,
@@ -592,6 +593,7 @@ class Database:
             "ALTER TABLE terminal_reference ADD COLUMN id_outpost INTEGER",
             "ALTER TABLE terminal_reference ADD COLUMN outpost_name TEXT",
             "ALTER TABLE terminal_reference ADD COLUMN id_city INTEGER",
+            "ALTER TABLE terminal_reference ADD COLUMN is_auto_load INTEGER",
             "ALTER TABLE terminal_data_health_state ADD COLUMN last_update_days_limit INTEGER",
             "ALTER TABLE terminal_data_health_state ADD COLUMN last_update_days_percentage INTEGER",
             "ALTER TABLE terminal_data_health_observations ADD COLUMN last_update_days_limit INTEGER",
@@ -953,7 +955,8 @@ class Database:
                  row.get("space_station_name"), self._integer(row.get("id_outpost")), row.get("outpost_name"),
                  self._integer(row.get("id_city")), row.get("star_system_name"), row.get("planet_name"),
                  row.get("moon_name"), row.get("city_name"), self._integer(row.get("max_container_size")),
-                 self._flag(row.get("has_loading_dock")), self._flag(row.get("has_freight_elevator")),
+                 self._flag(row.get("has_loading_dock")), self._flag(row.get("is_auto_load")),
+                 self._flag(row.get("has_freight_elevator")),
                  self._flag(row.get("is_cargo_center")), self._flag(row.get("is_refuel")), self._flag(row.get("is_repair")),
                  self._flag(row.get("is_player_owned")))
             )
@@ -964,9 +967,9 @@ class Database:
                 """INSERT INTO terminal_reference
                    (id_terminal, terminal_name, terminal_type, id_space_station, space_station_name,
                     id_outpost, outpost_name, id_city, star_system_name, planet_name, moon_name, city_name,
-                    max_container_size, has_loading_dock, has_freight_elevator, is_cargo_center, is_refuel,
+                    max_container_size, has_loading_dock, is_auto_load, has_freight_elevator, is_cargo_center, is_refuel,
                     is_repair, is_player_owned, last_seen)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
                    ON CONFLICT(id_terminal) DO UPDATE SET
                        terminal_name=excluded.terminal_name, terminal_type=excluded.terminal_type,
                        id_space_station=excluded.id_space_station, space_station_name=excluded.space_station_name,
@@ -975,6 +978,7 @@ class Database:
                        moon_name=excluded.moon_name, city_name=excluded.city_name,
                        max_container_size=excluded.max_container_size,
                        has_loading_dock=excluded.has_loading_dock,
+                       is_auto_load=excluded.is_auto_load,
                        has_freight_elevator=excluded.has_freight_elevator,
                        is_cargo_center=excluded.is_cargo_center, is_refuel=excluded.is_refuel,
                        is_repair=excluded.is_repair, is_player_owned=excluded.is_player_owned,

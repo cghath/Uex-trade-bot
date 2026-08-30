@@ -11,7 +11,7 @@ from bot.cogs.ships import ship_name_autocomplete
 from bot.uex.exceptions import UexApiError
 from bot.uex.data_health import classify_terminal_health, format_health_note
 from bot.uex.route_confidence import coalesce_report_count, compute_route_confidence
-from bot.uex.practical_routes import route_practical_notes
+from bot.uex.practical_routes import route_practical_notes, terminal_supports_auto_load
 from bot.uex.commodity_risk import format_commodity_risk
 from bot.uex.supply_demand import analyze_terminal_market_history, has_sell_side_demand
 from bot.uex.ships import estimate_route_cargo, resolve_ship
@@ -216,9 +216,17 @@ class Prices(commands.Cog):
     @app_commands.describe(
         commodity="Commodity name, e.g. 'Gold' or 'Laranite'",
         ship="Optional: check cargo for a specific ship instead of your default (/set-default-ship)",
+        auto_load_only="Only show routes where the origin terminal offers UEX's auto-load at purchase",
     )
+    @app_commands.rename(auto_load_only="auto-load-only")
     @app_commands.autocomplete(ship=ship_name_autocomplete, commodity=commodity_name_autocomplete)
-    async def best_route(self, interaction: discord.Interaction, commodity: str, ship: str | None = None) -> None:
+    async def best_route(
+        self,
+        interaction: discord.Interaction,
+        commodity: str,
+        ship: str | None = None,
+        auto_load_only: bool = False,
+    ) -> None:
         await interaction.response.defer()
         try:
             rows = await self.bot.uex.get_commodities_prices(commodity_name=commodity)
@@ -273,6 +281,19 @@ class Prices(commands.Cog):
                 )
                 if terminal_id is not None
             ]
+            terminal_references = await self.bot.db.get_terminal_references_by_ids(route_terminal_ids)
+            if auto_load_only:
+                ranked = [
+                    r for r in ranked
+                    if terminal_supports_auto_load(
+                        terminal_references.get(_positive_int(r.get("id_terminal_origin")))
+                    )
+                ]
+                if not ranked:
+                    await interaction.followup.send(
+                        f"No auto-load-capable routes found for '{commodity_display}' right now."
+                    )
+                    return
             health_rows = await self.bot.db.get_terminal_data_health_by_ids(route_terminal_ids)
             health_notes = {
                 terminal_id: note
@@ -284,7 +305,6 @@ class Prices(commands.Cog):
                 for row in rows
                 if (terminal_id := _positive_int(row.get("id_terminal"))) is not None
             }
-            terminal_references = await self.bot.db.get_terminal_references_by_ids(route_terminal_ids)
             embed = discord.Embed(title=f"{commodity_display} — Best Trade Routes", color=discord.Color.green())
             if risk_warning:
                 embed.description = risk_warning
@@ -404,6 +424,17 @@ class Prices(commands.Cog):
             for terminal_id in (route.buy_terminal_id, route.sell_terminal_id)
             if terminal_id is not None
         ]
+        fallback_references = await self.bot.db.get_terminal_references_by_ids(route_terminal_ids)
+        if auto_load_only:
+            routes = [
+                route for route in routes
+                if terminal_supports_auto_load(fallback_references.get(route.buy_terminal_id))
+            ]
+            if not routes:
+                await interaction.followup.send(
+                    f"No auto-load-capable routes found for '{commodity}' right now."
+                )
+                return
         route_health_rows = await self.bot.db.get_terminal_data_health_by_ids(route_terminal_ids)
         health_notes = {
             terminal_id: note
@@ -415,7 +446,6 @@ class Prices(commands.Cog):
             for row in rows
             if (terminal_id := _positive_int(row.get("id_terminal"))) is not None
         }
-        fallback_references = await self.bot.db.get_terminal_references_by_ids(route_terminal_ids)
 
         embed = discord.Embed(
             title=f"{routes[0].commodity_name} — Best Trade Routes",

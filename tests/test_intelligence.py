@@ -9,7 +9,7 @@ from cryptography.fernet import Fernet
 from bot.db.database import Database
 from bot.uex.data_health import classify_terminal_health, format_health_note
 from bot.uex.supply_demand import analyze_terminal_market_history
-from bot.uex.practical_routes import route_practical_notes
+from bot.uex.practical_routes import route_practical_notes, terminal_supports_auto_load
 from bot.cogs.intelligence_brief import _format_cross_system_note, _format_market_shifts
 from bot.uex.commodity_risk import (
     commodity_risk_labels,
@@ -317,6 +317,17 @@ def test_practical_route_notes_report_confirmed_limits_and_services():
     assert any("player-owned" in note for note in notes)
     assert "Origin services: refuel" in notes
     assert "Destination services: repair, cargo center" in notes
+
+
+def test_terminal_supports_auto_load_is_distinct_from_loading_dock_and_fails_closed():
+    # UEX exposes is_auto_load separately from has_loading_dock/has_freight_elevator -
+    # a terminal with physical loading-dock infrastructure doesn't necessarily also
+    # offer the purchase-time auto-load-onto-stored-ship feature, and vice versa.
+    assert terminal_supports_auto_load({"is_auto_load": 1, "has_loading_dock": 0}) is True
+    assert terminal_supports_auto_load({"is_auto_load": 0, "has_loading_dock": 1}) is False
+    assert terminal_supports_auto_load({"has_loading_dock": 1}) is False
+    assert terminal_supports_auto_load({}) is False
+    assert terminal_supports_auto_load(None) is False
 
 
 def test_commodity_risk_labels_are_specific_and_do_not_overstate_illegality():

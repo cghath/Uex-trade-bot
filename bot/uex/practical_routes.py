@@ -36,3 +36,16 @@ def route_practical_notes(
         *terminal_practical_notes("Origin", origin),
         *terminal_practical_notes("Destination", destination),
     ]
+
+
+def terminal_supports_auto_load(terminal: dict[str, Any] | None) -> bool:
+    """True only when UEX explicitly reports auto-load purchasing at this terminal.
+
+    This is UEX's `is_auto_load` field - the "buy cargo, have it loaded onto your
+    stored ship automatically" purchase-time feature - which is a different field
+    than `has_loading_dock`/`has_freight_elevator` (physical external cargo
+    infrastructure, used by practical notes and mixed-route capital-ship gating
+    above). Missing/unknown terminals fail closed, matching the other route
+    safety filters in this codebase.
+    """
+    return bool(terminal) and bool(terminal.get("is_auto_load"))
