@@ -21,6 +21,9 @@ class _FakeResponse:
     async def defer(self, **kwargs):
         pass
 
+    async def edit_message(self, **kwargs):
+        pass
+
     async def send_message(self, *args, **kwargs):
         raise AssertionError("send_message should not be used once deferred")
 
@@ -91,6 +94,90 @@ def test_my_negotiations_links_item_via_listing_lookup(tmp_path):
     asyncio.run(run())
 
 
+def test_delete_listing_shows_a_confirmation_preview_before_deleting_anything(tmp_path):
+    """/marketplace-delete-listing must never delete on a single command - it shows a
+    preview (title/price) and a Confirm/Cancel view first, since this is a real, public,
+    unrecoverable UEX listing and a mistyped listing_id has no undo."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        user_id = 654
+        await db.set_user_secret_key(user_id, "sk_test")
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "GET" and "marketplace_listings" in request.url.path:
+                return httpx.Response(200, json={"status": "ok", "data": [
+                    {"id": 999, "title": "Laranite", "price": "150", "currency": "UEC", "unit": "unit"},
+                ]})
+            raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+        client = UexClient(app_token="test", base_url="https://uex.test")
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+        bot = type("FakeBot", (), {})()
+        bot.db = db
+        bot.uex = client
+        cog = Marketplace.__new__(Marketplace)
+        cog.bot = bot
+        interaction = _FakeInteraction(user_id)
+
+        try:
+            await cog.marketplace_delete_listing.callback(cog, interaction, 999)
+
+            assert len(interaction.followup.sent) == 1
+            _, kwargs = interaction.followup.sent[0]
+            assert "Delete this listing?" in kwargs["embed"].title
+            assert "Laranite" in kwargs["embed"].description
+            assert kwargs["view"] is not None  # Confirm/Cancel - nothing deleted yet
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_delete_listing_cancel_does_not_call_delete(tmp_path):
+    """Clicking Cancel on the confirmation view must never reach the UEX DELETE call."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        user_id = 987
+        await db.set_user_secret_key(user_id, "sk_test")
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "GET" and "marketplace_listings" in request.url.path:
+                return httpx.Response(200, json={"status": "ok", "data": [
+                    {"id": 999, "title": "Laranite", "price": "150", "currency": "UEC", "unit": "unit"},
+                ]})
+            raise AssertionError(f"unexpected request: {request.method} {request.url} - Cancel must not delete")
+
+        client = UexClient(app_token="test", base_url="https://uex.test")
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+        bot = type("FakeBot", (), {})()
+        bot.db = db
+        bot.uex = client
+        cog = Marketplace.__new__(Marketplace)
+        cog.bot = bot
+        interaction = _FakeInteraction(user_id)
+
+        try:
+            await cog.marketplace_delete_listing.callback(cog, interaction, 999)
+
+            _, kwargs = interaction.followup.sent[0]
+            view = kwargs["view"]
+            cancel_interaction = _FakeInteraction(user_id)
+            await view.cancel.callback(cancel_interaction)
+
+            (message,), _ = cancel_interaction.followup.sent[0]
+            assert "cancelled" in message.lower()
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
 def test_delete_listing_does_not_record_local_stock_when_uex_delete_fails(tmp_path):
     """The exact bug this guards: if UEX rejects the delete, local inventory state must be
     untouched - not partially updated based on a deletion that never actually happened."""
@@ -136,7 +223,13 @@ def test_delete_listing_does_not_record_local_stock_when_uex_delete_fails(tmp_pa
         try:
             await cog.marketplace_delete_listing.callback(cog, interaction, 999)
 
-            (message,), _ = interaction.followup.sent[0]
+            # The command only shows the preview - simulate the user clicking "Delete listing".
+            _, kwargs = interaction.followup.sent[0]
+            view = kwargs["view"]
+            confirm_interaction = _FakeInteraction(user_id)
+            await view.confirm.callback(confirm_interaction)
+
+            (message,), _ = confirm_interaction.followup.sent[0]
             assert "couldn't delete" in message.lower()
 
             after = await db.get_inventory_item(user_id, inventory_id)

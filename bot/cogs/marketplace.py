@@ -171,6 +171,94 @@ class ConfirmListingView(discord.ui.View):
         await interaction.followup.send("Cancelled - nothing was posted.", ephemeral=True)
 
 
+class ConfirmDeleteListingView(discord.ui.View):
+    """Confirm/cancel gate in front of a real DELETE against a public UEX listing - the
+    original single-command version had no recovery from a mistyped listing_id."""
+
+    def __init__(self, bot: commands.Bot, listing_id: int, secret_key: str, author_id: int) -> None:
+        super().__init__(timeout=180)
+        self.bot = bot
+        self.listing_id = listing_id
+        self.secret_key = secret_key
+        self.author_id = author_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("Only the person who started this deletion can confirm it.", ephemeral=True)
+            return False
+        return True
+
+    async def on_timeout(self) -> None:
+        for item in self.children:
+            item.disabled = True
+
+    @discord.ui.button(label="Delete listing", style=discord.ButtonStyle.red)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(view=self)
+
+        listing_id = self.listing_id
+        tracked_job = await self.bot.db.get_inventory_post_job_by_listing(self.author_id, listing_id)
+        current_stock = None
+        sold_out = False
+        if tracked_job:
+            try:
+                listing_rows = await self.bot.uex.get_marketplace_listings(id=listing_id, use_cache=False)
+            except UexApiError as exc:
+                await interaction.followup.send(
+                    f"UEX could not verify remaining inventory before deletion: {exc}",
+                    ephemeral=True,
+                )
+                return
+            if not listing_rows:
+                await self.bot.db.mark_inventory_post_needs_confirmation(
+                    int(tracked_job["id"]),
+                    "Deletion requested, but UEX no longer exposed final stock",
+                )
+                await interaction.followup.send(
+                    "This is a tracked inventory listing, but UEX no longer exposes its final stock. "
+                    f"Deletion stopped without releasing or relisting anything. Use `/inventory-confirm-sale` "
+                    f"for job #{tracked_job['id']}.",
+                    ephemeral=True,
+                )
+                return
+            current_stock = parse_uex_number(listing_rows[0].get("in_stock"))
+            if current_stock is None:
+                await interaction.followup.send(
+                    "This tracked listing has no remaining-stock value from UEX, so deletion stopped rather "
+                    "than guessing at your private inventory.",
+                    ephemeral=True,
+                )
+                return
+            sold_out = _uex_flag(listing_rows[0].get("is_sold_out"))
+        # Delete on UEX before touching any local state: if this raises, nothing below has
+        # run yet, so there's nothing to leave inconsistent or roll back.
+        try:
+            await self.bot.uex.delete_marketplace_listing(listing_id=listing_id, secret_key=self.secret_key)
+        except UexApiError as exc:
+            await interaction.followup.send(f"Couldn't delete listing #{listing_id}: {exc}", ephemeral=True)
+            return
+
+        if tracked_job:
+            await self.bot.db.record_inventory_listing_stock(
+                int(tracked_job["id"]), in_stock=int(current_stock), sold_out=sold_out
+            )
+        released = await self.bot.db.cancel_tracked_inventory_listing(self.author_id, listing_id)
+        inventory_note = " Its unsold reserved inventory is available again." if released else ""
+        await interaction.followup.send(
+            f"Listing #{listing_id} deleted (if it existed and belonged to you).{inventory_note}",
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.grey)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(view=self)
+        await interaction.followup.send("Cancelled - nothing was deleted.", ephemeral=True)
+
+
 class ListingDetailsModal(discord.ui.Modal, title="Marketplace listing details"):
     listing_title = discord.ui.TextInput(label="Title", max_length=140, required=True)
     price = discord.ui.TextInput(label="Price (whole number)", max_length=12, required=True)
@@ -799,59 +887,36 @@ class Marketplace(commands.Cog):
             return
 
         await interaction.response.defer(ephemeral=True)
-        tracked_job = await self.bot.db.get_inventory_post_job_by_listing(
-            interaction.user.id, listing_id
-        )
-        current_stock = None
-        sold_out = False
-        if tracked_job:
-            try:
-                listing_rows = await self.bot.uex.get_marketplace_listings(id=listing_id, use_cache=False)
-            except UexApiError as exc:
-                await interaction.followup.send(
-                    f"UEX could not verify remaining inventory before deletion: {exc}",
-                    ephemeral=True,
-                )
-                return
-            if not listing_rows:
-                await self.bot.db.mark_inventory_post_needs_confirmation(
-                    int(tracked_job["id"]),
-                    "Deletion requested, but UEX no longer exposed final stock",
-                )
-                await interaction.followup.send(
-                    "This is a tracked inventory listing, but UEX no longer exposes its final stock. "
-                    f"Deletion stopped without releasing or relisting anything. Use `/inventory-confirm-sale` "
-                    f"for job #{tracked_job['id']}.",
-                    ephemeral=True,
-                )
-                return
-            current_stock = parse_uex_number(listing_rows[0].get("in_stock"))
-            if current_stock is None:
-                await interaction.followup.send(
-                    "This tracked listing has no remaining-stock value from UEX, so deletion stopped rather "
-                    "than guessing at your private inventory.",
-                    ephemeral=True,
-                )
-                return
-            sold_out = _uex_flag(listing_rows[0].get("is_sold_out"))
-        # Delete on UEX before touching any local state: if this raises, nothing below has
-        # run yet, so there's nothing to leave inconsistent or roll back.
+
+        # Shown so a mistyped listing_id is caught before the delete, not after - this is a
+        # real, public, unrecoverable UEX listing, not a local record.
         try:
-            await self.bot.uex.delete_marketplace_listing(listing_id=listing_id, secret_key=secret_key)
+            preview_rows = await self.bot.uex.get_marketplace_listings(id=listing_id, use_cache=False)
         except UexApiError as exc:
-            await interaction.followup.send(f"Couldn't delete listing #{listing_id}: {exc}", ephemeral=True)
+            await interaction.followup.send(describe_uex_api_error(exc), ephemeral=True)
             return
 
-        if tracked_job:
-            await self.bot.db.record_inventory_listing_stock(
-                int(tracked_job["id"]), in_stock=int(current_stock), sold_out=sold_out
+        if not preview_rows:
+            await interaction.followup.send(
+                f"No listing #{listing_id} was found (or it isn't yours) - nothing to delete.",
+                ephemeral=True,
             )
-        released = await self.bot.db.cancel_tracked_inventory_listing(interaction.user.id, listing_id)
-        inventory_note = " Its unsold reserved inventory is available again." if released else ""
-        await interaction.followup.send(
-            f"Listing #{listing_id} deleted (if it existed and belonged to you).{inventory_note}",
-            ephemeral=True,
+            return
+
+        listing = preview_rows[0]
+        price = parse_uex_number(listing.get("price"))
+        currency = listing.get("currency", "UEC")
+        price_text = f"{price:,.0f} {currency}/{listing.get('unit') or 'unit'}" if price is not None else "price n/a"
+        title = str(listing.get("title") or "Untitled listing")[:256]
+
+        embed = discord.Embed(
+            title="Delete this listing?",
+            description=f"**{title}**\n{price_text}\n\nThis removes it from the public UEX Marketplace. This cannot be undone.",
+            color=discord.Color.red(),
         )
+        embed.set_footer(text=f"Listing #{listing_id}")
+        view = ConfirmDeleteListingView(self.bot, listing_id, secret_key, interaction.user.id)
+        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
 
 async def setup(bot: commands.Bot) -> None:
