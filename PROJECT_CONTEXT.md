@@ -246,6 +246,77 @@ they're in sync).
     coverage for both new code paths, since neither existing negotiation_alerts fixture
     happened to set `id_listing` and so never actually reached this code before.
 
+24. **CI added on `TestBranch`**: `.github/workflows/tests.yml` runs `pytest -q` on every
+    push to `main`/`TestBranch` and every pull request - previously tests only ran when
+    someone remembered to run them locally. A second job runs `ruff check --select F`
+    (undefined names, unused imports) - deliberately scoped narrower than ruff's own
+    unscoped default, which a dry run showed surfaces 45 findings (import sorting,
+    quoted-annotation style, etc.) against 2 real ones on this codebase. `--select F` is
+    exactly the category that would have caught a real bug from this same session: a
+    `replace_all` edit in `digest.py` left one differently-indented call site referencing
+    a now-removed import, surfacing only as a runtime `NameError`. Fixing the two
+    pre-existing `F401` hits to get CI green on the first run caught a live false positive
+    of ruff's own `--fix`: it deleted `trends.py`'s `SELL_SIDE_NO_DEMAND_CODE` import
+    because nothing inside that file uses it, not noticing `tests/test_trends.py` imports
+    it *from* `trends.py` as a re-export - restored via the `import X as X` explicit
+    re-export idiom, which both ruff and mypy recognize as intentional.
+    `.github/workflows/dependency-audit.yml` runs `pip-audit` against both requirements
+    files weekly plus on any `requirements*.txt` change - a pure vulnerability check, no
+    auto-PRs (native Dependabot security-update PRs are a repo Settings toggle, outside
+    what a committed file can control).
+
+25. **Discord UX audit on `TestBranch`**: a dedicated pass over the Discord-facing
+    behavior (not architecture) across ~13 of 18 cogs found and fixed five things.
+    `ships.py`'s `/set-default-ship` and `/my-ship` called the UEX API before
+    responding/deferring - on a slow request Discord would show "This interaction
+    failed" even though the command actually succeeded; both now defer first.
+    `trades.py`'s `/trade-log-add`/`/trade-log` posted personal trade financials publicly
+    while `/uex-trades` in the same cog was ephemeral - made consistent. Fixing that
+    surfaced a real bug while already in the file: `/uex-trades` deferred
+    `ephemeral=True` but its `followup.send()` calls never passed `ephemeral=True`
+    themselves - discord.py does not inherit the flag from `defer()`, so trade history
+    was actually posting publicly despite the apparent intent, unlike the
+    already-correct pattern in `personal_inventory.py` (every `followup.send()` there
+    passes `ephemeral=True` explicitly). Added `tests/test_trades.py` to lock in the
+    fix. `account.py`'s post-link confirmation now points to `/intro`, since opt-in
+    features (negotiation alerts, digest, stock/marketplace alerts, auto-posting) were
+    otherwise undiscoverable. Added `describe_uex_api_error()` to
+    `bot/uex/exceptions.py`, which gives rate-limit (transient, wait) and auth
+    (actionable, relink) failures distinct text instead of the same raw
+    `f"UEX API error: {exc}"` string every failure class previously got - applied
+    across 17 call sites in `marketplace.py`, `prices.py`, `trends.py`, `scanner.py`,
+    `ships.py`.
+
+26. **`/marketplace-delete-listing` gained a Confirm/Cancel gate**: previously a single
+    command permanently deleted a real, public UEX listing with no recovery - a
+    mistyped `listing_id` (a bare int, easy to confuse with someone else's or an old
+    one) had no undo. Now shows a preview embed (title + price, from the same
+    `get_marketplace_listings` lookup already used to verify tracked-inventory stock)
+    with Delete/Cancel buttons before touching anything, via a new
+    `ConfirmDeleteListingView` matching the `ConfirmListingView` pattern
+    `/marketplace-post` already used. All the original correctness-critical logic
+    (tracked-job stock verification, delete-before-touching-local-state ordering) moved
+    into the confirm button unchanged - only the timing shifted, from immediate to
+    gated behind an explicit click.
+
+27. **Pi deploy/revert scripts added, replacing the manual-merge fallback for a bad
+    upgrade**: `scripts/deploy_and_backup.sh` stops `uex-trade-bot.service`, snapshots
+    the current DB (+ `-wal`/`-shm` sidecars if present) and records the current commit
+    to `backups/pi/<timestamp>_<commit>/meta.txt`, fast-forwards to the target branch
+    (`TestBranch` by default), reinstalls dependencies only if `requirements*.txt`
+    actually changed between the old and new commit, then restarts. `scripts/
+    revert_last_deploy.sh` undoes it: restores the snapshotted DB, `git checkout`s the
+    recorded commit, and restarts - and snapshots the state it's discarding first (a
+    `..._pre-revert` backup), so the revert itself is undoable. This is narrower than
+    the existing PC<->Pi database-*merge* practice documented below (that's for two
+    sides that both accumulated genuinely independent user data over time) - this tool
+    is specifically for "about to upgrade the Pi's code, want an easy way back if the
+    new commit is bad," which needs a point-in-time snapshot, not a merge. Verified
+    end-to-end in an isolated fake git repo with stubbed `sudo`/`systemctl` (backup,
+    fast-forward, dependency-change detection, revert, and the pre-revert safety net
+    all exercised) - not yet run against the real Pi's systemd unit or its actual
+    `data/uexbot.sqlite3`, since this sandbox has no path to `arkwatcher`.
+
 ## Where to look for what
 
 Five docs, deliberately scoped so they don't duplicate each other:
@@ -450,6 +521,12 @@ guessed at.
   *and* `operation` together) - not fixed, see the API-facts note above for detail.
 - `Local-model-handoff` remains available as a backup, but current development happens on
   `TestBranch`.
+- **`scripts/deploy_and_backup.sh`/`scripts/revert_last_deploy.sh` need a real-Pi run**
+  (timeline entry 27). Logic is verified against a fake git repo with stubbed
+  `sudo`/`systemctl`, but not against the actual `uex-trade-bot.service` unit or a real
+  `data/uexbot.sqlite3` - confirm on the next Pi deploy that `sudo systemctl` doesn't
+  prompt for a password non-interactively (would hang the script) and that the detected
+  `DATABASE_PATH` matches what's actually in the Pi's `.env`.
 - **Liquidity rating** is deliberately an indicator, not a predicted percentage chance of
   sale. It is bounded to 0-100 so users can interpret it at a glance. The history/movers view
   needs at least two hourly Marketplace snapshots before it can show a comparison.

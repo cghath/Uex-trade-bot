@@ -4,6 +4,9 @@
 # Runtime data: SQLite DB and the Fernet encryption key. Sensitive — keep local only.
 data/
 
+# Pre-deploy DB snapshots from scripts/deploy_and_backup.sh - same sensitivity as data/.
+backups/
+
 # Python bytecode
 __pycache__/
 *.py[cod]

@@ -187,8 +187,15 @@ sudo systemctl status uex-trade-bot     # check it's running
 journalctl -u uex-trade-bot -f          # live logs
 ```
 
-To deploy updates later: `git pull` (or re-copy files), `pip install -r requirements.txt` if
-dependencies changed, then `sudo systemctl restart uex-trade-bot`.
+To deploy updates later: `scripts/deploy_and_backup.sh [branch]` (defaults to `TestBranch`) -
+stops the service, snapshots the current DB + git commit into `backups/pi/`, fast-forwards,
+reinstalls dependencies if `requirements*.txt` changed, then restarts. If the new version has
+a problem, `scripts/revert_last_deploy.sh` restores that snapshot and checks out the recorded
+commit (itself snapshotting the state it's discarding first). Avoids the manual git
+pull/restart dance and the need to merge PC/Pi databases after a bad deploy - just revert.
+
+The same three manual steps still work if you'd rather do it by hand: `git pull`,
+`pip install -r requirements.txt` if dependencies changed, `sudo systemctl restart uex-trade-bot`.
 
 **When migrating from your dev machine to the Pi, copy the whole `data/` folder** (not just the
 code) so everyone's already-linked UEX accounts keep working — see "Security notes" above.
