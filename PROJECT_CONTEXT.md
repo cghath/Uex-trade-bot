@@ -215,6 +215,22 @@ they're in sync).
     auto-load is about loading purchased cargo onto a stored ship, not the sell side. Not
     yet verified live in Discord - see "Current state" below.
 
+22. **Marketplace item links made consistent on `TestBranch`**: an audit found
+    `marketplace_item_url` (the UEX Marketplace page link) applied inconsistently - present
+    in `liquidity.py`/`digest.py`/most of `personal_inventory.py`, missing everywhere else
+    that displays an item name. Added a shared `marketplace_item_link(name, id_item)`
+    helper (falls back to plain text when `id_item` is unavailable) and applied it to
+    `scanner.py` (both `/scan-now` and the channel alert - `StealEntry` gained `id_item`,
+    already resolved during matching but not stored), `marketplace_alerts.py`'s DM,
+    `intelligence_brief.py`'s executive-signals lines, and `marketplace.py`'s
+    `/marketplace-trending`/`/marketplace-movers` (`MarketplaceMoverEntry` gained
+    `id_item`). All used data already on hand - no new API calls. Deliberately left
+    unfixed: `negotiation_alerts.py` and `marketplace.py`'s `/my-negotiations`/
+    `/my-favorites` - UEX's `/marketplace_negotiations` and `/marketplace_favorites`
+    don't return `id_item` at all, so linking those needs an extra
+    `get_marketplace_listings` lookup per row (a real added-cost decision, a recurring
+    background poller in negotiation_alerts.py's case, not a free fix).
+
 ## Where to look for what
 
 Five docs, deliberately scoped so they don't duplicate each other:
@@ -400,6 +416,13 @@ guessed at.
   still reference the old path - import from `bot.uex.marketplace` instead.
 - Discord bot token and UEX app token committed in old git history have not been rotated.
   Low urgency (private repo) but still outstanding.
+- **Three Marketplace surfaces still show unlinked item names** (timeline entry 22):
+  `negotiation_alerts.py`'s DM alerts, and `marketplace.py`'s `/my-negotiations` and
+  `/my-favorites`. Fixable, but needs an explicit decision first since UEX's underlying
+  endpoints don't return `id_item` - closing the gap means adding a
+  `get_marketplace_listings(id=id_listing)` lookup per row, which is a real cost on
+  negotiation_alerts.py's 5-min poller specifically (the two `/my-*` commands are
+  on-demand and bounded to 15 rows, so lower-stakes either way).
 - **Auto-load-only route filter needs a live check.** `/best-route auto-load-only:True` and
   `/top-routes auto-load-only:True` (timeline entry 21) were built and unit-tested - including
   the schema migration exercised end-to-end against a real SQLite file - from a sandbox with
