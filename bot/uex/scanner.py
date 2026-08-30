@@ -73,6 +73,7 @@ class FairPrice:
 @dataclass
 class StealEntry:
     listing_id: int
+    id_item: int
     item_name: str
     listing_title: str
     listing_price: float
@@ -188,6 +189,7 @@ def find_steals(
         steals.append(
             StealEntry(
                 listing_id=listing_id,
+                id_item=int(id_item),
                 item_name=fair.item_name,
                 listing_title=listing.get("title") or "Untitled listing",
                 listing_price=listing_price,

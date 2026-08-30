@@ -725,7 +725,7 @@ def test_post_now_confirm_creates_claims_and_posts_the_job_immediately(tmp_path)
             assert all(child.disabled for child in view.children)
             assert len(interaction.followup.sent) == 1
             (message,), _ = interaction.followup.sent[0]
-            assert "Posted **Laranite**" in message
+            assert "Posted **[Laranite](https://uexcorp.space/marketplace/home/?id_item=55&mode=list)**" in message
             assert "listing #4242" in message
 
             jobs = await db.list_tracked_inventory_posts()

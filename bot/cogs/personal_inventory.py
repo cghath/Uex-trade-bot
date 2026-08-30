@@ -23,7 +23,12 @@ from bot.uex.inventory import (
     quality_label,
     recommend_balanced_price,
 )
-from bot.uex.marketplace import find_item_id_by_name, marketplace_item_url, parse_uex_number
+from bot.uex.marketplace import (
+    find_item_id_by_name,
+    marketplace_item_link,
+    marketplace_item_url,
+    parse_uex_number,
+)
 
 logger = logging.getLogger("uexbot.personal_inventory")
 
@@ -561,7 +566,8 @@ def _format_post_now_result(job_id: int, job: dict[str, Any], result: dict[str, 
         confidence_note = "" if result["confidence"] == "Custom" else f" · pricing confidence {result['confidence'].lower()}"
         listing_note = f" · [listing #{result['listing_id']}]({result['listing_url']})" if result.get("listing_url") else f" · listing #{result['listing_id']}"
         return (
-            f"Posted **{job['item_name']}** to UEX: qty **{job['quantity']}** at **{result['price']:,} UEC/{job['unit']}**"
+            f"Posted **{marketplace_item_link(job['item_name'], job.get('id_item'))}** to UEX: "
+            f"qty **{job['quantity']}** at **{result['price']:,} UEC/{job['unit']}**"
             f"{confidence_note}{floor_note}{listing_note}."
         )
     reason = result["reason"]
@@ -813,7 +819,7 @@ class PersonalInventory(commands.Cog):
         embed = discord.Embed(
             title="Post now?",
             description=(
-                f"**#{inventory_id} · {entry['item_name']}** — qty **{available}**\n"
+                f"**#{inventory_id} · {marketplace_item_link(entry['item_name'], entry.get('id_item'))}** — qty **{available}**\n"
                 f"Recommended price: **{recommendation.price:,} UEC/{entry['unit']}** "
                 f"(confidence {recommendation.confidence.lower()} · minimum {int(entry['minimum_price']):,})\n\n"
                 "This posts a REAL public UEX listing immediately, not a scheduled one. Pick a pricing strategy "
@@ -923,7 +929,7 @@ class PersonalInventory(commands.Cog):
         embed = discord.Embed(
             title="No interest at your floor price",
             description=(
-                f"**{job['item_name']}** (job #{job_id}) is still paused at your minimum of "
+                f"**{marketplace_item_link(job['item_name'], job.get('id_item'))}** (job #{job_id}) is still paused at your minimum of "
                 f"**{int(job['minimum_price']):,} UEC/unit** with no negotiation. Pick one below."
             ),
             color=discord.Color.orange(),
@@ -985,7 +991,7 @@ class PersonalInventory(commands.Cog):
         for stale in await self.bot.db.flag_stale_inventory_post_jobs():
             await self._notify_user(
                 int(stale["user_id"]),
-                f"Inventory job #{stale['id']} for **{stale['item_name']}** was interrupted while posting. "
+                f"Inventory job #{stale['id']} for **{marketplace_item_link(stale['item_name'], stale.get('id_item'))}** was interrupted while posting. "
                 "The result is unknown, so the bot stopped and will not retry. Check UEX, then resolve it with "
                 f"`/inventory-confirm-sale job_id:{stale['id']}`.",
             )
@@ -1061,8 +1067,8 @@ class PersonalInventory(commands.Cog):
             message = str(exc)
             await self.bot.db.mark_inventory_post_failed(int(job["id"]), message, ambiguous=False)
             full_message = (
-                f"Inventory job #{job['id']} for **{job['item_name']}** could not prepare fresh pricing. "
-                f"Nothing was posted and its reservation was released.\n{message[:500]}"
+                f"Inventory job #{job['id']} for **{marketplace_item_link(job['item_name'], job.get('id_item'))}** "
+                f"could not prepare fresh pricing. Nothing was posted and its reservation was released.\n{message[:500]}"
             )
             if notify:
                 await self._notify_user(int(job["user_id"]), full_message)
@@ -1086,7 +1092,8 @@ class PersonalInventory(commands.Cog):
                 if ambiguous
                 else "Nothing will retry automatically; the reserved quantity has been released."
             )
-            full_message = f"Inventory job #{job['id']} for **{job['item_name']}** could not be posted. {action}\n{message[:500]}"
+            item_link = marketplace_item_link(job['item_name'], job.get('id_item'))
+            full_message = f"Inventory job #{job['id']} for **{item_link}** could not be posted. {action}\n{message[:500]}"
             if notify:
                 await self._notify_user(int(job["user_id"]), full_message)
             return {"success": False, "reason": "post_failed", "ambiguous": ambiguous, "message": message}
@@ -1117,7 +1124,8 @@ class PersonalInventory(commands.Cog):
         if notify:
             await self._notify_user(
                 int(job["user_id"]),
-                f"Posted **{job['item_name']}** to UEX: qty **{job['quantity']}** at "
+                f"Posted **{marketplace_item_link(job['item_name'], job.get('id_item'))}** to UEX: "
+                f"qty **{job['quantity']}** at "
                 f"**{recommendation.price:,} UEC/{job['unit']}** · listing #{listing_id} · "
                 f"pricing confidence {recommendation.confidence.lower()}{floor_note}.",
             )
@@ -1215,7 +1223,7 @@ class PersonalInventory(commands.Cog):
                 )
                 await self._notify_user(
                     int(job["user_id"]),
-                    f"UEX no longer shows listing #{listing_id} for **{job['item_name']}**, but did not prove how many sold. "
+                    f"UEX no longer shows listing #{listing_id} for **{marketplace_item_link(job['item_name'], job.get('id_item'))}**, but did not prove how many sold. "
                     f"Automatic relisting stopped. Use `/inventory-confirm-sale job_id:{job_id}` after checking UEX.",
                 )
                 continue
@@ -1231,7 +1239,8 @@ class PersonalInventory(commands.Cog):
                     await self._notify_user(
                         int(job["user_id"]),
                         f"UEX reports **{outcome['sold_delta']}** sold from listing #{listing_id} "
-                        f"for **{job['item_name']}**; **{outcome['remaining']}** remain listed.",
+                        f"for **{marketplace_item_link(job['item_name'], job.get('id_item'))}**; "
+                        f"**{outcome['remaining']}** remain listed.",
                     )
                 if outcome and outcome["status"] == "sold":
                     continue
@@ -1247,7 +1256,8 @@ class PersonalInventory(commands.Cog):
                         await self.bot.db.disable_auto_relist(job_id)
                         await self._notify_user(
                             int(job["user_id"]),
-                            f"A negotiation has opened on listing #{listing_id} for **{job['item_name']}** - "
+                            f"A negotiation has opened on listing #{listing_id} for "
+                            f"**{marketplace_item_link(job['item_name'], job.get('id_item'))}** - "
                             "automatic discounting and relisting has paused so it isn't disrupted.",
                         )
                         continue
@@ -1282,7 +1292,8 @@ class PersonalInventory(commands.Cog):
                             await self._post_one_job(new_job, notify=False)
                         await self._notify_user(
                             int(job["user_id"]),
-                            f"No interest yet on **{job['item_name']}** after {RELIST_DISCOUNT_INTERVAL_HOURS}h - "
+                            f"No interest yet on **{marketplace_item_link(job['item_name'], job.get('id_item'))}** "
+                            f"after {RELIST_DISCOUNT_INTERVAL_HOURS}h - "
                             f"relisted as job #{new_id} at **{next_price:,}** UEC/unit (was {current_price:,}).",
                         )
                     continue
@@ -1316,7 +1327,7 @@ class PersonalInventory(commands.Cog):
         embed = discord.Embed(
             title="No interest at your floor price",
             description=(
-                f"**{job['item_name']}** (job #{job['id']}) has been relisted down to your minimum of "
+                f"**{marketplace_item_link(job['item_name'], job.get('id_item'))}** (job #{job['id']}) has been relisted down to your minimum of "
                 f"**{int(job['minimum_price']):,} UEC/unit** with no negotiation yet. Automatic discounting "
                 "has stopped - pick one below.\n\nIf these buttons ever stop responding (e.g. after a bot "
                 f"restart), run `/inventory-resolve-floor job_id:{job['id']}` for a fresh working prompt."

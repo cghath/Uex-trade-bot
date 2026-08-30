@@ -13,7 +13,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from bot.uex.exceptions import UexApiError
-from bot.uex.marketplace import marketplace_item_url
+from bot.uex.marketplace import marketplace_item_link
 from bot.uex.trends import compute_movers
 
 logger = logging.getLogger("uexbot.digest")
@@ -204,7 +204,7 @@ def _format_sellability_digest_fields(
         for index, row in enumerate(rows, start=1):
             item_name = row["item_name"]
             id_item = row.get("id_item")
-            item = f"[{item_name}]({marketplace_item_url(id_item)})" if id_item is not None else item_name
+            item = marketplace_item_link(item_name, id_item)
             lines.append(f"{index}. {item} — **{float(row['score']):,.0f}/100**")
         rankings = "\n".join(lines)
 
@@ -226,7 +226,7 @@ def _format_rating_movers(movers: list[dict], *, direction: str) -> list[str]:
         movement = "up" if change > 0 else "down" if change < 0 else "unchanged"
         item_name = mover["item_name"]
         id_item = mover.get("id_item")
-        item = f"[{item_name}]({marketplace_item_url(id_item)})" if id_item is not None else item_name
+        item = marketplace_item_link(item_name, id_item)
         if change:
             lines.append(f"{arrow} {item} {movement} {abs(change):,.0f} pts ({previous:,.0f} → {current:,.0f})")
         else:

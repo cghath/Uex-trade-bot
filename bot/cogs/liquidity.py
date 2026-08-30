@@ -11,7 +11,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from bot.uex.charts import render_liquidity_history_chart
-from bot.uex.marketplace import marketplace_item_url
+from bot.uex.marketplace import marketplace_item_link, marketplace_item_url
 
 logger = logging.getLogger("uexbot.liquidity")
 
@@ -21,10 +21,6 @@ async def liquidity_item_autocomplete(
 ) -> list[app_commands.Choice[str]]:
     rows = await interaction.client.db.find_liquidity_items(current)
     return [app_commands.Choice(name=row["item_name"][:100], value=row["item_name"]) for row in rows]
-
-
-def _marketplace_name(item_name: str, id_item: int | None) -> str:
-    return f"[{item_name}]({marketplace_item_url(id_item)})" if id_item is not None else item_name
 
 
 def _relative_timestamp(raw: str | None) -> str | None:
@@ -175,7 +171,7 @@ class LiquidityCog(commands.Cog):
             previous = float(mover["previous_score"])
             current = float(mover["current_score"])
             lines.append(
-                f"**{i}. {_marketplace_name(mover['item_name'], mover.get('id_item'))}**\n"
+                f"**{i}. {marketplace_item_link(mover['item_name'], mover.get('id_item'))}**\n"
                 f"{_format_rating_change(previous, current)}"
             )
         embed.description += "\n\n" + "\n".join(lines)

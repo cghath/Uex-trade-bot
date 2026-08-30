@@ -10,6 +10,15 @@ def marketplace_item_url(id_item: int) -> str:
     return f"https://uexcorp.space/marketplace/home/?id_item={id_item}&mode=list"
 
 
+def marketplace_item_link(item_name: str, id_item: int | None) -> str:
+    """Markdown-link an item name to its UEX Marketplace page when the id is known.
+
+    Falls back to the plain name (no link) when id_item is missing - e.g. rows sourced
+    from an endpoint that doesn't return it, like /marketplace_negotiations.
+    """
+    return f"[{item_name}]({marketplace_item_url(id_item)})" if id_item is not None else item_name
+
+
 def find_item_id_by_name(items: list[dict], query: str) -> int | None:
     """Resolve a typed query to a single catalog item's id, if there's an unambiguous match.
 
@@ -124,6 +133,7 @@ def quality_to_tier(quality: float) -> int:
 @dataclass
 class MarketplaceMoverEntry:
     item_name: str
+    id_item: int | None
     current_avg_sell: float
     baseline_avg_sell: float
     pct_change: float
@@ -153,9 +163,11 @@ def compute_marketplace_movers(rows: list[dict], limit: int = 5) -> tuple[list[M
         if abs(pct_change) < 0.5:
             continue
 
+        raw_id_item = parse_uex_number(row.get("id_item"))
         movers.append(
             MarketplaceMoverEntry(
                 item_name=name,
+                id_item=int(raw_id_item) if raw_id_item is not None else None,
                 current_avg_sell=round(current, 2),
                 baseline_avg_sell=round(baseline, 2),
                 pct_change=pct_change,

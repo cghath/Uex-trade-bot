@@ -27,6 +27,7 @@ from bot.uex.marketplace import (
     filter_listings_by_keyword,
     filter_listings_by_quality,
     find_item_id_by_name,
+    marketplace_item_link,
     marketplace_item_url,
     match_traded_items,
     parse_listing_quality,
@@ -402,8 +403,9 @@ class Marketplace(commands.Cog):
         for i, r in enumerate(rows[:10], start=1):
             sell = parse_uex_number(r.get("price_avg_sell"))
             sell_text = f"{sell:,.0f} {r.get('currency', 'UEC')}" if sell else "n/a"
+            name = marketplace_item_link(r.get("item_name", "Unknown"), r.get("id_item"))
             lines.append(
-                f"**{i}. {r.get('item_name', 'Unknown')}** — {r.get('negotiations_count', 0)} negotiations · "
+                f"**{i}. {name}** — {r.get('negotiations_count', 0)} negotiations · "
                 f"{r.get('total_listings_count', 0)} active listings · avg sell {sell_text}"
             )
         embed.description = "\n".join(lines)
@@ -432,7 +434,8 @@ class Marketplace(commands.Cog):
             embed.add_field(
                 name="Trending up",
                 value="\n".join(
-                    f"**{m.item_name}** +{m.pct_change:.1f}% ({m.current_avg_sell:,.0f} UEC)" for m in gainers
+                    f"**{marketplace_item_link(m.item_name, m.id_item)}** +{m.pct_change:.1f}% "
+                    f"({m.current_avg_sell:,.0f} UEC)" for m in gainers
                 ),
                 inline=False,
             )
@@ -440,7 +443,8 @@ class Marketplace(commands.Cog):
             embed.add_field(
                 name="Trending down",
                 value="\n".join(
-                    f"**{m.item_name}** {m.pct_change:.1f}% ({m.current_avg_sell:,.0f} UEC)" for m in losers
+                    f"**{marketplace_item_link(m.item_name, m.id_item)}** {m.pct_change:.1f}% "
+                    f"({m.current_avg_sell:,.0f} UEC)" for m in losers
                 ),
                 inline=False,
             )

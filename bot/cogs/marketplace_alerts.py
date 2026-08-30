@@ -22,6 +22,7 @@ from bot.uex.marketplace import (
     filter_listings_by_keyword,
     filter_listings_by_quality,
     find_item_id_by_name,
+    marketplace_item_link,
     parse_listing_quality,
     parse_uex_number,
 )
@@ -180,7 +181,7 @@ class MarketplaceAlerts(commands.Cog):
         quality_text = f" · quality {quality:.0f}" if quality is not None else ""
         message = (
             f"Marketplace alert #{alert['id']} ('{alert['keyword']}'): new **{alert['operation']}** listing — "
-            f"**{title}** · {price_text}{quality_text} · by {seller}"
+            f"**{marketplace_item_link(title, listing.get('id_item'))}** · {price_text}{quality_text} · by {seller}"
         )
         try:
             user = await self.bot.fetch_user(alert["user_id"])

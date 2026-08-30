@@ -9,6 +9,7 @@ from bot.cogs.digest import _format_data_freshness, _format_rating_movers
 from bot.cogs.ships import ship_name_autocomplete
 from bot.uex.commodity_risk import commodity_risk_labels, has_commodity_risk_metadata
 from bot.uex.exceptions import UexApiError
+from bot.uex.marketplace import marketplace_item_link
 from bot.uex.mixed_routes import build_mixed_routes, requires_capital_cargo_access
 from bot.uex.ships import resolve_ship
 
@@ -60,9 +61,11 @@ class IntelligenceBrief(commands.Cog):
         embed = discord.Embed(title="Intelligence Brief", color=discord.Color.blurple())
         signals = []
         if gainers:
-            signals.append(f"📈 Strongest sellability gain: **{gainers[0]['item_name']}** ({gainers[0]['score_change']:+.0f})")
+            gain_name = marketplace_item_link(gainers[0]["item_name"], gainers[0].get("id_item"))
+            signals.append(f"📈 Strongest sellability gain: **{gain_name}** ({gainers[0]['score_change']:+.0f})")
         if losers:
-            signals.append(f"📉 Strongest sellability drop: **{losers[0]['item_name']}** ({losers[0]['score_change']:+.0f})")
+            loss_name = marketplace_item_link(losers[0]["item_name"], losers[0].get("id_item"))
+            signals.append(f"📉 Strongest sellability drop: **{loss_name}** ({losers[0]['score_change']:+.0f})")
         embed.add_field(name="Executive signals", value="\n".join(signals) or "No major rating changes yet.", inline=False)
         embed.add_field(name="Data health", value=_format_data_freshness(freshness), inline=False)
         embed.add_field(name="Sellability shifts — Up", value="\n".join(_format_rating_movers(gainers, direction="up")), inline=False)
