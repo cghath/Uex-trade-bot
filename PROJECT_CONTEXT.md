@@ -203,6 +203,18 @@ they're in sync).
     instead of collapsing it to the catalog's bare name once resolved, so the variant survives
     into `/inventory`, the eventual Marketplace listing title, and the confirmation message.
 
+21. **Auto-load route filter added on `TestBranch`**: `/best-route` and `/top-routes` gained
+    an `auto-load-only` option that filters to routes whose origin terminal supports UEX's
+    `is_auto_load` - the purchase-time "buy cargo, have it loaded onto my stored ship
+    automatically" feature, which UEX exposes as a field distinct from
+    `has_loading_dock`/`has_freight_elevator` (physical external cargo infrastructure,
+    already used by practical-route notes and mixed-route capital-ship gating) - the bot
+    wasn't capturing `is_auto_load` at all before this. `terminal_reference` gained an
+    `is_auto_load` column, filled from the same `/terminals` rows the 24h reference refresh
+    already fetches - no new API call. Checked at the origin only, not the destination:
+    auto-load is about loading purchased cargo onto a stored ship, not the sell side. Not
+    yet verified live in Discord - see "Current state" below.
+
 ## Where to look for what
 
 Five docs, deliberately scoped so they don't duplicate each other:
@@ -388,6 +400,12 @@ guessed at.
   still reference the old path - import from `bot.uex.marketplace` instead.
 - Discord bot token and UEX app token committed in old git history have not been rotated.
   Low urgency (private repo) but still outstanding.
+- **Auto-load-only route filter needs a live check.** `/best-route auto-load-only:True` and
+  `/top-routes auto-load-only:True` (timeline entry 21) were built and unit-tested - including
+  the schema migration exercised end-to-end against a real SQLite file - from a sandbox with
+  no Discord/UEX credentials. Confirm on the next update/deploy: `tree.sync()` actually picks
+  up the renamed `auto-load-only` parameter, and real UEX terminal data populates
+  `is_auto_load` as expected once the 24h reference refresh has run.
 - `Harvestables` (category id 87) is in the scanner's allowlist alongside `Commodities`
   (id 36) but wasn't independently verified against live data the way `Commodities` was -
   the user included it provisionally. Worth confirming it actually produces sane results,
