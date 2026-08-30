@@ -157,7 +157,7 @@ nano .env   # fill in the same values you used locally
 
 ### Run it as a systemd service (survives reboots/crashes)
 
-Create `/etc/systemd/system/uexbot.service`:
+Create `/etc/systemd/system/uex-trade-bot.service`:
 
 ```ini
 [Unit]
@@ -182,13 +182,13 @@ Then:
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable --now uexbot
-sudo systemctl status uexbot     # check it's running
-journalctl -u uexbot -f          # live logs
+sudo systemctl enable --now uex-trade-bot
+sudo systemctl status uex-trade-bot     # check it's running
+journalctl -u uex-trade-bot -f          # live logs
 ```
 
 To deploy updates later: `git pull` (or re-copy files), `pip install -r requirements.txt` if
-dependencies changed, then `sudo systemctl restart uexbot`.
+dependencies changed, then `sudo systemctl restart uex-trade-bot`.
 
 **When migrating from your dev machine to the Pi, copy the whole `data/` folder** (not just the
 code) so everyone's already-linked UEX accounts keep working — see "Security notes" above.
@@ -208,6 +208,12 @@ bot/
     marketplace.py   Marketplace listings + 30-day rolling price averages
     inventory.py     personal-inventory pricing
     scanner.py       Raw Materials Deal Scanner matching logic (pure functions, unit tested)
+    mixed_routes.py    dependency-free mixed-cargo load allocation + terminal-access gates
+    route_confidence.py route confidence scoring (terminal freshness, report depth, stock/demand, volatility)
+    supply_demand.py    time-weighted supply/demand history from terminal observations
+    commodity_risk.py   commodity risk labels (jurisdiction, explosion, volatility) from UEX flags
+    data_health.py       terminal data-freshness scoring
+    practical_routes.py  practical route checks (container limits, cargo infra, refuel/repair/services)
     ships.py         ship data lookups
     stock_alerts.py  terminal stock-level change detection
     leaderboard.py   UEX leaderboard fetching
@@ -221,14 +227,18 @@ bot/
     prices.py             /price, /best-route
     alerts.py             /alert-add, /alert-list, /alert-remove (list/remove cover all 3 alert types) + background poller
     trades.py             /trade-log-add, /trade-log, /uex-trades
-    trends.py             /trending, /movers, /commodity-history + background trending refresh
+    trends.py             /trending, /movers, /commodity-history, /top-routes + background trending refresh
     marketplace.py        /marketplace-average and Marketplace lookups
     personal_inventory.py inventory UI + guarded posting/reconciliation worker
     marketplace_alerts.py Marketplace listing alerts + background poller
+    negotiation_alerts.py /negotiation-alerts opt-in DM alerts + background poller
     scanner.py             /set-scanner-channel, /scanner-status, /scan-now + background poller
+    liquidity.py           /liquidity-rank, /liquidity-trends
     stock_alerts.py       terminal stock alerts + background poller
     ships.py              ship info commands
     digest.py             scheduled guild digest posts
+    intelligence.py       background market/data-health/fuel/reference collectors, no slash commands
+    intelligence_brief.py /intelligence-brief on-demand deep view
     diagnostics.py        bot health/diagnostic commands
     help.py               /help
 scripts/
