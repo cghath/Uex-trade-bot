@@ -131,6 +131,10 @@ The SQLite database file is created automatically at `data/uexbot.sqlite3` (conf
 `DATABASE_PATH` in `.env`), and a `data/credentials.key` file is generated alongside it the first
 time anyone links a UEX account (see "Security notes" above).
 
+> Setting up an **additional** Windows dev machine, including SSH access back to your
+> deployment host? [`docs/WINDOWS_DEV_SETUP.md`](docs/WINDOWS_DEV_SETUP.md) scripts most
+> of it.
+
 ## 4. Deploying to a Raspberry Pi 5 for permanent hosting
 
 The Pi 5 is ARM64, and everything this project uses (`discord.py`, `httpx`, `aiosqlite`,
