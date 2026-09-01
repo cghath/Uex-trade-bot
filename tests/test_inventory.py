@@ -16,9 +16,12 @@ from bot.cogs.personal_inventory import (
     AuthorizeScheduleView,
     CustomPriceModal,
     FloorReachedView,
+    InventorySelectionView,
     LowerFloorModal,
     PersonalInventory,
     PostNowView,
+    SetMinimumModal,
+    SetMinimumPricesView,
 )
 import bot.cogs.personal_inventory as personal_inventory_module
 from bot.db.database import Database
@@ -645,6 +648,7 @@ class _FakeResponse:
     def __init__(self):
         self.edits = []
         self.messages = []
+        self.sent_modal = None
 
     async def defer(self, **kwargs):
         pass
@@ -654,6 +658,9 @@ class _FakeResponse:
 
     async def send_message(self, *args, **kwargs):
         self.messages.append((args, kwargs))
+
+    async def send_modal(self, modal):
+        self.sent_modal = modal
 
 
 class _FakeFollowup:
@@ -1027,6 +1034,114 @@ def test_authorize_schedule_view_confirm_creates_a_custom_priced_job(tmp_path):
         # loop claims and posts it later - "custom" pricing must survive to that later post.
         assert jobs[0]["pricing_strategy"] == "custom"
         assert jobs[0]["custom_price"] == 6_833_000
+
+    asyncio.run(run())
+
+
+async def _setup_selection_view(tmp_path, *, minimum_prices: dict[str, int | None]):
+    """Build a real InventorySelectionView with one inventory row per (item_name, price)
+    pair in `minimum_prices`, all pre-selected."""
+    db = _make_db(tmp_path)
+    await db.init()
+    user_id = 55
+    ids_by_name: dict[str, int] = {}
+    for item_name, minimum_price in minimum_prices.items():
+        inventory_id = await db.add_inventory_item(
+            user_id=user_id, id_item=hash(item_name) % 1000, id_category=9, item_name=item_name,
+            item_slug=item_name.lower(), quantity=10, quality=0, location="Area18",
+            unit="unit", minimum_price=minimum_price,
+        )
+        ids_by_name[item_name] = inventory_id
+
+    bot = type("FakeBot", (), {})()
+    bot.db = db
+    cog = PersonalInventory.__new__(PersonalInventory)
+    cog.bot = bot
+
+    rows = await db.list_inventory(user_id)
+    view = InventorySelectionView(cog, user_id, rows)
+    view.selected_ids = set(ids_by_name.values())
+    return db, cog, user_id, view, ids_by_name
+
+
+def test_review_selected_offers_inline_minimum_buttons_when_a_floor_is_missing(tmp_path):
+    """The old behavior dead-ended with a text pointer to /inventory-set-minimum, making the
+    user re-run /inventory-sell from scratch after leaving to fix it. It must now offer a
+    way to set the floor without leaving the flow."""
+    async def run():
+        db, cog, user_id, view, ids_by_name = await _setup_selection_view(
+            tmp_path, minimum_prices={"Laranite": None}
+        )
+        interaction = _FakeInteraction(user_id)
+
+        await view.review_selected(interaction)
+
+        (_,), kwargs = interaction.followup.sent[0]
+        assert isinstance(kwargs.get("view"), SetMinimumPricesView)
+        assert kwargs.get("ephemeral") is True
+
+    asyncio.run(run())
+
+
+def test_setting_the_only_missing_minimum_continues_straight_into_the_authorize_screen(tmp_path):
+    """The core new behavior: once the last missing floor is set, the SAME message must
+    turn into the authorize screen - not a dead end, not a second /inventory-sell run."""
+    async def run():
+        db, cog, user_id, view, ids_by_name = await _setup_selection_view(
+            tmp_path, minimum_prices={"Laranite": None}
+        )
+        interaction = _FakeInteraction(user_id)
+        await view.review_selected(interaction)
+        (_,), kwargs = interaction.followup.sent[0]
+        prices_view: SetMinimumPricesView = kwargs["view"]
+
+        button = next(c for c in prices_view.children if "Laranite" in (c.label or ""))
+        button_interaction = _FakeInteraction(user_id)
+        await button.callback(button_interaction)
+        modal = button_interaction.response.sent_modal
+        assert isinstance(modal, SetMinimumModal)
+
+        modal.price_input._value = "500,000"
+        modal_interaction = _FakeInteraction(user_id)
+        await modal.on_submit(modal_interaction)
+
+        entry = await db.get_inventory_item(user_id, ids_by_name["Laranite"])
+        assert entry["minimum_price"] == 500_000
+
+        (edit,) = modal_interaction.response.edits
+        assert isinstance(edit.get("view"), AuthorizeScheduleView)
+        assert edit.get("embed") is not None
+
+    asyncio.run(run())
+
+
+def test_setting_one_of_two_missing_minimums_leaves_the_other_button_showing(tmp_path):
+    async def run():
+        db, cog, user_id, view, ids_by_name = await _setup_selection_view(
+            tmp_path, minimum_prices={"Laranite": None, "Gold": None}
+        )
+        interaction = _FakeInteraction(user_id)
+        await view.review_selected(interaction)
+        (_,), kwargs = interaction.followup.sent[0]
+        prices_view: SetMinimumPricesView = kwargs["view"]
+
+        laranite_button = next(c for c in prices_view.children if "Laranite" in (c.label or ""))
+        button_interaction = _FakeInteraction(user_id)
+        await laranite_button.callback(button_interaction)
+        modal = button_interaction.response.sent_modal
+        modal.price_input._value = "100000"
+        modal_interaction = _FakeInteraction(user_id)
+        await modal.on_submit(modal_interaction)
+
+        # Still one floor missing - must show the remaining button, not jump to authorize.
+        (edit,) = modal_interaction.response.edits
+        assert isinstance(edit.get("view"), SetMinimumPricesView)
+        remaining_labels = [c.label for c in edit["view"].children]
+        assert any("Gold" in label for label in remaining_labels)
+        assert not any("Laranite" in label for label in remaining_labels)
+
+        laranite_entry = await db.get_inventory_item(user_id, ids_by_name["Laranite"])
+        assert laranite_entry["minimum_price"] == 100_000
 
     asyncio.run(run())
 

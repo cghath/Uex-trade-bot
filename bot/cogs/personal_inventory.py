@@ -200,74 +200,133 @@ class InventorySelectionView(discord.ui.View):
         selected = [row for row in self.rows if int(row["id"]) in self.selected_ids]
         missing_floor = [row for row in selected if not row.get("minimum_price")]
         if missing_floor:
-            ids = ", ".join(f"#{row['id']} {row['item_name']}" for row in missing_floor)
             await interaction.followup.send(
-                f"Set a manual minimum price first for: {ids}. Use `/inventory-set-minimum`.",
+                "Set a minimum price before these can be authorized - never posted or relisted below it.",
+                view=SetMinimumPricesView(self.cog, self.author_id, selected, missing_floor),
                 ephemeral=True,
             )
             return
 
-        scheduled_for = datetime.now(timezone.utc)
-        specs: list[dict[str, Any]] = []
-        embed = discord.Embed(
-            title="Authorize automatic UEX posting",
-            description=(
-                "Each stack posts within the next few minutes once you confirm below (UEX staff approval after "
-                "that is outside the bot's control). The price is recalculated right before posting and can "
-                "never go below your manual minimum."
-            ),
-            color=discord.Color.orange(),
-        )
-        for row in selected:
-            available = int(row["quantity"]) - int(row["reserved_quantity"])
-            if available <= 0:
-                continue
-            average_rows = await self.cog.bot.db.get_item_tier_stats(int(row["id_item"]))
-            own_prices = await self.cog.bot.db.get_inventory_completed_unit_prices(
-                user_id=self.author_id,
-                id_item=int(row["id_item"]), quality=int(row["quality"]), unit=str(row["unit"])
-            )
-            price = recommend_balanced_price(
-                listings=[],
-                average_rows=average_rows,
-                quality=int(row["quality"]),
-                unit=str(row["unit"]),
-                minimum_price=int(row["minimum_price"]),
-                own_completed_unit_prices=own_prices,
-            )
-            specs.append(
-                {
-                    "inventory_id": int(row["id"]),
-                    "quantity": available,
-                    "scheduled_for": scheduled_for,
-                    "auto_relist": True,
-                    "minimum_price": int(row["minimum_price"]),
-                }
-            )
-            embed.add_field(
-                name=f"#{row['id']} · {row['item_name']}"[:256],
-                value=(
-                    f"Qty **{available}** · preview **{price.price:,} UEC/{row['unit']}** "
-                    f"(minimum {int(row['minimum_price']):,})"
-                )[:1024],
-                inline=False,
-            )
-
-        if not specs:
+        result = await self.cog._build_authorize_screen(self.author_id, selected)
+        if result is None:
             await interaction.followup.send("None of those stacks currently has unreserved inventory.", ephemeral=True)
             return
-        embed.set_footer(
-            text=(
-                "This one confirmation authorizes posting and guarded 48-hour repricing/relisting until sold or cancelled. "
-                "Ambiguous UEX results stop and ask you; they are never retried blindly. "
-                "Pick a pricing strategy below before authorizing."
+        embed, view = result
+        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+
+
+MAX_MINIMUM_PRICE_BUTTONS = 24  # a View caps at 25 components total; leave one for Cancel
+
+
+class SetMinimumPricesView(discord.ui.View):
+    """Lets /inventory-sell set a missing minimum price inline instead of dead-ending with
+    "run /inventory-set-minimum and start over" - one button per stack that still needs a
+    floor. The moment the last one gets set, this same message turns into the authorize
+    screen (via PersonalInventory._build_authorize_screen) rather than making the user
+    re-select everything from scratch.
+    """
+
+    def __init__(
+        self, cog: "PersonalInventory", author_id: int,
+        selected: list[dict[str, Any]], missing_floor: list[dict[str, Any]],
+    ) -> None:
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.author_id = author_id
+        self.selected = selected
+        self.missing_ids = {int(row["id"]) for row in missing_floor}
+        self._rebuild()
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("This menu belongs to someone else.", ephemeral=True)
+            return False
+        return True
+
+    def _rebuild(self) -> None:
+        self.clear_items()
+        missing_rows = [row for row in self.selected if int(row["id"]) in self.missing_ids]
+        for row in missing_rows[:MAX_MINIMUM_PRICE_BUTTONS]:
+            button: discord.ui.Button = discord.ui.Button(
+                label=f"Set minimum: {row['item_name']}"[:80],
+                style=discord.ButtonStyle.secondary,
             )
+            button.callback = self._make_set_minimum_callback(int(row["id"]))
+            self.add_item(button)
+        cancel: discord.ui.Button = discord.ui.Button(label="Cancel", style=discord.ButtonStyle.grey)
+        cancel.callback = self._cancel
+        self.add_item(cancel)
+
+    def _make_set_minimum_callback(self, inventory_id: int):
+        async def _callback(interaction: discord.Interaction) -> None:
+            await interaction.response.send_modal(SetMinimumModal(self, inventory_id))
+        return _callback
+
+    async def _cancel(self, interaction: discord.Interaction) -> None:
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(
+            content="Cancelled - no inventory was reserved or scheduled.", view=self
         )
-        await interaction.followup.send(
-            embed=embed,
-            view=AuthorizeScheduleView(self.cog, self.author_id, specs),
-            ephemeral=True,
+
+    async def resolve_minimum_set(self, interaction: discord.Interaction, inventory_id: int, minimum_price: int) -> None:
+        """Called by SetMinimumModal right after a successful set."""
+        for row in self.selected:
+            if int(row["id"]) == inventory_id:
+                row["minimum_price"] = minimum_price
+        self.missing_ids.discard(inventory_id)
+
+        if self.missing_ids:
+            self._rebuild()
+            await interaction.response.edit_message(
+                content="Set a minimum price before these can be authorized - never posted or relisted below it.",
+                view=self,
+            )
+            return
+
+        result = await self.cog._build_authorize_screen(self.author_id, self.selected)
+        if result is None:
+            await interaction.response.edit_message(
+                content="None of those stacks currently has unreserved inventory.", embed=None, view=None
+            )
+            return
+        embed, view = result
+        await interaction.response.edit_message(content=None, embed=embed, view=view)
+
+
+class SetMinimumModal(discord.ui.Modal, title="Set a minimum price"):
+    price_input: discord.ui.TextInput = discord.ui.TextInput(
+        label="Minimum price per unit (UEC)",
+        placeholder="e.g. 500000",
+        style=discord.TextStyle.short,
+        max_length=15,
+    )
+
+    def __init__(self, view: SetMinimumPricesView, inventory_id: int) -> None:
+        super().__init__()
+        self.view = view
+        self.inventory_id = inventory_id
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        raw = self.price_input.value.strip().replace(",", "")
+        try:
+            price = int(raw)
+        except ValueError:
+            await interaction.response.send_message("That's not a whole number - try again.", ephemeral=True)
+            return
+        if price <= 0:
+            await interaction.response.send_message("Price must be a positive whole number.", ephemeral=True)
+            return
+
+        changed = await self.view.cog.bot.db.set_inventory_minimum_price(
+            interaction.user.id, self.inventory_id, price
         )
+        if not changed:
+            await interaction.response.send_message(
+                f"Inventory #{self.inventory_id} was not found - it may have been removed.", ephemeral=True
+            )
+            return
+        await self.view.resolve_minimum_set(interaction, self.inventory_id, price)
 
 
 class AuthorizeScheduleView(discord.ui.View):
@@ -999,6 +1058,72 @@ class PersonalInventory(commands.Cog):
             if not await self.bot.db.claim_inventory_post_job(int(job["id"])):
                 continue
             await self._post_one_job(job)
+
+    async def _build_authorize_screen(
+        self, author_id: int, selected: list[dict[str, Any]]
+    ) -> tuple[discord.Embed, "AuthorizeScheduleView"] | None:
+        """Build the /inventory-sell authorize embed + view for rows that already all have
+        a minimum price. Returns None if none of them currently has unreserved stock.
+        Shared by the no-floor-missing path and SetMinimumPricesView, which calls this
+        the moment the last missing floor gets set so the flow can continue on the same
+        message instead of making the user re-run /inventory-sell.
+        """
+        scheduled_for = datetime.now(timezone.utc)
+        specs: list[dict[str, Any]] = []
+        embed = discord.Embed(
+            title="Authorize automatic UEX posting",
+            description=(
+                "Each stack posts within the next few minutes once you confirm below (UEX staff approval after "
+                "that is outside the bot's control). The price is recalculated right before posting and can "
+                "never go below your manual minimum."
+            ),
+            color=discord.Color.orange(),
+        )
+        for row in selected:
+            available = int(row["quantity"]) - int(row["reserved_quantity"])
+            if available <= 0:
+                continue
+            average_rows = await self.bot.db.get_item_tier_stats(int(row["id_item"]))
+            own_prices = await self.bot.db.get_inventory_completed_unit_prices(
+                user_id=author_id,
+                id_item=int(row["id_item"]), quality=int(row["quality"]), unit=str(row["unit"])
+            )
+            price = recommend_balanced_price(
+                listings=[],
+                average_rows=average_rows,
+                quality=int(row["quality"]),
+                unit=str(row["unit"]),
+                minimum_price=int(row["minimum_price"]),
+                own_completed_unit_prices=own_prices,
+            )
+            specs.append(
+                {
+                    "inventory_id": int(row["id"]),
+                    "quantity": available,
+                    "scheduled_for": scheduled_for,
+                    "auto_relist": True,
+                    "minimum_price": int(row["minimum_price"]),
+                }
+            )
+            embed.add_field(
+                name=f"#{row['id']} · {row['item_name']}"[:256],
+                value=(
+                    f"Qty **{available}** · preview **{price.price:,} UEC/{row['unit']}** "
+                    f"(minimum {int(row['minimum_price']):,})"
+                )[:1024],
+                inline=False,
+            )
+
+        if not specs:
+            return None
+        embed.set_footer(
+            text=(
+                "This one confirmation authorizes posting and guarded 48-hour repricing/relisting until sold or cancelled. "
+                "Ambiguous UEX results stop and ask you; they are never retried blindly. "
+                "Pick a pricing strategy below before authorizing."
+            )
+        )
+        return embed, AuthorizeScheduleView(self, author_id, specs)
 
     async def _fetch_live_price(
         self, *, id_item: int, quality: int, unit: str, minimum_price: int, user_id: int, strategy: str = "balanced",
