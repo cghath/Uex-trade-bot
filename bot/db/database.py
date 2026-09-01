@@ -829,7 +829,7 @@ class Database:
                           t.star_system_name, t.planet_name, t.moon_name,
                           t.city_name, t.max_container_size, t.has_loading_dock,
                           t.has_freight_elevator, t.is_cargo_center, t.is_refuel,
-                          t.is_repair, t.is_player_owned,
+                          t.is_repair, t.is_player_owned, t.is_auto_load,
                           c.is_illegal, c.is_volatile_qt, c.is_volatile_time,
                           c.is_explosive, c.is_buggy
                    FROM terminal_market_state AS m

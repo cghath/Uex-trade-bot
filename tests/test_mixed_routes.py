@@ -159,3 +159,26 @@ def test_capital_access_filter_fails_closed_for_unverified_terminal():
     ]
     assert build_mixed_routes(rows, ship_capacity_scu=10)
     assert build_mixed_routes(rows, ship_capacity_scu=10, capital_access_only=True) == []
+
+
+def test_auto_load_only_excludes_a_route_when_the_origin_lacks_auto_load():
+    rows = [
+        _row(1, 1, "A", "Origin", price_buy=10, scu_buy=2, is_auto_load=0),
+        _row(1, 2, "A", "Destination", price_sell=20, scu_sell=2),
+        _row(2, 1, "B", "Origin", price_buy=10, scu_buy=2, is_auto_load=0),
+        _row(2, 2, "B", "Destination", price_sell=20, scu_sell=2),
+    ]
+    assert build_mixed_routes(rows, ship_capacity_scu=10)
+    assert build_mixed_routes(rows, ship_capacity_scu=10, auto_load_only=True) == []
+
+
+def test_auto_load_only_checks_the_origin_not_the_destination():
+    """Auto-load is a purchase-time feature - a destination (sell) terminal without it is
+    irrelevant, the same way /best-route and /top-routes only ever check the origin."""
+    rows = [
+        _row(1, 1, "A", "Origin", price_buy=10, scu_buy=2, is_auto_load=1),
+        _row(1, 2, "A", "Destination", price_sell=20, scu_sell=2, is_auto_load=0),
+        _row(2, 1, "B", "Origin", price_buy=10, scu_buy=2, is_auto_load=1),
+        _row(2, 2, "B", "Destination", price_sell=20, scu_sell=2, is_auto_load=0),
+    ]
+    assert build_mixed_routes(rows, ship_capacity_scu=10, auto_load_only=True)

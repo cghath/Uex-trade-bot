@@ -374,6 +374,24 @@ they're in sync).
       (a bare "remote" repo + a clone configured with the same single-branch fetch rule as
       the Pi), confirming the fix actually advances to the real branch tip rather than
       silently no-oping.
+29. **`/inventory-sell` sets a missing minimum price inline instead of dead-ending**:
+    selecting a stack with no `minimum_price` used to just bounce you out with "run
+    `/inventory-set-minimum` and try again," losing the selection. Now shows a
+    "Set minimum: <item>" button per stack that needs one (`SetMinimumPricesView` +
+    `SetMinimumModal`); setting the last missing floor turns the same message straight
+    into the authorize screen. Required pulling the authorize-embed construction out of
+    `InventorySelectionView.review_selected` into `PersonalInventory._build_authorize_screen`
+    so both the no-floor-missing path and the just-finished-setting-floors path share it,
+    rather than duplicating it. 189 tests passing (3 new).
+30. **`/mixed-routes` gained the same `auto-load-only` filter as `/best-route` and
+    `/top-routes`**: noticed missing by comparing `/mixed-routes`' options against the
+    other two in Discord. The data was already one `SELECT` away -
+    `get_mixed_route_market_rows()`'s existing join against `terminal_reference` (the
+    same one that already supplies `has_loading_dock` etc. for the capital-ship checks)
+    just didn't include `is_auto_load`, so this needed a one-line query change plus a new
+    `auto_load_only` parameter on `build_mixed_routes` (filtering only the *origins* list,
+    never destinations - auto-load is purchase-time only) and the matching command option.
+    191 tests passing (2 new).
 
 ## Where to look for what
 
@@ -654,7 +672,7 @@ guessed at.
   branch. Local (PC) and the Pi's databases have been fully merged at least twice now; the
   established practice is to back up both sides before any such merge and pull the Pi's
   backup down to the PC afterward, so nothing valuable lives only on the Pi's disk. The full
-  suite has 186 passing tests. Re-check live service and branch state rather than assuming
+  suite has 191 passing tests. Re-check live service and branch state rather than assuming
   this point-in-time operational note is still current.
 - The data collectors in `bot/cogs/intelligence.py` only pay off once they've been running a
   while - most of the `ROADMAP.md` intelligence backlog depends on accumulated history, so

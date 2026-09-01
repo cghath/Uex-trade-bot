@@ -544,8 +544,9 @@ class Prices(commands.Cog):
         ship="Optional: use a specific ship instead of your saved default",
         budget="Optional maximum aUEC to invest in the cargo",
         space_only="Exclude surface terminals; require both ends to be confirmed space stations",
+        auto_load_only="Only show loads where the origin terminal offers UEX's auto-load at purchase",
     )
-    @app_commands.rename(space_only="space-only")
+    @app_commands.rename(space_only="space-only", auto_load_only="auto-load-only")
     @app_commands.autocomplete(ship=ship_name_autocomplete)
     async def mixed_routes(
         self,
@@ -553,6 +554,7 @@ class Prices(commands.Cog):
         ship: str | None = None,
         budget: app_commands.Range[float, 1, 1_000_000_000] | None = None,
         space_only: bool = False,
+        auto_load_only: bool = False,
     ) -> None:
         await interaction.response.defer()
 
@@ -605,14 +607,16 @@ class Prices(commands.Cog):
             max_commodities=3,
             space_only=space_only,
             capital_access_only=capital_access_only,
+            auto_load_only=auto_load_only,
         )
         if not routes:
             budget_note = " within that budget" if budget is not None else ""
             safety_note = " using confirmed space stations only" if space_only else ""
             access_note = " with confirmed capital-ship cargo access" if capital_access_only else ""
+            auto_load_note = " with auto-load at the origin" if auto_load_only else ""
             await interaction.followup.send(
                 f"No two- or three-commodity loads fit **{ship_vehicle.get('name', ship_query)}**"
-                f"{budget_note}{safety_note}{access_note} right now."
+                f"{budget_note}{safety_note}{access_note}{auto_load_note} right now."
             )
             return
 
