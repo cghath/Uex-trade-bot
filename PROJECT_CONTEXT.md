@@ -392,6 +392,27 @@ they're in sync).
     `auto_load_only` parameter on `build_mixed_routes` (filtering only the *origins* list,
     never destinations - auto-load is purchase-time only) and the matching command option.
     191 tests passing (2 new).
+31. **Audited the other two route commands for the same kind of gap, on request** - not
+    everything that looked asymmetric between `/best-route`, `/top-routes`, and
+    `/mixed-routes` turned out to be a real one:
+    - `/mixed-routes`' `space-only` filter and its auto-derived capital-ship-access check
+      are genuinely mixed-routes-specific by design (entry 12), not an omission elsewhere -
+      a hard filter fits a single one-terminal-visit recommendation; `/best-route` and
+      `/top-routes` return a ranked list across many terminals instead, where an empty
+      result from over-filtering is a worse experience than an informational note.
+    - Suspected `/top-routes` was missing the real `distance`/`score` fields `/best-route`
+      shows - false alarm, caught on a fuller read of `_build_route_field`: it already
+      shows both, identically.
+    - Real finding: `/best-route`'s fallback path (no UEX `/commodities_routes` data for
+      that commodity - a real, documented, non-rare branch) never disclosed that distance/
+      travel-time isn't factored into that ranking, unlike `/mixed-routes`, which is
+      *always* in that same situation and always says so. Added the identical
+      cross-system-aware disclaimer `/mixed-routes` already uses, reusing
+      `fallback_references`' existing `star_system_name` data - no new lookups needed.
+      No new cog-level test added (no existing harness tests `/best-route`'s Discord
+      rendering at all, and building one from scratch for a one-line text addition would
+      cost more than the fix itself); verified by tracing the logic by hand and confirming
+      the module still imports cleanly with the full suite green.
 
 ## Where to look for what
 

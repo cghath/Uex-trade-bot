@@ -523,6 +523,18 @@ class Prices(commands.Cog):
                         fallback_references.get(route.sell_terminal_id),
                     )
                 )
+            # This fallback (no UEX /commodities_routes data for this commodity) has no real
+            # distance figure the way the primary branch above does - say so explicitly
+            # instead of silently ranking purely on price the way /mixed-routes already does
+            # for the same reason.
+            origin_system = (fallback_references.get(route.buy_terminal_id) or {}).get("star_system_name")
+            destination_system = (fallback_references.get(route.sell_terminal_id) or {}).get("star_system_name")
+            if origin_system and destination_system and origin_system != destination_system:
+                value_lines.append(
+                    f"⚠️ Cross-system route: {origin_system} → {destination_system}; compare profit against travel time"
+                )
+            else:
+                value_lines.append("⚠️ Travel time/distance is not included in this ranking")
 
             _add_chunked_fields(
                 embed,
