@@ -1147,25 +1147,46 @@ class PersonalInventory(commands.Cog):
         if not jobs:
             return
 
-        async def _fetch_negotiations(user_id: int) -> tuple[int, list[dict[str, Any]]]:
+        async def _fetch_negotiations(user_id: int) -> tuple[int, list[dict[str, Any]] | None]:
             secret = await self.bot.db.get_user_secret_key(user_id)
             if not secret:
                 return user_id, []
             try:
                 return user_id, await self.bot.uex.get_marketplace_negotiations(secret_key=secret)
             except UexApiError:
-                return user_id, []
+                # None means "couldn't verify", distinct from "verified: no negotiations" (the
+                # empty-list case above). Collapsing these used to let a fetch failure look like
+                # a confirmed-clear negotiation state and reprice/relist blind - see
+                # open_negotiation_listings_by_user below, which is the only thing that reads
+                # this distinction.
+                return user_id, None
 
         negotiation_results = await asyncio.gather(
             *(_fetch_negotiations(user_id) for user_id in {int(job["user_id"]) for job in jobs})
         )
         negotiations_by_user: dict[int, dict[int, dict[str, Any]]] = {}
+        # Tracks, per user, the set of listing ids with at least one OPEN negotiation right
+        # now - kept separate from negotiations_by_user's "best" pick below, which favors a
+        # closed negotiation (it exists to surface deal_value for completed-sale recording).
+        # Collapsing both into one "best" record let an older closed negotiation's higher
+        # tuple-comparison rank hide a genuinely newer open one for the same listing, which is
+        # exactly backwards for "should we pause repricing because someone's negotiating."
+        # None here (as opposed to an empty set) means the fetch above failed - unknown, not
+        # verified-clear.
+        open_negotiation_listings_by_user: dict[int, set[int] | None] = {}
         for user_id, rows in negotiation_results:
+            if rows is None:
+                negotiations_by_user[user_id] = {}
+                open_negotiation_listings_by_user[user_id] = None
+                continue
             best_by_listing: dict[int, dict[str, Any]] = {}
+            open_listing_ids: set[int] = set()
             for row in rows:
                 listing_id = _integer(row.get("id_listing"))
                 if listing_id is None:
                     continue
+                if not _integer(row.get("date_closed")):
+                    open_listing_ids.add(listing_id)
                 current = best_by_listing.get(listing_id)
                 candidate_key = (
                     1 if _integer(row.get("date_closed")) else 0,
@@ -1178,6 +1199,7 @@ class PersonalInventory(commands.Cog):
                 if current is None or candidate_key > current_key:
                     best_by_listing[listing_id] = row
             negotiations_by_user[user_id] = best_by_listing
+            open_negotiation_listings_by_user[user_id] = open_listing_ids
 
         async def _fetch_listing(listing_id: int) -> tuple[int, list[dict[str, Any]] | None]:
             try:
@@ -1251,7 +1273,12 @@ class PersonalInventory(commands.Cog):
                     (datetime.now(timezone.utc) - posted_at).total_seconds() / 3600 if posted_at else 0
                 )
                 if price_age_hours >= RELIST_DISCOUNT_INTERVAL_HOURS:
-                    has_open_negotiation = negotiation is not None and not _integer(negotiation.get("date_closed"))
+                    open_listings = open_negotiation_listings_by_user.get(int(job["user_id"]))
+                    if open_listings is None:
+                        # Negotiation fetch failed this cycle for this user - unverifiable,
+                        # never treat that as "confirmed clear to reprice." Retry next cycle.
+                        continue
+                    has_open_negotiation = listing_id in open_listings
                     if has_open_negotiation:
                         await self.bot.db.disable_auto_relist(job_id)
                         await self._notify_user(
@@ -1288,14 +1315,30 @@ class PersonalInventory(commands.Cog):
                     )
                     if new_id:
                         new_job = await self.bot.db.get_inventory_post_job(int(job["user_id"]), new_id)
+                        posted = False
                         if new_job and await self.bot.db.claim_inventory_post_job(new_id):
-                            await self._post_one_job(new_job, notify=False)
-                        await self._notify_user(
-                            int(job["user_id"]),
-                            f"No interest yet on **{marketplace_item_link(job['item_name'], job.get('id_item'))}** "
-                            f"after {RELIST_DISCOUNT_INTERVAL_HOURS}h - "
-                            f"relisted as job #{new_id} at **{next_price:,}** UEC/unit (was {current_price:,}).",
-                        )
+                            result = await self._post_one_job(new_job, notify=False)
+                            posted = bool(result.get("success"))
+                        if posted:
+                            await self._notify_user(
+                                int(job["user_id"]),
+                                f"No interest yet on **{marketplace_item_link(job['item_name'], job.get('id_item'))}** "
+                                f"after {RELIST_DISCOUNT_INTERVAL_HOURS}h - "
+                                f"relisted as job #{new_id} at **{next_price:,}** UEC/unit (was {current_price:,}).",
+                            )
+                        else:
+                            # The old listing is already gone (deleted above) - this item
+                            # currently has NO active UEX listing, whatever went wrong. Never
+                            # claim a successful relist here; _post_one_job already recorded
+                            # the real failure reason on the job itself (notify=False only
+                            # suppressed its own DM, not the DB write).
+                            await self._notify_user(
+                                int(job["user_id"]),
+                                f"No interest yet on **{marketplace_item_link(job['item_name'], job.get('id_item'))}** "
+                                f"after {RELIST_DISCOUNT_INTERVAL_HOURS}h. The old listing was removed to relist "
+                                f"lower, but the new post (job #{new_id}) did not succeed - it currently has "
+                                "**no active listing**. Check `/inventory` and use `/inventory-post-now` to try again.",
+                            )
                     continue
 
             expiration = _integer(listing.get("date_expiration")) or _integer(job.get("date_expiration"))

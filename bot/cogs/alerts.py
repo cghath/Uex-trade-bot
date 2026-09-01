@@ -19,6 +19,10 @@ logger = logging.getLogger("uexbot.alerts")
 
 POLL_INTERVAL_MINUTES = 10
 
+# Discord's plain-message content cap is 2000 chars; leave headroom for the truncation
+# note itself so appending it can never push the final message back over the real limit.
+ALERT_LIST_MAX_CHARS = 1900
+
 DIRECTION_CHOICES = [
     app_commands.Choice(name="Sell price reaches at least...", value="sell_at_least"),
     app_commands.Choice(name="Buy price drops to at most...", value="buy_at_most"),
@@ -99,7 +103,17 @@ class Alerts(commands.Cog):
                 lines.append(f"#{a['id']} — {a['operation']} listings matching '{a['keyword']}'{price_note}{quality_note}")
             sections.append("**Marketplace alerts**\n" + "\n".join(lines))
 
-        await interaction.response.send_message("\n\n".join(sections), ephemeral=True)
+        message = "\n\n".join(sections)
+        if len(message) > ALERT_LIST_MAX_CHARS:
+            total_alerts = len(price_alerts) + len(stock_alerts) + len(marketplace_alerts)
+            truncated = message[:ALERT_LIST_MAX_CHARS]
+            cutoff = truncated.rfind("\n")  # cut at a full line, never mid-entry
+            message = (
+                (truncated[:cutoff] if cutoff > 0 else truncated)
+                + f"\n\n… truncated — {total_alerts} alerts total. Remove some with "
+                "`/alert-remove` to see the rest."
+            )
+        await interaction.response.send_message(message, ephemeral=True)
 
     @app_commands.command(
         name="alert-remove",

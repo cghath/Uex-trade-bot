@@ -161,6 +161,35 @@ def test_alert_remove_dispatches_each_prefix_to_its_own_table_only(tmp_path):
     asyncio.run(run())
 
 
+def test_alert_list_truncates_instead_of_exceeding_discords_message_limit(tmp_path):
+    """Discord rejects a plain message content over 2000 chars outright - a user with enough
+    alerts across all three types must get a truncated, still-sendable list, not an
+    uncaught discord.HTTPException."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        user_id = 314
+        for i in range(120):
+            await db.add_price_alert(
+                guild_id=1, channel_id=2, user_id=user_id,
+                commodity_name=f"Commodity{i}", direction="sell_at_least", target_price=10.0,
+            )
+        bot = type("FakeBot", (), {})()
+        bot.db = db
+        cog = Alerts.__new__(Alerts)
+        cog.bot = bot
+        interaction = _FakeInteraction(user_id)
+
+        await cog.alert_list.callback(cog, interaction)
+
+        (text,), _ = interaction.response.messages[0]
+        assert len(text) <= 2000
+        assert "truncated" in text
+        assert "120 alerts total" in text
+
+    asyncio.run(run())
+
+
 def test_alert_remove_reports_already_removed_for_a_stale_id(tmp_path):
     async def run():
         db = _make_db(tmp_path)

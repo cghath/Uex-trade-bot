@@ -227,6 +227,29 @@ def test_recent_terminal_health_without_a_warning_formats_as_none():
     assert format_health_note(health) is None
 
 
+def test_terminal_health_falls_back_to_age_ratio_at_the_exact_50_percent_boundary():
+    """Every other classify_terminal_health test supplies last_update_days_percentage
+    directly, so the age/age_limit fallback branch (used whenever UEX omits that field)
+    has never actually been exercised - including at its own 50% boundary, which must
+    agree with the ttl-percentage branch's `<= 50` (i.e. `>=` on the age side, not `>`)."""
+    at_the_boundary = classify_terminal_health(
+        {
+            "terminal_name": "Lorville CBD", "prices_updated_percentage": 90,
+            "last_update_days_limit": 2, "last_update_days": 1,
+            "has_recent_reports": False,
+        }
+    )
+    just_under_the_boundary = classify_terminal_health(
+        {
+            "terminal_name": "Lorville CBD", "prices_updated_percentage": 90,
+            "last_update_days_limit": 2, "last_update_days": 0.9,
+            "has_recent_reports": False,
+        }
+    )
+    assert at_the_boundary.status == "recent"
+    assert just_under_the_boundary.status == "fresh"
+
+
 def test_pending_report_queue_is_not_used_as_terminal_freshness():
     just_updated = classify_terminal_health(
         {

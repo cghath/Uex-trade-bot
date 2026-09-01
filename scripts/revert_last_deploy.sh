@@ -33,6 +33,14 @@ source "$META"
 [ -n "${commit:-}" ] || { echo "meta.txt in $BACKUP_DIR has no commit recorded." >&2; exit 1; }
 [ -n "${db_path:-}" ] || { echo "meta.txt in $BACKUP_DIR has no db_path recorded." >&2; exit 1; }
 
+# Validate the backup is actually usable BEFORE stopping anything - meta.txt existing and
+# parsing isn't enough on its own; a half-written backup or a commit that's since been
+# pruned/rebased away would otherwise leave the service stopped with no way to complete
+# the revert (git checkout / cp failing after the stop, with nothing to fall back to).
+BACKUP_DB="$BACKUP_DIR/$(basename "$db_path")"
+[ -f "$BACKUP_DB" ] || { echo "Backup DB file $BACKUP_DB is missing - refusing to revert from an incomplete backup." >&2; exit 1; }
+git cat-file -e "${commit}^{commit}" 2>/dev/null || { echo "Recorded commit $commit does not exist in this repo - refusing to revert to an unknown commit." >&2; exit 1; }
+
 echo "Reverting to commit $commit (snapshotted $timestamp_utc from branch $branch)..."
 
 echo "Stopping $SERVICE_NAME..."
@@ -58,6 +66,11 @@ for suffix in -wal -shm; do
 done
 
 git checkout "$commit"
+
+if ! git diff --quiet "$CURRENT_COMMIT" "$commit" -- requirements.txt requirements-dev.txt; then
+    echo "requirements*.txt differs between the discarded and reverted-to commit - reinstalling dependencies..."
+    .venv/bin/pip install -r requirements.txt
+fi
 
 echo "Starting $SERVICE_NAME..."
 sudo systemctl start "$SERVICE_NAME"

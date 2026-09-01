@@ -27,8 +27,27 @@ OLD_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 TIMESTAMP="$(date -u +%Y%m%d-%H%M%S)"
 BACKUP_DIR="$REPO_ROOT/backups/pi/${TIMESTAMP}_${OLD_COMMIT}"
 
+# Without this, any failure between "stop" and "start" below (a bad fetch, a merge that
+# isn't fast-forwardable, a broken pip install) leaves the bot stopped with no automatic
+# recovery - set -e just exits mid-script. The DB is only ever copied FROM here, never
+# overwritten, so rolling back never needs to touch it - restoring the old commit and
+# restarting is enough to get back to the exact working state this run started from.
+SERVICE_STOPPED=0
+DEPLOY_SUCCEEDED=0
+rollback_on_failure() {
+    if [ "$DEPLOY_SUCCEEDED" -eq 1 ] || [ "$SERVICE_STOPPED" -eq 0 ]; then
+        return
+    fi
+    echo "" >&2
+    echo "Deploy failed - rolling back to $OLD_COMMIT and restarting $SERVICE_NAME..." >&2
+    git checkout "$OLD_COMMIT" || echo "Could not check out $OLD_COMMIT - repo may be in a partial state, fix manually." >&2
+    sudo systemctl start "$SERVICE_NAME" || echo "Could not restart $SERVICE_NAME - check it manually." >&2
+}
+trap rollback_on_failure ERR
+
 echo "Stopping $SERVICE_NAME (so the DB backup is quiesced, not mid-write)..."
 sudo systemctl stop "$SERVICE_NAME"
+SERVICE_STOPPED=1
 
 mkdir -p "$BACKUP_DIR"
 cp "$DB_PATH" "$BACKUP_DIR/$(basename "$DB_PATH")"
@@ -57,6 +76,7 @@ echo "Starting $SERVICE_NAME..."
 sudo systemctl start "$SERVICE_NAME"
 sudo systemctl status "$SERVICE_NAME" --no-pager
 
+DEPLOY_SUCCEEDED=1
 echo ""
 echo "Deployed $(git rev-parse --short HEAD) (was $OLD_COMMIT)."
 echo "If something's wrong: scripts/revert_last_deploy.sh"

@@ -316,6 +316,52 @@ they're in sync).
     fast-forward, dependency-change detection, revert, and the pre-revert safety net
     all exercised) - not yet run against the real Pi's systemd unit or its actual
     `data/uexbot.sqlite3`, since this sandbox has no path to `arkwatcher`.
+28. **Five high-priority review findings fixed in the 48h relist-discount cycle and the
+    two deploy scripts, plus four smaller hardening items**, each verified against the
+    live code (not the finding text) before changing anything:
+    - A failed negotiation fetch used to return an empty list indistinguishable from
+      "verified: no negotiations" - `_fetch_negotiations` now returns `None` on
+      `UexApiError`, and the reprice decision `continue`s (retries next cycle) rather
+      than proceeding as if confirmed-clear.
+    - Picking one "best" negotiation per listing by `(closed, date_modified)` always
+      ranked ANY closed negotiation above ANY open one in tuple comparison, regardless
+      of recency - an older closed negotiation could hide a genuinely newer open one for
+      the same listing. Open-negotiation detection is now a separate per-listing set,
+      independent of the "best" pick (which still exists, unchanged, for its own job:
+      surfacing `deal_value` on a completed sale).
+    - The old listing is deleted before the discounted replacement is posted, so a failed
+      replacement post left the item with zero active listings - but `_post_one_job`'s
+      return value was never checked, so the bot told the user "relisted as job #N"
+      regardless. Now checked; failure gets an honest "no active listing, check
+      `/inventory-post-now`" message instead.
+    - `deploy_and_backup.sh` had no failure recovery: `set -e` meant any error between
+      stop and start (bad fetch, non-fast-forwardable merge, broken pip install) left the
+      bot down with no automatic restart. Added a `trap ... ERR` that checks out the old
+      commit and restarts, guarded by flags so it only fires once the service has
+      actually been stopped and only if the deploy hasn't already succeeded.
+    - `revert_last_deploy.sh` validated that `meta.txt` parsed, but never that the backup
+      DB file it named actually existed or that its recorded commit still exists in the
+      repo - either gap would only surface after the service was already stopped. Both
+      are now checked first.
+    - Smaller items: `revert_last_deploy.sh` never reinstalled dependencies (unlike the
+      forward deploy script), so reverting past a requirements change would run old code
+      against mismatched packages - fixed with the same conditional reinstall.
+      `/alert-list` could exceed Discord's 2000-char message cap with enough alerts across
+      all three types - now truncates at a line boundary with a count-and-hint note.
+      The exact 50% terminal-freshness boundary turned out to already be correct (verified
+      by hand-checking the math and confirmed with a new test) - the real gap was that no
+      test had ever exercised the age/age_limit fallback branch at all, only the
+      `last_update_days_percentage` branch; added coverage rather than changing behavior
+      that was already right. Checked whether the new auto-load-only filtering added any
+      per-route UEX API calls (rate-limiting concern) - it reads terminal data via one
+      batched local DB call, not per-route, so no new exposure there.
+    - The two script fixes were verified against real failure simulations, not just read
+      through: a scratch sandbox (fake git repo, stubbed `sudo`/`systemctl`) confirmed the
+      deploy script's rollback trap actually restarts the service and returns to the old
+      commit on a forced `git fetch` failure, and confirmed the revert script's new checks
+      reject both a missing backup DB file and a bogus commit reference before ever
+      touching the service.
+    - 186 tests passing (10 new).
 
 ## Where to look for what
 
@@ -596,7 +642,7 @@ guessed at.
   branch. Local (PC) and the Pi's databases have been fully merged at least twice now; the
   established practice is to back up both sides before any such merge and pull the Pi's
   backup down to the PC afterward, so nothing valuable lives only on the Pi's disk. The full
-  suite has 171 passing tests. Re-check live service and branch state rather than assuming
+  suite has 186 passing tests. Re-check live service and branch state rather than assuming
   this point-in-time operational note is still current.
 - The data collectors in `bot/cogs/intelligence.py` only pay off once they've been running a
   while - most of the `ROADMAP.md` intelligence backlog depends on accumulated history, so

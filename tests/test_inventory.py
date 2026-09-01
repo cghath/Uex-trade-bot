@@ -1078,7 +1078,7 @@ def test_post_now_reports_a_friendly_error_when_live_pricing_fails(tmp_path):
 
 async def _setup_reconcile(
     tmp_path, *, hours_old, minimum_price=850_000, posted_price=1_000_000,
-    negotiation_rows=None,
+    negotiation_rows=None, negotiations_fail=False, advertise_fails=False,
 ):
     db = _make_db(tmp_path)
     await db.init()
@@ -1108,6 +1108,8 @@ async def _setup_reconcile(
         if request.method == "DELETE" and "marketplace_listings" in request.url.path:
             return httpx.Response(200, json={"status": "ok"})
         if request.url.path.endswith("/marketplace_advertise"):
+            if advertise_fails:
+                return httpx.Response(400, json={"status": "error", "message": "invalid_type", "http_code": 400})
             return httpx.Response(200, json={"status": "ok", "data": {"id_listing": 556, "url": "https://uex.test/l/556"}})
         if "marketplace_prices_averages" in request.url.path:
             return httpx.Response(200, json={"status": "ok", "data": []})
@@ -1116,6 +1118,8 @@ async def _setup_reconcile(
                 {"id": 555, "in_stock": 10, "is_sold_out": False},
             ]})
         if "marketplace_negotiations" in request.url.path:
+            if negotiations_fail:
+                return httpx.Response(500, json={"status": "error", "message": "boom", "http_code": 500})
             return httpx.Response(200, json={"status": "ok", "data": negotiation_rows or []})
         raise AssertionError(f"unexpected request: {request.method} {request.url}")
 
@@ -1225,6 +1229,80 @@ def test_reconcile_pauses_without_discounting_when_a_negotiation_is_open(tmp_pat
             assert job["auto_relist"] == 0
             assert len(dmed) == 1
             assert "negotiation" in dmed[0][1].lower()
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_reconcile_does_not_reprice_when_negotiation_fetch_fails(tmp_path):
+    """A failed negotiation fetch must never be treated as 'verified: no negotiation' -
+    that would let the bot reprice/relist blind while a negotiation might genuinely be
+    open. It should retry next cycle instead, silently (matching how the other transient
+    failure in this same function - the delete-listing UexApiError - already behaves)."""
+    async def run():
+        db, client, cog, user_id, job_id, dmed = await _setup_reconcile(
+            tmp_path, hours_old=49, minimum_price=850_000, posted_price=1_000_000,
+            negotiations_fail=True,
+        )
+        try:
+            await cog._reconcile_listed_jobs()
+
+            job = await db.get_inventory_post_job(user_id, job_id)
+            assert job["status"] == "listed"
+            assert job["posted_price"] == 1_000_000  # untouched
+            assert job["auto_relist"] == 1  # not disabled - this should retry, not give up
+            assert dmed == []
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_reconcile_detects_an_open_negotiation_even_when_an_older_one_is_closed(tmp_path):
+    """Regression guard: picking a single 'best' negotiation per listing by (closed, then
+    date_modified) always ranks any closed negotiation above any open one in tuple
+    comparison, regardless of which is actually more recent - so an older closed
+    negotiation could hide a genuinely newer open one for the same listing. Open-listing
+    detection must not depend on that 'best' pick."""
+    async def run():
+        db, client, cog, user_id, job_id, dmed = await _setup_reconcile(
+            tmp_path, hours_old=49, minimum_price=850_000, posted_price=1_000_000,
+            negotiation_rows=[
+                {"id": 1, "id_listing": 555, "date_modified": 100, "date_closed": 200, "listing_title": "Laranite"},
+                {"id": 2, "id_listing": 555, "date_modified": 500, "date_closed": None, "listing_title": "Laranite"},
+            ],
+        )
+        try:
+            await cog._reconcile_listed_jobs()
+
+            job = await db.get_inventory_post_job(user_id, job_id)
+            assert job["status"] == "listed"
+            assert job["posted_price"] == 1_000_000  # untouched, not discounted
+            assert job["auto_relist"] == 0
+            assert len(dmed) == 1
+            assert "negotiation" in dmed[0][1].lower()
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_reconcile_reports_failure_honestly_when_the_relist_post_does_not_succeed(tmp_path):
+    """The old listing is deleted before the replacement is posted, so if the new post
+    fails, the item has NO active listing - the bot must say so, never claim success."""
+    async def run():
+        db, client, cog, user_id, job_id, dmed = await _setup_reconcile(
+            tmp_path, hours_old=49, minimum_price=850_000, posted_price=1_000_000,
+            advertise_fails=True,
+        )
+        try:
+            await cog._reconcile_listed_jobs()
+
+            assert len(dmed) == 1
+            message = dmed[0][1].lower()
+            assert "relisted as job" not in message
+            assert "no active listing" in message
         finally:
             await client.aclose()
 
