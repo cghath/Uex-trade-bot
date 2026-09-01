@@ -362,6 +362,18 @@ they're in sync).
       reject both a missing backup DB file and a bogus commit reference before ever
       touching the service.
     - 186 tests passing (10 new).
+    - **Found deploying this very commit**: the sandbox test above used a plain local
+      "origin" with no fetch restrictions, so it never caught that `deploy_and_backup.sh`'s
+      `git fetch origin "$BRANCH"` silently does nothing on the Pi's actual clone - its
+      `remote.origin.fetch` only auto-updates `origin/main` (see the git quirk noted
+      elsewhere in this doc), so `origin/TestBranch` never moved and `git merge --ff-only`
+      reported "Already up to date" against a stale ref, with exit code 0. The real first
+      run of the real script deployed nothing while claiming success. Fixed with an
+      explicit destination refspec (`git fetch origin "$BRANCH:refs/remotes/origin/$BRANCH"`)
+      and verified in a new sandbox that specifically reproduces the restrictive refspec
+      (a bare "remote" repo + a clone configured with the same single-branch fetch rule as
+      the Pi), confirming the fix actually advances to the real branch tip rather than
+      silently no-oping.
 
 ## Where to look for what
 

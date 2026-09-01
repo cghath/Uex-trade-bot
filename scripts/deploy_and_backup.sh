@@ -63,7 +63,13 @@ EOF
 echo "Backed up DB + recorded commit $OLD_COMMIT ($OLD_BRANCH) to $BACKUP_DIR"
 
 echo "Fetching and fast-forwarding to origin/$BRANCH..."
-git fetch origin "$BRANCH"
+# Plain `git fetch origin "$BRANCH"` silently does nothing useful on a clone whose
+# remote.origin.fetch refspec only auto-updates one branch (this Pi's is
+# +refs/heads/main:refs/remotes/origin/main) - it fetches into FETCH_HEAD but never moves
+# origin/$BRANCH, so the merge below would report "Already up to date" against a stale ref
+# without erroring. The explicit destination refspec updates origin/$BRANCH regardless of
+# what the remote's own default refspec covers.
+git fetch origin "$BRANCH:refs/remotes/origin/$BRANCH"
 git checkout "$BRANCH"
 git merge --ff-only "origin/$BRANCH"
 
