@@ -31,7 +31,9 @@ class LinkUexModal(discord.ui.Modal, title="Link your UEX account"):
         await self.bot.db.set_user_secret_key(interaction.user.id, secret_key)
         await interaction.response.send_message(
             "Your UEX account is linked. It's stored encrypted and only used for your "
-            "own requests (e.g. /uex-trades). Use /unlink-uex-account any time to remove it.",
+            "own requests (e.g. /uex-trades). Use /unlink-uex-account any time to remove it.\n"
+            "Run /intro to see what else this unlocks - negotiation alerts, daily digests, "
+            "stock/marketplace alerts, and automatic inventory posting.",
             ephemeral=True,
         )
 

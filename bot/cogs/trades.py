@@ -70,14 +70,15 @@ class Trades(commands.Cog):
         total = quantity_scu * unit_price
         await interaction.response.send_message(
             f"Logged #{entry_id}: {operation.value} {quantity_scu} SCU of {commodity} "
-            f"@ {unit_price:.2f} aUEC (total {total:,.0f} aUEC)"
+            f"@ {unit_price:.2f} aUEC (total {total:,.0f} aUEC)",
+            ephemeral=True,
         )
 
     @app_commands.command(name="trade-log", description="Show your recent logged trades.")
     async def trade_log(self, interaction: discord.Interaction, limit: int = 10) -> None:
         entries = await self.bot.db.get_trade_log(interaction.user.id, limit=limit)
         if not entries:
-            await interaction.response.send_message("No trades logged yet. Use /trade-log-add.")
+            await interaction.response.send_message("No trades logged yet. Use /trade-log-add.", ephemeral=True)
             return
         lines = []
         for e in entries:
@@ -87,7 +88,7 @@ class Trades(commands.Cog):
                 f"{e['quantity_scu']} SCU {e['commodity_name']}{terminal} "
                 f"({e['unit_price']:.2f} aUEC/unit)"
             )
-        await interaction.response.send_message("\n".join(lines))
+        await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
     @app_commands.command(name="uex-trades", description="Show your trade history as logged on UEX itself (requires a linked account).")
     async def uex_trades(self, interaction: discord.Interaction) -> None:
@@ -97,7 +98,8 @@ class Trades(commands.Cog):
         if not secret_key:
             await interaction.followup.send(
                 "You haven't linked a UEX account yet. Run /link-uex-account first "
-                "(it opens a private form, nothing is posted in the channel)."
+                "(it opens a private form, nothing is posted in the channel).",
+                ephemeral=True,
             )
             return
 
@@ -107,12 +109,13 @@ class Trades(commands.Cog):
             await interaction.followup.send(
                 f"Couldn't fetch UEX trade history: {exc}\n"
                 "Your linked secret key may be invalid or expired — try /unlink-uex-account "
-                "then /link-uex-account again with a fresh key."
+                "then /link-uex-account again with a fresh key.",
+                ephemeral=True,
             )
             return
 
         if not rows:
-            await interaction.followup.send("No trades found on your UEX account.")
+            await interaction.followup.send("No trades found on your UEX account.", ephemeral=True)
             return
 
         lines = [
@@ -120,7 +123,7 @@ class Trades(commands.Cog):
             f"@ {r.get('price', '?')} aUEC/unit ({r.get('date_added', '?')})"
             for r in rows[:15]
         ]
-        await interaction.followup.send("\n".join(lines))
+        await interaction.followup.send("\n".join(lines), ephemeral=True)
 
     @app_commands.command(
         name="leaderboard",

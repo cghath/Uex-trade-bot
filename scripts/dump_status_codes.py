@@ -45,7 +45,7 @@ async def main() -> None:
         print()
 
     # Cross-reference: pull the real live row for the "Waste -> Everus Harbor" route from the
-    # /top-in-stock-routes output, so we can see the raw numbers behind that specific
+    # /top-routes strict:True output, so we can see the raw numbers behind that specific
     # "sell side: Out Stock" label next to its actual sell price.
     print("Cross-checking a real commodity (Waste) across terminals for context:\n")
     try:

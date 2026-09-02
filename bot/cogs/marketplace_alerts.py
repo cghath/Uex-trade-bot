@@ -16,13 +16,13 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from bot.cogs.marketplace import OPERATION_CHOICES, traded_item_autocomplete
-from bot.discord_ui import send_alert_remove_picker
 from bot.uex.exceptions import UexApiError
 from bot.uex.marketplace import (
     exclude_sold_out,
     filter_listings_by_keyword,
     filter_listings_by_quality,
     find_item_id_by_name,
+    marketplace_item_link,
     parse_listing_quality,
     parse_uex_number,
 )
@@ -90,67 +90,31 @@ class MarketplaceAlerts(commands.Cog):
             ephemeral=True,
         )
 
-    @app_commands.command(name="marketplace-alert-list", description="List your active marketplace listing alerts.")
-    async def marketplace_alert_list(self, interaction: discord.Interaction) -> None:
-        alerts = await self.bot.db.list_user_marketplace_alerts(interaction.user.id)
-        if not alerts:
-            await interaction.response.send_message("You have no active marketplace alerts.", ephemeral=True)
-            return
-        lines = []
-        for a in alerts:
-            price_note = f" @ target {a['target_price']:,.0f}" if a["target_price"] is not None else ""
-            min_q, max_q = a.get("min_quality"), a.get("max_quality")
-            quality_note = ""
-            if min_q is not None or max_q is not None:
-                lo = f"{min_q:.0f}" if min_q is not None else "0"
-                hi = f"{max_q:.0f}" if max_q is not None else "100"
-                quality_note = f" · quality {lo}-{hi}"
-            lines.append(f"#{a['id']} — {a['operation']} listings matching '{a['keyword']}'{price_note}{quality_note}")
-        await interaction.response.send_message("\n".join(lines), ephemeral=True)
-
-    @app_commands.command(name="marketplace-alert-remove", description="Remove one of your marketplace alerts (pick from a menu).")
-    async def marketplace_alert_remove(self, interaction: discord.Interaction) -> None:
-        alerts = await self.bot.db.list_user_marketplace_alerts(interaction.user.id)
-        picker_items = []
-        for a in alerts:
-            price_note = f" @ {a['target_price']:,.0f}" if a["target_price"] is not None else ""
-            min_q, max_q = a.get("min_quality"), a.get("max_quality")
-            quality_note = ""
-            if min_q is not None or max_q is not None:
-                lo = f"{min_q:.0f}" if min_q is not None else "0"
-                hi = f"{max_q:.0f}" if max_q is not None else "100"
-                quality_note = f" · quality {lo}-{hi}"
-            picker_items.append(
-                {
-                    "id": a["id"],
-                    "label": f"#{a['id']} {a['keyword']}",
-                    "description": f"{a['operation']} listings{price_note}{quality_note}",
-                }
-            )
-
-        async def _remove(picker_interaction: discord.Interaction, alert_id: int) -> str:
-            removed = await self.bot.db.remove_marketplace_alert(alert_id, picker_interaction.user.id)
-            return f"Marketplace alert #{alert_id} removed." if removed else f"Marketplace alert #{alert_id} was already removed."
-
-        await send_alert_remove_picker(
-            interaction,
-            alerts=picker_items,
-            remove_callback=_remove,
-            empty_message="You have no active marketplace alerts.",
-            placeholder_noun="marketplace alert",
-        )
-
     @tasks.loop(minutes=POLL_INTERVAL_MINUTES)
     async def poll_marketplace_alerts(self) -> None:
         alerts = await self.bot.db.list_active_marketplace_alerts()
         if not alerts:
             return
 
+        # Alert names normally come from the Marketplace activity autocomplete, which
+        # already persists id_item. That index only covers UEX's top ~100 active-negotiation
+        # items though, and an item outside it would otherwise fall through to the unfiltered
+        # get_marketplace_listings() branch below, which the API itself caps at 100 rows -
+        # silently missing a real item's listings forever. Extend with the full item catalog
+        # (already warmed/cached elsewhere, e.g. by autocomplete) so a real id_item is found
+        # whenever possible and the higher-limit, server-filtered id_item= query can be used.
+        activity = await self.bot.db.list_marketplace_item_activity()
+        items = [
+            {"id": row.get("id_item"), "name": row.get("item_name")}
+            for row in activity
+        ]
+        known_ids = {item.get("id") for item in items}
         try:
-            items = await self.bot.uex.get_items()
+            catalog = await self.bot.uex.get_item_catalog()
         except UexApiError as exc:
-            logger.warning("Failed to load items for marketplace alert matching: %s", exc)
-            items = []
+            logger.warning("Full item catalog unavailable for alert keyword resolution: %s", exc)
+            catalog = []
+        items.extend(item for item in catalog if item.get("id") not in known_ids)
 
         # Group alerts by (keyword, operation) so identical watches from different users
         # share one API call instead of one per alert.
@@ -217,7 +181,7 @@ class MarketplaceAlerts(commands.Cog):
         quality_text = f" · quality {quality:.0f}" if quality is not None else ""
         message = (
             f"Marketplace alert #{alert['id']} ('{alert['keyword']}'): new **{alert['operation']}** listing — "
-            f"**{title}** · {price_text}{quality_text} · by {seller}"
+            f"**{marketplace_item_link(title, listing.get('id_item'))}** · {price_text}{quality_text} · by {seller}"
         )
         try:
             user = await self.bot.fetch_user(alert["user_id"])

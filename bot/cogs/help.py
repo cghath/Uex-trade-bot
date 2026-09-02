@@ -18,7 +18,7 @@ HIDDEN_COMMANDS = {"marketplace-index-status"}
 
 CATEGORIES: list[tuple[str, str, list[str]]] = [
     ("💰 Prices & Routes", "Terminal prices, profitable hauls, and ranked live routes.", [
-        "price", "best-route", "top-routes",
+        "price", "best-route", "mixed-routes", "multi-stop-route", "top-routes", "terminal-history",
     ]),
     ("📊 Commodity Trends", "Trade volume, price movement, and commodity price charts.", [
         "trending", "movers", "commodity-history",
@@ -27,9 +27,8 @@ CATEGORIES: list[tuple[str, str, list[str]]] = [
         "set-default-ship", "clear-default-ship", "my-ship",
     ]),
     ("🔔 Alerts & Notifications", "Price targets, Marketplace matches, restocks, and DM delivery checks.", [
-        "alert-add", "alert-list", "alert-remove",
-        "marketplace-alert-add", "marketplace-alert-list", "marketplace-alert-remove",
-        "stock-alert-add", "stock-alert-list", "stock-alert-remove", "test-dm",
+        "alert-add", "stock-alert-add", "marketplace-alert-add",
+        "alert-list", "alert-remove", "negotiation-alerts", "test-dm",
     ]),
     ("🧾 Trade Log & Leaderboard", "Your personal ledger, UEX-recorded history, and server standings.", [
         "trade-log-add", "trade-log", "uex-trades", "leaderboard",
@@ -37,13 +36,18 @@ CATEGORIES: list[tuple[str, str, list[str]]] = [
     ("🛒 UEX Marketplace", "Search and analyze listings, or manage your own Marketplace activity.", [
         "marketplace-search", "marketplace-trending", "marketplace-movers", "marketplace-average",
         "marketplace-history", "my-negotiations", "my-favorites", "marketplace-post",
-        "marketplace-delete-listing",
+        "marketplace-listing", "marketplace-delete-listing",
     ]),
-    ("🔥 Marketplace Intelligence", "Sellability rankings and history for all items, plus quality-matched raw-material deal scans.", [
+    ("🎒 Personal Inventory", "Track game-earned items, sellability, and guarded automatic posts.", [
+        "inventory", "inventory-add", "inventory-set-minimum", "inventory-remove",
+        "inventory-sell", "inventory-post-now",
+        "inventory-confirm-sale", "inventory-cancel-post", "inventory-resolve-floor",
+    ]),
+    ("🔥 Sellability Ratings", "The bot's own 0-100 sellability score (not UEX's raw activity numbers) — rankings and history for all items, plus quality-matched raw-material deal scans.", [
         "liquidity-rank", "liquidity-trends", "scan-now", "scanner-status", "set-scanner-channel",
     ]),
     ("🗓️ Daily Digest", "Post a snapshot now or configure the server's scheduled digest.", [
-        "digest-now", "set-digest-channel", "digest-disable",
+        "digest-now", "intelligence-brief", "set-digest-channel", "digest-disable",
     ]),
     ("🔗 Account Linking", "Connect UEX securely to use personal Marketplace and trade-history tools.", [
         "link-uex-account", "unlink-uex-account", "uex-account-status",
@@ -69,6 +73,7 @@ class Help(commands.Cog):
             description=(
                 "Your quick map to live UEX Corp trading tools.\n\n"
                 "**Start here:** `/price` for terminal prices · `/best-route` for a haul · "
+                "`/mixed-routes` for combined cargo · "
                 "`/liquidity-rank` for Marketplace sellability.\n\n"
                 "Start typing any command to see its options and autocomplete."
             ),

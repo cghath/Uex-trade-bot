@@ -12,24 +12,30 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
   sell listings below their matching 30-day fair price, accounting for quality tier, currency,
   unit, and a minimum sample size before alerting. Crafted gear is intentionally excluded.
 - [x] **Commodity arbitrage tools**: Current prices, best routes, route scoring, stock-aware
-  route rankings, ship cargo math, and price/trade-volume trends.
+  route rankings, ship cargo math, price/trade-volume trends, mixed-commodity loads, and
+  multi-stop (2-3 leg) trade chains with live inter-terminal distance and real starting-
+  capital/ROI accounting.
 - [x] **UEX Data Collection Foundation**: The always-on Pi collector records change-only
   terminal market states, data freshness, fuel prices, refinery yields, reference metadata,
   and Marketplace tier changes so future intelligence features have real history to use.
+- [x] **Personal Inventory and Guarded Relisting**: Discord-managed catalog item stacks,
+  Sellability Ratings, direct UEX links, balanced price recommendations, hard manual floors,
+  automatic no-interest relisting (5% lower every 48h, pausing on open negotiations) down to
+  the floor, and explicit handling for ambiguous sale quantities.
 
 ## Backlog & Ideas
 
 ### UEX Data Intelligence
 
-- [ ] **Route Confidence Rating**: Score trade routes by price freshness, player-report depth,
+- [x] **Route Confidence Rating**: Score trade routes by price freshness, player-report depth,
   stock, demand, and price volatility so recommendations clearly communicate their reliability.
-- [ ] **Terminal Data Health**: Surface how recently each terminal was reported and warn when
+- [x] **Terminal Data Health**: Surface how recently each terminal was reported and warn when
   a price or route relies on stale UEX data.
-- [ ] **Supply & Demand History**: Save periodic terminal stock and demand snapshots to reveal
+- [x] **Supply & Demand History**: Save periodic terminal stock and demand snapshots to reveal
   regular sell-outs, dependable buyers, and possible restock patterns.
-- [ ] **Practical Route Checks**: Account for freight elevators, loading docks, container-size
+- [x] **Practical Route Checks**: Account for freight elevators, loading docks, container-size
   limits, cargo centers, refuel/repair availability, and player-owned or monitored locations.
-- [ ] **Commodity Risk Labels**: Mark illegal, volatile, explosive, known-buggy, and other
+- [x] **Commodity Risk Labels**: Mark illegal, volatile, explosive, known-buggy, and other
   operationally relevant commodity traits in route recommendations.
 - [ ] **Refinery Advisor**: Compare refinery yield bonuses, processing choices, and current
   refined-material sale value for mining runs.

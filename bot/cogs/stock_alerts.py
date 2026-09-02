@@ -23,7 +23,6 @@ from discord.ext import commands, tasks
 
 from bot.cogs.prices import commodity_name_autocomplete
 from bot.cogs.ships import ship_name_autocomplete
-from bot.discord_ui import send_alert_remove_picker
 from bot.uex.exceptions import UexApiError
 from bot.uex.ships import resolve_ship
 from bot.uex.stock_alerts import compute_terminal_availability, detect_restocks, format_cargo_fit_note
@@ -84,46 +83,6 @@ class StockAlerts(commands.Cog):
             f"at any terminal{ship_note} (checked every {POLL_INTERVAL_MINUTES} min). This keeps "
             "watching - it fires again on every future restock, not just the first one.",
             ephemeral=(scope_value == "personal"),
-        )
-
-    @app_commands.command(name="stock-alert-list", description="List your active commodity restock alerts.")
-    async def stock_alert_list(self, interaction: discord.Interaction) -> None:
-        alerts = await self.bot.db.list_user_stock_alerts(interaction.user.id)
-        if not alerts:
-            await interaction.response.send_message("You have no active stock alerts.", ephemeral=True)
-            return
-        lines = []
-        for a in alerts:
-            ship_note = f" · ship: {a['ship_query']}" if a.get("ship_query") else ""
-            scope_note = " · personal (DM)" if a.get("scope") == "personal" else " · global (channel)"
-            lines.append(f"#{a['id']} — {a['commodity_name']}{ship_note}{scope_note}")
-        await interaction.response.send_message("\n".join(lines), ephemeral=True)
-
-    @app_commands.command(name="stock-alert-remove", description="Remove one of your commodity restock alerts (pick from a menu).")
-    async def stock_alert_remove(self, interaction: discord.Interaction) -> None:
-        alerts = await self.bot.db.list_user_stock_alerts(interaction.user.id)
-        picker_items = [
-            {
-                "id": a["id"],
-                "label": f"#{a['id']} {a['commodity_name']}",
-                "description": (
-                    ("personal · " if a.get("scope") == "personal" else "global · ")
-                    + (f"ship: {a['ship_query']}" if a.get("ship_query") else "no ship set")
-                ),
-            }
-            for a in alerts
-        ]
-
-        async def _remove(picker_interaction: discord.Interaction, alert_id: int) -> str:
-            removed = await self.bot.db.remove_stock_alert(alert_id, picker_interaction.user.id)
-            return f"Stock alert #{alert_id} removed." if removed else f"Stock alert #{alert_id} was already removed."
-
-        await send_alert_remove_picker(
-            interaction,
-            alerts=picker_items,
-            remove_callback=_remove,
-            empty_message="You have no active stock alerts.",
-            placeholder_noun="stock alert",
         )
 
     @tasks.loop(minutes=POLL_INTERVAL_MINUTES)

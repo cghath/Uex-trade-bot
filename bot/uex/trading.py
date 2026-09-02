@@ -19,6 +19,8 @@ class TradeRoute:
     # to keep this module dependency-free of the lookup table.
     status_buy_code: int | None = None
     status_sell_code: int | None = None
+    buy_terminal_id: int | None = None
+    sell_terminal_id: int | None = None
 
     @property
     def profit_per_unit(self) -> float:
@@ -71,6 +73,8 @@ def best_routes(price_rows: list[dict[str, Any]], limit: int = 5) -> list[TradeR
                 scu_sell_wanted=sell.get("scu_sell"),
                 status_buy_code=buy.get("status_buy"),
                 status_sell_code=sell.get("status_sell"),
+                buy_terminal_id=buy.get("id_terminal"),
+                sell_terminal_id=sell.get("id_terminal"),
             )
             if route.profit_per_unit > 0:
                 routes.append(route)

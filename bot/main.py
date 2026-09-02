@@ -13,6 +13,7 @@ from bot.config import Config
 from bot.db.crypto import load_or_create_key
 from bot.db.database import Database
 from bot.uex.client import UexClient
+from bot.uex.exceptions import UexApiError
 
 logging.basicConfig(
     level=logging.INFO,
@@ -28,6 +29,7 @@ INITIAL_COGS = (
     "bot.cogs.trends",
     "bot.cogs.marketplace",
     "bot.cogs.intelligence",
+    "bot.cogs.intelligence_brief",
     "bot.cogs.marketplace_alerts",
     "bot.cogs.stock_alerts",
     "bot.cogs.ships",
@@ -36,6 +38,8 @@ INITIAL_COGS = (
     "bot.cogs.help",
     "bot.cogs.scanner",
     "bot.cogs.liquidity",
+    "bot.cogs.personal_inventory",
+    "bot.cogs.negotiation_alerts",
 )
 
 
@@ -86,6 +90,13 @@ class UexBot(commands.Bot):
 
     async def on_ready(self) -> None:
         logger.info("Logged in as %s (id=%s)", self.user, self.user.id if self.user else "?")
+        # Item-name autocomplete reads the warm cache only (get_cached_item_catalog), which
+        # never fetches itself - without this, autocomplete returns nothing until some
+        # unrelated background loop happens to warm it, up to its own poll interval later.
+        try:
+            await self.uex.get_item_catalog()
+        except UexApiError as exc:
+            logger.warning("Could not warm the item catalog at startup: %s", exc)
 
     @commands.command()
     @commands.is_owner()

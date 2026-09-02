@@ -1,0 +1,23 @@
+name: Dependency Audit
+
+on:
+  push:
+    branches: [main, TestBranch]
+    paths:
+      - "requirements*.txt"
+  schedule:
+    - cron: "0 13 * * 1" # weekly, Monday 13:00 UTC
+  workflow_dispatch:
+
+jobs:
+  pip-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install pip-audit
+        run: pip install pip-audit
+      - name: Audit dependencies for known vulnerabilities
+        run: python -m pip_audit -r requirements.txt -r requirements-dev.txt

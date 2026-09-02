@@ -13,7 +13,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from bot.uex.exceptions import UexApiError
-from bot.uex.marketplace import marketplace_item_url
+from bot.uex.marketplace import marketplace_item_link
 from bot.uex.trends import compute_movers
 
 logger = logging.getLogger("uexbot.digest")
@@ -120,10 +120,31 @@ class Digest(commands.Cog):
             embed.add_field(name="Marketplace Trending", value="No marketplace trend data right now.", inline=False)
 
         sellability_rows = await self.bot.db.get_top_liquidity_items(limit=3)
-        liquidity_movers = await self.bot.db.get_liquidity_movers(limit=3)
+        liquidity_gainers = await self.bot.db.get_liquidity_movers(limit=4, direction="up")
+        liquidity_losers = await self.bot.db.get_liquidity_movers(limit=4, direction="down")
+        sellability, shifts_up, shifts_down = _format_sellability_digest_fields(
+            sellability_rows, liquidity_gainers, liquidity_losers
+        )
         embed.add_field(
             name="Marketplace Sellability",
-            value=_format_sellability_digest(sellability_rows, liquidity_movers),
+            value=sellability,
+            inline=False,
+        )
+        embed.add_field(
+            name="Biggest Rating Shifts — Up",
+            value=shifts_up,
+            inline=False,
+        )
+        embed.add_field(
+            name="Biggest Rating Shifts — Down",
+            value=shifts_down,
+            inline=False,
+        )
+
+        freshness = await self.bot.db.get_digest_data_freshness()
+        embed.add_field(
+            name="Data Freshness",
+            value=_format_data_freshness(freshness),
             inline=False,
         )
 
@@ -172,33 +193,88 @@ async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(Digest(bot))
 
 
-def _format_sellability_digest(rows: list[dict], movers: list[dict]) -> str:
-    """Create one compact daily-digest field from locally tracked liquidity data."""
+def _format_sellability_digest_fields(
+    rows: list[dict], gainers: list[dict], losers: list[dict]
+) -> tuple[str, str, str]:
+    """Create Discord-safe sellability and directional rating-shift fields."""
     if not rows:
-        return "Still collecting Marketplace sellability data."
-
-    lines = ["**Best to list now**"]
-    for index, row in enumerate(rows, start=1):
-        item_name = row["item_name"]
-        id_item = row.get("id_item")
-        item = f"[{item_name}]({marketplace_item_url(id_item)})" if id_item is not None else item_name
-        lines.append(f"{index}. {item} — **{float(row['score']):,.0f}/100**")
-
-    if movers:
-        lines.append("\n**Biggest rating shifts**")
-        for mover in movers:
-            previous = float(mover["previous_score"])
-            current = float(mover["current_score"])
-            change = current - previous
-            arrow = "📈" if change > 0 else "📉" if change < 0 else "➖"
-            direction = "up" if change > 0 else "down" if change < 0 else "unchanged"
-            item_name = mover["item_name"]
-            id_item = mover.get("id_item")
-            item = f"[{item_name}]({marketplace_item_url(id_item)})" if id_item is not None else item_name
-            if change:
-                lines.append(f"{arrow} {item} {direction} {abs(change):,.0f} pts ({previous:,.0f} → {current:,.0f})")
-            else:
-                lines.append(f"{arrow} {item} unchanged at {current:,.0f}/100")
+        rankings = "Still collecting Marketplace sellability data."
     else:
-        lines.append("\n*Rating shifts appear after another hourly snapshot.*")
+        lines = []
+        for index, row in enumerate(rows, start=1):
+            item_name = row["item_name"]
+            id_item = row.get("id_item")
+            item = marketplace_item_link(item_name, id_item)
+            lines.append(f"{index}. {item} — **{float(row['score']):,.0f}/100**")
+        rankings = "\n".join(lines)
+
+    awaiting = "*Rating shifts appear after another hourly snapshot.*"
+    shifts_up = "\n".join(_format_rating_movers(gainers, direction="up")) if gainers else awaiting
+    shifts_down = "\n".join(_format_rating_movers(losers, direction="down")) if losers else awaiting
+    return rankings, shifts_up, shifts_down
+
+
+def _format_rating_movers(movers: list[dict], *, direction: str) -> list[str]:
+    if not movers:
+        return [f"*No items moved {direction} during this window.*"]
+    lines: list[str] = []
+    for mover in movers:
+        previous = float(mover["previous_score"])
+        current = float(mover["current_score"])
+        change = current - previous
+        arrow = "📈" if change > 0 else "📉" if change < 0 else "➖"
+        movement = "up" if change > 0 else "down" if change < 0 else "unchanged"
+        item_name = mover["item_name"]
+        id_item = mover.get("id_item")
+        item = marketplace_item_link(item_name, id_item)
+        if change:
+            lines.append(f"{arrow} {item} {movement} {abs(change):,.0f} pts ({previous:,.0f} → {current:,.0f})")
+        else:
+            lines.append(f"{arrow} {item} unchanged at {current:,.0f}/100")
+    return lines
+
+
+def _format_data_freshness(
+    timestamps: dict[str, str | None], *, now: datetime | None = None
+) -> str:
+    """Format collector ages and flag snapshots overdue relative to their schedules."""
+    current = now or datetime.now(timezone.utc)
+    sources = (
+        ("Terminal markets", "terminal_market", 3),
+        ("Liquidity ratings", "liquidity", 2),
+        ("Marketplace index", "marketplace", 2),
+    )
+    lines: list[str] = []
+    for label, key, stale_after_hours in sources:
+        raw = timestamps.get(key)
+        if not raw:
+            lines.append(f"⚠️ **{label}:** not collected yet")
+            continue
+        try:
+            observed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            if observed.tzinfo is None:
+                observed = observed.replace(tzinfo=timezone.utc)
+            age_seconds = max(0.0, (current - observed.astimezone(timezone.utc)).total_seconds())
+        except (TypeError, ValueError):
+            lines.append(f"⚠️ **{label}:** timestamp unavailable")
+            continue
+        age_text = _format_age(age_seconds)
+        overdue = age_seconds > stale_after_hours * 3600
+        marker = "⚠️" if overdue else "✅"
+        lines.append(f"{marker} **{label}:** {age_text} ago{' · overdue' if overdue else ''}")
     return "\n".join(lines)
+
+
+def _format_age(seconds: float) -> str:
+    minutes = int(seconds // 60)
+    if minutes < 1:
+        return "just now"
+    if minutes < 60:
+        return f"{minutes}m"
+    hours = minutes // 60
+    remaining_minutes = minutes % 60
+    if hours < 24:
+        return f"{hours}h {remaining_minutes}m" if remaining_minutes else f"{hours}h"
+    days = hours // 24
+    remaining_hours = hours % 24
+    return f"{days}d {remaining_hours}h" if remaining_hours else f"{days}d"

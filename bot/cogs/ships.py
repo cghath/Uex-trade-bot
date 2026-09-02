@@ -5,7 +5,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from bot.uex.exceptions import UexApiError
+from bot.uex.exceptions import UexApiError, describe_uex_api_error
 from bot.uex.ships import resolve_ship
 
 
@@ -27,15 +27,16 @@ class Ships(commands.Cog):
     @app_commands.describe(ship="Ship name, e.g. 'Cutlass Black' or 'Caterpillar'")
     @app_commands.autocomplete(ship=ship_name_autocomplete)
     async def set_default_ship(self, interaction: discord.Interaction, ship: str) -> None:
+        await interaction.response.defer(ephemeral=True)
         try:
             vehicles = await self.bot.uex.get_vehicles()
         except UexApiError as exc:
-            await interaction.response.send_message(f"UEX API error: {exc}", ephemeral=True)
+            await interaction.followup.send(describe_uex_api_error(exc), ephemeral=True)
             return
 
         vehicle = resolve_ship(vehicles, ship)
         if vehicle is None:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"Couldn't find a single unambiguous match for '{ship}'. Try the full ship name "
                 "and pick from the autocomplete suggestions.",
                 ephemeral=True,
@@ -45,7 +46,7 @@ class Ships(commands.Cog):
         await self.bot.db.set_default_ship(interaction.user.id, vehicle.get("name"))
         scu = vehicle.get("scu")
         scu_text = f"{scu:,.0f} SCU" if scu else "unknown cargo capacity"
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"Default ship set to **{vehicle.get('name')}** ({scu_text}). "
             "/best-route will now show how much of a run you can actually haul.",
             ephemeral=True,
@@ -64,6 +65,7 @@ class Ships(commands.Cog):
             await interaction.response.send_message("No default ship set. Use /set-default-ship.", ephemeral=True)
             return
 
+        await interaction.response.defer(ephemeral=True)
         try:
             vehicles = await self.bot.uex.get_vehicles()
             vehicle = resolve_ship(vehicles, ship_name)
@@ -71,7 +73,7 @@ class Ships(commands.Cog):
             vehicle = None
 
         if vehicle is None:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"Default ship is set to '{ship_name}', but it couldn't be matched against UEX's current "
                 "ship list (maybe renamed) - try /set-default-ship again.",
                 ephemeral=True,
@@ -80,7 +82,7 @@ class Ships(commands.Cog):
 
         scu = vehicle.get("scu")
         scu_text = f"{scu:,.0f} SCU" if scu else "unknown cargo capacity"
-        await interaction.response.send_message(f"Default ship: **{vehicle.get('name')}** ({scu_text})", ephemeral=True)
+        await interaction.followup.send(f"Default ship: **{vehicle.get('name')}** ({scu_text})", ephemeral=True)
 
 
 async def setup(bot: commands.Bot) -> None:

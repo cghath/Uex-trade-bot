@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from bot.uex.trends import (
     SELL_SIDE_NO_DEMAND_CODE,
-    MoverEntry,
     ScoredRouteEntry,
     TrendingEntry,
     aggregate_commodity_trips,
@@ -13,6 +12,8 @@ from bot.uex.trends import (
     select_best_available_route,
     select_best_in_stock_route,
 )
+from bot.uex.data_health import classify_terminal_health
+from bot.uex.route_confidence import coalesce_report_count, compute_route_confidence
 
 
 def _price_row(**overrides) -> dict:
@@ -35,6 +36,8 @@ def _route_row(**overrides) -> dict:
     row = {
         "origin_terminal_name": "Mine",
         "destination_terminal_name": "City",
+        "id_terminal_origin": 10,
+        "id_terminal_destination": 20,
         "price_origin": 100,
         "price_destination": 200,
         "price_margin": 100,
@@ -181,6 +184,7 @@ def test_select_best_available_route_picks_highest_score_with_origin_stock():
     best = select_best_available_route("Laranite", 1, rows)
     assert best is not None
     assert best.score == 70
+    assert (best.origin_terminal_id, best.destination_terminal_id) == (10, 20)
 
 
 def test_select_best_available_route_excludes_unscored_rows():
@@ -225,3 +229,46 @@ def test_rank_top_scored_routes_orders_by_score_and_caps():
     ranked = rank_top_scored_routes(entries, limit=10)
     assert len(ranked) == 10
     assert [e.score for e in ranked] == list(range(14, 4, -1))
+
+
+def test_route_confidence_rewards_fresh_reports_availability_and_stable_prices():
+    fresh = classify_terminal_health(
+        {"terminal_name": "A", "has_recent_reports": 1, "last_update_days": 0,
+         "last_update_days_limit": 1, "last_update_days_percentage": 100,
+         "prices_updated_percentage": 100}
+    )
+    high = compute_route_confidence(
+        origin_health=fresh, destination_health=fresh,
+        origin_report_count=5, destination_report_count=5,
+        volatility_origin=0.1, volatility_destination=0.1,
+        origin_available=True, destination_available=True,
+    )
+    low = compute_route_confidence(
+        origin_health=None, destination_health=None,
+        origin_report_count=0, destination_report_count=0,
+        volatility_origin=1.0, volatility_destination=1.0,
+        origin_available=True, destination_available=False,
+    )
+    assert high.label == "High"
+    assert high.score > low.score
+    assert low.label == "Low"
+
+
+def test_route_confidence_is_not_a_profit_score():
+    stale = classify_terminal_health(
+        {"terminal_name": "A", "has_recent_reports": 0, "last_update_days": 14,
+         "last_update_days_limit": 1, "last_update_days_percentage": 0,
+         "prices_updated_percentage": 100}
+    )
+    confidence = compute_route_confidence(
+        origin_health=stale, destination_health=stale,
+        origin_report_count=0, destination_report_count=0,
+        volatility_origin=None, volatility_destination=None,
+        origin_available=True, destination_available=True,
+    )
+    assert confidence.score < 50
+
+
+def test_report_count_coalescing_preserves_valid_zero():
+    assert coalesce_report_count(0, 9) == 0
+    assert coalesce_report_count(None, 9) == 9

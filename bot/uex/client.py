@@ -34,13 +34,13 @@ BASE_URL = "https://api.uexcorp.uk/2.0"
 _DEFAULT_CACHE_TTL = 300  # 5 minutes, conservative default
 _ENDPOINT_CACHE_TTL = {
     "terminals": 12 * 3600,
+    "space_stations": 24 * 3600,
     "commodities": 12 * 3600,
     "commodities_prices": 30 * 60,
     "commodities_prices_all": 30 * 60,
     "commodities_routes": 30 * 60,
     "commodities_prices_history": 3600,
     "items": 12 * 3600,
-    "items_prices": 30 * 60,
     "categories": 24 * 3600,
     "marketplace_trends": 3600,
     "vehicles": 12 * 3600,
@@ -51,6 +51,8 @@ _ENDPOINT_CACHE_TTL = {
     "marketplace_prices_history": 3600,
     "marketplace_prices_averages": 3600,
     "marketplace_prices_averages_all": 3600,
+    "marketplace_listings": 60,
+    "terminals_distances": 12 * 3600,
 }
 
 # UEX status strings that specifically mean "the secret_key is missing/wrong/not allowed",
@@ -81,6 +83,8 @@ class UexClient:
         self._client = httpx.AsyncClient(timeout=timeout)
         self._cache: dict[tuple, tuple[float, Any]] = {}
         self._cache_lock = asyncio.Lock()
+        self._item_catalog: tuple[float, list[dict[str, Any]]] | None = None
+        self._item_catalog_lock = asyncio.Lock()
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -246,6 +250,10 @@ class UexClient:
         """Trading terminals/locations. Filters: id_star_system, id_planet, name, type, code, ..."""
         return await self._get("terminals", params=filters) or []
 
+    async def get_space_stations(self, **filters: Any) -> list[dict[str, Any]]:
+        """Space-station access metadata, including pad sizes and external loading docks."""
+        return await self._get("space_stations", params=filters) or []
+
     async def get_commodities(self, **filters: Any) -> list[dict[str, Any]]:
         return await self._get("commodities", params=filters) or []
 
@@ -279,14 +287,93 @@ class UexClient:
         """
         return await self._get("commodities_prices_history", params=filters) or []
 
+    async def get_terminal_distance(
+        self, id_terminal_origin: int, id_terminal_destination: int
+    ) -> dict[str, Any] | None:
+        """Real point-to-point distance (gigameters) between two terminals, independent
+        of any specific commodity - unlike /commodities_routes' own distance field, this
+        works for an arbitrary terminal pair regardless of what's being traded between
+        them, which is what a multi-stop chain's legs need.
+        """
+        return await self._get(
+            "terminals_distances",
+            params={
+                "id_terminal_origin": id_terminal_origin,
+                "id_terminal_destination": id_terminal_destination,
+            },
+        )
+
     async def get_items(self, **filters: Any) -> list[dict[str, Any]]:
+        """Items from one UEX-supported filter.
+
+        UEX currently returns ``requires_id_category`` and no rows for an unfiltered call.
+        Use :meth:`get_item_catalog` when a caller genuinely needs the whole catalog.
+        """
         return await self._get("items", params=filters) or []
 
-    async def get_items_prices(self, **filters: Any) -> list[dict[str, Any]]:
-        return await self._get("items_prices", params=filters) or []
+    async def get_item_catalog(self) -> list[dict[str, Any]]:
+        """Load every item category once and cache the combined catalog for 12 hours.
 
-    async def get_companies(self, **filters: Any) -> list[dict[str, Any]]:
-        return await self._get("companies", params=filters) or []
+        `/items` documents and enforces a category/filter requirement, so an unfiltered
+        request silently produces no catalog. The bounded batches stay below UEX's
+        120-request/minute ceiling even when all current item categories must be fetched.
+        """
+        now = time.monotonic()
+        if self._item_catalog and self._item_catalog[0] > now:
+            return list(self._item_catalog[1])
+
+        async with self._item_catalog_lock:
+            now = time.monotonic()
+            if self._item_catalog and self._item_catalog[0] > now:
+                return list(self._item_catalog[1])
+
+            categories = await self.get_categories(type="item")
+            category_ids = [
+                int(category["id"])
+                for category in categories
+                if category.get("id") is not None
+            ]
+            if not category_ids:
+                raise UexApiError("UEX returned no item categories for the catalog")
+
+            rows: list[dict[str, Any]] = []
+            failures = 0
+            batch_size = 8
+            for start in range(0, len(category_ids), batch_size):
+                results = await asyncio.gather(
+                    *(self.get_items(id_category=category_id) for category_id in category_ids[start : start + batch_size]),
+                    return_exceptions=True,
+                )
+                for result in results:
+                    if isinstance(result, Exception):
+                        failures += 1
+                        logger.warning("Failed to load one UEX item category: %s", result)
+                    else:
+                        rows.extend(result)
+
+            deduplicated: dict[int, dict[str, Any]] = {}
+            for row in rows:
+                try:
+                    id_item = int(row.get("id"))
+                except (TypeError, ValueError):
+                    continue
+                deduplicated[id_item] = row
+            catalog = sorted(
+                deduplicated.values(), key=lambda row: (str(row.get("name") or "").lower(), int(row.get("id") or 0))
+            )
+            if not catalog:
+                raise UexApiError(
+                    f"UEX item catalog was empty after {failures} category request failure(s)"
+                )
+            ttl = _DEFAULT_CACHE_TTL if failures else _ENDPOINT_CACHE_TTL["items"]
+            self._item_catalog = (time.monotonic() + ttl, catalog)
+            return list(catalog)
+
+    def get_cached_item_catalog(self) -> list[dict[str, Any]]:
+        """Return the catalog only if already warm; safe for Discord autocomplete."""
+        if self._item_catalog and self._item_catalog[0] > time.monotonic():
+            return list(self._item_catalog[1])
+        return []
 
     async def get_vehicles(self, **filters: Any) -> list[dict[str, Any]]:
         """Ship/vehicle catalog. Includes `scu` (cargo capacity) and `container_sizes`.
@@ -326,11 +413,15 @@ class UexClient:
 
     # -- marketplace (player-to-player, separate from commodity/terminal trading) --
 
-    async def get_marketplace_listings(self, **filters: Any) -> list[dict[str, Any]]:
+    async def get_marketplace_listings(self, *, use_cache: bool = True, **filters: Any) -> list[dict[str, Any]]:
         """Active public marketplace listings. No auth required. Filters: id, slug,
         username, id_item, operation ('buy'|'sell'). Without id_item, capped at 100 rows.
+
+        Cached briefly (60s) by default. Pass use_cache=False for a stock/status decision
+        that can't tolerate a stale read - e.g. deciding how much of a tracked listing sold
+        before cancelling or relisting it.
         """
-        return await self._get("marketplace_listings", params=filters) or []
+        return await self._get("marketplace_listings", params=filters, use_cache=use_cache) or []
 
     async def get_marketplace_trends(self, **filters: Any) -> list[dict[str, Any]]:
         """Marketplace items with the most negotiation activity right now. No auth required."""
@@ -342,10 +433,23 @@ class UexClient:
             "marketplace_negotiations", params=filters, require_secret=True, secret_key=secret_key, use_cache=False
         ) or []
 
+    async def get_marketplace_negotiations_messages(
+        self, secret_key: str | None = None, **filters: Any
+    ) -> list[dict[str, Any]]:
+        """Chat messages within one negotiation. Filters: id_negotiation or hash (one required)."""
+        return await self._get(
+            "marketplace_negotiations_messages",
+            params=filters,
+            require_secret=True,
+            secret_key=secret_key,
+            use_cache=False,
+        ) or []
+
     async def post_marketplace_advertise(self, secret_key: str, **fields: Any) -> dict[str, Any]:
         """Create a REAL, public UEX marketplace listing as the given player. This is not
-        reversible by the bot alone - the caller should confirm with the user before calling
-        this. Required fields: id_category, operation ('buy'|'sell'), type
+        reversible by the bot alone - the caller must either confirm this exact post or have
+        a stored, explicit scheduling authorization with a hard price floor. Required fields:
+        id_category, operation ('buy'|'sell'), type
         ('item'|'service'|'contract'), unit, title, description, price, currency, language.
         """
         return await self._post("marketplace_advertise", json_body=fields, secret_key=secret_key)

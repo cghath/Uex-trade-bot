@@ -11,7 +11,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from bot.uex.charts import render_liquidity_history_chart
-from bot.uex.marketplace import marketplace_item_url
+from bot.uex.marketplace import marketplace_item_link, marketplace_item_url
 
 logger = logging.getLogger("uexbot.liquidity")
 
@@ -21,10 +21,6 @@ async def liquidity_item_autocomplete(
 ) -> list[app_commands.Choice[str]]:
     rows = await interaction.client.db.find_liquidity_items(current)
     return [app_commands.Choice(name=row["item_name"][:100], value=row["item_name"]) for row in rows]
-
-
-def _marketplace_name(item_name: str, id_item: int | None) -> str:
-    return f"[{item_name}]({marketplace_item_url(id_item)})" if id_item is not None else item_name
 
 
 def _relative_timestamp(raw: str | None) -> str | None:
@@ -58,7 +54,7 @@ class LiquidityCog(commands.Cog):
 
     @app_commands.command(
         name="liquidity-rank",
-        description="Show the top 10 most liquid items in the marketplace (ranked by how fast they sell)."
+        description="The bot's own sellability score: top 10 items ranked by how fast they sell (not UEX's raw activity).",
     )
     async def liquidity_rank(
         self, interaction: discord.Interaction
@@ -113,7 +109,7 @@ class LiquidityCog(commands.Cog):
 
     @app_commands.command(
         name="liquidity-trends",
-        description="Liquidity-score history for one item, or the biggest score movers when no item is selected.",
+        description="Sellability-score history for one item, or its biggest movers (the bot's score, not raw activity).",
     )
     @app_commands.describe(item="Optional Marketplace item to chart")
     @app_commands.autocomplete(item=liquidity_item_autocomplete)
@@ -175,7 +171,7 @@ class LiquidityCog(commands.Cog):
             previous = float(mover["previous_score"])
             current = float(mover["current_score"])
             lines.append(
-                f"**{i}. {_marketplace_name(mover['item_name'], mover.get('id_item'))}**\n"
+                f"**{i}. {marketplace_item_link(mover['item_name'], mover.get('id_item'))}**\n"
                 f"{_format_rating_change(previous, current)}"
             )
         embed.description += "\n\n" + "\n".join(lines)

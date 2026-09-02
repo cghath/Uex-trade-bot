@@ -10,11 +10,25 @@ def marketplace_item_url(id_item: int) -> str:
     return f"https://uexcorp.space/marketplace/home/?id_item={id_item}&mode=list"
 
 
+def marketplace_item_link(item_name: str, id_item: int | None) -> str:
+    """Markdown-link an item name to its UEX Marketplace page when the id is known.
+
+    Falls back to the plain name (no link) when id_item is missing - e.g. rows sourced
+    from an endpoint that doesn't return it, like /marketplace_negotiations.
+    """
+    return f"[{item_name}]({marketplace_item_url(id_item)})" if id_item is not None else item_name
+
+
 def find_item_id_by_name(items: list[dict], query: str) -> int | None:
     """Resolve a typed query to a single catalog item's id, if there's an unambiguous match.
 
     Prefers an exact (case-insensitive) name match; falls back to a substring match only
-    if it's unique, so a vague query doesn't silently pick the wrong item.
+    if it's unique, so a vague query doesn't silently pick the wrong item. As a last resort,
+    also tries the reverse direction: UEX sellers routinely title listings with a variant/skin
+    name layered onto the base catalogued item (e.g. 'Arlington Rifle Widowmaker' for the
+    catalogued 'Arlington Rifle' - confirmed empirically against live listings, there is no
+    separate 'Widowmaker' catalog entry), so a query *longer* than any exact catalog name
+    should still resolve when exactly one catalog name is contained within it.
     """
     query_lower = query.strip().lower()
     if not query_lower:
@@ -27,6 +41,18 @@ def find_item_id_by_name(items: list[dict], query: str) -> int | None:
     substring_matches = [item for item in items if query_lower in (item.get("name") or "").lower()]
     if len(substring_matches) == 1:
         return substring_matches[0].get("id")
+
+    # Word-subset, not substring: real UEX sellers sometimes interleave the variant word
+    # in the middle ('Arlington "Watchpoint" Rifle'), not just append it ('Arlington Rifle
+    # Widowmaker'), so the catalog name isn't always a contiguous substring of the query even
+    # when every one of its words is present.
+    query_words = set(query_lower.split())
+    contains_matches = [
+        item for item in items
+        if (catalog_words := set((item.get("name") or "").strip().lower().split())) and catalog_words <= query_words
+    ]
+    if len(contains_matches) == 1:
+        return contains_matches[0].get("id")
     return None
 
 
@@ -107,6 +133,7 @@ def quality_to_tier(quality: float) -> int:
 @dataclass
 class MarketplaceMoverEntry:
     item_name: str
+    id_item: int | None
     current_avg_sell: float
     baseline_avg_sell: float
     pct_change: float
@@ -136,9 +163,11 @@ def compute_marketplace_movers(rows: list[dict], limit: int = 5) -> tuple[list[M
         if abs(pct_change) < 0.5:
             continue
 
+        raw_id_item = parse_uex_number(row.get("id_item"))
         movers.append(
             MarketplaceMoverEntry(
                 item_name=name,
+                id_item=int(raw_id_item) if raw_id_item is not None else None,
                 current_avg_sell=round(current, 2),
                 baseline_avg_sell=round(baseline, 2),
                 pct_change=pct_change,
@@ -276,16 +305,33 @@ def extract_item_activity(trend_rows: list[dict]) -> list[dict]:
     return result
 
 
+# Relative weight of each demand signal, strongest first.
+#
+# A completed negotiation is the baseline (1.0) - direct proof the item actually sells.
+# An open negotiation is a real conversation against a specific listing but may never
+# close, so it counts half. A buy posting is only a standing want-ad: nobody has engaged
+# a seller yet, and it vanishes whenever the poster loses interest, so it is the weakest
+# of the three.
+#
+# Keep these ordered COMPLETED > OPEN > BUY_POSTING. An earlier version weighted buy
+# postings at 2.0 - twice a completed sale - which made an item with zero sales outrank
+# one with five real completed sales. That is backwards for a rating whose whole question
+# is "will this actually sell?", and it contradicted this module's own description of buy
+# postings as the weaker signal.
+WEIGHT_COMPLETED_NEGOTIATION = 1.0
+WEIGHT_OPEN_NEGOTIATION = 0.5
+WEIGHT_BUY_POSTING = 0.25
+
+
 def compute_liquidity_score(activity: dict) -> float:
     """Return a bounded 0-100 sellability rating for one Marketplace item.
 
-    Completed negotiations are the strongest signal that an item actually sells. Open
-    negotiations represent live interest, but may not complete, so they receive half
-    weight. Dividing this demand signal by the number of active listings prevents raw
-    volume alone from making heavily supplied items look more liquid than they are.
-    For a seller, the relevant supply is competing *sell* listings, rather than buy
-    postings. Active buy postings are a direct, but weaker and shorter-lived, sign of
-    demand, so each adds the weight of two completed negotiations.
+    Demand combines three signals at the weights above: completed negotiations (proof of
+    sale), open negotiations (live but unresolved interest), and active buy postings
+    (standing demand nobody has acted on yet). Dividing that demand by active listings
+    prevents raw volume alone from making heavily supplied items look more liquid than
+    they are. For a seller, the relevant supply is competing *sell* listings, not buy
+    postings.
 
     A three-listing supply cushion keeps a single listing from producing a misleading
     outlier. The final saturation step makes the rating easy to read: it always falls
@@ -307,9 +353,9 @@ def compute_liquidity_score(activity: dict) -> float:
 
     buy_postings = float(activity.get("listings_count_buy") or 0)
     weighted_demand = (
-        float(successful or 0)
-        + (float(open_negotiations or 0) * 0.5)
-        + (buy_postings * 2)
+        (float(successful or 0) * WEIGHT_COMPLETED_NEGOTIATION)
+        + (float(open_negotiations or 0) * WEIGHT_OPEN_NEGOTIATION)
+        + (buy_postings * WEIGHT_BUY_POSTING)
     )
     if weighted_demand <= 0:
         return 0.0

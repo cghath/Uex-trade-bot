@@ -19,7 +19,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
-from bot.uex.exceptions import UexApiError
+from bot.uex.exceptions import UexApiError, describe_uex_api_error
+from bot.uex.marketplace import marketplace_item_link, marketplace_item_url
 from bot.uex.scanner import StealEntry, build_fair_price_index, find_steals
 
 logger = logging.getLogger("uexbot.scanner")
@@ -83,7 +84,7 @@ class Scanner(commands.Cog):
         try:
             steals = await self._find_current_steals()
         except UexApiError as exc:
-            await interaction.followup.send(f"UEX API error: {exc}")
+            await interaction.followup.send(describe_uex_api_error(exc))
             return
 
         if not steals:
@@ -104,7 +105,7 @@ class Scanner(commands.Cog):
                 value=(
                     f"**{steal.listing_price:,.0f} {steal.currency}** vs 30d avg "
                     f"**{steal.fair_price:,.0f} {steal.currency}** — **{steal.discount_pct:.0f}%** off "
-                    f"· by {steal.seller}"
+                    f"· by {steal.seller}\n🔗 [Open in UEX Marketplace]({marketplace_item_url(steal.id_item)})"
                 ),
                 inline=False,
             )
@@ -158,7 +159,7 @@ class Scanner(commands.Cog):
 
     async def _notify(self, channel: discord.abc.Messageable, user_id: int, steal: StealEntry) -> None:
         embed = discord.Embed(title="Raw-material deal found!", color=discord.Color.green())
-        embed.description = f"**{steal.item_name}** — {steal.listing_title}"
+        embed.description = f"**{marketplace_item_link(steal.item_name, steal.id_item)}** — {steal.listing_title}"
         embed.add_field(name="Listing price", value=f"{steal.listing_price:,.0f} {steal.currency}")
         embed.add_field(name="30-day average", value=f"{steal.fair_price:,.0f} {steal.currency}")
         embed.add_field(name="Discount", value=f"{steal.discount_pct:.0f}%")

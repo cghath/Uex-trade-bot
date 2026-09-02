@@ -25,12 +25,17 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
-from bot.cogs.prices import commodity_name_autocomplete
+from bot.cogs.prices import SYSTEM_CHOICES, _add_chunked_fields, commodity_name_autocomplete
 from bot.cogs.ships import ship_name_autocomplete
 from bot.uex.charts import render_price_history_chart
-from bot.uex.exceptions import UexApiError
+from bot.uex.exceptions import UexApiError, describe_uex_api_error
+from bot.uex.data_health import classify_terminal_health, format_health_note
+from bot.uex.route_confidence import compute_route_confidence
+from bot.uex.practical_routes import route_in_system, route_practical_notes, route_supports_auto_load
+from bot.uex.commodity_risk import format_commodity_risk
 from bot.uex.ships import estimate_route_cargo, resolve_ship
 from bot.uex.status import build_status_lookup, resolve_status_label
+from bot.uex.supply_demand import has_sell_side_demand
 from bot.uex.trends import (
     ScoredRouteEntry,
     TrendingEntry,
@@ -262,7 +267,14 @@ class Trends(commands.Cog):
             self._trending_updated_at = datetime.now(timezone.utc)
         logger.info("Trending refresh complete: %d commodities ranked", len(ranked))
 
-        ranked_routes = rank_top_scored_routes(route_candidates, limit=TOP_SCORED_ROUTES_KEEP)
+        # Keep every candidate the loop already computed, not just the top
+        # TOP_SCORED_ROUTES_KEEP by score - a user's auto-load-only/system filter runs
+        # later, at command time, and can only work with what's still here. Discarding
+        # the rest now would make a route that fails on score alone but would pass the
+        # filter unrecoverable, since this refresh cycle's candidates aren't kept
+        # anywhere else. TOP_SCORED_ROUTES_KEEP is applied as a *display* cap instead,
+        # after filtering, in _send_ranked_routes.
+        ranked_routes = rank_top_scored_routes(route_candidates, limit=len(route_candidates))
         async with self._top_scored_routes_lock:
             self._top_scored_routes = ranked_routes
             self._top_scored_routes_updated_at = datetime.now(timezone.utc)
@@ -270,7 +282,7 @@ class Trends(commands.Cog):
             "Top-routes refresh complete: %d candidates, %d kept", len(route_candidates), len(ranked_routes)
         )
 
-        ranked_in_stock_routes = rank_top_scored_routes(in_stock_route_candidates, limit=TOP_IN_STOCK_ROUTES_KEEP)
+        ranked_in_stock_routes = rank_top_scored_routes(in_stock_route_candidates, limit=len(in_stock_route_candidates))
         async with self._top_in_stock_routes_lock:
             self._top_in_stock_routes = ranked_in_stock_routes
             self._top_in_stock_routes_updated_at = datetime.now(timezone.utc)
@@ -295,6 +307,9 @@ class Trends(commands.Cog):
         title: str,
         footer_note: str,
         log_label: str,
+        display_limit: int,
+        auto_load_only: bool = False,
+        system: str | None = None,
     ) -> None:
         await interaction.response.defer()
 
@@ -308,11 +323,108 @@ class Trends(commands.Cog):
                 logger.info("Vehicle lookup failed for '%s' in %s: %s", ship_query, log_label, exc)
         ship_cargo_scu = ship_vehicle.get("scu") if ship_vehicle else None
         status_lookup = await self._get_status_lookup()
+        terminal_ids = [
+            terminal_id
+            for route in entries
+            for terminal_id in (route.origin_terminal_id, route.destination_terminal_id)
+            if terminal_id is not None
+        ]
+        terminal_references = await self.bot.db.get_terminal_references_by_ids(terminal_ids)
+        if auto_load_only:
+            entries = [
+                route for route in entries
+                if route_supports_auto_load(
+                    terminal_references.get(route.origin_terminal_id),
+                    terminal_references.get(route.destination_terminal_id),
+                )
+            ]
+            if not entries:
+                await interaction.followup.send(
+                    "No auto-load-capable routes found right now - try again once more route data has been collected."
+                )
+                return
+        if system is not None:
+            entries = [
+                route for route in entries
+                if route_in_system(
+                    terminal_references.get(route.origin_terminal_id),
+                    terminal_references.get(route.destination_terminal_id),
+                    system,
+                )
+            ]
+            if not entries:
+                await interaction.followup.send(
+                    f"No routes confirmed entirely within {system} found right now."
+                )
+                return
+        # Truncate for display only after filtering, not before - the background refresh
+        # loop now keeps every candidate it computed specifically so this filter has a
+        # real pool to work with (see refresh_trending).
+        entries = entries[:display_limit]
+        terminal_ids = [
+            terminal_id
+            for route in entries
+            for terminal_id in (route.origin_terminal_id, route.destination_terminal_id)
+            if terminal_id is not None
+        ]
+        health_rows = await self.bot.db.get_terminal_data_health_by_ids(terminal_ids)
+        health_notes = {
+            terminal_id: note
+            for terminal_id, row in health_rows.items()
+            if (note := format_health_note(classify_terminal_health(row)))
+        }
+        market_signals = await self.bot.db.get_route_market_signals_by_ids(
+            [
+                (route.id_commodity, terminal_id)
+                for route in entries
+                for terminal_id in (route.origin_terminal_id, route.destination_terminal_id)
+                if terminal_id is not None
+            ],
+        )
+        commodity_references = await self.bot.db.get_commodity_references(
+            [route.id_commodity for route in entries]
+        )
 
         embed = discord.Embed(title=title, color=discord.Color.green())
         for i, r in enumerate(entries, start=1):
             name, value = _build_route_field(i, r, ship_vehicle, ship_cargo_scu, status_lookup)
-            embed.add_field(name=name, value=value, inline=False)
+            warnings = []
+            for side, terminal_id in (
+                ("Origin", r.origin_terminal_id),
+                ("Destination", r.destination_terminal_id),
+            ):
+                note = health_notes.get(terminal_id)
+                if note:
+                    warnings.append(f"{side}: {note}")
+            if warnings:
+                value += "\n" + "\n".join(warnings)
+            origin_health_row = health_rows.get(r.origin_terminal_id)
+            destination_health_row = health_rows.get(r.destination_terminal_id)
+            origin_signal = market_signals.get((r.id_commodity, r.origin_terminal_id), {})
+            destination_signal = market_signals.get((r.id_commodity, r.destination_terminal_id), {})
+            confidence = compute_route_confidence(
+                origin_health=classify_terminal_health(origin_health_row) if origin_health_row else None,
+                destination_health=classify_terminal_health(destination_health_row) if destination_health_row else None,
+                origin_report_count=origin_signal.get("buy_report_count"),
+                destination_report_count=destination_signal.get("sell_report_count"),
+                volatility_origin=r.volatility_origin,
+                volatility_destination=r.volatility_destination,
+                origin_available=bool(r.scu_origin and r.scu_origin > 0),
+                destination_available=has_sell_side_demand(
+                    r.scu_destination, r.status_destination
+                ),
+            )
+            value += f"\nConfidence: **{confidence.label} ({confidence.score}/100)**"
+            practical_notes = route_practical_notes(
+                terminal_references.get(r.origin_terminal_id),
+                terminal_references.get(r.destination_terminal_id),
+            )
+            if practical_notes:
+                value += "\n" + "\n".join(practical_notes)
+            risk_note = format_commodity_risk(commodity_references.get(r.id_commodity))
+            if risk_note:
+                value += f"\n{risk_note}"
+            _add_chunked_fields(embed, name=name, lines=value.splitlines())
 
         footer = footer_note + " · " + SELL_SIDE_STATUS_CLARIFIER
         if updated_at:
@@ -326,13 +438,19 @@ class Trends(commands.Cog):
     @app_commands.describe(
         ship="Optional: check cargo/profit for a specific ship instead of your default (/set-default-ship)",
         strict="Require live stock at the origin and live demand at the destination (safer).",
+        auto_load_only="Only show routes where both the origin and destination terminal offer UEX's auto-load",
+        system="Optional: require both ends of the route to be in this star system",
     )
+    @app_commands.rename(auto_load_only="auto-load-only")
+    @app_commands.choices(system=SYSTEM_CHOICES)
     @app_commands.autocomplete(ship=ship_name_autocomplete)
     async def top_routes(
         self,
         interaction: discord.Interaction,
         strict: bool = False,
         ship: str | None = None,
+        auto_load_only: bool = False,
+        system: app_commands.Choice[str] | None = None,
     ) -> None:
         if strict:
             async with self._top_in_stock_routes_lock:
@@ -367,6 +485,9 @@ class Trends(commands.Cog):
             title=title,
             footer_note=footer_note,
             log_label="/top-routes",
+            display_limit=TOP_IN_STOCK_ROUTES_KEEP if strict else TOP_SCORED_ROUTES_KEEP,
+            auto_load_only=auto_load_only,
+            system=system.value if system else None,
         )
 
     # -- /movers: single bulk call, computed on demand -----------------------
@@ -377,7 +498,7 @@ class Trends(commands.Cog):
         try:
             rows = await self.bot.uex.get_commodities_prices_all()
         except UexApiError as exc:
-            await interaction.followup.send(f"UEX API error: {exc}")
+            await interaction.followup.send(describe_uex_api_error(exc))
             return
 
         gainers, losers = compute_movers(rows, limit=5)
@@ -421,7 +542,7 @@ class Trends(commands.Cog):
         try:
             price_rows = await self.bot.uex.get_commodities_prices(commodity_name=commodity)
         except UexApiError as exc:
-            await interaction.followup.send(f"UEX API error: {exc}")
+            await interaction.followup.send(describe_uex_api_error(exc))
             return
 
         if not price_rows:
@@ -456,7 +577,7 @@ class Trends(commands.Cog):
                 id_terminal=id_terminal, id_commodity=id_commodity
             )
         except UexApiError as exc:
-            await interaction.followup.send(f"UEX API error fetching history: {exc}")
+            await interaction.followup.send(describe_uex_api_error(exc))
             return
 
         if not history_rows:

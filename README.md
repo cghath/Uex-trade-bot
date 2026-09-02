@@ -10,11 +10,18 @@ Current features:
   volume, price movement, and price charts.
 - **UEX Marketplace** — search listings, review current and historical Marketplace prices, manage
   listings/favorites/negotiations, and receive matching-listing alerts.
-- **Marketplace Intelligence** — `/liquidity-rank` and `/liquidity-trends` provide all-item
-  sellability ratings and history. `/scan-now` and its optional channel alerts run the **Raw
-  Materials Deal Scanner**: it compares only Commodities and Harvestables with a reported quality
-  against the matching 30-day quality tier, currency, and unit. Crafted gear is deliberately
-  excluded because UEX does not expose its modifiers as structured pricing data.
+- **Sellability ratings** — `/liquidity-rank` and `/liquidity-trends` provide the bot's own
+  all-item sellability score and history (distinct from the raw UEX activity numbers behind
+  `/marketplace-trending`/`/marketplace-movers` above). `/scan-now` and its optional channel
+  alerts run the **Raw Materials Deal Scanner**: it compares only Commodities and Harvestables
+  with a reported quality against the matching 30-day quality tier, currency, and unit. Crafted
+  gear is deliberately excluded because UEX does not expose its modifiers as structured pricing
+  data.
+- **Personal inventory and guarded relisting** — manually record catalogued, game-earned item
+  stacks; review the same Sellability Rating beside direct UEX item links; and explicitly
+  authorize guarded UEC sell listings. An unsold listing relists 5% lower every 48 hours (pausing
+  instead whenever a negotiation is open) down to a hard manual floor, then asks what to do next.
+  Ambiguous UEX results stop for confirmation instead of risking duplicates.
 - **Alerts and digest** — commodity-price alerts, terminal-restock alerts, Marketplace listing
   alerts, and a configurable daily digest.
 - **Personal tools** — a local trade ledger, server leaderboard, saved cargo ship, and private UEX
@@ -64,14 +71,24 @@ different real fields rather than one obvious endpoint:
   `/commodities_routes` doesn't have distance/ROI data for a particular commodity yet, `/best-route`
   quietly falls back to computing routes from raw price rows instead.
 
-### A note on "inventory management"
+### A note on inventory management
 
-UEX's API does not expose a live in-game cargo hold (there's no endpoint that says "you're
-currently carrying 40 SCU of Laranite in your Cutlass"). What it has instead is `/user_trades`,
-a history of trades logged through UEX's own tools. So this bot approximates inventory tracking
-two ways: a local trade ledger you fill in via Discord commands, and a pull of your real UEX trade
-history if you use UEX's own logging tools too. If UEX adds a live fleet/cargo endpoint later,
-this is the natural place to wire it in (`bot/uex/client.py` + a new cog).
+UEX does not expose a live in-game cargo hold, so the bot cannot discover newly looted or crafted
+items automatically. `/inventory-add` is the source of truth for personal Marketplace stock;
+quality and location create separate stacks. `/inventory` shows quantity, reservations, manual
+price floor, Sellability Rating, and a clickable UEX item page. `/inventory-sell` opens a paged
+checklist and an explicit authorization preview; posting happens within minutes, though UEX
+staff approval before a listing actually goes live is outside the bot's control. Scheduled posts
+are catalogued UEC sell listings only. An unsold listing with no open negotiation relists 5% lower
+every 48 hours down to its hard floor, then DMs to ask what to do next; an open negotiation pauses
+relisting instead so it isn't disrupted.
+
+When UEX explicitly reports a lower `in_stock` value or sold-out state, local quantity is updated.
+If a listing disappears without a final stock value, `/inventory-confirm-sale` asks for the actual
+quantity rather than guessing. Sold-out asking prices can inform a recommendation, but they are not
+misrepresented as verified final transaction prices. Private inventory notes are never posted.
+Every inventory command, checklist, preview, error, and confirmation is ephemeral in Discord;
+background posting/sale updates are delivered only by private DM.
 
 ## 1. Get your UEX credentials
 
@@ -114,6 +131,10 @@ The SQLite database file is created automatically at `data/uexbot.sqlite3` (conf
 `DATABASE_PATH` in `.env`), and a `data/credentials.key` file is generated alongside it the first
 time anyone links a UEX account (see "Security notes" above).
 
+> Setting up an **additional** Windows dev machine, including SSH access back to your
+> deployment host? [`docs/WINDOWS_DEV_SETUP.md`](docs/WINDOWS_DEV_SETUP.md) scripts most
+> of it.
+
 ## 4. Deploying to a Raspberry Pi 5 for permanent hosting
 
 The Pi 5 is ARM64, and everything this project uses (`discord.py`, `httpx`, `aiosqlite`,
@@ -136,7 +157,7 @@ nano .env   # fill in the same values you used locally
 
 ### Run it as a systemd service (survives reboots/crashes)
 
-Create `/etc/systemd/system/uexbot.service`:
+Create `/etc/systemd/system/uex-trade-bot.service`:
 
 ```ini
 [Unit]
@@ -161,13 +182,20 @@ Then:
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable --now uexbot
-sudo systemctl status uexbot     # check it's running
-journalctl -u uexbot -f          # live logs
+sudo systemctl enable --now uex-trade-bot
+sudo systemctl status uex-trade-bot     # check it's running
+journalctl -u uex-trade-bot -f          # live logs
 ```
 
-To deploy updates later: `git pull` (or re-copy files), `pip install -r requirements.txt` if
-dependencies changed, then `sudo systemctl restart uexbot`.
+To deploy updates later: `scripts/deploy_and_backup.sh [branch]` (defaults to `TestBranch`) -
+stops the service, snapshots the current DB + git commit into `backups/pi/`, fast-forwards,
+reinstalls dependencies if `requirements*.txt` changed, then restarts. If the new version has
+a problem, `scripts/revert_last_deploy.sh` restores that snapshot and checks out the recorded
+commit (itself snapshotting the state it's discarding first). Avoids the manual git
+pull/restart dance and the need to merge PC/Pi databases after a bad deploy - just revert.
+
+The same three manual steps still work if you'd rather do it by hand: `git pull`,
+`pip install -r requirements.txt` if dependencies changed, `sudo systemctl restart uex-trade-bot`.
 
 **When migrating from your dev machine to the Pi, copy the whole `data/` folder** (not just the
 code) so everyone's already-linked UEX accounts keep working — see "Security notes" above.
@@ -185,7 +213,14 @@ bot/
     trends.py        trade-volume + price-mover aggregation (pure functions, unit tested)
     charts.py        matplotlib price-history chart rendering
     marketplace.py   Marketplace listings + 30-day rolling price averages
+    inventory.py     personal-inventory pricing
     scanner.py       Raw Materials Deal Scanner matching logic (pure functions, unit tested)
+    mixed_routes.py    dependency-free mixed-cargo load allocation + terminal-access gates
+    route_confidence.py route confidence scoring (terminal freshness, report depth, stock/demand, volatility)
+    supply_demand.py    time-weighted supply/demand history from terminal observations
+    commodity_risk.py   commodity risk labels (jurisdiction, explosion, volatility) from UEX flags
+    data_health.py       terminal data-freshness scoring
+    practical_routes.py  practical route checks (container limits, cargo infra, refuel/repair/services)
     ships.py         ship data lookups
     stock_alerts.py  terminal stock-level change detection
     leaderboard.py   UEX leaderboard fetching
@@ -197,15 +232,20 @@ bot/
   cogs/
     account.py            /link-uex-account (modal), /unlink-uex-account, /uex-account-status
     prices.py             /price, /best-route
-    alerts.py             /alert-add, /alert-list, /alert-remove + background poller
+    alerts.py             /alert-add, /alert-list, /alert-remove (list/remove cover all 3 alert types) + background poller
     trades.py             /trade-log-add, /trade-log, /uex-trades
-    trends.py             /trending, /movers, /commodity-history + background trending refresh
+    trends.py             /trending, /movers, /commodity-history, /top-routes + background trending refresh
     marketplace.py        /marketplace-average and Marketplace lookups
+    personal_inventory.py inventory UI + guarded posting/reconciliation worker
     marketplace_alerts.py Marketplace listing alerts + background poller
+    negotiation_alerts.py /negotiation-alerts opt-in DM alerts + background poller
     scanner.py             /set-scanner-channel, /scanner-status, /scan-now + background poller
+    liquidity.py           /liquidity-rank, /liquidity-trends
     stock_alerts.py       terminal stock alerts + background poller
     ships.py              ship info commands
     digest.py             scheduled guild digest posts
+    intelligence.py       background market/data-health/fuel/reference collectors, no slash commands
+    intelligence_brief.py /intelligence-brief on-demand deep view
     diagnostics.py        bot health/diagnostic commands
     help.py               /help
 scripts/

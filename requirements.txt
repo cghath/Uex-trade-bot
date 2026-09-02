@@ -4,3 +4,4 @@ aiosqlite>=0.20.0
 python-dotenv>=1.0.1
 cryptography>=42.0.0
 matplotlib>=3.8.0
+tzdata>=2024.1
