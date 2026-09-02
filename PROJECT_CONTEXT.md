@@ -420,6 +420,43 @@ they're in sync).
     profit-per-SCU), but the line never said so, so it read as ambiguous next to the
     aggregate Investment/Revenue line further down. Added the word "profit" next to it.
     A reminder that correct math doesn't excuse an unlabeled number in a financial embed.
+33. **`system` filter added to all three route commands**: `/best-route`, `/top-routes`,
+    and `/mixed-routes` all gained an optional `system` choice (Stanton/Pyro/Nyx - the
+    exact three values confirmed live via UEX `/terminals`, so a fixed dropdown rather than
+    free text/autocomplete). A system filter requires *both* ends of a route to be confirmed
+    in the requested system - a route that crosses systems doesn't satisfy "stay in Pyro"
+    just because one end happens to be there (see entry 34: `auto-load-only` was origin-only
+    at the time this entry was written, but was changed to the same both-ends requirement
+    shortly after).
+    New shared helpers in `bot/uex/practical_routes.py`: `terminal_in_system` (one terminal)
+    and `route_in_system` (both ends, fails closed on an unknown terminal, always true when
+    no system is requested). `/mixed-routes` applies it to the shared row pool *before*
+    origins/destinations are split out, so a filtered pairing can never mix an in-system
+    origin with an out-of-system destination without a separate post-pairing check the way
+    `/best-route`/`/top-routes` need (both branches of `/best-route`, and `/top-routes`'
+    shared `_send_ranked_routes` helper, filter the already-paired route list directly).
+    `SYSTEM_CHOICES` lives once in `bot/cogs/prices.py` and is imported into `trends.py`,
+    which already imported other things from `prices.py` - not duplicated per file.
+    194 tests passing (3 new): direct coverage for the two new pure helpers and for
+    `build_mixed_routes`' new parameter; `/best-route`'s and `/top-routes`' cog-level
+    wiring is verified the same way `auto-load-only` was (real command-tree inspection
+    proving Discord actually receives the option and its three choices), not a full
+    Discord-render test, since no such harness exists for either command yet.
+34. **`auto-load-only` changed to require both ends, not just the origin** - explicit user
+    correction of the origin-only design from entry 21 ("loading a purchase onto a stored
+    ship is a buy-side concept"). This is NOT an independent re-verification against UEX's
+    own docs the way the buy/sell status-code asymmetry or the quality-scale mismatch
+    elsewhere in this doc were - `is_auto_load` is a plain terminal-level flag with no
+    documented buy/sell scoping either way, so record this as user-directed product
+    behavior, not a confirmed fact about what the field "really" means. New
+    `route_supports_auto_load(origin, destination)` in `bot/uex/practical_routes.py`
+    replaces the origin-only `terminal_supports_auto_load` at all three call sites
+    (both `/best-route` branches, `/top-routes`' shared `_send_ranked_routes`, and
+    `/mixed-routes`, which now folds it into the shared `eligible_rows` pool alongside
+    `system` and `space_only` instead of `origins` alone). The one existing test that
+    asserted the old origin-only behavior (`test_auto_load_only_checks_the_origin_not_the_
+    destination`) was rewritten, not just supplemented, since its premise was no longer
+    true. 195 tests passing.
 
 ## Where to look for what
 
@@ -700,7 +737,7 @@ guessed at.
   branch. Local (PC) and the Pi's databases have been fully merged at least twice now; the
   established practice is to back up both sides before any such merge and pull the Pi's
   backup down to the PC afterward, so nothing valuable lives only on the Pi's disk. The full
-  suite has 191 passing tests. Re-check live service and branch state rather than assuming
+  suite has 195 passing tests. Re-check live service and branch state rather than assuming
   this point-in-time operational note is still current.
 - The data collectors in `bot/cogs/intelligence.py` only pay off once they've been running a
   while - most of the `ROADMAP.md` intelligence backlog depends on accumulated history, so

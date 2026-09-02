@@ -11,7 +11,7 @@ from bot.cogs.ships import ship_name_autocomplete
 from bot.uex.exceptions import UexApiError, describe_uex_api_error
 from bot.uex.data_health import classify_terminal_health, format_health_note
 from bot.uex.route_confidence import coalesce_report_count, compute_route_confidence
-from bot.uex.practical_routes import route_practical_notes, terminal_supports_auto_load
+from bot.uex.practical_routes import route_in_system, route_practical_notes, route_supports_auto_load
 from bot.uex.commodity_risk import format_commodity_risk
 from bot.uex.supply_demand import analyze_terminal_market_history, has_sell_side_demand
 from bot.uex.ships import estimate_route_cargo, resolve_ship
@@ -22,6 +22,13 @@ from bot.uex.mixed_routes import build_mixed_routes, requires_capital_cargo_acce
 logger = logging.getLogger("uexbot.prices")
 
 MAX_FIELD_ROWS = 5
+
+# Confirmed live via UEX /terminals: exactly these three values exist for star_system_name.
+SYSTEM_CHOICES = [
+    app_commands.Choice(name="Stanton", value="Stanton"),
+    app_commands.Choice(name="Pyro", value="Pyro"),
+    app_commands.Choice(name="Nyx", value="Nyx"),
+]
 
 
 def _positive_int(value: object) -> int | None:
@@ -216,9 +223,11 @@ class Prices(commands.Cog):
     @app_commands.describe(
         commodity="Commodity name, e.g. 'Gold' or 'Laranite'",
         ship="Optional: check cargo for a specific ship instead of your default (/set-default-ship)",
-        auto_load_only="Only show routes where the origin terminal offers UEX's auto-load at purchase",
+        auto_load_only="Only show routes where both the origin and destination terminal offer UEX's auto-load",
+        system="Optional: require both ends of the route to be in this star system",
     )
     @app_commands.rename(auto_load_only="auto-load-only")
+    @app_commands.choices(system=SYSTEM_CHOICES)
     @app_commands.autocomplete(ship=ship_name_autocomplete, commodity=commodity_name_autocomplete)
     async def best_route(
         self,
@@ -226,8 +235,10 @@ class Prices(commands.Cog):
         commodity: str,
         ship: str | None = None,
         auto_load_only: bool = False,
+        system: app_commands.Choice[str] | None = None,
     ) -> None:
         await interaction.response.defer()
+        system_value = system.value if system else None
         try:
             rows = await self.bot.uex.get_commodities_prices(commodity_name=commodity)
         except UexApiError as exc:
@@ -285,13 +296,28 @@ class Prices(commands.Cog):
             if auto_load_only:
                 ranked = [
                     r for r in ranked
-                    if terminal_supports_auto_load(
-                        terminal_references.get(_positive_int(r.get("id_terminal_origin")))
+                    if route_supports_auto_load(
+                        terminal_references.get(_positive_int(r.get("id_terminal_origin"))),
+                        terminal_references.get(_positive_int(r.get("id_terminal_destination"))),
                     )
                 ]
                 if not ranked:
                     await interaction.followup.send(
                         f"No auto-load-capable routes found for '{commodity_display}' right now."
+                    )
+                    return
+            if system_value is not None:
+                ranked = [
+                    r for r in ranked
+                    if route_in_system(
+                        terminal_references.get(_positive_int(r.get("id_terminal_origin"))),
+                        terminal_references.get(_positive_int(r.get("id_terminal_destination"))),
+                        system_value,
+                    )
+                ]
+                if not ranked:
+                    await interaction.followup.send(
+                        f"No routes confirmed entirely within {system_value} found for '{commodity_display}' right now."
                     )
                     return
             health_rows = await self.bot.db.get_terminal_data_health_by_ids(route_terminal_ids)
@@ -428,11 +454,28 @@ class Prices(commands.Cog):
         if auto_load_only:
             routes = [
                 route for route in routes
-                if terminal_supports_auto_load(fallback_references.get(route.buy_terminal_id))
+                if route_supports_auto_load(
+                    fallback_references.get(route.buy_terminal_id),
+                    fallback_references.get(route.sell_terminal_id),
+                )
             ]
             if not routes:
                 await interaction.followup.send(
                     f"No auto-load-capable routes found for '{commodity}' right now."
+                )
+                return
+        if system_value is not None:
+            routes = [
+                route for route in routes
+                if route_in_system(
+                    fallback_references.get(route.buy_terminal_id),
+                    fallback_references.get(route.sell_terminal_id),
+                    system_value,
+                )
+            ]
+            if not routes:
+                await interaction.followup.send(
+                    f"No routes confirmed entirely within {system_value} found for '{commodity}' right now."
                 )
                 return
         route_health_rows = await self.bot.db.get_terminal_data_health_by_ids(route_terminal_ids)
@@ -556,9 +599,11 @@ class Prices(commands.Cog):
         ship="Optional: use a specific ship instead of your saved default",
         budget="Optional maximum aUEC to invest in the cargo",
         space_only="Exclude surface terminals; require both ends to be confirmed space stations",
-        auto_load_only="Only show loads where the origin terminal offers UEX's auto-load at purchase",
+        auto_load_only="Only show loads where both the origin and destination terminal offer UEX's auto-load",
+        system="Optional: require both ends of the load to be in this star system",
     )
     @app_commands.rename(space_only="space-only", auto_load_only="auto-load-only")
+    @app_commands.choices(system=SYSTEM_CHOICES)
     @app_commands.autocomplete(ship=ship_name_autocomplete)
     async def mixed_routes(
         self,
@@ -567,8 +612,10 @@ class Prices(commands.Cog):
         budget: app_commands.Range[float, 1, 1_000_000_000] | None = None,
         space_only: bool = False,
         auto_load_only: bool = False,
+        system: app_commands.Choice[str] | None = None,
     ) -> None:
         await interaction.response.defer()
+        system_value = system.value if system else None
 
         ship_query = ship or await self.bot.db.get_default_ship(interaction.user.id)
         if not ship_query:
@@ -620,15 +667,17 @@ class Prices(commands.Cog):
             space_only=space_only,
             capital_access_only=capital_access_only,
             auto_load_only=auto_load_only,
+            system=system_value,
         )
         if not routes:
             budget_note = " within that budget" if budget is not None else ""
             safety_note = " using confirmed space stations only" if space_only else ""
             access_note = " with confirmed capital-ship cargo access" if capital_access_only else ""
             auto_load_note = " with auto-load at the origin" if auto_load_only else ""
+            system_note = f" entirely within {system_value}" if system_value else ""
             await interaction.followup.send(
                 f"No two- or three-commodity loads fit **{ship_vehicle.get('name', ship_query)}**"
-                f"{budget_note}{safety_note}{access_note}{auto_load_note} right now."
+                f"{budget_note}{safety_note}{access_note}{auto_load_note}{system_note} right now."
             )
             return
 

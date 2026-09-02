@@ -172,13 +172,52 @@ def test_auto_load_only_excludes_a_route_when_the_origin_lacks_auto_load():
     assert build_mixed_routes(rows, ship_capacity_scu=10, auto_load_only=True) == []
 
 
-def test_auto_load_only_checks_the_origin_not_the_destination():
-    """Auto-load is a purchase-time feature - a destination (sell) terminal without it is
-    irrelevant, the same way /best-route and /top-routes only ever check the origin."""
+def test_auto_load_only_requires_both_the_origin_and_destination():
+    """Per user direction, auto-load-only requires BOTH ends of a route, not just the
+    origin - is_auto_load is a property of the terminal itself, not documented as
+    specific to buying or selling."""
     rows = [
         _row(1, 1, "A", "Origin", price_buy=10, scu_buy=2, is_auto_load=1),
         _row(1, 2, "A", "Destination", price_sell=20, scu_sell=2, is_auto_load=0),
         _row(2, 1, "B", "Origin", price_buy=10, scu_buy=2, is_auto_load=1),
         _row(2, 2, "B", "Destination", price_sell=20, scu_sell=2, is_auto_load=0),
     ]
+    assert build_mixed_routes(rows, ship_capacity_scu=10)
+    assert build_mixed_routes(rows, ship_capacity_scu=10, auto_load_only=True) == []
+
+
+def test_auto_load_only_keeps_a_route_confirmed_at_both_ends():
+    rows = [
+        _row(1, 1, "A", "Origin", price_buy=10, scu_buy=2, is_auto_load=1),
+        _row(1, 2, "A", "Destination", price_sell=20, scu_sell=2, is_auto_load=1),
+        _row(2, 1, "B", "Origin", price_buy=10, scu_buy=2, is_auto_load=1),
+        _row(2, 2, "B", "Destination", price_sell=20, scu_sell=2, is_auto_load=1),
+    ]
     assert build_mixed_routes(rows, ship_capacity_scu=10, auto_load_only=True)
+
+
+def test_system_filter_requires_both_ends_in_the_named_system():
+    """Unlike auto-load-only, a system filter must reject a route where only one end is
+    in the requested system - crossing systems defeats the point of asking to 'stay in
+    Pyro'. Filtering the shared row pool before pairing (not a post-pairing check) should
+    already guarantee this - a route can never mix an in-system origin with an
+    out-of-system destination if the destination was never in the eligible pool at all."""
+    rows = [
+        _row(1, 1, "A", "Pyro Origin", price_buy=10, scu_buy=2, star_system_name="Pyro"),
+        _row(1, 2, "A", "Stanton Destination", price_sell=20, scu_sell=2, star_system_name="Stanton"),
+        _row(2, 1, "B", "Pyro Origin", price_buy=10, scu_buy=2, star_system_name="Pyro"),
+        _row(2, 2, "B", "Stanton Destination", price_sell=20, scu_sell=2, star_system_name="Stanton"),
+    ]
+    assert build_mixed_routes(rows, ship_capacity_scu=10)
+    assert build_mixed_routes(rows, ship_capacity_scu=10, system="Pyro") == []
+    assert build_mixed_routes(rows, ship_capacity_scu=10, system="Stanton") == []
+
+
+def test_system_filter_keeps_a_route_confirmed_in_system_at_both_ends():
+    rows = [
+        _row(1, 1, "A", "Pyro Origin", price_buy=10, scu_buy=2, star_system_name="Pyro"),
+        _row(1, 2, "A", "Pyro Destination", price_sell=20, scu_sell=2, star_system_name="Pyro"),
+        _row(2, 1, "B", "Pyro Origin", price_buy=10, scu_buy=2, star_system_name="Pyro"),
+        _row(2, 2, "B", "Pyro Destination", price_sell=20, scu_sell=2, star_system_name="Pyro"),
+    ]
+    assert build_mixed_routes(rows, ship_capacity_scu=10, system="Pyro")

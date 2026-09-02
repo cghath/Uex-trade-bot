@@ -9,7 +9,12 @@ from cryptography.fernet import Fernet
 from bot.db.database import Database
 from bot.uex.data_health import classify_terminal_health, format_health_note
 from bot.uex.supply_demand import analyze_terminal_market_history
-from bot.uex.practical_routes import route_practical_notes, terminal_supports_auto_load
+from bot.uex.practical_routes import (
+    route_in_system,
+    route_practical_notes,
+    terminal_in_system,
+    terminal_supports_auto_load,
+)
 from bot.cogs.intelligence_brief import _format_cross_system_note, _format_market_shifts
 from bot.uex.commodity_risk import (
     commodity_risk_labels,
@@ -351,6 +356,20 @@ def test_terminal_supports_auto_load_is_distinct_from_loading_dock_and_fails_clo
     assert terminal_supports_auto_load({"has_loading_dock": 1}) is False
     assert terminal_supports_auto_load({}) is False
     assert terminal_supports_auto_load(None) is False
+
+
+def test_terminal_and_route_in_system_fail_closed_and_require_both_ends():
+    assert terminal_in_system({"star_system_name": "Pyro"}, "Pyro") is True
+    assert terminal_in_system({"star_system_name": "Stanton"}, "Pyro") is False
+    assert terminal_in_system({}, "Pyro") is False
+    assert terminal_in_system(None, "Pyro") is False
+
+    pyro = {"star_system_name": "Pyro"}
+    stanton = {"star_system_name": "Stanton"}
+    assert route_in_system(pyro, pyro, "Pyro") is True
+    assert route_in_system(pyro, stanton, "Pyro") is False  # crosses systems
+    assert route_in_system(pyro, None, "Pyro") is False  # unknown destination fails closed
+    assert route_in_system(pyro, stanton, None) is True  # no filter requested
 
 
 def test_commodity_risk_labels_are_specific_and_do_not_overstate_illegality():

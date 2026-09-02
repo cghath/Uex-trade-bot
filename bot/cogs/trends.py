@@ -25,13 +25,13 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
-from bot.cogs.prices import _add_chunked_fields, commodity_name_autocomplete
+from bot.cogs.prices import SYSTEM_CHOICES, _add_chunked_fields, commodity_name_autocomplete
 from bot.cogs.ships import ship_name_autocomplete
 from bot.uex.charts import render_price_history_chart
 from bot.uex.exceptions import UexApiError, describe_uex_api_error
 from bot.uex.data_health import classify_terminal_health, format_health_note
 from bot.uex.route_confidence import compute_route_confidence
-from bot.uex.practical_routes import route_practical_notes, terminal_supports_auto_load
+from bot.uex.practical_routes import route_in_system, route_practical_notes, route_supports_auto_load
 from bot.uex.commodity_risk import format_commodity_risk
 from bot.uex.ships import estimate_route_cargo, resolve_ship
 from bot.uex.status import build_status_lookup, resolve_status_label
@@ -301,6 +301,7 @@ class Trends(commands.Cog):
         footer_note: str,
         log_label: str,
         auto_load_only: bool = False,
+        system: str | None = None,
     ) -> None:
         await interaction.response.defer()
 
@@ -324,11 +325,28 @@ class Trends(commands.Cog):
         if auto_load_only:
             entries = [
                 route for route in entries
-                if terminal_supports_auto_load(terminal_references.get(route.origin_terminal_id))
+                if route_supports_auto_load(
+                    terminal_references.get(route.origin_terminal_id),
+                    terminal_references.get(route.destination_terminal_id),
+                )
             ]
             if not entries:
                 await interaction.followup.send(
                     "No auto-load-capable routes found right now - try again once more route data has been collected."
+                )
+                return
+        if system is not None:
+            entries = [
+                route for route in entries
+                if route_in_system(
+                    terminal_references.get(route.origin_terminal_id),
+                    terminal_references.get(route.destination_terminal_id),
+                    system,
+                )
+            ]
+            if not entries:
+                await interaction.followup.send(
+                    f"No routes confirmed entirely within {system} found right now."
                 )
                 return
         health_rows = await self.bot.db.get_terminal_data_health_by_ids(terminal_ids)
@@ -402,9 +420,11 @@ class Trends(commands.Cog):
     @app_commands.describe(
         ship="Optional: check cargo/profit for a specific ship instead of your default (/set-default-ship)",
         strict="Require live stock at the origin and live demand at the destination (safer).",
-        auto_load_only="Only show routes where the origin terminal offers UEX's auto-load at purchase",
+        auto_load_only="Only show routes where both the origin and destination terminal offer UEX's auto-load",
+        system="Optional: require both ends of the route to be in this star system",
     )
     @app_commands.rename(auto_load_only="auto-load-only")
+    @app_commands.choices(system=SYSTEM_CHOICES)
     @app_commands.autocomplete(ship=ship_name_autocomplete)
     async def top_routes(
         self,
@@ -412,6 +432,7 @@ class Trends(commands.Cog):
         strict: bool = False,
         ship: str | None = None,
         auto_load_only: bool = False,
+        system: app_commands.Choice[str] | None = None,
     ) -> None:
         if strict:
             async with self._top_in_stock_routes_lock:
@@ -447,6 +468,7 @@ class Trends(commands.Cog):
             footer_note=footer_note,
             log_label="/top-routes",
             auto_load_only=auto_load_only,
+            system=system.value if system else None,
         )
 
     # -- /movers: single bulk call, computed on demand -----------------------

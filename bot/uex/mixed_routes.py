@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import math
 from typing import Any
 
+from bot.uex.practical_routes import terminal_in_system, terminal_supports_auto_load
 from bot.uex.supply_demand import has_sell_side_demand
 
 
@@ -53,6 +54,7 @@ def build_mixed_routes(
     space_only: bool = False,
     capital_access_only: bool = False,
     auto_load_only: bool = False,
+    system: str | None = None,
 ) -> list[MixedRoute]:
     """Return profitable same-origin/same-destination mixed loads.
 
@@ -61,9 +63,11 @@ def build_mixed_routes(
     those are actionable at commodity kiosks. A result must contain at least two commodities;
     if one commodity can fill the ship by itself, it is a normal /best-route candidate instead.
 
-    ``auto_load_only`` only applies to origins (buy side) - like /best-route and /top-routes,
-    it's the purchase-time "load onto my stored ship" feature, not something a sell-side
-    destination has any bearing on.
+    ``auto_load_only`` and ``system`` (e.g. 'Stanton', 'Pyro', 'Nyx') both require BOTH
+    ends of a route to satisfy them - each is applied to the whole shared row pool
+    *before* origins/destinations are split out of it, so every candidate on both sides
+    is already confirmed, and a route built from this filtered pool can never pair a
+    passing origin with a failing destination.
     """
     capacity = math.floor(float(ship_capacity_scu or 0))
     if capacity <= 0 or limit <= 0 or max_commodities < 2:
@@ -74,11 +78,12 @@ def build_mixed_routes(
         r for r in market_rows
         if (not space_only or is_space_terminal(r))
         and (not capital_access_only or supports_capital_cargo_access(r))
+        and (system is None or terminal_in_system(r, system))
+        and (not auto_load_only or terminal_supports_auto_load(r))
     ]
     origins = [
         r for r in eligible_rows
         if _positive(r.get("price_buy")) and _positive(r.get("scu_buy"))
-        and (not auto_load_only or bool(r.get("is_auto_load")))
     ]
     destinations = [
         r for r in eligible_rows
