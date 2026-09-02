@@ -162,6 +162,7 @@ def allocate_pair_cargo(
     capacity: float,
     budget: float,
     max_commodities: int,
+    min_commodities: int = 1,
 ) -> list[MixedCargoItem]:
     """Load commodities for one origin/destination pair, under stock, demand, ship
     capacity, and budget limits, keeping whichever of two greedy orderings earns more.
@@ -172,12 +173,24 @@ def allocate_pair_cargo(
     the same budget far more completely (concrete case: buy 90/sell 140 vs buy 10/sell 19,
     budget 100, capacity 10 - per-unit-first nets 59 profit; buying only the cheaper
     commodity nets 90 with the same inputs). Also trying profit-*per-aUEC-invested* order
-    catches this without a full knapsack search over commodity subsets. Ties keep today's
-    per-unit-first result.
+    catches this without a full knapsack search over commodity subsets.
+
+    ``min_commodities`` matters because the two orderings don't just reach different
+    profit totals, they can reach a different *number* of commodities loaded: the
+    efficiency ordering above floods all 10 capacity/100 budget into the cheap commodity
+    alone (1 item, profit 90), while the margin ordering spreads across both (2 items,
+    profit 59) - picking purely by profit would silently drop a caller's "at least N
+    commodities" requirement (build_mixed_routes needs 2; a single commodity that fills
+    the ship is /best-route's job, not a mixed load). An ordering that doesn't reach
+    min_commodities is never preferred over one that does, regardless of its profit.
+    Ties keep today's per-unit-first result.
     """
     by_margin = _greedy_fill(pairs, capacity=capacity, budget=budget, max_commodities=max_commodities, key=_profit_per_unit)
     by_efficiency = _greedy_fill(pairs, capacity=capacity, budget=budget, max_commodities=max_commodities, key=_profit_per_auec)
-    return max(by_margin, by_efficiency, key=lambda cargo: sum(item.profit for item in cargo))
+    qualifying = [cargo for cargo in (by_margin, by_efficiency) if len(cargo) >= min_commodities]
+    if qualifying:
+        return max(qualifying, key=lambda cargo: sum(item.profit for item in cargo))
+    return by_margin
 
 
 def build_mixed_routes(
@@ -220,7 +233,9 @@ def build_mixed_routes(
 
     routes: list[MixedRoute] = []
     for (origin_id, destination_id), pairs in opportunities.items():
-        cargo = allocate_pair_cargo(pairs, capacity=capacity, budget=capital, max_commodities=max_commodities)
+        cargo = allocate_pair_cargo(
+            pairs, capacity=capacity, budget=capital, max_commodities=max_commodities, min_commodities=2
+        )
         if len(cargo) < 2:
             continue
         investment = sum(item.investment for item in cargo)

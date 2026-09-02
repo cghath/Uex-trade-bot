@@ -74,6 +74,24 @@ def test_allocate_pair_cargo_prefers_efficiency_over_raw_margin_when_budget_bind
     assert sum(item.profit for item in cargo) == 90
 
 
+def test_build_mixed_routes_never_drops_a_valid_load_for_a_higher_profit_single_item():
+    """Regression: picking allocate_pair_cargo's ordering purely by total profit (see the
+    test above) can pick a 1-item allocation over a 2-item one with lower profit - fine
+    for a single leg of a multi-stop chain, but /mixed-routes requires at least 2
+    commodities, so that same A/B data must still produce the 2-item (A+B, profit 59)
+    load here, not disappear just because the 1-item (B-only, profit 90) allocation
+    scores higher and doesn't meet the 2-commodity minimum."""
+    rows = [
+        _row(1, 1, "A", "Origin", price_buy=90, scu_buy=1000),
+        _row(1, 2, "A", "Destination", price_sell=140, scu_sell=1000),
+        _row(2, 1, "B", "Origin", price_buy=10, scu_buy=1000),
+        _row(2, 2, "B", "Destination", price_sell=19, scu_sell=1000),
+    ]
+    (route,) = build_mixed_routes(rows, ship_capacity_scu=10, budget=100)
+    assert [item.commodity_name for item in route.cargo] == ["A", "B"]
+    assert route.profit == 59
+
+
 def test_routes_rank_by_ship_adjusted_profit_and_return_only_five():
     rows = []
     for destination_id in range(2, 9):

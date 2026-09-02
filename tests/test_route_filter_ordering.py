@@ -103,6 +103,63 @@ def test_best_route_fallback_auto_load_filter_finds_a_lower_ranked_route(tmp_pat
     asyncio.run(run())
 
 
+def test_best_route_fallback_pool_is_not_capped_at_a_fixed_size(tmp_path):
+    """Regression: the fallback's first fix widened the candidate pool from
+    MAX_FIELD_ROWS (5) to a fixed ROUTE_FILTER_CANDIDATE_POOL (25) before filtering -
+    better, but still a cap. A commodity traded at more than 25 terminals (real on live
+    UEX data for dozens of commodities) could still have its only auto-load-capable pair
+    excluded before the filter ever ran, since best_routes' own `limit` caps which
+    buy-side terminals get considered at all, not just how many final routes come back.
+    30 decoy buy terminals (prices 1-30, cheaper than the auto-load buy terminal at 31)
+    push it past any fixed cap on the buy side specifically."""
+    async def run():
+        db = Database(tmp_path / "best_route_wide.sqlite3", Fernet(Fernet.generate_key()))
+        await db.init()
+        terminal_refs = [{"id": 7, "name": "BA", "is_auto_load": True}, {"id": 8, "name": "SA", "is_auto_load": True}]
+        terminal_refs += [{"id": 100 + i, "name": f"Decoy{i}", "is_auto_load": False} for i in range(30)]
+        terminal_refs += [{"id": 200, "name": "DecoySell", "is_auto_load": False}]
+        await db.upsert_terminal_reference(terminal_refs)
+
+        rows = [
+            {"id_terminal": 100 + i, "terminal_name": f"Decoy{i}", "id_commodity": 1, "commodity_name": "Cobalt",
+             "price_buy": i + 1, "price_sell": 0, "scu_buy": 100, "scu_sell": 0, "status_buy": 1, "status_sell": None}
+            for i in range(30)
+        ]
+        rows.append({"id_terminal": 200, "terminal_name": "DecoySell", "id_commodity": 1, "commodity_name": "Cobalt",
+                      "price_buy": 0, "price_sell": 1000, "scu_buy": 0, "scu_sell": 100, "status_buy": None, "status_sell": 1})
+        rows.append({"id_terminal": 7, "terminal_name": "BA", "id_commodity": 1, "commodity_name": "Cobalt",
+                     "price_buy": 31, "price_sell": 0, "scu_buy": 100, "scu_sell": 0, "status_buy": 1, "status_sell": None})
+        rows.append({"id_terminal": 8, "terminal_name": "SA", "id_commodity": 1, "commodity_name": "Cobalt",
+                     "price_buy": 0, "price_sell": 50, "scu_buy": 0, "scu_sell": 100, "status_buy": None, "status_sell": 1})
+
+        client = UexClient(app_token="test", base_url="https://uex.test")
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(transport=_catch_all_transport(rows))
+
+        bot = type("FakeBot", (), {})()
+        bot.db = db
+        bot.uex = client
+        cog = Prices.__new__(Prices)
+        cog.bot = bot
+        interaction = _FakeInteraction(111)
+
+        try:
+            await cog.best_route.callback(cog, interaction, commodity="Cobalt", auto_load_only=True)
+
+            assert interaction.followup.sent, "expected at least one followup"
+            _, kwargs = interaction.followup.sent[0]
+            embed = kwargs.get("embed")
+            assert embed is not None, f"expected an embed response, got: {interaction.followup.sent}"
+            field_names = " ".join(f.name for f in embed.fields)
+            assert "BA" in field_names and "SA" in field_names, (
+                f"expected the auto-load-capable BA->SA route in the response, got fields: {field_names}"
+            )
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
 def test_top_routes_auto_load_filter_finds_a_lower_scored_route(tmp_path):
     """10 decoy entries (score 91-100, none auto-load-capable) outrank the one entry that
     IS auto-load-capable at both ends (score 50). This directly injects the full 11-entry

@@ -23,10 +23,6 @@ from bot.uex.multi_stop_routes import build_multi_stop_routes
 logger = logging.getLogger("uexbot.prices")
 
 MAX_FIELD_ROWS = 5
-# Wider than MAX_FIELD_ROWS on purpose: /best-route's fallback ranks then filters by
-# auto-load-only/system, and filtering only the top MAX_FIELD_ROWS by profit can discard
-# every route that would've passed the filter just because none were in that top 5.
-ROUTE_FILTER_CANDIDATE_POOL = 25
 
 # Confirmed live via UEX /terminals: exactly these three values exist for star_system_name.
 SYSTEM_CHOICES = [
@@ -457,9 +453,14 @@ class Prices(commands.Cog):
             return
 
         # Fallback: derive routes ourselves from raw price rows (no distance data available).
-        # Rank a wider pool than MAX_FIELD_ROWS before filtering (see
-        # ROUTE_FILTER_CANDIDATE_POOL) - filter first, slice to MAX_FIELD_ROWS after.
-        routes = best_routes(rows, limit=ROUTE_FILTER_CANDIDATE_POOL)
+        # best_routes' own `limit` caps BOTH how many buy/sell-side terminals get
+        # cross-joined AND how many final routes it returns - a fixed constant here
+        # (previously 25) still silently excludes any commodity traded at more terminals
+        # than that before the filter ever runs. len(rows)**2 is a real upper bound on
+        # possible profitable pairs (each row can be at most one buy AND one sell
+        # candidate), so it can never truncate anything - filter the true full list,
+        # slice to MAX_FIELD_ROWS after.
+        routes = best_routes(rows, limit=max(len(rows), 1) ** 2)
         if not routes:
             await interaction.followup.send(f"No profitable buy/sell pair found for '{commodity}' right now.")
             return
@@ -820,21 +821,8 @@ class Prices(commands.Cog):
             if capital_access_only:
                 footer += " · capital access confirmed at both ends"
             route_embed.set_footer(text=footer)
-            # Sent one route per message, not batched like /mixed-routes: a multi-leg
-            # route's per-leg cargo/warning fields can push a single embed close to
-            # Discord's combined 6,000-character-per-message embed limit on their own,
-            # and bundling up to 5 of them (as one message with multiple embeds) hit that
-            # limit in testing - with nothing catching the send failure, Discord never
-            # got a followup at all and the interaction looked permanently "thinking."
-            try:
-                await interaction.followup.send(embed=route_embed)
-            except discord.HTTPException:
-                fallback = (
-                    f"**#{index} {path_label}**\n"
-                    + "\n".join(summary_lines)
-                    + "\n⚠️ Full leg-by-leg details omitted - too large for one Discord message."
-                )
-                await interaction.followup.send(content=fallback)
+            embeds.append(route_embed)
+        await interaction.followup.send(embeds=embeds)
 
     @app_commands.command(
         name="multi-stop-route",
@@ -1063,8 +1051,21 @@ class Prices(commands.Cog):
             if capital_access_only:
                 footer += " · capital access confirmed at every stop"
             route_embed.set_footer(text=footer)
-            embeds.append(route_embed)
-        await interaction.followup.send(embeds=embeds)
+            # Sent one route per message, not batched like /mixed-routes: a multi-leg
+            # route's per-leg cargo/warning fields can push a single embed close to
+            # Discord's combined 6,000-character-per-message embed limit on their own,
+            # and bundling up to 5 of them (as one message with multiple embeds) hit that
+            # limit in testing - with nothing catching the send failure, Discord never
+            # got a followup at all and the interaction looked permanently "thinking."
+            try:
+                await interaction.followup.send(embed=route_embed)
+            except discord.HTTPException:
+                fallback = (
+                    f"**#{index} {path_label}**\n"
+                    + "\n".join(summary_lines)
+                    + "\n⚠️ Full leg-by-leg details omitted - too large for one Discord message."
+                )
+                await interaction.followup.send(content=fallback)
 
 
 async def setup(bot: commands.Bot) -> None:

@@ -566,6 +566,72 @@ they're in sync).
     `test_builds_a_multi_leg_chain_and_sums_profit_across_legs` test's investment/
     revenue assertions were also corrected (1000/1900, not 1500/2400) since it had been
     asserting the bug.
+38. **An edit tool's anchor text matched the wrong command - undetected by the full test
+    suite and a live deploy, caught only when the user re-checked the deployed code.**
+    Fixing `/multi-stop-route`'s embed-size bug (entry 36) used a Python-level find/
+    replace anchored on the tail end of its embed-building loop plus the next
+    `@app_commands.command` decorator for uniqueness. `/mixed-routes` (defined
+    immediately before `/multi-stop-route` in `bot/cogs/prices.py`) ends with
+    structurally identical boilerplate - `route_embed.set_footer(...)` /
+    `embeds.append(route_embed)` / `await interaction.followup.send(embeds=embeds)` -
+    immediately followed by that same next-command decorator, so the anchor matched
+    *there* instead. Net effect: `/mixed-routes` gained dead code in an unreachable
+    `except` branch referencing `path_label`/`summary_lines` - variables that only exist
+    in `/multi-stop-route`'s scope, so hitting that branch would have raised `NameError`
+    instead of being handled - while `/multi-stop-route` kept its original `embeds =
+    []` line removed (from a separate, correctly-targeted edit in the same session) but
+    never gained a replacement, so `embeds.append(route_embed)` referenced a name that
+    no longer existed anywhere in the function: guaranteed `NameError` on every call
+    with at least one result. Entry 36's own commit, the entry 37 audit round on top of
+    it, the full 205-test suite, and a live Pi deploy all passed clean, because nothing
+    exercises either command's actual Discord-send call shape - every test up to this
+    point checked route-*building* logic, never what gets passed to
+    `interaction.followup.send`. Fixed by moving the try/except block to
+    `/multi-stop-route`'s actual ending and restoring `/mixed-routes`' original batched
+    send verbatim. Added `tests/test_route_send_shape.py` - two end-to-end cog tests
+    (same `httpx.MockTransport` + fake `Interaction` pattern) asserting `/multi-stop-
+    route` sends one `embed=` followup per route (never a batched `embeds=` list) and
+    `/mixed-routes` still sends exactly one batched `embeds=` followup. Confirmed these
+    actually catch the regression, not just coincidentally pass, by temporarily
+    reintroducing the broken batched code and watching the multi-stop test fail with the
+    exact `NameError` this incident produced, before restoring the fix. 207 tests
+    passing (2 new). Lesson: when an Edit tool's match could plausibly land in more than
+    one structurally-similar location, verify the actual line numbers/surrounding
+    content after the edit lands, every time - don't trust "the tool reported success"
+    as proof it edited the intended target.
+39. **Two of entry 37's own fixes were themselves incomplete - both confirmed by
+    reproducing them directly, not by trusting the report that found them:**
+    - `allocate_pair_cargo`'s two-ordering fix picks whichever ordering earns more total
+      profit, but never checked how many commodities that ordering actually loads. For
+      the exact A/B counterexample from entry 37 (buy 90/sell 140 vs buy 10/sell 19,
+      budget 100, capacity 10), the higher-profit efficiency ordering loads only B (1
+      item, profit 90) - which beats margin-first's A+B (2 items, profit 59) on raw
+      profit, but `build_mixed_routes` requires 2 commodities, so the *whole route*
+      silently vanished (`build_mixed_routes(...) == []`) even though a valid 2-commodity
+      load genuinely existed. A single commodity that fills the ship is `/best-route`'s
+      job, not a mixed load's, so preferring pure profit here was wrong. Fixed by adding
+      `min_commodities` (default 1): an ordering that doesn't reach it is never preferred
+      over one that does, regardless of profit; `build_mixed_routes` now passes
+      `min_commodities=2`, `build_multi_stop_routes`'s per-leg calls keep the default (a
+      1-commodity leg is fine there).
+    - `/best-route`'s fallback fix (entry 37) widened the pre-filter candidate pool from
+      `MAX_FIELD_ROWS` (5) to a fixed `ROUTE_FILTER_CANDIDATE_POOL` (25) - real progress,
+      but still a cap, and `best_routes`' own `limit` parameter caps which buy/sell-side
+      *terminals* get cross-joined at all, not just how many final routes come back. A
+      commodity traded at more than 25 terminals on either side could still have its only
+      filter-passing pair excluded before any filter ran - confirmed on the live
+      collected database for 21 Stanton, 23 Pyro, and 9 Nyx commodities. Fixed by passing
+      `max(len(rows), 1) ** 2` instead of a fixed constant - a genuine upper bound on
+      possible profitable pairs (each row can be at most one buy AND one sell candidate),
+      so it can never truncate anything, removing the now-unused
+      `ROUTE_FILTER_CANDIDATE_POOL` constant entirely.
+    Both fixes were reproduced directly before being trusted (a `build_mixed_routes` call
+    returning `[]` for data that should produce a route; a 30-decoy-buy-terminal scenario
+    where the auto-load pair ranks below any fixed cap), and both new tests were
+    confirmed to actually catch their bug - not just pass - by temporarily reverting each
+    fix and watching the corresponding test fail before restoring it, same discipline as
+    entry 38. 209 tests passing (2 new, in `tests/test_mixed_routes.py` and
+    `tests/test_route_filter_ordering.py`).
 
 ## Where to look for what
 
@@ -846,7 +912,7 @@ guessed at.
   branch. Local (PC) and the Pi's databases have been fully merged at least twice now; the
   established practice is to back up both sides before any such merge and pull the Pi's
   backup down to the PC afterward, so nothing valuable lives only on the Pi's disk. The full
-  suite has 205 passing tests. Re-check live service and branch state rather than assuming
+  suite has 209 passing tests. Re-check live service and branch state rather than assuming
   this point-in-time operational note is still current.
 - The data collectors in `bot/cogs/intelligence.py` only pay off once they've been running a
   while - most of the `ROADMAP.md` intelligence backlog depends on accumulated history, so
