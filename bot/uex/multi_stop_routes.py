@@ -95,9 +95,15 @@ def build_multi_stop_routes(
         for key, pairs in opportunities.items()
     }
 
+    # Rank candidate edges assuming unlimited capital, not the caller's actual budget: an
+    # edge that's unaffordable at the start but would become affordable once an earlier
+    # leg's profit compounds the running budget still needs to be *reachable* by the DFS
+    # below - it's excluded from a chain later (correctly) if the real, path-dependent
+    # budget never actually gets there, not pre-excluded here just for looking expensive
+    # up front. The DFS itself still uses the real remaining_budget for every allocation.
     ranked_edges: list[tuple[float, tuple[int, int]]] = []
     for key, pairs in opportunities.items():
-        cargo = allocate_pair_cargo(pairs, capacity=capacity, budget=capital, max_commodities=max_commodities)
+        cargo = allocate_pair_cargo(pairs, capacity=capacity, budget=math.inf, max_commodities=max_commodities)
         if cargo:
             ranked_edges.append((sum(item.profit for item in cargo), key))
     ranked_edges.sort(key=lambda entry: entry[0], reverse=True)
@@ -123,13 +129,24 @@ def build_multi_stop_routes(
     ) -> None:
         nonlocal explored
         if len(legs) >= 2:
-            investment = sum(leg.investment for leg in legs)
+            # Legs are self-funding in sequence (leg N's purchase is capped by the cash
+            # actually on hand after leg N-1 sells - see remaining_budget below), so
+            # summing each leg's own investment/revenue double-counts money recycled
+            # through the chain. The real starting capital required is the deepest cash
+            # deficit reached before enough revenue has come back in to cover it.
+            running_balance = 0.0
+            min_balance = 0.0
+            for leg in legs:
+                running_balance -= leg.investment
+                min_balance = min(min_balance, running_balance)
+                running_balance += leg.revenue
+            starting_capital = -min_balance
             profit = sum(leg.profit for leg in legs)
             routes.append(
                 MultiStopRoute(
                     legs=legs,
-                    investment=investment,
-                    revenue=investment + profit,
+                    investment=starting_capital,
+                    revenue=starting_capital + profit,
                     profit=profit,
                 )
             )

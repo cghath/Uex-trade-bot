@@ -493,6 +493,79 @@ they're in sync).
     outranking any single hop, budget compounding across legs, no terminal ever revisited
     within one chain, a plain 2-terminal hop never appearing as a result, and a system
     filter excluding a chain whose *middle* terminal (not just an endpoint) fails it.
+36. **`/multi-stop-route` silently "stuck thinking" - Discord's combined embed limit, not
+    a hang**: bundling up to 5 multi-leg routes into one message (the same pattern
+    `/mixed-routes` uses) hit Discord's documented combined 6,000-character limit across
+    all embeds in one message, since each multi-stop route's per-leg fields carry 2-3x
+    the content of a single hop. Confirmed via the live Pi's journalctl traceback, not
+    guessed - `discord.HTTPException: 400 ... Embed size exceeds maximum size of 6000`,
+    uncaught, so no followup ever reached Discord and the interaction just looked
+    permanently "thinking." Fixed by sending one embed per route as its own followup
+    message instead of batching, with a try/except `HTTPException` fallback to a short
+    plain-text summary if a single route's embed is still too large on its own. No new
+    tests (a Discord-send-path fix with no existing harness for it, same gap noted for
+    `/mixed-routes` in entry 31); verified against the real traceback and the full suite
+    staying green.
+37. **Route-features audit: 4 more confirmed defects fixed, all independently
+    re-verified against the code before touching anything** (a pasted external review
+    flagged 6 issues total; the embed-size one was entry 36, already fixed by the time
+    the review arrived):
+    - `/best-route` (both branches) and `/top-routes` filtered `auto-load-only`/`system`
+      *after* already ranking-and-truncating to the display size (`MAX_FIELD_ROWS`=5, or
+      `TOP_SCORED_ROUTES_KEEP`=10) - a route that would pass the filter but wasn't in
+      that top N was silently unreachable. `/top-routes`' version was one layer deeper
+      and more serious: the 45-minute `refresh_trending()` background loop itself
+      discarded ~67 of ~77 candidates by score alone, for every user, before any filter
+      could ever run - no reordering inside the command could recover what the loop had
+      already thrown away. Fixed by filtering the FULL candidate list first in both
+      `/best-route` branches (widening the fallback branch's ranked pool via a new
+      `ROUTE_FILTER_CANDIDATE_POOL`=25 constant before slicing to `MAX_FIELD_ROWS`), and
+      by having `refresh_trending()` store every candidate it computes instead of
+      pre-truncating, moving `TOP_SCORED_ROUTES_KEEP`/`TOP_IN_STOCK_ROUTES_KEEP` to a
+      *display* cap applied in `_send_ranked_routes` after filtering (new
+      `display_limit` parameter, threaded from `/top-routes`' `strict` branch).
+    - `allocate_pair_cargo` (shared by `/mixed-routes` and `/multi-stop-route`, extracted
+      in entry 35) picks by highest profit-*per-unit* first, which under a binding
+      budget can pick substantially worse cargo than the same budget could otherwise
+      earn - concrete counterexample used to build the regression test: buy 90/sell 140
+      vs buy 10/sell 19, budget 100, capacity 10; profit-per-unit-first nets 59, buying
+      only the cheaper commodity nets 90 with the same inputs. This is pre-existing
+      `/mixed-routes` behavior, not something entry 35 introduced - multi-stop just
+      calls the same allocator many more times per query, making the ceiling more
+      consequential. Fixed (not a full knapsack solver over commodity subsets - a bigger
+      change to a function both commands depend on) by also trying profit-*per-aUEC-
+      invested* order and keeping whichever ordering earns more; ties keep the original
+      per-unit-first result.
+    - `build_multi_stop_routes`'s candidate-terminal ranking pass used the caller's
+      *original* budget, so an edge unaffordable at the start but reachable once an
+      earlier leg's profit compounds the budget could never enter the candidate graph at
+      all, regardless of leg order. Fixed by ranking candidates assuming unlimited
+      capital (`budget=math.inf`) - the DFS search itself already threads the real,
+      path-dependent `remaining_budget` through every allocation and did not need to
+      change; only which terminals are *eligible* to be searched did.
+    - `MultiStopRoute.investment`/`.revenue`/`.roi_pct` summed each leg's own
+      investment/revenue independently, double-counting money recycled through the
+      chain - worked example: start with 1000, leg 1 nets 500 profit (1500 on hand), leg
+      2 invests 1400 of that for 700 more profit; shown before: investment 2400, ROI
+      50%. Real numbers: 1000 needed up front, ends at 2200, true ROI 120%. Fixed with a
+      running-balance simulation over the legs (deepest cash deficit before enough
+      revenue has come back to cover it = real starting capital required); `profit` and
+      the `roi_pct` formula itself were already correct and needed no change.
+    205 tests passing (4 new): a concrete `allocate_pair_cargo` counterexample; a
+    multi-stop chain unreachable under the old original-budget-only candidate ranking,
+    reachable once ranking assumes unlimited capital; and two new end-to-end cog tests
+    (`tests/test_route_filter_ordering.py`, following the existing `httpx.MockTransport`
+    + hand-built fake `Interaction` pattern from `tests/test_trades.py`) proving a
+    lower-ranked/lower-scored but filter-passing route is still returned for
+    `/best-route` and `/top-routes`. The `/top-routes` one injects the full candidate
+    pool directly rather than running the real `refresh_trending()` loop (impractical
+    here - needs live UEX calls across every tradeable commodity), so it proves
+    `_send_ranked_routes` filters before its display cap, not that `refresh_trending`'s
+    own one-line storage-limit change behaves correctly - that change is simple enough
+    to be verified by reading it. The existing
+    `test_builds_a_multi_leg_chain_and_sums_profit_across_legs` test's investment/
+    revenue assertions were also corrected (1000/1900, not 1500/2400) since it had been
+    asserting the bug.
 
 ## Where to look for what
 
@@ -773,7 +846,7 @@ guessed at.
   branch. Local (PC) and the Pi's databases have been fully merged at least twice now; the
   established practice is to back up both sides before any such merge and pull the Pi's
   backup down to the PC afterward, so nothing valuable lives only on the Pi's disk. The full
-  suite has 201 passing tests. Re-check live service and branch state rather than assuming
+  suite has 205 passing tests. Re-check live service and branch state rather than assuming
   this point-in-time operational note is still current.
 - The data collectors in `bot/cogs/intelligence.py` only pay off once they've been running a
   while - most of the `ROADMAP.md` intelligence backlog depends on accumulated history, so

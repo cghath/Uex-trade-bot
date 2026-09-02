@@ -267,7 +267,14 @@ class Trends(commands.Cog):
             self._trending_updated_at = datetime.now(timezone.utc)
         logger.info("Trending refresh complete: %d commodities ranked", len(ranked))
 
-        ranked_routes = rank_top_scored_routes(route_candidates, limit=TOP_SCORED_ROUTES_KEEP)
+        # Keep every candidate the loop already computed, not just the top
+        # TOP_SCORED_ROUTES_KEEP by score - a user's auto-load-only/system filter runs
+        # later, at command time, and can only work with what's still here. Discarding
+        # the rest now would make a route that fails on score alone but would pass the
+        # filter unrecoverable, since this refresh cycle's candidates aren't kept
+        # anywhere else. TOP_SCORED_ROUTES_KEEP is applied as a *display* cap instead,
+        # after filtering, in _send_ranked_routes.
+        ranked_routes = rank_top_scored_routes(route_candidates, limit=len(route_candidates))
         async with self._top_scored_routes_lock:
             self._top_scored_routes = ranked_routes
             self._top_scored_routes_updated_at = datetime.now(timezone.utc)
@@ -275,7 +282,7 @@ class Trends(commands.Cog):
             "Top-routes refresh complete: %d candidates, %d kept", len(route_candidates), len(ranked_routes)
         )
 
-        ranked_in_stock_routes = rank_top_scored_routes(in_stock_route_candidates, limit=TOP_IN_STOCK_ROUTES_KEEP)
+        ranked_in_stock_routes = rank_top_scored_routes(in_stock_route_candidates, limit=len(in_stock_route_candidates))
         async with self._top_in_stock_routes_lock:
             self._top_in_stock_routes = ranked_in_stock_routes
             self._top_in_stock_routes_updated_at = datetime.now(timezone.utc)
@@ -300,6 +307,7 @@ class Trends(commands.Cog):
         title: str,
         footer_note: str,
         log_label: str,
+        display_limit: int,
         auto_load_only: bool = False,
         system: str | None = None,
     ) -> None:
@@ -349,6 +357,16 @@ class Trends(commands.Cog):
                     f"No routes confirmed entirely within {system} found right now."
                 )
                 return
+        # Truncate for display only after filtering, not before - the background refresh
+        # loop now keeps every candidate it computed specifically so this filter has a
+        # real pool to work with (see refresh_trending).
+        entries = entries[:display_limit]
+        terminal_ids = [
+            terminal_id
+            for route in entries
+            for terminal_id in (route.origin_terminal_id, route.destination_terminal_id)
+            if terminal_id is not None
+        ]
         health_rows = await self.bot.db.get_terminal_data_health_by_ids(terminal_ids)
         health_notes = {
             terminal_id: note
@@ -467,6 +485,7 @@ class Trends(commands.Cog):
             title=title,
             footer_note=footer_note,
             log_label="/top-routes",
+            display_limit=TOP_IN_STOCK_ROUTES_KEEP if strict else TOP_SCORED_ROUTES_KEEP,
             auto_load_only=auto_load_only,
             system=system.value if system else None,
         )

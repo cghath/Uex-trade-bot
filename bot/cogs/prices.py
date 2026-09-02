@@ -23,6 +23,10 @@ from bot.uex.multi_stop_routes import build_multi_stop_routes
 logger = logging.getLogger("uexbot.prices")
 
 MAX_FIELD_ROWS = 5
+# Wider than MAX_FIELD_ROWS on purpose: /best-route's fallback ranks then filters by
+# auto-load-only/system, and filtering only the top MAX_FIELD_ROWS by profit can discard
+# every route that would've passed the filter just because none were in that top 5.
+ROUTE_FILTER_CANDIDATE_POOL = 25
 
 # Confirmed live via UEX /terminals: exactly these three values exist for star_system_name.
 SYSTEM_CHOICES = [
@@ -283,8 +287,49 @@ class Prices(commands.Cog):
                 logger.info("commodities_routes unavailable for %s, falling back: %s", commodity_display, exc)
 
         if uex_routes:
-            ranked = sorted(uex_routes, key=lambda r: r.get("profit") or 0, reverse=True)[:MAX_FIELD_ROWS]
+            # Filter the FULL candidate list before ranking/truncating to MAX_FIELD_ROWS,
+            # not after - filtering an already-sliced top-5 can throw away every route
+            # that would have passed just because they weren't the top 5 by profit.
             route_terminal_ids = [
+                terminal_id
+                for route in uex_routes
+                for terminal_id in (
+                    _positive_int(route.get("id_terminal_origin")),
+                    _positive_int(route.get("id_terminal_destination")),
+                )
+                if terminal_id is not None
+            ]
+            terminal_references = await self.bot.db.get_terminal_references_by_ids(route_terminal_ids)
+            candidates = uex_routes
+            if auto_load_only:
+                candidates = [
+                    r for r in candidates
+                    if route_supports_auto_load(
+                        terminal_references.get(_positive_int(r.get("id_terminal_origin"))),
+                        terminal_references.get(_positive_int(r.get("id_terminal_destination"))),
+                    )
+                ]
+                if not candidates:
+                    await interaction.followup.send(
+                        f"No auto-load-capable routes found for '{commodity_display}' right now."
+                    )
+                    return
+            if system_value is not None:
+                candidates = [
+                    r for r in candidates
+                    if route_in_system(
+                        terminal_references.get(_positive_int(r.get("id_terminal_origin"))),
+                        terminal_references.get(_positive_int(r.get("id_terminal_destination"))),
+                        system_value,
+                    )
+                ]
+                if not candidates:
+                    await interaction.followup.send(
+                        f"No routes confirmed entirely within {system_value} found for '{commodity_display}' right now."
+                    )
+                    return
+            ranked = sorted(candidates, key=lambda r: r.get("profit") or 0, reverse=True)[:MAX_FIELD_ROWS]
+            ranked_terminal_ids = [
                 terminal_id
                 for route in ranked
                 for terminal_id in (
@@ -293,35 +338,7 @@ class Prices(commands.Cog):
                 )
                 if terminal_id is not None
             ]
-            terminal_references = await self.bot.db.get_terminal_references_by_ids(route_terminal_ids)
-            if auto_load_only:
-                ranked = [
-                    r for r in ranked
-                    if route_supports_auto_load(
-                        terminal_references.get(_positive_int(r.get("id_terminal_origin"))),
-                        terminal_references.get(_positive_int(r.get("id_terminal_destination"))),
-                    )
-                ]
-                if not ranked:
-                    await interaction.followup.send(
-                        f"No auto-load-capable routes found for '{commodity_display}' right now."
-                    )
-                    return
-            if system_value is not None:
-                ranked = [
-                    r for r in ranked
-                    if route_in_system(
-                        terminal_references.get(_positive_int(r.get("id_terminal_origin"))),
-                        terminal_references.get(_positive_int(r.get("id_terminal_destination"))),
-                        system_value,
-                    )
-                ]
-                if not ranked:
-                    await interaction.followup.send(
-                        f"No routes confirmed entirely within {system_value} found for '{commodity_display}' right now."
-                    )
-                    return
-            health_rows = await self.bot.db.get_terminal_data_health_by_ids(route_terminal_ids)
+            health_rows = await self.bot.db.get_terminal_data_health_by_ids(ranked_terminal_ids)
             health_notes = {
                 terminal_id: note
                 for terminal_id, row in health_rows.items()
@@ -440,7 +457,9 @@ class Prices(commands.Cog):
             return
 
         # Fallback: derive routes ourselves from raw price rows (no distance data available).
-        routes = best_routes(rows, limit=MAX_FIELD_ROWS)
+        # Rank a wider pool than MAX_FIELD_ROWS before filtering (see
+        # ROUTE_FILTER_CANDIDATE_POOL) - filter first, slice to MAX_FIELD_ROWS after.
+        routes = best_routes(rows, limit=ROUTE_FILTER_CANDIDATE_POOL)
         if not routes:
             await interaction.followup.send(f"No profitable buy/sell pair found for '{commodity}' right now.")
             return
@@ -479,7 +498,14 @@ class Prices(commands.Cog):
                     f"No routes confirmed entirely within {system_value} found for '{commodity}' right now."
                 )
                 return
-        route_health_rows = await self.bot.db.get_terminal_data_health_by_ids(route_terminal_ids)
+        routes = routes[:MAX_FIELD_ROWS]
+        ranked_terminal_ids = [
+            terminal_id
+            for route in routes
+            for terminal_id in (route.buy_terminal_id, route.sell_terminal_id)
+            if terminal_id is not None
+        ]
+        route_health_rows = await self.bot.db.get_terminal_data_health_by_ids(ranked_terminal_ids)
         health_notes = {
             terminal_id: note
             for terminal_id, row in route_health_rows.items()

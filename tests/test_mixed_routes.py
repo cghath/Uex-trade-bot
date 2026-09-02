@@ -2,6 +2,7 @@
 import discord
 
 from bot.uex.mixed_routes import (
+    allocate_pair_cargo,
     build_mixed_routes,
     is_space_terminal,
     requires_capital_cargo_access,
@@ -54,6 +55,23 @@ def test_budget_is_a_hard_limit_and_requires_two_allocated_commodities():
     (route,) = build_mixed_routes(rows, ship_capacity_scu=10, budget=420)
     assert route.investment <= 420
     assert len(route.cargo) == 2
+
+
+def test_allocate_pair_cargo_prefers_efficiency_over_raw_margin_when_budget_binds():
+    """Greedy-by-per-unit-margin alone can pick badly under a binding budget: A's per-unit
+    margin (50) beats B's (9), but A is so expensive that the budget barely affords 1
+    unit, wasting potential that spending the same budget entirely on cheap-but-lower-
+    margin B would have captured. Trying profit-per-aUEC-invested too (B: 9/10 = 0.9 beats
+    A: 50/90 = ~0.56) and keeping whichever ordering performs better fixes this without a
+    full knapsack search over commodity combinations."""
+    source_a = _row(1, 1, "A", "Origin", price_buy=90, scu_buy=1000)
+    dest_a = _row(1, 2, "A", "Destination", price_sell=140, scu_sell=1000)
+    source_b = _row(2, 1, "B", "Origin", price_buy=10, scu_buy=1000)
+    dest_b = _row(2, 2, "B", "Destination", price_sell=19, scu_sell=1000)
+    pairs = [(source_a, dest_a), (source_b, dest_b)]
+    cargo = allocate_pair_cargo(pairs, capacity=10, budget=100, max_commodities=3)
+    assert [item.commodity_name for item in cargo] == ["B"]
+    assert sum(item.profit for item in cargo) == 90
 
 
 def test_routes_rank_by_ship_adjusted_profit_and_return_only_five():

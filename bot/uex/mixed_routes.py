@@ -98,23 +98,19 @@ def build_pair_opportunities(
     return opportunities
 
 
-def allocate_pair_cargo(
+def _greedy_fill(
     pairs: list[tuple[dict[str, Any], dict[str, Any]]],
     *,
     capacity: float,
     budget: float,
     max_commodities: int,
+    key: Any,
 ) -> list[MixedCargoItem]:
-    """Greedily load commodities (highest profit/SCU first) for one origin/destination
-    pair, under stock, demand, ship capacity, and budget limits.
-
-    Shared by a single mixed-commodity hop (build_mixed_routes) and each leg of a
-    multi-stop chain (bot/uex/multi_stop_routes.py) - the allocation rules are identical
-    either way, only the caller's notion of "one hop" vs "one leg of several" differs.
+    """Greedily load commodities in `key`-descending order, under stock, demand, ship
+    capacity, and budget limits. Shared implementation behind allocate_pair_cargo's two
+    greedy passes.
     """
-    ordered_pairs = sorted(
-        pairs, key=lambda pair: float(pair[1]["price_sell"]) - float(pair[0]["price_buy"]), reverse=True
-    )
+    ordered_pairs = sorted(pairs, key=key, reverse=True)
     remaining_scu = capacity
     remaining_budget = budget
     cargo: list[MixedCargoItem] = []
@@ -149,6 +145,39 @@ def allocate_pair_cargo(
         remaining_scu -= quantity
         remaining_budget -= investment
     return cargo
+
+
+def _profit_per_unit(pair: tuple[dict[str, Any], dict[str, Any]]) -> float:
+    return float(pair[1]["price_sell"]) - float(pair[0]["price_buy"])
+
+
+def _profit_per_auec(pair: tuple[dict[str, Any], dict[str, Any]]) -> float:
+    buy_price = float(pair[0]["price_buy"])
+    return _profit_per_unit(pair) / buy_price if buy_price > 0 else 0.0
+
+
+def allocate_pair_cargo(
+    pairs: list[tuple[dict[str, Any], dict[str, Any]]],
+    *,
+    capacity: float,
+    budget: float,
+    max_commodities: int,
+) -> list[MixedCargoItem]:
+    """Load commodities for one origin/destination pair, under stock, demand, ship
+    capacity, and budget limits, keeping whichever of two greedy orderings earns more.
+
+    Highest profit-*per-unit*-SCU first is the obvious greedy choice, but under a binding
+    budget it can pick badly: an expensive, high-margin commodity that only a token
+    quantity is affordable can crowd out a cheaper, lower-margin one that would have used
+    the same budget far more completely (concrete case: buy 90/sell 140 vs buy 10/sell 19,
+    budget 100, capacity 10 - per-unit-first nets 59 profit; buying only the cheaper
+    commodity nets 90 with the same inputs). Also trying profit-*per-aUEC-invested* order
+    catches this without a full knapsack search over commodity subsets. Ties keep today's
+    per-unit-first result.
+    """
+    by_margin = _greedy_fill(pairs, capacity=capacity, budget=budget, max_commodities=max_commodities, key=_profit_per_unit)
+    by_efficiency = _greedy_fill(pairs, capacity=capacity, budget=budget, max_commodities=max_commodities, key=_profit_per_auec)
+    return max(by_margin, by_efficiency, key=lambda cargo: sum(item.profit for item in cargo))
 
 
 def build_mixed_routes(
