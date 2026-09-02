@@ -794,8 +794,21 @@ class Prices(commands.Cog):
             if capital_access_only:
                 footer += " · capital access confirmed at both ends"
             route_embed.set_footer(text=footer)
-            embeds.append(route_embed)
-        await interaction.followup.send(embeds=embeds)
+            # Sent one route per message, not batched like /mixed-routes: a multi-leg
+            # route's per-leg cargo/warning fields can push a single embed close to
+            # Discord's combined 6,000-character-per-message embed limit on their own,
+            # and bundling up to 5 of them (as one message with multiple embeds) hit that
+            # limit in testing - with nothing catching the send failure, Discord never
+            # got a followup at all and the interaction looked permanently "thinking."
+            try:
+                await interaction.followup.send(embed=route_embed)
+            except discord.HTTPException:
+                fallback = (
+                    f"**#{index} {path_label}**\n"
+                    + "\n".join(summary_lines)
+                    + "\n⚠️ Full leg-by-leg details omitted - too large for one Discord message."
+                )
+                await interaction.followup.send(content=fallback)
 
     @app_commands.command(
         name="multi-stop-route",
@@ -891,7 +904,6 @@ class Prices(commands.Cog):
         terminal_ids = [terminal_id for route in routes for terminal_id in route.stops]
         health_rows = await self.bot.db.get_terminal_data_health_by_ids(terminal_ids)
         status_lookup = await self._get_status_lookup()
-        embeds: list[discord.Embed] = []
         for index, route in enumerate(routes, 1):
             path_label = " → ".join(
                 [route.legs[0].origin_name, *(leg.destination_name for leg in route.legs)]
