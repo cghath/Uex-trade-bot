@@ -647,7 +647,7 @@ class Prices(commands.Cog):
             )
             cargo_lines = [
                 f"• **{item.commodity_name}:** {item.quantity_scu:,.0f} SCU · "
-                f"+{item.profit_per_scu:,.0f}/SCU · **{item.profit:,.0f}**"
+                f"+{item.profit_per_scu:,.0f}/SCU · **{item.profit:,.0f} profit**"
                 for item in route.cargo
             ]
             warnings: list[str] = []

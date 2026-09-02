@@ -413,6 +413,13 @@ they're in sync).
       rendering at all, and building one from scratch for a one-line text addition would
       cost more than the fix itself); verified by tracing the logic by hand and confirming
       the module still imports cleanly with the full suite green.
+32. **`/mixed-routes`' per-commodity cargo line had an unlabeled number**: a user testing
+    the bot flagged confusion over a real, arithmetically-correct example (verified against
+    live UEX prices down to the exact aUEC - nothing was actually wrong) - the last bolded
+    figure on each cargo line is that commodity's *profit* (`item.profit`, i.e. quantity ×
+    profit-per-SCU), but the line never said so, so it read as ambiguous next to the
+    aggregate Investment/Revenue line further down. Added the word "profit" next to it.
+    A reminder that correct math doesn't excuse an unlabeled number in a financial embed.
 
 ## Where to look for what
 
