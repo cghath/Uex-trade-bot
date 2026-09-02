@@ -44,36 +44,22 @@ class MixedRoute:
         return 0.0 if self.investment <= 0 else self.profit / self.investment * 100
 
 
-def build_mixed_routes(
+def build_pair_opportunities(
     market_rows: list[dict[str, Any]],
     *,
-    ship_capacity_scu: float,
-    budget: float | None = None,
-    limit: int = 5,
-    max_commodities: int = 3,
     space_only: bool = False,
     capital_access_only: bool = False,
     auto_load_only: bool = False,
     system: str | None = None,
-) -> list[MixedRoute]:
-    """Return profitable same-origin/same-destination mixed loads.
+) -> dict[tuple[int, int], list[tuple[dict[str, Any], dict[str, Any]]]]:
+    """Group market rows into every profitable (origin_terminal, destination_terminal)
+    pairing, per commodity, after applying the shared route safety filters.
 
-    Cargo is allocated by profit per SCU. Stock, destination demand, ship capacity, and
-    optional investment capital are all hard limits. Whole SCU quantities are used because
-    those are actionable at commodity kiosks. A result must contain at least two commodities;
-    if one commodity can fill the ship by itself, it is a normal /best-route candidate instead.
-
-    ``auto_load_only`` and ``system`` (e.g. 'Stanton', 'Pyro', 'Nyx') both require BOTH
-    ends of a route to satisfy them - each is applied to the whole shared row pool
-    *before* origins/destinations are split out of it, so every candidate on both sides
-    is already confirmed, and a route built from this filtered pool can never pair a
-    passing origin with a failing destination.
+    Filters are applied to the whole row pool before origins/destinations are split out
+    of it, so a result can never pair a passing origin with a failing destination.
+    Shared by a single hop (build_mixed_routes) and every leg of a multi-stop chain
+    (bot/uex/multi_stop_routes.py).
     """
-    capacity = math.floor(float(ship_capacity_scu or 0))
-    if capacity <= 0 or limit <= 0 or max_commodities < 2:
-        return []
-    capital = math.inf if budget is None else max(0.0, float(budget))
-
     eligible_rows = [
         r for r in market_rows
         if (not space_only or is_space_terminal(r))
@@ -109,44 +95,103 @@ def build_mixed_routes(
             if float(destination["price_sell"]) <= float(source["price_buy"]):
                 continue
             opportunities.setdefault((origin_id, destination_id), []).append((source, destination))
+    return opportunities
+
+
+def allocate_pair_cargo(
+    pairs: list[tuple[dict[str, Any], dict[str, Any]]],
+    *,
+    capacity: float,
+    budget: float,
+    max_commodities: int,
+) -> list[MixedCargoItem]:
+    """Greedily load commodities (highest profit/SCU first) for one origin/destination
+    pair, under stock, demand, ship capacity, and budget limits.
+
+    Shared by a single mixed-commodity hop (build_mixed_routes) and each leg of a
+    multi-stop chain (bot/uex/multi_stop_routes.py) - the allocation rules are identical
+    either way, only the caller's notion of "one hop" vs "one leg of several" differs.
+    """
+    ordered_pairs = sorted(
+        pairs, key=lambda pair: float(pair[1]["price_sell"]) - float(pair[0]["price_buy"]), reverse=True
+    )
+    remaining_scu = capacity
+    remaining_budget = budget
+    cargo: list[MixedCargoItem] = []
+    for source, destination in ordered_pairs:
+        if len(cargo) >= max_commodities:
+            break
+        if remaining_scu < 1:
+            break
+        buy_price = float(source["price_buy"])
+        sell_price = float(destination["price_sell"])
+        available = math.floor(min(float(source["scu_buy"]), float(destination["scu_sell"])))
+        affordable = remaining_scu if math.isinf(remaining_budget) else math.floor(remaining_budget / buy_price)
+        quantity = min(available, remaining_scu, affordable)
+        if quantity < 1:
+            continue
+        investment = quantity * buy_price
+        profit = quantity * (sell_price - buy_price)
+        cargo.append(
+            MixedCargoItem(
+                id_commodity=int(source["id_commodity"]),
+                commodity_name=str(source.get("commodity_name") or "Unknown"),
+                quantity_scu=float(quantity),
+                buy_price=buy_price,
+                sell_price=sell_price,
+                available_scu=float(available),
+                investment=investment,
+                profit=profit,
+                source=source,
+                destination=destination,
+            )
+        )
+        remaining_scu -= quantity
+        remaining_budget -= investment
+    return cargo
+
+
+def build_mixed_routes(
+    market_rows: list[dict[str, Any]],
+    *,
+    ship_capacity_scu: float,
+    budget: float | None = None,
+    limit: int = 5,
+    max_commodities: int = 3,
+    space_only: bool = False,
+    capital_access_only: bool = False,
+    auto_load_only: bool = False,
+    system: str | None = None,
+) -> list[MixedRoute]:
+    """Return profitable same-origin/same-destination mixed loads.
+
+    Cargo is allocated by profit per SCU. Stock, destination demand, ship capacity, and
+    optional investment capital are all hard limits. Whole SCU quantities are used because
+    those are actionable at commodity kiosks. A result must contain at least two commodities;
+    if one commodity can fill the ship by itself, it is a normal /best-route candidate instead.
+
+    ``auto_load_only`` and ``system`` (e.g. 'Stanton', 'Pyro', 'Nyx') both require BOTH
+    ends of a route to satisfy them - each is applied to the whole shared row pool
+    *before* origins/destinations are split out of it, so every candidate on both sides
+    is already confirmed, and a route built from this filtered pool can never pair a
+    passing origin with a failing destination.
+    """
+    capacity = math.floor(float(ship_capacity_scu or 0))
+    if capacity <= 0 or limit <= 0 or max_commodities < 2:
+        return []
+    capital = math.inf if budget is None else max(0.0, float(budget))
+
+    opportunities = build_pair_opportunities(
+        market_rows,
+        space_only=space_only,
+        capital_access_only=capital_access_only,
+        auto_load_only=auto_load_only,
+        system=system,
+    )
 
     routes: list[MixedRoute] = []
     for (origin_id, destination_id), pairs in opportunities.items():
-        pairs.sort(key=lambda pair: float(pair[1]["price_sell"]) - float(pair[0]["price_buy"]), reverse=True)
-        remaining_scu = capacity
-        remaining_budget = capital
-        cargo: list[MixedCargoItem] = []
-        for source, destination in pairs:
-            if len(cargo) >= max_commodities:
-                break
-            if remaining_scu < 1:
-                break
-            buy_price = float(source["price_buy"])
-            sell_price = float(destination["price_sell"])
-            available = math.floor(min(float(source["scu_buy"]), float(destination["scu_sell"])))
-            affordable = remaining_scu if math.isinf(remaining_budget) else math.floor(remaining_budget / buy_price)
-            quantity = min(available, remaining_scu, affordable)
-            if quantity < 1:
-                continue
-            investment = quantity * buy_price
-            profit = quantity * (sell_price - buy_price)
-            cargo.append(
-                MixedCargoItem(
-                    id_commodity=int(source["id_commodity"]),
-                    commodity_name=str(source.get("commodity_name") or "Unknown"),
-                    quantity_scu=float(quantity),
-                    buy_price=buy_price,
-                    sell_price=sell_price,
-                    available_scu=float(available),
-                    investment=investment,
-                    profit=profit,
-                    source=source,
-                    destination=destination,
-                )
-            )
-            remaining_scu -= quantity
-            remaining_budget -= investment
-
+        cargo = allocate_pair_cargo(pairs, capacity=capacity, budget=capital, max_commodities=max_commodities)
         if len(cargo) < 2:
             continue
         investment = sum(item.investment for item in cargo)

@@ -18,6 +18,7 @@ from bot.uex.ships import estimate_route_cargo, resolve_ship
 from bot.uex.status import build_status_lookup, resolve_status_label
 from bot.uex.trading import best_buy_locations, best_routes, best_sell_locations
 from bot.uex.mixed_routes import build_mixed_routes, requires_capital_cargo_access
+from bot.uex.multi_stop_routes import build_multi_stop_routes
 
 logger = logging.getLogger("uexbot.prices")
 
@@ -792,6 +793,237 @@ class Prices(commands.Cog):
                 footer += " · surface terminals excluded"
             if capital_access_only:
                 footer += " · capital access confirmed at both ends"
+            route_embed.set_footer(text=footer)
+            embeds.append(route_embed)
+        await interaction.followup.send(embeds=embeds)
+
+    @app_commands.command(
+        name="multi-stop-route",
+        description="Chain 2-3 profitable hops across multiple stops for your ship and budget.",
+    )
+    @app_commands.describe(
+        ship="Optional: use a specific ship instead of your saved default",
+        budget="Optional starting aUEC to invest - profit compounds into later legs",
+        space_only="Exclude surface terminals; require every stop to be a confirmed space station",
+        auto_load_only="Only show chains where every stop offers UEX's auto-load",
+        system="Optional: require every stop in the chain to be in this star system",
+    )
+    @app_commands.rename(space_only="space-only", auto_load_only="auto-load-only")
+    @app_commands.choices(system=SYSTEM_CHOICES)
+    @app_commands.autocomplete(ship=ship_name_autocomplete)
+    async def multi_stop_route(
+        self,
+        interaction: discord.Interaction,
+        ship: str | None = None,
+        budget: app_commands.Range[float, 1, 1_000_000_000] | None = None,
+        space_only: bool = False,
+        auto_load_only: bool = False,
+        system: app_commands.Choice[str] | None = None,
+    ) -> None:
+        await interaction.response.defer()
+        system_value = system.value if system else None
+
+        ship_query = ship or await self.bot.db.get_default_ship(interaction.user.id)
+        if not ship_query:
+            await interaction.followup.send(
+                "Set a default ship with `/set-default-ship`, or provide the `ship` option, "
+                "so a multi-stop chain can be ranked against a real cargo limit."
+            )
+            return
+        try:
+            vehicles = await self.bot.uex.get_vehicles()
+        except UexApiError as exc:
+            await interaction.followup.send(describe_uex_api_error(exc))
+            return
+        ship_vehicle = resolve_ship(vehicles, ship_query)
+        if not ship_vehicle or not ship_vehicle.get("scu"):
+            await interaction.followup.send(
+                f"I couldn't resolve a cargo capacity for **{ship_query}**. "
+                "Choose a ship from autocomplete or update `/set-default-ship`."
+            )
+            return
+
+        market_rows = await self.bot.db.get_mixed_route_market_rows()
+        capital_access_only = requires_capital_cargo_access(ship_vehicle)
+        if capital_access_only:
+            try:
+                stations = await self.bot.uex.get_space_stations()
+            except UexApiError as exc:
+                await interaction.followup.send(
+                    "I couldn't verify XL-hangar/loading-dock access for this capital ship, "
+                    f"so I won't recommend potentially unusable routes: {exc}"
+                )
+                return
+            stations_by_id = {
+                int(station["id"]): station
+                for station in stations
+                if station.get("id") is not None and int(station["id"]) > 0
+            }
+            for row in market_rows:
+                station_id = int(row.get("id_space_station") or 0)
+                station = stations_by_id.get(station_id, {})
+                row["station_pad_types"] = station.get("pad_types")
+                row["station_has_loading_dock"] = station.get("has_loading_dock")
+
+        routes = build_multi_stop_routes(
+            market_rows,
+            ship_capacity_scu=float(ship_vehicle["scu"]),
+            budget=float(budget) if budget is not None else None,
+            limit=5,
+            max_commodities=3,
+            space_only=space_only,
+            capital_access_only=capital_access_only,
+            auto_load_only=auto_load_only,
+            system=system_value,
+        )
+        if not routes:
+            budget_note = " within that budget" if budget is not None else ""
+            safety_note = " using confirmed space stations only" if space_only else ""
+            access_note = " with confirmed capital-ship cargo access" if capital_access_only else ""
+            auto_load_note = " with auto-load at every stop" if auto_load_only else ""
+            system_note = f" entirely within {system_value}" if system_value else ""
+            await interaction.followup.send(
+                f"No multi-stop chains fit **{ship_vehicle.get('name', ship_query)}**"
+                f"{budget_note}{safety_note}{access_note}{auto_load_note}{system_note} right now."
+            )
+            return
+
+        terminal_ids = [terminal_id for route in routes for terminal_id in route.stops]
+        health_rows = await self.bot.db.get_terminal_data_health_by_ids(terminal_ids)
+        status_lookup = await self._get_status_lookup()
+        embeds: list[discord.Embed] = []
+        for index, route in enumerate(routes, 1):
+            path_label = " → ".join(
+                [route.legs[0].origin_name, *(leg.destination_name for leg in route.legs)]
+            )
+            route_embed = discord.Embed(
+                title=f"#{index} {path_label}",
+                description=(
+                    f"{len(route.legs)}-leg chain for **{ship_vehicle.get('name', ship_query)}** · "
+                    f"ranked by total profit{' · space stations only' if space_only else ''}"
+                ),
+                color=discord.Color.green(),
+            )
+            warnings: list[str] = []
+            leg_confidences = []
+            total_distance_gm = 0.0
+            distance_partial = False
+            for leg_index, leg in enumerate(route.legs, 1):
+                origin_health = (
+                    classify_terminal_health(health_rows[leg.origin_id])
+                    if leg.origin_id in health_rows else None
+                )
+                destination_health = (
+                    classify_terminal_health(health_rows[leg.destination_id])
+                    if leg.destination_id in health_rows else None
+                )
+                try:
+                    distance_row = await self.bot.uex.get_terminal_distance(leg.origin_id, leg.destination_id)
+                except UexApiError:
+                    distance_row = None
+                if distance_row and distance_row.get("distance") is not None:
+                    total_distance_gm += float(distance_row["distance"])
+                    distance_note = f"{float(distance_row['distance']):,.1f} Gm"
+                else:
+                    distance_partial = True
+                    distance_note = "distance unavailable"
+                cargo_lines = [
+                    f"• **{item.commodity_name}:** {item.quantity_scu:,.0f} SCU · "
+                    f"+{item.profit_per_scu:,.0f}/SCU · **{item.profit:,.0f} profit**"
+                    for item in leg.cargo
+                ]
+                leg_lines = [
+                    *cargo_lines,
+                    f"Investment: **{leg.investment:,.0f}** · Revenue: **{leg.revenue:,.0f} aUEC** · "
+                    f"Profit: **{leg.profit:,.0f} aUEC** · {distance_note}",
+                ]
+                _add_chunked_fields(
+                    route_embed,
+                    name=f"Leg {leg_index}: {leg.origin_name} → {leg.destination_name}",
+                    lines=leg_lines,
+                )
+                for side, health in (("Origin", origin_health), ("Destination", destination_health)):
+                    if note := format_health_note(health):
+                        warnings.append(f"Leg {leg_index} {side}: {note}")
+                for item in leg.cargo:
+                    if risk := format_commodity_risk(item.source):
+                        warnings.append(f"Leg {leg_index} {item.commodity_name}: {risk}")
+                    source_stock = float(item.source.get("scu_buy") or 0)
+                    destination_demand = float(item.destination.get("scu_sell") or 0)
+                    if item.available_scu < float(ship_vehicle["scu"]):
+                        if source_stock <= destination_demand:
+                            warnings.append(
+                                f"⚠️ Leg {leg_index} {item.commodity_name}: origin stock limits this load to "
+                                f"{item.available_scu:,.0f} SCU"
+                            )
+                        else:
+                            warnings.append(
+                                f"⚠️ Leg {leg_index} {item.commodity_name}: destination demand limits this load to "
+                                f"{item.available_scu:,.0f} SCU"
+                            )
+                    buy_status = resolve_status_label(status_lookup, "buy", item.source.get("status_buy"))
+                    sell_status = resolve_status_label(status_lookup, "sell", item.destination.get("status_sell"))
+                    if buy_status or sell_status:
+                        status_bits = []
+                        if buy_status:
+                            status_bits.append(f"origin {buy_status}")
+                        if sell_status:
+                            status_bits.append(f"destination {sell_status}")
+                        warnings.append(
+                            f"Leg {leg_index} {item.commodity_name} market status: {' · '.join(status_bits)}"
+                        )
+                warnings.extend(
+                    f"Leg {leg_index} {note}"
+                    for note in route_practical_notes(leg.cargo[0].source, leg.cargo[0].destination)
+                )
+                origin_system = leg.cargo[0].source.get("star_system_name")
+                destination_system = leg.cargo[0].destination.get("star_system_name")
+                if origin_system and destination_system and origin_system != destination_system:
+                    warnings.append(f"⚠️ Leg {leg_index} crosses systems: {origin_system} → {destination_system}")
+                leg_confidences.extend(
+                    compute_route_confidence(
+                        origin_health=origin_health,
+                        destination_health=destination_health,
+                        origin_report_count=item.source.get("buy_report_count"),
+                        destination_report_count=item.destination.get("sell_report_count"),
+                        volatility_origin=item.source.get("volatility_buy"),
+                        volatility_destination=item.destination.get("volatility_sell"),
+                        origin_available=item.source.get("scu_buy", 0) > 0,
+                        destination_available=has_sell_side_demand(
+                            item.destination.get("scu_sell"), item.destination.get("status_sell")
+                        ),
+                    )
+                    for item in leg.cargo
+                )
+            if capital_access_only:
+                warnings.append(
+                    "Capital-ship access confirmed: XL hangar or external cargo loading dock at every stop"
+                )
+            confidence = min(leg_confidences, key=lambda value: value.score)
+            distance_summary = (
+                f"~{total_distance_gm:,.1f} Gm (partial - one or more legs' distance unavailable)"
+                if distance_partial
+                else f"{total_distance_gm:,.1f} Gm total"
+            )
+            summary_lines = [
+                f"Investment: **{route.investment:,.0f}** · Revenue: **{route.revenue:,.0f} aUEC**",
+                f"Profit: **{route.profit:,.0f} aUEC** · ROI: **{route.roi_pct:.1f}%**",
+                f"Distance: {distance_summary}",
+                f"Confidence: **{confidence.label} ({confidence.score}/100)**",
+            ]
+            route_embed.add_field(name="Route summary", value="\n".join(summary_lines), inline=False)
+            unique_warnings = list(dict.fromkeys(warnings))
+            _add_chunked_fields(route_embed, name="Warnings & practical checks", lines=unique_warnings)
+            footer = (
+                "Collected UEX data + live UEX distance · prices can change before arrival · "
+                "warnings do not change profit ranking"
+            )
+            if budget is not None:
+                footer += f" · starting budget {float(budget):,.0f} aUEC"
+            if space_only:
+                footer += " · surface terminals excluded"
+            if capital_access_only:
+                footer += " · capital access confirmed at every stop"
             route_embed.set_footer(text=footer)
             embeds.append(route_embed)
         await interaction.followup.send(embeds=embeds)

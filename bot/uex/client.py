@@ -52,6 +52,7 @@ _ENDPOINT_CACHE_TTL = {
     "marketplace_prices_averages": 3600,
     "marketplace_prices_averages_all": 3600,
     "marketplace_listings": 60,
+    "terminals_distances": 12 * 3600,
 }
 
 # UEX status strings that specifically mean "the secret_key is missing/wrong/not allowed",
@@ -285,6 +286,22 @@ class UexClient:
         Requires id_terminal and id_commodity. Up to 500 rows, updated hourly.
         """
         return await self._get("commodities_prices_history", params=filters) or []
+
+    async def get_terminal_distance(
+        self, id_terminal_origin: int, id_terminal_destination: int
+    ) -> dict[str, Any] | None:
+        """Real point-to-point distance (gigameters) between two terminals, independent
+        of any specific commodity - unlike /commodities_routes' own distance field, this
+        works for an arbitrary terminal pair regardless of what's being traded between
+        them, which is what a multi-stop chain's legs need.
+        """
+        return await self._get(
+            "terminals_distances",
+            params={
+                "id_terminal_origin": id_terminal_origin,
+                "id_terminal_destination": id_terminal_destination,
+            },
+        )
 
     async def get_items(self, **filters: Any) -> list[dict[str, Any]]:
         """Items from one UEX-supported filter.

@@ -457,6 +457,42 @@ they're in sync).
     asserted the old origin-only behavior (`test_auto_load_only_checks_the_origin_not_the_
     destination`) was rewritten, not just supplemented, since its premise was no longer
     true. 195 tests passing.
+35. **Added `/multi-stop-route`**: chains 2-3 profitable legs (origin -> stop -> ... ->
+    destination) instead of the single-hop model every other route command uses. Two
+    design questions were confirmed with the user before building: a one-way chain, not
+    a loop back to the start, and real distance shown for context only - ranking stays
+    profit-first, same as every other route command.
+    While scoping this, found UEX exposes `GET /terminals_distances` (real gigameter
+    distance between any two terminals, 12h cache/hourly update) that was completely
+    unused anywhere in this bot - `/commodities_routes` carries its own `distance` field
+    too, but only for its own precomputed single-commodity routes, which doesn't help an
+    arbitrary multi-commodity, multi-leg chain the way a terminal-pair-only endpoint
+    does. New `UexClient.get_terminal_distance` wraps it, cached the same way every
+    other endpoint is (`_ENDPOINT_CACHE_TTL["terminals_distances"] = 12h`).
+    Extracted `allocate_pair_cargo` (the greedy profit/SCU loader) and
+    `build_pair_opportunities` (the filtered origin/destination pairing map) out of
+    `build_mixed_routes` in `bot/uex/mixed_routes.py` into standalone, exported
+    functions - pure reorganization, `build_mixed_routes`'s own behavior and its full
+    existing test suite are unchanged, but the new `bot/uex/multi_stop_routes.py` reuses
+    both instead of duplicating the allocation math.
+    The chain search bounds itself to the ~20 most profitable single legs' endpoint
+    terminals as a candidate set (no scan of every terminal in the snapshot, no extra API
+    calls for the search itself), then does a bounded DFS over that small graph for
+    2-3-leg simple paths (no repeated terminal - a naive search over a profitable-both-
+    ways pair would otherwise happily produce A->B->A). Ship capacity resets every leg
+    (cargo is fully sold before the next leg's purchase) but budget compounds forward: a
+    profitable leg's revenue becomes the next leg's available capital, so a budget that
+    only covers leg 1 alone can still fund leg 2 once leg 1 sells. A 1-leg result is
+    excluded - that's `/mixed-routes`' job, not this command's.
+    Distance is fetched live, per leg, only for the up-to-5 final routes returned (at
+    most 15 calls, never for the search itself) - a missing/failed lookup never blocks
+    the route from displaying, same "never let a lookup's own failure block the result"
+    convention already used for marketplace item-name resolution; the route's total
+    distance is marked partial instead of silently understated.
+    201 tests passing (6 new, in `tests/test_multi_stop_routes.py`): a 3-terminal chain
+    outranking any single hop, budget compounding across legs, no terminal ever revisited
+    within one chain, a plain 2-terminal hop never appearing as a result, and a system
+    filter excluding a chain whose *middle* terminal (not just an endpoint) fails it.
 
 ## Where to look for what
 
@@ -737,7 +773,7 @@ guessed at.
   branch. Local (PC) and the Pi's databases have been fully merged at least twice now; the
   established practice is to back up both sides before any such merge and pull the Pi's
   backup down to the PC afterward, so nothing valuable lives only on the Pi's disk. The full
-  suite has 195 passing tests. Re-check live service and branch state rather than assuming
+  suite has 201 passing tests. Re-check live service and branch state rather than assuming
   this point-in-time operational note is still current.
 - The data collectors in `bot/cogs/intelligence.py` only pay off once they've been running a
   while - most of the `ROADMAP.md` intelligence backlog depends on accumulated history, so
