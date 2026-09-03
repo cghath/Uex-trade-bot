@@ -792,6 +792,26 @@ they're in sync).
     All three fixes were confirmed to actually catch their bug - not just pass - by
     temporarily reverting each one and watching the corresponding test fail before
     restoring it, same discipline as entries 38-41. 224 tests passing (6 new).
+43. **Entry 42's two `build_mixed_routes`-caller fixes were incomplete - a third caller,
+    `/intelligence-brief`, was missed entirely.** `bot/cogs/intelligence_brief.py`'s
+    `_routes_embed` calls the same `build_mixed_routes` as `/mixed-routes` and
+    `/multi-stop-route` but wasn't touched in entry 42: it still called it directly
+    (not offloaded, so a dense snapshot could stall the bot exactly like the fixed
+    commands used to), and never checked `route.is_exact` at all, so a recommendation
+    could be an unproven approximation - a controlled example matching an earlier
+    allocator counterexample (75 vs a feasible 189 profit) - with no warning, unlike
+    `/mixed-routes`' footer for the same case. Both fixed the same way as entry 42:
+    `await asyncio.to_thread(build_mixed_routes, ...)`, and an
+    `if not route.is_exact: notes.append(...)` alongside this function's other
+    per-route conditional warnings (risk labels, unknown risk metadata, cross-system).
+    New test file `tests/test_intelligence_brief_routes.py` (this cog had no
+    request-level test harness before) - a thread-identity check for the offload (same
+    approach as entry 42, not timing-based) and a disclosure check reusing the existing
+    `/mixed-routes` 30-SCU-ship fixture shape. Both confirmed to actually catch their bug
+    by reverting and restoring each fix. The lesson generalizes: when a shared helper
+    gets a caller-side fix (offloading, a new disclosure field), grep for *every* caller
+    before considering it done, not just the one(s) the original report named. 226 tests
+    passing (2 new).
 
 ## Where to look for what
 
@@ -1072,7 +1092,7 @@ guessed at.
   branch. Local (PC) and the Pi's databases have been fully merged at least twice now; the
   established practice is to back up both sides before any such merge and pull the Pi's
   backup down to the PC afterward, so nothing valuable lives only on the Pi's disk. The full
-  suite has 224 passing tests. Re-check live service and branch state rather than assuming
+  suite has 226 passing tests. Re-check live service and branch state rather than assuming
   this point-in-time operational note is still current.
 - The data collectors in `bot/cogs/intelligence.py` only pay off once they've been running a
   while - most of the `ROADMAP.md` intelligence backlog depends on accumulated history, so

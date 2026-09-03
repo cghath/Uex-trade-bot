@@ -1,6 +1,8 @@
 """Personalized, on-demand market intelligence assembled from collected local history."""
 from __future__ import annotations
 
+import asyncio
+
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -88,7 +90,11 @@ class IntelligenceBrief(commands.Cog):
                     station = station_map.get(int(row.get("id_space_station") or 0), {})
                     row["station_pad_types"] = station.get("pad_types")
                     row["station_has_loading_dock"] = station.get("has_loading_dock")
-            routes = build_mixed_routes(
+            # Cargo allocation can run a real combinatorial search (see
+            # allocate_pair_cargo) - offload it so a dense snapshot can't stall the
+            # bot's one event loop, same fix as /mixed-routes and /multi-stop-route.
+            routes = await asyncio.to_thread(
+                build_mixed_routes,
                 rows, ship_capacity_scu=float(vehicle["scu"]),
                 budget=float(budget) if budget is not None else None,
                 limit=3, max_commodities=3, space_only=space_only,
@@ -115,6 +121,8 @@ class IntelligenceBrief(commands.Cog):
                 notes.append("⚠️ " + " · ".join(risks))
             if unknown_risks:
                 notes.append(f"⚠️ Cargo risk metadata unavailable: {', '.join(unknown_risks)}")
+            if not route.is_exact:
+                notes.append("⚠️ Cargo allocation is approximate, not proven-optimal")
             if capital_gate:
                 notes.append("Capital access confirmed at both ends")
             origin_system = route.cargo[0].source.get("star_system_name")
