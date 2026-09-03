@@ -95,23 +95,37 @@ def build_multi_stop_routes(
         for key, pairs in opportunities.items()
     }
 
-    # Rank candidate edges assuming unlimited capital, not the caller's actual budget: an
-    # edge that's unaffordable at the start but would become affordable once an earlier
-    # leg's profit compounds the running budget still needs to be *reachable* by the DFS
-    # below - it's excluded from a chain later (correctly) if the real, path-dependent
-    # budget never actually gets there, not pre-excluded here just for looking expensive
-    # up front. The DFS itself still uses the real remaining_budget for every allocation.
-    ranked_edges: list[tuple[float, tuple[int, int]]] = []
-    for key, pairs in opportunities.items():
-        cargo = allocate_pair_cargo(pairs, capacity=capacity, budget=math.inf, max_commodities=max_commodities)
-        if cargo:
-            ranked_edges.append((sum(item.profit for item in cargo), key))
-    ranked_edges.sort(key=lambda entry: entry[0], reverse=True)
+    # Rank candidate edges TWICE and take the union - neither ranking alone is safe:
+    # - At unlimited capital, so an edge that's unaffordable at the start but would
+    #   become affordable once an earlier leg's profit compounds the running budget is
+    #   still *reachable* by the DFS below (it's excluded later, correctly, only if the
+    #   real path-dependent budget never actually gets there).
+    # - At the caller's real starting budget, so edges that are immediately affordable
+    #   right now can't be crowded out of the bounded top-MAX_CANDIDATE_EDGES window by
+    #   edges that only look enormous assuming infinite capital nobody actually has -
+    #   reproduced with 20+ such "expensive-at-infinite-budget" decoys pushing a
+    #   genuinely affordable chain out of the candidate set entirely.
+    # The DFS itself is unaffected either way - it always uses the real, path-dependent
+    # remaining_budget for every allocation; this only changes which terminals are
+    # *eligible* to be searched.
+    def rank_edges(budget: float) -> list[tuple[float, tuple[int, int]]]:
+        ranked: list[tuple[float, tuple[int, int]]] = []
+        for key, pairs in opportunities.items():
+            cargo = allocate_pair_cargo(pairs, capacity=capacity, budget=budget, max_commodities=max_commodities)
+            if cargo:
+                ranked.append((sum(item.profit for item in cargo), key))
+        ranked.sort(key=lambda entry: entry[0], reverse=True)
+        return ranked
 
+    # No budget given means capital is already math.inf - the second ranking would be
+    # an identical, wasted recomputation, so only do it when there's a real budget to
+    # rank against.
+    rankings = (rank_edges(math.inf),) if math.isinf(capital) else (rank_edges(math.inf), rank_edges(capital))
     candidate_terminals: set[int] = set()
-    for _, (origin_id, destination_id) in ranked_edges[:MAX_CANDIDATE_EDGES]:
-        candidate_terminals.add(origin_id)
-        candidate_terminals.add(destination_id)
+    for ranked_edges in rankings:
+        for _, (origin_id, destination_id) in ranked_edges[:MAX_CANDIDATE_EDGES]:
+            candidate_terminals.add(origin_id)
+            candidate_terminals.add(destination_id)
 
     graph: dict[int, list[int]] = {}
     for origin_id, destination_id in opportunities:

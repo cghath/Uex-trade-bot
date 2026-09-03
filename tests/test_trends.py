@@ -9,8 +9,8 @@ from bot.uex.trends import (
     compute_movers,
     rank_top_scored_routes,
     rank_trending,
-    select_best_available_route,
-    select_best_in_stock_route,
+    select_available_routes,
+    select_in_stock_routes,
 )
 from bot.uex.data_health import classify_terminal_health
 from bot.uex.route_confidence import coalesce_report_count, compute_route_confidence
@@ -171,38 +171,39 @@ def test_movers_skip_rows_without_usable_prices():
     assert gainers == [] and losers == []
 
 
-# --- select_best_available_route ---
+# --- select_available_routes ---
 
 
-def test_select_best_available_route_picks_highest_score_with_origin_stock():
+def test_select_available_routes_returns_every_qualifying_route_sorted_by_score():
+    """Not just the single best - a later auto-load-only/system filter needs a
+    same-commodity alternative to fall back to if the top-scored one gets excluded."""
     rows = [
         _route_row(score=90, scu_origin=0),  # best score, but nothing to buy
         _route_row(score=80, price_origin=0),  # origin doesn't sell it
         _route_row(score=70),
         _route_row(score=60, origin_terminal_name="Backup"),
     ]
-    best = select_best_available_route("Laranite", 1, rows)
-    assert best is not None
-    assert best.score == 70
-    assert (best.origin_terminal_id, best.destination_terminal_id) == (10, 20)
+    routes = select_available_routes("Laranite", 1, rows)
+    assert [r.score for r in routes] == [70, 60]
+    assert (routes[0].origin_terminal_id, routes[0].destination_terminal_id) == (10, 20)
 
 
-def test_select_best_available_route_excludes_unscored_rows():
+def test_select_available_routes_excludes_unscored_rows():
     rows = [_route_row(score=None), _route_row(score=10, origin_terminal_name="Scored")]
-    best = select_best_available_route("Laranite", 1, rows)
-    assert best is not None
-    assert best.origin_terminal_name == "Scored"
+    routes = select_available_routes("Laranite", 1, rows)
+    assert len(routes) == 1
+    assert routes[0].origin_terminal_name == "Scored"
 
 
-def test_select_best_available_route_returns_none_when_nothing_qualifies():
-    assert select_best_available_route("Laranite", 1, [_route_row(scu_origin=0)]) is None
-    assert select_best_available_route("Laranite", 1, []) is None
+def test_select_available_routes_returns_empty_when_nothing_qualifies():
+    assert select_available_routes("Laranite", 1, [_route_row(scu_origin=0)]) == []
+    assert select_available_routes("Laranite", 1, []) == []
 
 
-# --- select_best_in_stock_route ---
+# --- select_in_stock_routes ---
 
 
-def test_select_best_in_stock_route_requires_live_destination_demand():
+def test_select_in_stock_routes_requires_live_destination_demand():
     rows = [
         _route_row(score=90, status_destination=SELL_SIDE_NO_DEMAND_CODE),  # full, no demand
         _route_row(score=80, status_destination=0),  # destination doesn't buy it
@@ -211,14 +212,14 @@ def test_select_best_in_stock_route_requires_live_destination_demand():
         _route_row(score=50, scu_destination=0),
         _route_row(score=40, destination_terminal_name="LiveDemand"),
     ]
-    best = select_best_in_stock_route("Laranite", 1, rows)
-    assert best is not None
-    assert best.destination_terminal_name == "LiveDemand"
-    assert best.score == 40
+    routes = select_in_stock_routes("Laranite", 1, rows)
+    assert len(routes) == 1
+    assert routes[0].destination_terminal_name == "LiveDemand"
+    assert routes[0].score == 40
 
 
-def test_select_best_in_stock_route_still_requires_origin_stock():
-    assert select_best_in_stock_route("Laranite", 1, [_route_row(scu_origin=0)]) is None
+def test_select_in_stock_routes_still_requires_origin_stock():
+    assert select_in_stock_routes("Laranite", 1, [_route_row(scu_origin=0)]) == []
 
 
 # --- rank_top_scored_routes ---

@@ -43,8 +43,8 @@ from bot.uex.trends import (
     compute_movers,
     rank_top_scored_routes,
     rank_trending,
-    select_best_available_route,
-    select_best_in_stock_route,
+    select_available_routes,
+    select_in_stock_routes,
 )
 
 logger = logging.getLogger("uexbot.trends")
@@ -251,14 +251,13 @@ class Trends(commands.Cog):
                     logger.info("Skipping %s in top-routes refresh: %s", name, exc)
                     route_rows = []
                 else:
-                    best_route = select_best_available_route(name, id_commodity, route_rows)
-                    if best_route is not None:
-                        route_candidates.append(best_route)
+                    # Every qualifying route for this commodity, not just the top-scored
+                    # one - so a later auto-load-only/system filter has a same-commodity
+                    # alternative to fall back to instead of the commodity vanishing.
+                    route_candidates.extend(select_available_routes(name, id_commodity, route_rows))
                     # Same route_rows, no extra API call - just a stricter filter requiring
                     # real demand at the destination too, not just stock at the origin.
-                    best_in_stock_route = select_best_in_stock_route(name, id_commodity, route_rows)
-                    if best_in_stock_route is not None:
-                        in_stock_route_candidates.append(best_in_stock_route)
+                    in_stock_route_candidates.extend(select_in_stock_routes(name, id_commodity, route_rows))
                 await asyncio.sleep(_TRENDING_CALL_DELAY)
 
         ranked = rank_trending(entries, limit=TRENDING_KEEP_TOP)
@@ -357,6 +356,20 @@ class Trends(commands.Cog):
                     f"No routes confirmed entirely within {system} found right now."
                 )
                 return
+        # Dedupe back to one route per commodity - entries can now carry several
+        # candidates per commodity (see select_available_routes), so a same-commodity
+        # alternative survives being filtered here instead of the whole commodity
+        # disappearing when only its top-scored route is checked. entries is still
+        # score-sorted overall at this point, so keeping the first occurrence per
+        # commodity keeps the highest-scoring surviving one.
+        seen_commodities: set[int] = set()
+        deduped_entries: list[ScoredRouteEntry] = []
+        for route in entries:
+            if route.id_commodity in seen_commodities:
+                continue
+            seen_commodities.add(route.id_commodity)
+            deduped_entries.append(route)
+        entries = deduped_entries
         # Truncate for display only after filtering, not before - the background refresh
         # loop now keeps every candidate it computed specifically so this filter has a
         # real pool to work with (see refresh_trending).

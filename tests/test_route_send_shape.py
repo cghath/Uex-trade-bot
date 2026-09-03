@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 
 from cryptography.fernet import Fernet
+import discord
 import httpx
 
 from bot.cogs.prices import Prices
@@ -112,6 +113,66 @@ def test_multi_stop_route_sends_one_message_per_route_not_batched(tmp_path):
                 "that batched shape is what caused the original stuck-thinking bug"
             )
             assert kwargs.get("embed") is not None or "content" in kwargs
+
+    asyncio.run(run())
+
+
+class _EmbedTooLargeFollowup(_FakeFollowup):
+    """Simulates Discord rejecting the embed (too large) so the plain-text fallback path
+    in multi_stop_route actually runs, the same way a real oversized route would."""
+
+    async def send(self, *args, **kwargs):
+        if "embed" in kwargs:
+            response = type("R", (), {"status": 400, "reason": "Bad Request", "headers": {}})()
+            raise discord.HTTPException(response, {"message": "Embed size exceeds maximum size of 6000"})
+        await super().send(*args, **kwargs)
+
+
+def test_multi_stop_route_fallback_preserves_warnings(tmp_path):
+    """Regression: the fallback text (sent when the real embed is rejected as too large)
+    only carried summary_lines (investment/revenue/profit/ROI/distance/confidence) -
+    warnings (risk flags, stock/demand limits, practical notes) were silently dropped.
+    A stock-limited leg (5 SCU available vs a 10-SCU ship) must produce a real warning
+    that survives into the fallback content, not just the profit figures."""
+    async def run():
+        db = Database(tmp_path / "multi_stop_fallback.sqlite3", Fernet(Fernet.generate_key()))
+        await db.init()
+        rows = [
+            {"id_commodity": 1, "id_terminal": 1, "commodity_name": "Stileron", "terminal_name": "Origin",
+             "price_buy": 100, "price_sell": 0, "scu_buy": 5, "scu_sell": 0, "status_buy": 1, "status_sell": None},
+            {"id_commodity": 1, "id_terminal": 2, "commodity_name": "Stileron", "terminal_name": "Midpoint",
+             "price_buy": 0, "price_sell": 150, "scu_buy": 0, "scu_sell": 5, "status_buy": None, "status_sell": 1},
+            {"id_commodity": 2, "id_terminal": 2, "commodity_name": "Cobalt", "terminal_name": "Midpoint",
+             "price_buy": 50, "price_sell": 0, "scu_buy": 10, "scu_sell": 0, "status_buy": 1, "status_sell": None},
+            {"id_commodity": 2, "id_terminal": 3, "commodity_name": "Cobalt", "terminal_name": "Final",
+             "price_buy": 0, "price_sell": 90, "scu_buy": 0, "scu_sell": 10, "status_buy": None, "status_sell": 1},
+        ]
+        await db.record_terminal_market_snapshot(rows)
+
+        client = UexClient(app_token="test", base_url="https://uex.test")
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(transport=_transport())
+
+        bot = type("FakeBot", (), {})()
+        bot.db = db
+        bot.uex = client
+        cog = Prices.__new__(Prices)
+        cog.bot = bot
+        interaction = _FakeInteraction(111)
+        interaction.followup = _EmbedTooLargeFollowup()
+
+        try:
+            await cog.multi_stop_route.callback(cog, interaction, ship="TestShip")
+
+            assert interaction.followup.sent, "expected at least one followup"
+            for args, kwargs in interaction.followup.sent:
+                assert "embed" not in kwargs, "the embed send should have been rejected, not succeeded"
+            fallback_text = "\n".join(kwargs["content"] for _, kwargs in interaction.followup.sent)
+            assert "stock limits this load to 5 SCU" in fallback_text, (
+                f"expected the stock-limit warning to survive into the fallback, got: {fallback_text!r}"
+            )
+        finally:
+            await client.aclose()
 
     asyncio.run(run())
 

@@ -160,6 +160,134 @@ def test_best_route_fallback_pool_is_not_capped_at_a_fixed_size(tmp_path):
     asyncio.run(run())
 
 
+def test_top_routes_falls_back_to_a_second_best_route_for_the_same_commodity(tmp_path):
+    """Regression: the background loop used to keep only the single highest-scored route
+    per commodity (select_best_available_route) - if that one failed auto-load-only,
+    there was no second-best for the *same* commodity to fall back to, since nothing
+    else was ever kept. Two routes for one commodity ("Multi"): the top-scored one is not
+    auto-load-capable, the second-best one is - the second-best must still surface."""
+    async def run():
+        db = Database(tmp_path / "top_routes_fallback.sqlite3", Fernet(Fernet.generate_key()))
+        await db.init()
+        await db.upsert_terminal_reference([
+            {"id": 1, "name": "TopOrigin", "is_auto_load": False},
+            {"id": 2, "name": "TopDest", "is_auto_load": False},
+            {"id": 3, "name": "AutoOrigin2", "is_auto_load": True},
+            {"id": 4, "name": "AutoDest2", "is_auto_load": True},
+        ])
+
+        top_scored = ScoredRouteEntry(
+            commodity_name="Multi", id_commodity=1,
+            origin_terminal_name="TopOrigin", destination_terminal_name="TopDest",
+            price_origin=10.0, price_destination=100.0, price_margin=None, price_roi=None,
+            distance=None, score=100, scu_origin=50, scu_destination=50,
+            status_origin=1, status_destination=1,
+            origin_terminal_id=1, destination_terminal_id=2,
+        )
+        second_best = ScoredRouteEntry(
+            commodity_name="Multi", id_commodity=1,
+            origin_terminal_name="AutoOrigin2", destination_terminal_name="AutoDest2",
+            price_origin=10.0, price_destination=50.0, price_margin=None, price_roi=None,
+            distance=None, score=50, scu_origin=50, scu_destination=50,
+            status_origin=1, status_destination=1,
+            origin_terminal_id=3, destination_terminal_id=4,
+        )
+
+        client = UexClient(app_token="test", base_url="https://uex.test")
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(transport=_catch_all_transport([]))
+
+        bot = type("FakeBot", (), {})()
+        bot.db = db
+        bot.uex = client
+        cog = Trends.__new__(Trends)
+        cog.bot = bot
+        cog._top_scored_routes_lock = asyncio.Lock()
+        cog._top_scored_routes = [top_scored, second_best]
+        cog._top_scored_routes_updated_at = datetime.now(timezone.utc)
+        interaction = _FakeInteraction(111)
+
+        try:
+            await cog.top_routes.callback(cog, interaction, auto_load_only=True)
+
+            assert interaction.followup.sent, "expected at least one followup"
+            _, kwargs = interaction.followup.sent[0]
+            embed = kwargs.get("embed")
+            assert embed is not None, f"expected an embed response, got: {interaction.followup.sent}"
+            field_names = " ".join(f.name for f in embed.fields)
+            assert "AutoOrigin2" in field_names and "AutoDest2" in field_names, (
+                f"expected the second-best auto-load-capable route for 'Multi', got: {field_names}"
+            )
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_top_routes_dedupes_to_one_route_per_commodity_after_filtering(tmp_path):
+    """/top-routes is documented (its own footer text) as one route per commodity - now
+    that entries can carry several candidates per commodity, two routes for the SAME
+    commodity that BOTH pass a filter must still collapse to just the higher-scored one,
+    not show the commodity twice."""
+    async def run():
+        db = Database(tmp_path / "top_routes_dedupe.sqlite3", Fernet(Fernet.generate_key()))
+        await db.init()
+        await db.upsert_terminal_reference([
+            {"id": 1, "name": "HighOrigin", "is_auto_load": True},
+            {"id": 2, "name": "HighDest", "is_auto_load": True},
+            {"id": 3, "name": "LowOrigin", "is_auto_load": True},
+            {"id": 4, "name": "LowDest", "is_auto_load": True},
+        ])
+
+        higher_scored = ScoredRouteEntry(
+            commodity_name="Multi", id_commodity=1,
+            origin_terminal_name="HighOrigin", destination_terminal_name="HighDest",
+            price_origin=10.0, price_destination=100.0, price_margin=None, price_roi=None,
+            distance=None, score=100, scu_origin=50, scu_destination=50,
+            status_origin=1, status_destination=1,
+            origin_terminal_id=1, destination_terminal_id=2,
+        )
+        lower_scored = ScoredRouteEntry(
+            commodity_name="Multi", id_commodity=1,
+            origin_terminal_name="LowOrigin", destination_terminal_name="LowDest",
+            price_origin=10.0, price_destination=50.0, price_margin=None, price_roi=None,
+            distance=None, score=50, scu_origin=50, scu_destination=50,
+            status_origin=1, status_destination=1,
+            origin_terminal_id=3, destination_terminal_id=4,
+        )
+
+        client = UexClient(app_token="test", base_url="https://uex.test")
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(transport=_catch_all_transport([]))
+
+        bot = type("FakeBot", (), {})()
+        bot.db = db
+        bot.uex = client
+        cog = Trends.__new__(Trends)
+        cog.bot = bot
+        cog._top_scored_routes_lock = asyncio.Lock()
+        cog._top_scored_routes = [higher_scored, lower_scored]
+        cog._top_scored_routes_updated_at = datetime.now(timezone.utc)
+        interaction = _FakeInteraction(111)
+
+        try:
+            await cog.top_routes.callback(cog, interaction, auto_load_only=True)
+
+            assert interaction.followup.sent, "expected at least one followup"
+            _, kwargs = interaction.followup.sent[0]
+            embed = kwargs.get("embed")
+            assert embed is not None, f"expected an embed response, got: {interaction.followup.sent}"
+            field_names = " ".join(f.name for f in embed.fields)
+            assert "HighOrigin" in field_names, f"expected the higher-scored route, got: {field_names}"
+            assert "LowOrigin" not in field_names, (
+                f"same commodity shown twice instead of deduped to the higher-scored route: {field_names}"
+            )
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
 def test_top_routes_auto_load_filter_finds_a_lower_scored_route(tmp_path):
     """10 decoy entries (score 91-100, none auto-load-capable) outrank the one entry that
     IS auto-load-capable at both ends (score 50). This directly injects the full 11-entry

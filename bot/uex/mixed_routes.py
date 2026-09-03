@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import itertools
 import math
 from typing import Any
 
@@ -156,6 +157,87 @@ def _profit_per_auec(pair: tuple[dict[str, Any], dict[str, Any]]) -> float:
     return _profit_per_unit(pair) / buy_price if buy_price > 0 else 0.0
 
 
+# Bounds for the exact search below. itertools.combinations over more candidates, or
+# brute-forcing a bigger capacity, grows fast enough to matter: ~65ms at 8 candidates/
+# capacity 30, ~85ms at 10/20, ~0.5s at 12/60 (measured). Tight capacity/few candidates
+# is exactly where the cheap greedy heuristic below fails worst, and is also the
+# cheapest case to solve exactly - larger cases keep the heuristic since
+# build_multi_stop_routes' search can call this thousands of times per command.
+EXACT_SEARCH_MAX_CANDIDATES = 8
+EXACT_SEARCH_MAX_CAPACITY = 25
+
+
+def _exact_allocate(
+    pairs: list[tuple[dict[str, Any], dict[str, Any]]],
+    *,
+    capacity: int,
+    budget: float,
+    max_commodities: int,
+    min_commodities: int,
+) -> list[MixedCargoItem]:
+    """Exact best allocation for a small candidate set: try every subset of size
+    min_commodities..max_commodities, and for each subset, brute-force every quantity
+    combination of all-but-one item (bounded by capacity, since a unit of any commodity
+    always costs exactly 1 SCU) with the last item's quantity chosen greedily from
+    whatever capacity/budget remains - provably optimal for a fixed subset, since with
+    only one item left to decide, using as much of it as still fits is always at least
+    as good as using less (profit per unit is always positive here). Exhausting every
+    subset this way finds the true global optimum, not an approximation.
+    """
+    n = len(pairs)
+    best_profit = 0.0
+    best_cargo: list[MixedCargoItem] = []
+    for size in range(max(1, min_commodities), min(max_commodities, n) + 1):
+        for combo in itertools.combinations(range(n), size):
+            items = []
+            for idx in combo:
+                source, destination = pairs[idx]
+                buy_price = float(source["price_buy"])
+                sell_price = float(destination["price_sell"])
+                available = math.floor(min(float(source["scu_buy"]), float(destination["scu_sell"]), capacity))
+                items.append((buy_price, sell_price - buy_price, available, source, destination))
+            *prefix, last = items
+            ranges = [range(0, item[2] + 1) for item in prefix]
+            for prefix_quantities in itertools.product(*ranges):
+                used_capacity = sum(prefix_quantities)
+                if used_capacity > capacity:
+                    continue
+                used_cost = sum(q * item[0] for q, item in zip(prefix_quantities, prefix))
+                if not math.isinf(budget) and used_cost > budget:
+                    continue
+                remaining_capacity = capacity - used_capacity
+                remaining_budget = budget - used_cost
+                last_buy_price = last[0]
+                last_affordable = (
+                    remaining_capacity if math.isinf(remaining_budget) or last_buy_price <= 0
+                    else math.floor(remaining_budget / last_buy_price)
+                )
+                last_quantity = max(0, min(last[2], remaining_capacity, last_affordable))
+                quantities = (*prefix_quantities, last_quantity)
+                if sum(1 for q in quantities if q > 0) < min_commodities:
+                    continue
+                total_profit = sum(q * item[1] for q, item in zip(quantities, items))
+                if total_profit > best_profit:
+                    best_profit = total_profit
+                    best_cargo = [
+                        MixedCargoItem(
+                            id_commodity=int(item[3]["id_commodity"]),
+                            commodity_name=str(item[3].get("commodity_name") or "Unknown"),
+                            quantity_scu=float(quantity),
+                            buy_price=item[0],
+                            sell_price=item[0] + item[1],
+                            available_scu=float(item[2]),
+                            investment=quantity * item[0],
+                            profit=quantity * item[1],
+                            source=item[3],
+                            destination=item[4],
+                        )
+                        for item, quantity in zip(items, quantities)
+                        if quantity > 0
+                    ]
+    return best_cargo
+
+
 def allocate_pair_cargo(
     pairs: list[tuple[dict[str, Any], dict[str, Any]]],
     *,
@@ -165,26 +247,37 @@ def allocate_pair_cargo(
     min_commodities: int = 1,
 ) -> list[MixedCargoItem]:
     """Load commodities for one origin/destination pair, under stock, demand, ship
-    capacity, and budget limits, keeping whichever of two greedy orderings earns more.
+    capacity, and budget limits - exactly, for a small enough candidate set and
+    capacity (see _exact_allocate), otherwise via whichever of two greedy orderings
+    earns more.
 
     Highest profit-*per-unit*-SCU first is the obvious greedy choice, but under a binding
     budget it can pick badly: an expensive, high-margin commodity that only a token
     quantity is affordable can crowd out a cheaper, lower-margin one that would have used
     the same budget far more completely (concrete case: buy 90/sell 140 vs buy 10/sell 19,
     budget 100, capacity 10 - per-unit-first nets 59 profit; buying only the cheaper
-    commodity nets 90 with the same inputs). Also trying profit-*per-aUEC-invested* order
-    catches this without a full knapsack search over commodity subsets.
+    commodity nets 90 with the same inputs). Trying profit-*per-aUEC-invested* order too
+    catches that specific case, but the two-ordering approach is still a real
+    approximation, not a solver - a random search over small scenarios found cases over
+    2x off the true optimum. _exact_allocate closes that gap outright when the search
+    space is small enough to brute-force in bounded time; larger cases keep this
+    two-ordering approximation, documented as a deliberate speed trade-off, not a claim
+    of universal optimality.
 
-    ``min_commodities`` matters because the two orderings don't just reach different
-    profit totals, they can reach a different *number* of commodities loaded: the
-    efficiency ordering above floods all 10 capacity/100 budget into the cheap commodity
-    alone (1 item, profit 90), while the margin ordering spreads across both (2 items,
-    profit 59) - picking purely by profit would silently drop a caller's "at least N
-    commodities" requirement (build_mixed_routes needs 2; a single commodity that fills
-    the ship is /best-route's job, not a mixed load). An ordering that doesn't reach
-    min_commodities is never preferred over one that does, regardless of its profit.
-    Ties keep today's per-unit-first result.
+    ``min_commodities`` matters because different strategies can reach a different
+    *number* of commodities loaded, not just different profit totals: an ordering that
+    doesn't reach min_commodities is never preferred over one that does, regardless of
+    its profit (build_mixed_routes needs 2; a single commodity that fills the ship is
+    /best-route's job, not a mixed load). Ties keep today's per-unit-first result.
     """
+    if len(pairs) <= EXACT_SEARCH_MAX_CANDIDATES and capacity <= EXACT_SEARCH_MAX_CAPACITY:
+        return _exact_allocate(
+            pairs,
+            capacity=int(capacity),
+            budget=budget,
+            max_commodities=max_commodities,
+            min_commodities=min_commodities,
+        )
     by_margin = _greedy_fill(pairs, capacity=capacity, budget=budget, max_commodities=max_commodities, key=_profit_per_unit)
     by_efficiency = _greedy_fill(pairs, capacity=capacity, budget=budget, max_commodities=max_commodities, key=_profit_per_auec)
     qualifying = [cargo for cargo in (by_margin, by_efficiency) if len(cargo) >= min_commodities]

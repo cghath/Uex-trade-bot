@@ -120,3 +120,29 @@ def test_multiple_chains_rank_by_total_profit_descending():
     ]
     routes = build_multi_stop_routes(rows, ship_capacity_scu=10)
     assert [route.stops for route in routes] == [(1, 2, 3), (1, 4, 5)]
+
+
+def test_a_real_budget_ranking_keeps_an_affordable_chain_from_being_crowded_out():
+    """Regression: candidate terminals used to be ranked by profit at *unlimited* budget
+    only (to keep budget-compounded-but-later-affordable edges reachable - see the other
+    test above). But ranking purely on unlimited-budget profit lets edges that would need
+    far more capital than any realistic chain could ever compound to dominate the bounded
+    candidate window, crowding out a chain that's genuinely affordable right now. 21
+    decoy edges, each needing 100,000 aUEC/unit (utterly unaffordable at budget 100) but
+    scoring enormous at unlimited budget, must not be able to exclude a real, valid,
+    budget=100-affordable 2-leg chain from the search entirely."""
+    rows = []
+    next_id = 100
+    for i in range(21):
+        origin_id, destination_id = next_id, next_id + 1
+        next_id += 2
+        rows.append(_row(1000 + i, origin_id, f"Decoy{i}", f"T{origin_id}", price_buy=100000, scu_buy=1000))
+        rows.append(_row(1000 + i, destination_id, f"Decoy{i}", f"T{destination_id}", price_sell=200000, scu_sell=1000))
+    rows += [
+        _row(1, 1, "A", "Origin", price_buy=10, scu_buy=10),
+        _row(1, 2, "A", "Midpoint", price_sell=30, scu_sell=10),
+        _row(2, 2, "B", "Midpoint", price_buy=5, scu_buy=10),
+        _row(2, 3, "B", "Final", price_sell=8, scu_sell=10),
+    ]
+    routes = build_multi_stop_routes(rows, ship_capacity_scu=10, budget=100)
+    assert any(route.stops == (1, 2, 3) for route in routes)

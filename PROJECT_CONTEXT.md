@@ -632,6 +632,65 @@ they're in sync).
     fix and watching the corresponding test fail before restoring it, same discipline as
     entry 38. 209 tests passing (2 new, in `tests/test_mixed_routes.py` and
     `tests/test_route_filter_ordering.py`).
+40. **4 more confirmed defects from continued review of entries 37-39, all reproduced
+    directly (not assumed) before touching code, and every new test verified to actually
+    catch its bug by reverting the fix first:**
+    - `/top-routes`' background loop kept only the single highest-scored route *per
+      commodity* (`select_best_available_route`/`select_best_in_stock_route`, both
+      `max(candidates, key=score)`) - entry 37's fix (keep every commodity, not just the
+      top 10 overall) never addressed this: if a commodity's one kept route failed
+      `auto-load-only`/`system`, there was no second-best for that same commodity to
+      fall back to, since nothing else was ever kept anywhere. Renamed to
+      `select_available_routes`/`select_in_stock_routes`, now returning every qualifying
+      route per commodity sorted by score. `_send_ranked_routes` dedupes back to one
+      route per commodity *after* filtering (entries are already score-sorted, so
+      keeping the first occurrence per commodity keeps the highest-scoring survivor) -
+      preserves the "one route per commodity" display property while letting a
+      same-commodity alternative surface when the top choice is filtered out.
+    - `build_multi_stop_routes`'s candidate-terminal ranking (entry 37: rank assuming
+      unlimited capital, so budget-compounded-but-later-affordable edges stay reachable)
+      could itself be crowded out: 21 decoy edges needing far more capital than any
+      realistic chain would ever compound to (individually unaffordable at the real
+      budget) scored enormous at unlimited budget and pushed a genuinely
+      immediately-affordable 2-leg chain out of the bounded top-20 candidate window
+      entirely - `build_multi_stop_routes(...)` returned `[]` for data that should
+      produce a route. Fixed by ranking candidates *twice* - once at unlimited budget,
+      once at the real starting budget - and taking the union of both top-20 lists (only
+      when a real budget was given; with none, the second ranking would be an identical,
+      wasted recomputation).
+    - `allocate_pair_cargo`'s two-greedy-orderings approach (entry 37) is meaningfully
+      non-optimal, not just in the one counterexample it was built to fix - a random
+      search over 20,000 small 2-commodity scenarios (capacity 9, budget 51) found cases
+      over 2x off optimal (57 vs 157 profit). Added `_exact_allocate`: for a small enough
+      candidate set and capacity (`EXACT_SEARCH_MAX_CANDIDATES`=8,
+      `EXACT_SEARCH_MAX_CAPACITY`=25 - measured ~65-85ms at those thresholds, climbing
+      sharply past them), brute-force every subset of size min_commodities..max_commodities
+      and every quantity split of all-but-one item in the subset (bounded by capacity,
+      since a unit of any commodity always costs exactly 1 SCU), choosing the last item's
+      quantity greedily from whatever remains - provably optimal for a fixed subset, and
+      exhausting every subset finds the true global optimum. Larger cases keep the
+      existing two-ordering approximation - `build_multi_stop_routes`' search can call
+      this thousands of times per command, so unbounded exactness isn't affordable there;
+      this is a deliberate, documented speed/optimality trade-off, not a claim of
+      universal optimality. One existing test's premise (`budget=400` finds no route) no
+      longer held once the exact solver could find a real, valid, better one the old
+      greedy-only code missed entirely - updated to a budget genuinely below the cheapest
+      possible 2-item combination instead.
+    - `/multi-stop-route`'s embed-too-large fallback (entry 38) carried
+      `summary_lines` (investment/revenue/profit/ROI/distance/confidence) into the
+      plain-text fallback but silently dropped `warnings` (risk flags, stock/demand
+      limits, practical notes, health) - confirmed by reading the fallback's own variable
+      references, then reproducing with a stock-limited leg whose warning never made it
+      into the fallback text. Fixed by running the fallback's lines through the same
+      `_chunk_lines` helper the embed fields already use (capped at 1900, under
+      Discord's separate 2,000-character plain-message limit, not the embed limit this
+      fallback exists to route around), sending as many messages as it takes rather than
+      dropping anything.
+    215 tests passing (6 new): the 21-decoy multi-stop crowding case; the exact-solver's
+    171-vs-76-profit case plus one confirming graceful fallback past the exact-search
+    thresholds; two `/top-routes` cog-level cases (a same-commodity fallback, and a
+    dedupe case proving two passing routes for one commodity still collapse to just the
+    higher-scored one); and the multi-stop fallback-preserves-warnings case.
 
 ## Where to look for what
 
@@ -912,7 +971,7 @@ guessed at.
   branch. Local (PC) and the Pi's databases have been fully merged at least twice now; the
   established practice is to back up both sides before any such merge and pull the Pi's
   backup down to the PC afterward, so nothing valuable lives only on the Pi's disk. The full
-  suite has 209 passing tests. Re-check live service and branch state rather than assuming
+  suite has 215 passing tests. Re-check live service and branch state rather than assuming
   this point-in-time operational note is still current.
 - The data collectors in `bot/cogs/intelligence.py` only pay off once they've been running a
   while - most of the `ROADMAP.md` intelligence backlog depends on accumulated history, so

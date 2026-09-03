@@ -137,52 +137,58 @@ def compute_movers(rows: list[dict], limit: int = 5) -> tuple[list[MoverEntry], 
     return gainers, losers
 
 
-def select_best_available_route(
+def _build_scored_route_entry(commodity_name: str, id_commodity: int, r: dict) -> ScoredRouteEntry:
+    return ScoredRouteEntry(
+        commodity_name=commodity_name,
+        id_commodity=id_commodity,
+        origin_terminal_name=r.get("origin_terminal_name", "Unknown"),
+        destination_terminal_name=r.get("destination_terminal_name", "Unknown"),
+        price_origin=r.get("price_origin") or 0,
+        price_destination=r.get("price_destination") or 0,
+        price_margin=r.get("price_margin"),
+        price_roi=r.get("price_roi"),
+        distance=r.get("distance"),
+        score=r["score"],
+        scu_origin=r.get("scu_origin"),
+        scu_destination=r.get("scu_destination"),
+        status_origin=r.get("status_origin"),
+        status_destination=r.get("status_destination"),
+        volatility_origin=r.get("volatility_origin"),
+        volatility_destination=r.get("volatility_destination"),
+        origin_terminal_id=_positive_id(r.get("id_terminal_origin")),
+        destination_terminal_id=_positive_id(r.get("id_terminal_destination")),
+    )
+
+
+def select_available_routes(
     commodity_name: str, id_commodity: int, route_rows: list[dict]
-) -> ScoredRouteEntry | None:
-    """From one commodity's /commodities_routes rows, pick the single highest-`score` route
-    whose origin terminal has real buy-side stock right now: price_origin > 0 (the terminal
-    actually sells it at all) AND scu_origin > 0 (real stock, not just a price with nothing to
-    sell) - the same "available to buy" bar bot/uex/stock_alerts.py uses. A route with no
-    `score` at all can't be ranked by this feature's whole premise (UEX's own route-quality
-    metric), so it's excluded rather than sorted arbitrarily. Returns None if nothing on this
-    commodity qualifies.
+) -> list[ScoredRouteEntry]:
+    """From one commodity's /commodities_routes rows, return every qualifying route (not
+    just the single highest-scored one), sorted by `score` descending - so that if the
+    top-scored route later fails a user filter (auto-load-only, system), the next-best
+    route for this SAME commodity is still available to fall back to, rather than the
+    whole commodity dropping out silently. Qualifying means the origin terminal has real
+    buy-side stock right now: price_origin > 0 (the terminal actually sells it at all)
+    AND scu_origin > 0 (real stock, not just a price with nothing to sell) - the same
+    "available to buy" bar bot/uex/stock_alerts.py uses. A route with no `score` at all
+    can't be ranked by this feature's whole premise (UEX's own route-quality metric), so
+    it's excluded rather than sorted arbitrarily. Returns [] if nothing qualifies.
     """
     candidates = [
         r
         for r in route_rows
         if (r.get("price_origin") or 0) > 0 and (r.get("scu_origin") or 0) > 0 and r.get("score") is not None
     ]
-    if not candidates:
-        return None
-
-    best = max(candidates, key=lambda r: r["score"])
-    return ScoredRouteEntry(
-        commodity_name=commodity_name,
-        id_commodity=id_commodity,
-        origin_terminal_name=best.get("origin_terminal_name", "Unknown"),
-        destination_terminal_name=best.get("destination_terminal_name", "Unknown"),
-        price_origin=best.get("price_origin") or 0,
-        price_destination=best.get("price_destination") or 0,
-        price_margin=best.get("price_margin"),
-        price_roi=best.get("price_roi"),
-        distance=best.get("distance"),
-        score=best["score"],
-        scu_origin=best.get("scu_origin"),
-        scu_destination=best.get("scu_destination"),
-        status_origin=best.get("status_origin"),
-        status_destination=best.get("status_destination"),
-        volatility_origin=best.get("volatility_origin"),
-        volatility_destination=best.get("volatility_destination"),
-        origin_terminal_id=_positive_id(best.get("id_terminal_origin")),
-        destination_terminal_id=_positive_id(best.get("id_terminal_destination")),
-    )
+    candidates.sort(key=lambda r: r["score"], reverse=True)
+    return [_build_scored_route_entry(commodity_name, id_commodity, r) for r in candidates]
 
 
 def rank_top_scored_routes(entries: list[ScoredRouteEntry], limit: int = 10) -> list[ScoredRouteEntry]:
-    """Entries are already one-per-commodity (see select_best_available_route, called once per
-    commodity in the background refresh) - this just ranks across every commodity by UEX's own
-    score, highest first, and caps the list."""
+    """Ranks across every commodity by UEX's own score, highest first, and caps the list.
+    entries can carry more than one route per commodity now (see select_available_routes)
+    - deduping back to one-per-commodity for display happens later, in
+    bot/cogs/trends.py:_send_ranked_routes, after a user's filters have had a chance to
+    pick among a commodity's alternatives."""
     return sorted(entries, key=lambda e: e.score, reverse=True)[:limit]
 
 
@@ -196,19 +202,19 @@ def rank_top_scored_routes(entries: list[ScoredRouteEntry], limit: int = 10) -> 
 # inventory = UEX's own explicit "no demand" (bad). This is the one sell-side code UEX itself
 # flags as unambiguously bad. The shared demand check also fails closed for code 0/None
 # ("not applicable" or unknown) and requires a positive destination SCU value.
-def select_best_in_stock_route(
+def select_in_stock_routes(
     commodity_name: str, id_commodity: int, route_rows: list[dict]
-) -> ScoredRouteEntry | None:
-    """Like select_best_available_route, but stricter: also requires the DESTINATION side to
+) -> list[ScoredRouteEntry]:
+    """Like select_available_routes, but stricter: also requires the DESTINATION side to
     have real, currently-live sell-side demand, not just the origin having real buy-side stock.
     The default /top-routes view only checks the buy side, which means a route can rank highly and
     still be practically dead - great buy-side stock but the destination has UEX's own
     explicit "no demand" status. The shared demand check requires positive destination SCU
     and a known, applicable status other than SELL_SIDE_NO_DEMAND_CODE. SCU alone doesn't
     catch this since it is a much larger, closer-to-static figure that doesn't reflect live
-    status the way the categorical code does. Same
-    one-highest-score-per-commodity selection as select_best_available_route otherwise; returns
-    None if nothing on this commodity qualifies.
+    status the way the categorical code does. Returns every qualifying route sorted by
+    score descending (see select_available_routes for why this isn't just the single
+    best), or [] if nothing on this commodity qualifies.
     """
     candidates = [
         r
@@ -219,27 +225,5 @@ def select_best_in_stock_route(
         and has_sell_side_demand(r.get("scu_destination"), r.get("status_destination"))
         and r.get("score") is not None
     ]
-    if not candidates:
-        return None
-
-    best = max(candidates, key=lambda r: r["score"])
-    return ScoredRouteEntry(
-        commodity_name=commodity_name,
-        id_commodity=id_commodity,
-        origin_terminal_name=best.get("origin_terminal_name", "Unknown"),
-        destination_terminal_name=best.get("destination_terminal_name", "Unknown"),
-        price_origin=best.get("price_origin") or 0,
-        price_destination=best.get("price_destination") or 0,
-        price_margin=best.get("price_margin"),
-        price_roi=best.get("price_roi"),
-        distance=best.get("distance"),
-        score=best["score"],
-        scu_origin=best.get("scu_origin"),
-        scu_destination=best.get("scu_destination"),
-        status_origin=best.get("status_origin"),
-        status_destination=best.get("status_destination"),
-        volatility_origin=best.get("volatility_origin"),
-        volatility_destination=best.get("volatility_destination"),
-        origin_terminal_id=_positive_id(best.get("id_terminal_origin")),
-        destination_terminal_id=_positive_id(best.get("id_terminal_destination")),
-    )
+    candidates.sort(key=lambda r: r["score"], reverse=True)
+    return [_build_scored_route_entry(commodity_name, id_commodity, r) for r in candidates]

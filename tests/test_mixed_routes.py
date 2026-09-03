@@ -51,10 +51,50 @@ def test_budget_is_a_hard_limit_and_requires_two_allocated_commodities():
         _row(2, 1, "B", "Origin", price_buy=10, scu_buy=10),
         _row(2, 2, "B", "Destination", price_sell=15, scu_sell=10),
     ]
-    assert build_mixed_routes(rows, ship_capacity_scu=10, budget=400) == []
+    # The cheapest possible 2-commodity load is 1 unit of each (100 + 10 = 110) - below
+    # that, no 2-item combination is affordable at all, regardless of allocation strategy.
+    assert build_mixed_routes(rows, ship_capacity_scu=10, budget=100) == []
     (route,) = build_mixed_routes(rows, ship_capacity_scu=10, budget=420)
     assert route.investment <= 420
     assert len(route.cargo) == 2
+
+
+def test_allocate_pair_cargo_finds_the_true_optimum_within_the_exact_search_thresholds():
+    """The two-ordering greedy approach is still a real approximation, not a solver - a
+    random search over small scenarios (capacity 9, budget 51) found this case where
+    neither ordering comes close: margin-first (equal per-unit margins, so stable order
+    keeps the first-listed commodity first) gets 3xA + 1xB = 76 profit; the true optimum
+    is 1xA + 8xB = 171 (cost 15 + 32 = 47, within the 51 budget, using all 9 capacity).
+    Within EXACT_SEARCH_MAX_CANDIDATES/EXACT_SEARCH_MAX_CAPACITY, allocate_pair_cargo
+    must find this exactly, not approximate it."""
+    source_a = _row(1, 1, "A", "Origin", price_buy=15, scu_buy=11)
+    dest_a = _row(1, 2, "A", "Destination", price_sell=34, scu_sell=11)
+    source_b = _row(2, 1, "B", "Origin", price_buy=4, scu_buy=9)
+    dest_b = _row(2, 2, "B", "Destination", price_sell=23, scu_sell=9)
+    pairs = [(source_a, dest_a), (source_b, dest_b)]
+    cargo = allocate_pair_cargo(pairs, capacity=9, budget=51, max_commodities=3, min_commodities=2)
+    assert {item.commodity_name: item.quantity_scu for item in cargo} == {"A": 1.0, "B": 8.0}
+    assert sum(item.profit for item in cargo) == 171
+
+
+def test_allocate_pair_cargo_still_returns_a_qualifying_result_past_the_exact_thresholds():
+    """Past EXACT_SEARCH_MAX_CANDIDATES/EXACT_SEARCH_MAX_CAPACITY, allocation falls back
+    to the two-ordering heuristic rather than brute-forcing an unbounded search space -
+    this must still return a valid, budget/capacity-respecting, qualifying result, not
+    error or hang."""
+    pairs = []
+    for i in range(10):  # past EXACT_SEARCH_MAX_CANDIDATES (8)
+        # Capped stock (5 units each) so no single commodity can consume all 30
+        # capacity alone - otherwise a degenerate greedy pick could land on 1 item
+        # regardless of ordering, which isn't what this test is checking.
+        buy, sell = 10, 10 + (i + 1)
+        source = _row(i, 1, f"C{i}", "Origin", price_buy=buy, scu_buy=5)
+        dest = _row(i, 2, f"C{i}", "Destination", price_sell=sell, scu_sell=5)
+        pairs.append((source, dest))
+    cargo = allocate_pair_cargo(pairs, capacity=30, budget=500, max_commodities=3, min_commodities=2)
+    assert len(cargo) >= 2
+    assert sum(item.investment for item in cargo) <= 500
+    assert sum(item.quantity_scu for item in cargo) <= 30
 
 
 def test_allocate_pair_cargo_prefers_efficiency_over_raw_margin_when_budget_binds():

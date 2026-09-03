@@ -1060,12 +1060,20 @@ class Prices(commands.Cog):
             try:
                 await interaction.followup.send(embed=route_embed)
             except discord.HTTPException:
-                fallback = (
-                    f"**#{index} {path_label}**\n"
-                    + "\n".join(summary_lines)
-                    + "\n⚠️ Full leg-by-leg details omitted - too large for one Discord message."
-                )
-                await interaction.followup.send(content=fallback)
+                # Plain-message fallback for an embed too large to send - warnings
+                # (risk flags, stock/demand limits, practical notes) must survive here
+                # too, not just the profit figures, so this goes through the same
+                # chunking helper the embed fields use (with Discord's plain-message cap
+                # of 2000 chars, not the embed field's 1024) and sends as many messages
+                # as it takes rather than silently dropping anything.
+                fallback_lines = [
+                    f"**#{index} {path_label}**",
+                    *summary_lines,
+                    "⚠️ Full leg-by-leg cargo/distance details omitted - too large for one Discord message.",
+                    *unique_warnings,
+                ]
+                for chunk in _chunk_lines(fallback_lines, max_length=1900):
+                    await interaction.followup.send(content=chunk)
 
 
 async def setup(bot: commands.Bot) -> None:
