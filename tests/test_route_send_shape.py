@@ -10,11 +10,13 @@ send-call shape each command must use, not just whether a response was sent at a
 from __future__ import annotations
 
 import asyncio
+import threading
 
 from cryptography.fernet import Fernet
 import discord
 import httpx
 
+from bot.cogs import prices as prices_module
 from bot.cogs.prices import Prices
 from bot.db.database import Database
 from bot.uex.client import UexClient
@@ -212,6 +214,111 @@ def test_mixed_routes_discloses_when_cargo_allocation_is_approximate(tmp_path):
             assert embeds, f"expected at least one embed, got: {interaction.followup.sent}"
             footer_text = embeds[0].footer.text or ""
             assert "approximate" in footer_text.lower(), f"expected an approximation disclosure, got footer: {footer_text!r}"
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_mixed_routes_offloads_cargo_allocation_to_a_worker_thread(tmp_path, monkeypatch):
+    """Regression: cargo allocation (see allocate_pair_cargo) can run a real, sometimes
+    expensive combinatorial search - a dense enough market snapshot measured at ~15s for
+    an 8-terminal/8-commodity case. Calling it directly on the coroutine handling the
+    interaction would run that on the bot's one asyncio event loop thread, freezing every
+    other interaction and background poller for as long as it takes. Checked directly
+    (not via timing, which can pass by accident from unrelated awaits earlier in the
+    command): the actual thread build_mixed_routes runs on must not be the main/event-loop
+    thread, meaning the call went through asyncio.to_thread."""
+    async def run():
+        called_from_thread = {}
+        real_build = prices_module.build_mixed_routes
+
+        def spy(*args, **kwargs):
+            called_from_thread["thread"] = threading.current_thread()
+            return real_build(*args, **kwargs)
+
+        monkeypatch.setattr(prices_module, "build_mixed_routes", spy)
+
+        interaction = await _run_command(
+            tmp_path, "mixed_routes_thread.sqlite3", _MIXED_ROUTES_ROWS,
+            lambda cog, interaction: cog.mixed_routes.callback(cog, interaction, ship="TestShip"),
+        )
+        assert interaction.followup.sent, "expected at least one followup"
+        assert called_from_thread.get("thread") is not None, "build_mixed_routes was never called"
+        assert called_from_thread["thread"] is not threading.main_thread(), (
+            "build_mixed_routes ran on the main/event-loop thread - it must be offloaded "
+            "via asyncio.to_thread so it can't block the bot's one event loop"
+        )
+
+    asyncio.run(run())
+
+
+def test_multi_stop_route_offloads_cargo_allocation_to_a_worker_thread(tmp_path, monkeypatch):
+    """Same regression as the /mixed-routes version above, for /multi-stop-route's
+    build_multi_stop_routes - its DFS can call the same exact allocator far more often
+    per command, making the offload matter even more here."""
+    async def run():
+        called_from_thread = {}
+        real_build = prices_module.build_multi_stop_routes
+
+        def spy(*args, **kwargs):
+            called_from_thread["thread"] = threading.current_thread()
+            return real_build(*args, **kwargs)
+
+        monkeypatch.setattr(prices_module, "build_multi_stop_routes", spy)
+
+        interaction = await _run_command(
+            tmp_path, "multi_stop_thread.sqlite3", _MULTI_STOP_ROWS,
+            lambda cog, interaction: cog.multi_stop_route.callback(cog, interaction, ship="TestShip"),
+        )
+        assert interaction.followup.sent, "expected at least one followup"
+        assert called_from_thread.get("thread") is not None, "build_multi_stop_routes was never called"
+        assert called_from_thread["thread"] is not threading.main_thread(), (
+            "build_multi_stop_routes ran on the main/event-loop thread - it must be "
+            "offloaded via asyncio.to_thread so it can't block the bot's one event loop"
+        )
+
+    asyncio.run(run())
+
+
+def test_multi_stop_route_fallback_preserves_approximation_disclosure(tmp_path):
+    """Regression: the "cargo allocation is approximate" disclosure lived only in the
+    embed footer - a route whose allocation is approximate but whose embed is rejected as
+    too large silently lost that disclosure in the plain-text fallback."""
+    async def run():
+        db = Database(tmp_path / "multi_stop_fallback_disclosure.sqlite3", Fernet(Fernet.generate_key()))
+        await db.init()
+        await db.record_terminal_market_snapshot(_MULTI_STOP_ROWS)
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            path = request.url.path
+            if "vehicles" in path:
+                # scu (30) exceeds EXACT_SEARCH_MAX_CAPACITY (25), making this route's
+                # cargo allocation approximate, not proven-optimal.
+                return httpx.Response(200, json={"status": "ok", "data": [{"name": "BigShip", "scu": 30, "pad_type": "M"}]})
+            if "terminals_distances" in path:
+                return httpx.Response(200, json={"status": "ok", "data": {"distance": 1.0}})
+            return httpx.Response(200, json={"status": "ok", "data": []})
+
+        client = UexClient(app_token="test", base_url="https://uex.test")
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+        bot = type("FakeBot", (), {})()
+        bot.db = db
+        bot.uex = client
+        cog = Prices.__new__(Prices)
+        cog.bot = bot
+        interaction = _FakeInteraction(111)
+        interaction.followup = _EmbedTooLargeFollowup()
+
+        try:
+            await cog.multi_stop_route.callback(cog, interaction, ship="BigShip")
+
+            fallback_text = "\n".join(kwargs["content"] for _, kwargs in interaction.followup.sent)
+            assert "approximate" in fallback_text.lower(), (
+                f"expected the approximation disclosure to survive into the fallback, got: {fallback_text!r}"
+            )
         finally:
             await client.aclose()
 

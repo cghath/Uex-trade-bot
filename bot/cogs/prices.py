@@ -1,6 +1,7 @@
 """Price lookup and trade-route commands backed by UEX /commodities_prices."""
 from __future__ import annotations
 
+import asyncio
 import logging
 
 import discord
@@ -17,7 +18,7 @@ from bot.uex.supply_demand import analyze_terminal_market_history, has_sell_side
 from bot.uex.ships import estimate_route_cargo, resolve_ship
 from bot.uex.status import build_status_lookup, resolve_status_label
 from bot.uex.trading import best_buy_locations, best_routes, best_sell_locations
-from bot.uex.mixed_routes import EXACT_SEARCH_MAX_CAPACITY, build_mixed_routes, requires_capital_cargo_access
+from bot.uex.mixed_routes import build_mixed_routes, requires_capital_cargo_access
 from bot.uex.multi_stop_routes import build_multi_stop_routes
 
 logger = logging.getLogger("uexbot.prices")
@@ -686,7 +687,13 @@ class Prices(commands.Cog):
                 station = stations_by_id.get(station_id, {})
                 row["station_pad_types"] = station.get("pad_types")
                 row["station_has_loading_dock"] = station.get("has_loading_dock")
-        routes = build_mixed_routes(
+        # Cargo allocation can run an exact combinatorial search per candidate route
+        # (see allocate_pair_cargo) - dense market data can make that expensive enough
+        # to matter, and this call would otherwise run synchronously on the bot's one
+        # asyncio event loop, delaying every other interaction and background poller
+        # for as long as it takes. Offload it to a worker thread instead.
+        routes = await asyncio.to_thread(
+            build_mixed_routes,
             market_rows,
             ship_capacity_scu=float(ship_vehicle["scu"]),
             budget=float(budget) if budget is not None else None,
@@ -820,8 +827,8 @@ class Prices(commands.Cog):
                 footer += " · surface terminals excluded"
             if capital_access_only:
                 footer += " · capital access confirmed at both ends"
-            if float(ship_vehicle["scu"]) > EXACT_SEARCH_MAX_CAPACITY:
-                footer += f" · cargo allocation above {EXACT_SEARCH_MAX_CAPACITY:.0f} SCU is approximate, not proven-optimal"
+            if not route.is_exact:
+                footer += " · cargo allocation for this route is approximate, not proven-optimal"
             route_embed.set_footer(text=footer)
             embeds.append(route_embed)
         await interaction.followup.send(embeds=embeds)
@@ -894,7 +901,11 @@ class Prices(commands.Cog):
                 row["station_pad_types"] = station.get("pad_types")
                 row["station_has_loading_dock"] = station.get("has_loading_dock")
 
-        routes = build_multi_stop_routes(
+        # See the matching comment in mixed_routes above: multi-stop's DFS can call the
+        # same exact allocator far more often per command, so offloading it matters even
+        # more here.
+        routes = await asyncio.to_thread(
+            build_multi_stop_routes,
             market_rows,
             ship_capacity_scu=float(ship_vehicle["scu"]),
             budget=float(budget) if budget is not None else None,
@@ -1052,8 +1063,8 @@ class Prices(commands.Cog):
                 footer += " · surface terminals excluded"
             if capital_access_only:
                 footer += " · capital access confirmed at every stop"
-            if float(ship_vehicle["scu"]) > EXACT_SEARCH_MAX_CAPACITY:
-                footer += f" · per-leg cargo allocation above {EXACT_SEARCH_MAX_CAPACITY:.0f} SCU is approximate, not proven-optimal"
+            if not route.is_exact:
+                footer += " · per-leg cargo allocation for this route is approximate, not proven-optimal"
             route_embed.set_footer(text=footer)
             # Sent one route per message, not batched like /mixed-routes: a multi-leg
             # route's per-leg cargo/warning fields can push a single embed close to
@@ -1074,6 +1085,9 @@ class Prices(commands.Cog):
                     f"**#{index} {path_label}**",
                     *summary_lines,
                     "⚠️ Full leg-by-leg cargo/distance details omitted - too large for one Discord message.",
+                    *([] if route.is_exact else [
+                        "⚠️ Per-leg cargo allocation for this route is approximate, not proven-optimal"
+                    ]),
                     *unique_warnings,
                 ]
                 for chunk in _chunk_lines(fallback_lines, max_length=1900):

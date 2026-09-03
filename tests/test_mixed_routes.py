@@ -3,6 +3,7 @@ import discord
 
 from bot.uex.mixed_routes import (
     allocate_pair_cargo,
+    allocation_is_exact,
     build_mixed_routes,
     is_space_terminal,
     requires_capital_cargo_access,
@@ -116,6 +117,44 @@ def test_a_bigger_ship_never_scores_worse_than_a_smaller_one_at_the_exact_thresh
     past_threshold = allocate_pair_cargo(pairs, capacity=26, budget=1_000_000, max_commodities=3, min_commodities=2)
     assert len(past_threshold) >= 2
     assert sum(item.profit for item in past_threshold) >= sum(item.profit for item in at_threshold)
+
+
+def test_available_scu_reports_real_market_stock_not_the_solvers_own_search_cap():
+    """Regression: _exact_allocate's own capped search capacity (EXACT_SEARCH_MAX_CAPACITY,
+    or a smaller real ship capacity) leaked into the reported available_scu, so a warning
+    like 'stock limits this load to 25 SCU' fired even when the real market had far more
+    stock/demand than the solver simply chose not to search past - confirmed on the real
+    collected snapshot (Astatine: 1,570 SCU demand, Quartz: 55 SCU stock, both reported as
+    25). available_scu must always reflect the source/destination rows' real
+    scu_buy/scu_sell, independent of ship capacity or the solver's own search bound."""
+    source = _row(1, 1, "Astatine", "Origin", price_buy=10, scu_buy=1570)
+    dest = _row(1, 2, "Astatine", "Destination", price_sell=20, scu_sell=1570)
+    pairs = [(source, dest)]
+    # capacity=10 is well within the exact-search thresholds, and far below the real
+    # 1,570 SCU of stock/demand - the solver's own cap must not be reported as if it
+    # were the market's real limit.
+    (item,) = allocate_pair_cargo(pairs, capacity=10, budget=1_000_000, max_commodities=3)
+    assert item.quantity_scu == 10  # ship capacity is still the real, binding limit on quantity
+    assert item.available_scu == 1570  # but the reported market stock must be the true figure
+
+
+def test_build_mixed_routes_is_exact_flags_approximate_allocations():
+    """Regression: the "cargo allocation is approximate" disclosure previously lived only
+    in the cog and only checked ship capacity - it never accounted for a candidate count
+    past EXACT_SEARCH_MAX_CANDIDATES, which also forces the two-ordering heuristic (no
+    exact solve at all, see allocate_pair_cargo) regardless of how small the ship is.
+    build_mixed_routes' is_exact must reflect allocation_is_exact for each route's real
+    pair count and capacity, not just a capacity threshold."""
+    rows = []
+    for i in range(10):  # past EXACT_SEARCH_MAX_CANDIDATES (8)
+        buy, sell = 10, 10 + (i + 1)
+        rows.append(_row(i, 1, f"C{i}", "Origin", price_buy=buy, scu_buy=5))
+        rows.append(_row(i, 2, f"C{i}", "Destination", price_sell=sell, scu_sell=5))
+    # capacity=10 is well under EXACT_SEARCH_MAX_CAPACITY (25) - only the candidate count
+    # pushes this past the exact-search threshold.
+    (route,) = build_mixed_routes(rows, ship_capacity_scu=10, budget=500)
+    assert route.is_exact is False
+    assert allocation_is_exact(num_pairs=len(rows) // 2, capacity=10) is False
 
 
 def test_allocate_pair_cargo_prefers_efficiency_over_raw_margin_when_budget_binds():

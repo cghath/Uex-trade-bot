@@ -149,6 +149,23 @@ def test_a_real_budget_ranking_keeps_an_affordable_chain_from_being_crowded_out(
     assert any(route.stops == (1, 2, 3) for route in routes)
 
 
+def test_route_is_exact_reflects_the_least_exact_leg():
+    """Regression: the exactness disclosure previously lived only in the cog, and only
+    checked ship capacity against EXACT_SEARCH_MAX_CAPACITY - MultiStopRoute now carries
+    its own is_exact (all(leg.is_exact for leg in legs), see allocate_pair_cargo's
+    docstring), so a chain is only as exact as its least-exact leg."""
+    rows = [
+        _row(1, 1, "Stileron", "Origin", price_buy=100, scu_buy=1000),
+        _row(1, 2, "Stileron", "Midpoint", price_sell=150, scu_sell=1000),
+        _row(2, 2, "Cobalt", "Midpoint", price_buy=50, scu_buy=1000),
+        _row(2, 3, "Cobalt", "Final", price_sell=90, scu_sell=1000),
+    ]
+    (exact_route,) = build_multi_stop_routes(rows, ship_capacity_scu=10)
+    assert exact_route.is_exact is True
+    (approximate_route,) = build_multi_stop_routes(rows, ship_capacity_scu=30)
+    assert approximate_route.is_exact is False
+
+
 def test_exploration_visits_the_most_promising_edges_first_not_insertion_order(monkeypatch):
     """Regression: on the real collected market snapshot, a 24-SCU ship with a
     100,000-aUEC budget found only a 323,124-profit chain while a valid 426,056-profit

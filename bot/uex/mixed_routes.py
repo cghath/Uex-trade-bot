@@ -39,6 +39,7 @@ class MixedRoute:
     investment: float
     revenue: float
     profit: float
+    is_exact: bool
 
     @property
     def roi_pct(self) -> float:
@@ -194,10 +195,17 @@ def _exact_allocate(
                 source, destination = pairs[idx]
                 buy_price = float(source["price_buy"])
                 sell_price = float(destination["price_sell"])
-                available = math.floor(min(float(source["scu_buy"]), float(destination["scu_sell"]), capacity))
-                items.append((buy_price, sell_price - buy_price, available, source, destination))
+                # market_available is the real stock/demand limit, reported to the user
+                # as-is; search_bound additionally caps it at this call's (possibly
+                # search-capped, see allocate_pair_cargo) capacity so the combinatorial
+                # search below never enumerates quantities no ship could carry anyway.
+                # Conflating the two previously reported this solver's own capacity cap
+                # as if it were the market's real stock/demand limit.
+                market_available = math.floor(min(float(source["scu_buy"]), float(destination["scu_sell"])))
+                search_bound = min(market_available, capacity)
+                items.append((buy_price, sell_price - buy_price, market_available, search_bound, source, destination))
             *prefix, last = items
-            ranges = [range(0, item[2] + 1) for item in prefix]
+            ranges = [range(0, item[3] + 1) for item in prefix]
             for prefix_quantities in itertools.product(*ranges):
                 used_capacity = sum(prefix_quantities)
                 if used_capacity > capacity:
@@ -212,7 +220,7 @@ def _exact_allocate(
                     remaining_capacity if math.isinf(remaining_budget) or last_buy_price <= 0
                     else math.floor(remaining_budget / last_buy_price)
                 )
-                last_quantity = max(0, min(last[2], remaining_capacity, last_affordable))
+                last_quantity = max(0, min(last[3], remaining_capacity, last_affordable))
                 quantities = (*prefix_quantities, last_quantity)
                 if sum(1 for q in quantities if q > 0) < min_commodities:
                     continue
@@ -221,16 +229,16 @@ def _exact_allocate(
                     best_profit = total_profit
                     best_cargo = [
                         MixedCargoItem(
-                            id_commodity=int(item[3]["id_commodity"]),
-                            commodity_name=str(item[3].get("commodity_name") or "Unknown"),
+                            id_commodity=int(item[4]["id_commodity"]),
+                            commodity_name=str(item[4].get("commodity_name") or "Unknown"),
                             quantity_scu=float(quantity),
                             buy_price=item[0],
                             sell_price=item[0] + item[1],
                             available_scu=float(item[2]),
                             investment=quantity * item[0],
                             profit=quantity * item[1],
-                            source=item[3],
-                            destination=item[4],
+                            source=item[4],
+                            destination=item[5],
                         )
                         for item, quantity in zip(items, quantities)
                         if quantity > 0
@@ -367,6 +375,7 @@ def build_mixed_routes(
                 investment=investment,
                 revenue=investment + profit,
                 profit=profit,
+                is_exact=allocation_is_exact(num_pairs=len(pairs), capacity=capacity),
             )
         )
 

@@ -13,7 +13,12 @@ from dataclasses import dataclass
 import math
 from typing import Any
 
-from bot.uex.mixed_routes import MixedCargoItem, allocate_pair_cargo, build_pair_opportunities
+from bot.uex.mixed_routes import (
+    MixedCargoItem,
+    allocate_pair_cargo,
+    allocation_is_exact,
+    build_pair_opportunities,
+)
 
 MAX_LEGS = 3
 MAX_CANDIDATE_EDGES = 20
@@ -37,6 +42,7 @@ class MultiStopLeg:
     investment: float
     revenue: float
     profit: float
+    is_exact: bool
 
 
 @dataclass(frozen=True)
@@ -53,6 +59,13 @@ class MultiStopRoute:
     @property
     def roi_pct(self) -> float:
         return 0.0 if self.investment <= 0 else self.profit / self.investment * 100
+
+    @property
+    def is_exact(self) -> bool:
+        """False if any leg's cargo allocation is only the two-ordering/capped-exact
+        approximation (see allocate_pair_cargo), not a proven optimum for its real
+        capacity - a chain is only as exact as its least-exact leg."""
+        return all(leg.is_exact for leg in self.legs)
 
 
 def build_multi_stop_routes(
@@ -216,6 +229,7 @@ def build_multi_stop_routes(
                 investment=leg_investment,
                 revenue=leg_revenue,
                 profit=leg_profit,
+                is_exact=allocation_is_exact(num_pairs=len(pairs), capacity=capacity),
             )
             next_budget = (
                 remaining_budget if math.isinf(remaining_budget)

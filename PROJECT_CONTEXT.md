@@ -737,6 +737,61 @@ they're in sync).
     the working version instead controls order directly through a dict-insertion-order
     trick (decoy edges inserted before the real one, all from a shared origin) rather
     than relying on set/hash behavior at all. 218 tests passing (3 new).
+42. **3 more confirmed defects, again independently reproduced (two directly against real
+    numbers/behavior, not just synthetic data):**
+    - `_exact_allocate` (entry 39) computed each candidate's `available` (stock/demand
+      limit) as `min(scu_buy, scu_sell, capacity)` - folding the solver's own search
+      capacity into a value that also became the reported `available_scu`, so a
+      "stock/demand limits this load to N SCU" warning showed the solver's cap, not the
+      real market figure. Confirmed against the real snapshot: Astatine (1,570 SCU real
+      demand) and Quartz (55 SCU real stock) both reported as capped to 25 SCU. Fixed by
+      splitting the single value into `market_available` (real stock/demand, used for the
+      returned `MixedCargoItem.available_scu` and never touched by capacity) and
+      `search_bound = min(market_available, capacity)` (used only to bound the
+      combinatorial search's ranges) - the search space explored is identical to before,
+      only the reported number changed.
+    - Cargo allocation (`allocate_pair_cargo`, in particular entry 40's "always try a
+      capped exact solve" fix) runs a real combinatorial search per candidate route and
+      can take meaningful wall-clock time on dense-enough data - reproduced at ~15s for a
+      fully-connected 8-terminal/8-commodity synthetic snapshot via `/mixed-routes`
+      end-to-end (a single `_exact_allocate` call at 8 candidates/capacity 25 alone
+      measured ~0.12s, and `build_mixed_routes` calls it once per origin/destination
+      pair - 56 pairs for that snapshot). Both `build_mixed_routes` and
+      `build_multi_stop_routes` were called directly on the coroutine handling the
+      interaction, so that cost ran synchronously on the bot's one asyncio event loop,
+      freezing every other interaction and background poller for the whole duration -
+      confirmed experimentally with a concurrent heartbeat coroutine that ticked zero
+      times during an equivalent direct synchronous call but kept ticking once offloaded.
+      Fixed by wrapping both calls in `await asyncio.to_thread(...)` in `bot/cogs/prices.py` -
+      moves the CPU-bound work off the event loop without touching the algorithm itself
+      or its optimality guarantees. The regression test checks this directly (the actual
+      thread `build_mixed_routes`/`build_multi_stop_routes` runs on must not be
+      `threading.main_thread()`) rather than via timing, since a timing/heartbeat-based
+      version passed even without the fix - ticks accumulated from unrelated awaits
+      earlier in the same command (fetching vehicles, market rows) gave a false pass
+      before the blocking call was ever reached.
+    - The "cargo allocation is approximate" disclosure (entry 41) checked only
+      `ship_vehicle["scu"] > EXACT_SEARCH_MAX_CAPACITY`, so a small ship choosing among
+      more than `EXACT_SEARCH_MAX_CANDIDATES` (8) commodities at one stop - which also
+      forces the pure two-ordering heuristic, no exact solve at all - got no disclosure.
+      It also lived only in the embed footer, so a route needing the plain-text fallback
+      (embed too large) silently lost it. Fixed by giving `MixedRoute` and
+      `MultiStopLeg`/`MultiStopRoute` their own `is_exact` (from the already-existing but
+      previously-uncalled `allocation_is_exact(num_pairs, capacity)`, computed once per
+      edge/leg at build time; a chain's `is_exact` is `all(leg.is_exact for leg in legs)`
+      - only as exact as its least-exact leg) and switching both the cog's footer checks
+      and the multi-stop fallback's line-list to `if not route.is_exact`.
+    Building the dense-mixed-route test fixture required a real fix mid-session: an
+    initial version used two separate rows per (terminal, commodity) - one buy-only, one
+    sell-only - which looked fine passed directly to `build_mixed_routes`, but collapsed
+    to just the second row once round-tripped through
+    `record_terminal_market_snapshot`/`get_mixed_route_market_rows`, since the DB's
+    upsert key is `(id_commodity, id_terminal)` and the real schema expects one row per
+    pair carrying both buy and sell fields together - caught because the cog-level test
+    returned "no routes found" in under a millisecond instead of taking real time.
+    All three fixes were confirmed to actually catch their bug - not just pass - by
+    temporarily reverting each one and watching the corresponding test fail before
+    restoring it, same discipline as entries 38-41. 224 tests passing (6 new).
 
 ## Where to look for what
 
@@ -1017,7 +1072,7 @@ guessed at.
   branch. Local (PC) and the Pi's databases have been fully merged at least twice now; the
   established practice is to back up both sides before any such merge and pull the Pi's
   backup down to the PC afterward, so nothing valuable lives only on the Pi's disk. The full
-  suite has 218 passing tests. Re-check live service and branch state rather than assuming
+  suite has 224 passing tests. Re-check live service and branch state rather than assuming
   this point-in-time operational note is still current.
 - The data collectors in `bot/cogs/intelligence.py` only pay off once they've been running a
   while - most of the `ROADMAP.md` intelligence backlog depends on accumulated history, so
