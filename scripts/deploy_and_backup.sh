@@ -75,7 +75,18 @@ git merge --ff-only "origin/$BRANCH"
 
 if ! git diff --quiet "$OLD_COMMIT" HEAD -- requirements.txt requirements-dev.txt; then
     echo "requirements*.txt changed - reinstalling dependencies..."
-    .venv/bin/pip install -r requirements.txt
+    # Local dev clones use .venv; the Pi's own clone uses venv (no dot) - check both
+    # rather than hardcoding one, so this doesn't silently fail on whichever machine
+    # doesn't match.
+    if [ -x ".venv/bin/pip" ]; then
+        VENV_PIP=".venv/bin/pip"
+    elif [ -x "venv/bin/pip" ]; then
+        VENV_PIP="venv/bin/pip"
+    else
+        echo "Could not find a virtualenv's pip at .venv/bin/pip or venv/bin/pip - aborting." >&2
+        exit 1
+    fi
+    "$VENV_PIP" install -r requirements.txt
 fi
 
 echo "Starting $SERVICE_NAME..."
