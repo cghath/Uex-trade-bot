@@ -483,6 +483,7 @@ class Database:
 
     async def init(self) -> None:
         async with aiosqlite.connect(self._path) as db:
+            await self._configure_connection(db)
             await db.executescript(SCHEMA)
             await self._run_migrations(db)
             # Must run after _run_migrations: on a database old enough to still need the
@@ -607,10 +608,30 @@ class Database:
                 if "duplicate column name" not in str(exc).lower():
                     raise
 
+    @staticmethod
+    async def _configure_connection(db: aiosqlite.Connection) -> None:
+        """WAL persists in the database file itself once set, but busy_timeout is a
+        per-connection runtime setting that resets on every new connection - both are
+        set here so every caller gets them, not just this method's own direct callers.
+
+        Without an explicit busy_timeout, aiosqlite/sqlite3's own default (5s) is what
+        was in effect - confirmed live: with ~8 independent background pollers each
+        opening their own connection to write, two whose loops happen to coincide (e.g.
+        intelligence.py's 1h and 2h collectors, which coincide every 2h since both start
+        from the same bot-startup reference point) can occasionally still exceed 5s,
+        surfacing as 'sqlite3.OperationalError: database is locked' and silently
+        dropping that write cycle (caught and logged, not fatal, but still a real gap in
+        data freshness). WAL mode also makes each commit itself faster/cheaper, shrinking
+        the window during which a lock is even held.
+        """
+        await db.execute("PRAGMA journal_mode=WAL")
+        await db.execute("PRAGMA busy_timeout=30000")
+
     @asynccontextmanager
     async def connect(self) -> AsyncIterator[aiosqlite.Connection]:
         db = await aiosqlite.connect(self._path)
         db.row_factory = aiosqlite.Row
+        await self._configure_connection(db)
         try:
             yield db
         finally:

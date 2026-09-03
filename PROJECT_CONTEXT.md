@@ -812,6 +812,36 @@ they're in sync).
     gets a caller-side fix (offloading, a new disclosure field), grep for *every* caller
     before considering it done, not just the one(s) the original report named. 226 tests
     passing (2 new).
+44. **Live incident: the daily digest showed terminal-market data as "overdue" (3h15m
+    since the last snapshot) even though `intelligence.py`'s collector runs every 2h.**
+    Diagnosed from `journalctl` on the Pi: at 17:54:41, the terminal-market snapshot
+    failed with `sqlite3.OperationalError: database is locked` (caught and logged, not
+    fatal - see `bot/cogs/intelligence.py`'s existing try/except - but it silently
+    dropped that collection cycle). Root cause: `intelligence.py`'s 1h (data-health) and
+    2h (terminal-market) loops both start counting from the same bot-startup moment, so
+    they coincide every 2 hours - confirmed directly in the logs (both fire within ~1
+    second of each other at 01:54, 03:54, 05:54, ... every odd hour). Each opens its own
+    `aiosqlite` connection via `Database.connect()`/`init()`, which never set
+    `PRAGMA journal_mode` or `PRAGMA busy_timeout` - meaning every connection ran on
+    aiosqlite/sqlite3's own implicit default (rollback-journal mode, 5s busy timeout).
+    Reproduced standalone: two connections to the same file, one holding a write
+    transaction open, the second's write fails at ~5.5s with the exact same error. Most
+    2h coincidences (8 of 9 that day) resolved fine within that 5s window; this one
+    didn't, most likely because terminal-market's own write (up to 2,593 rows via
+    `executemany`) is the single largest write in the whole app and can occasionally run
+    long enough to blow past 5s when it overlaps another writer. Fixed in
+    `bot/db/database.py` with a new `_configure_connection()` (called from both `init()`
+    and `connect()`, since WAL persists in the file itself but `busy_timeout` is a
+    per-connection runtime setting that resets on every new connection): enables
+    `PRAGMA journal_mode=WAL` (also makes each commit itself faster/cheaper, shrinking
+    the window a lock is held at all) and raises `busy_timeout` to 30s. New
+    `tests/test_database_concurrency.py`: a fast deterministic PRAGMA-value check, plus
+    a real concurrency test holding a write lock for 6s (deliberately past the old 5s
+    default, to prove the fix covers contention the old implicit default wouldn't have,
+    not just contention either default would tolerate) - both confirmed to fail with the
+    exact production error when the fix is temporarily reverted. Side benefit: the full
+    test suite got noticeably faster (roughly halved) purely from WAL's cheaper commits.
+    228 tests passing (2 new).
 
 ## Where to look for what
 
@@ -1092,7 +1122,7 @@ guessed at.
   branch. Local (PC) and the Pi's databases have been fully merged at least twice now; the
   established practice is to back up both sides before any such merge and pull the Pi's
   backup down to the PC afterward, so nothing valuable lives only on the Pi's disk. The full
-  suite has 226 passing tests. Re-check live service and branch state rather than assuming
+  suite has 228 passing tests. Re-check live service and branch state rather than assuming
   this point-in-time operational note is still current.
 - The data collectors in `bot/cogs/intelligence.py` only pay off once they've been running a
   while - most of the `ROADMAP.md` intelligence backlog depends on accumulated history, so
