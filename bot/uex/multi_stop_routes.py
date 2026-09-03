@@ -17,7 +17,14 @@ from bot.uex.mixed_routes import MixedCargoItem, allocate_pair_cargo, build_pair
 
 MAX_LEGS = 3
 MAX_CANDIDATE_EDGES = 20
-MAX_CHAINS_EXPLORED = 2000
+# Empirically checked against the real collected market snapshot (2593 rows): the
+# resulting candidate graph (~30 terminals, ~150 edges among them) needs on the order of
+# 20,000 edge-considerations to exhaust itself and find its true best chain, with
+# measured search time staying flat (~0.3s) even at 100x that - the graph's own size
+# bounds the real work regardless of how high this ceiling is set. 50,000 leaves
+# comfortable headroom above what real data needed while still being a genuine, finite
+# safety valve against a pathological input.
+MAX_CHAINS_EXPLORED = 50000
 
 
 @dataclass(frozen=True)
@@ -120,17 +127,35 @@ def build_multi_stop_routes(
     # No budget given means capital is already math.inf - the second ranking would be
     # an identical, wasted recomputation, so only do it when there's a real budget to
     # rank against.
-    rankings = (rank_edges(math.inf),) if math.isinf(capital) else (rank_edges(math.inf), rank_edges(capital))
+    unlimited_ranking = rank_edges(math.inf)
+    rankings = (unlimited_ranking,) if math.isinf(capital) else (unlimited_ranking, rank_edges(capital))
     candidate_terminals: set[int] = set()
     for ranked_edges in rankings:
         for _, (origin_id, destination_id) in ranked_edges[:MAX_CANDIDATE_EDGES]:
             candidate_terminals.add(origin_id)
             candidate_terminals.add(destination_id)
 
+    # Used only to *order* exploration below, not to filter it - an edge's real
+    # per-leg profit is still recomputed against the real, path-dependent budget inside
+    # extend() every time.
+    edge_profit_potential = {key: profit for profit, key in unlimited_ranking}
+
     graph: dict[int, list[int]] = {}
     for origin_id, destination_id in opportunities:
         if origin_id in candidate_terminals and destination_id in candidate_terminals:
             graph.setdefault(origin_id, []).append(destination_id)
+    # A bounded exploration budget (MAX_CHAINS_EXPLORED) shouldn't be spent in whatever
+    # arbitrary order the opportunities dict happened to iterate in - order each node's
+    # outgoing edges, and which terminal to start from, by profit potential descending,
+    # so the most promising branches are explored first and a truncated search still
+    # finds a near-best result rather than an arbitrary one.
+    for origin_id, destinations in graph.items():
+        destinations.sort(key=lambda d: edge_profit_potential.get((origin_id, d), 0.0), reverse=True)
+    ordered_starts = sorted(
+        candidate_terminals,
+        key=lambda t: max((edge_profit_potential.get((t, d), 0.0) for d in graph.get(t, [])), default=0.0),
+        reverse=True,
+    )
 
     routes: list[MultiStopRoute] = []
     explored = 0
@@ -198,7 +223,7 @@ def build_multi_stop_routes(
             )
             extend(next_stop, visited | {next_stop}, (*legs, leg), next_budget)
 
-    for start in candidate_terminals:
+    for start in ordered_starts:
         extend(start, frozenset({start}), (), capital)
 
     routes.sort(key=lambda route: (route.profit, route.roi_pct), reverse=True)

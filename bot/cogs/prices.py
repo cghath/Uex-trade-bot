@@ -17,7 +17,7 @@ from bot.uex.supply_demand import analyze_terminal_market_history, has_sell_side
 from bot.uex.ships import estimate_route_cargo, resolve_ship
 from bot.uex.status import build_status_lookup, resolve_status_label
 from bot.uex.trading import best_buy_locations, best_routes, best_sell_locations
-from bot.uex.mixed_routes import build_mixed_routes, requires_capital_cargo_access
+from bot.uex.mixed_routes import EXACT_SEARCH_MAX_CAPACITY, build_mixed_routes, requires_capital_cargo_access
 from bot.uex.multi_stop_routes import build_multi_stop_routes
 
 logger = logging.getLogger("uexbot.prices")
@@ -820,6 +820,8 @@ class Prices(commands.Cog):
                 footer += " · surface terminals excluded"
             if capital_access_only:
                 footer += " · capital access confirmed at both ends"
+            if float(ship_vehicle["scu"]) > EXACT_SEARCH_MAX_CAPACITY:
+                footer += f" · cargo allocation above {EXACT_SEARCH_MAX_CAPACITY:.0f} SCU is approximate, not proven-optimal"
             route_embed.set_footer(text=footer)
             embeds.append(route_embed)
         await interaction.followup.send(embeds=embeds)
@@ -1050,6 +1052,8 @@ class Prices(commands.Cog):
                 footer += " · surface terminals excluded"
             if capital_access_only:
                 footer += " · capital access confirmed at every stop"
+            if float(ship_vehicle["scu"]) > EXACT_SEARCH_MAX_CAPACITY:
+                footer += f" · per-leg cargo allocation above {EXACT_SEARCH_MAX_CAPACITY:.0f} SCU is approximate, not proven-optimal"
             route_embed.set_footer(text=footer)
             # Sent one route per message, not batched like /mixed-routes: a multi-leg
             # route's per-leg cargo/warning fields can push a single embed close to

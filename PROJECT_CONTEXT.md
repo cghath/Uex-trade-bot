@@ -691,6 +691,52 @@ they're in sync).
     thresholds; two `/top-routes` cog-level cases (a same-commodity fallback, and a
     dedupe case proving two passing routes for one commodity still collapse to just the
     higher-scored one); and the multi-stop fallback-preserves-warnings case.
+41. **2 more confirmed defects, this time reproduced directly against the real
+    collected `data/uexbot.sqlite3` snapshot (2593 rows), not just synthetic data -
+    entry 40's own fixes had real-world edges that synthetic test cases hadn't
+    surfaced:**
+    - `build_multi_stop_routes`' shared `MAX_CHAINS_EXPLORED` budget (2000) was consumed
+      in whatever order the `opportunities` dict happened to iterate in, not by how
+      promising each branch actually was. On the real snapshot, a 24-SCU ship with a
+      100,000-aUEC budget found only a 323,124-profit chain while a genuinely valid
+      426,056-profit chain existed - increasing only the search allowance (with nothing
+      else changed) found it, confirming the cutoff itself, not a missing route, was the
+      cause. The real candidate graph for that data (~30 terminals, ~150 edges) needed
+      on the order of 20,000 edge-considerations to exhaust itself, with measured search
+      time staying *flat* (~0.3s) even at 100x that - the graph's own size bounds the
+      real work regardless of the ceiling. Fixed two ways together: raised
+      `MAX_CHAINS_EXPLORED` to 50,000 (comfortable headroom above the measured real
+      need), and made exploration order itself profit-prioritized - both each node's
+      outgoing edges and which terminal to start from are sorted by profit potential
+      (from the existing unlimited-budget ranking pass) descending, so a bounded budget
+      is spent on the most promising branches first regardless of dict/set iteration
+      order, and a truncated search finds a near-best result even in some future case
+      this measurement didn't cover.
+    - `allocate_pair_cargo`'s exact solve (entry 39) stops above
+      `EXACT_SEARCH_MAX_CAPACITY` (25 SCU) and falls straight to the two-ordering
+      heuristic - meaning a *bigger* ship could silently score worse than a smaller one
+      on identical data, confirmed on the real snapshot: 25 SCU returned 59,404 profit,
+      26 SCU returned 49,360, even though the better 25-SCU load still physically fits
+      in 26 SCU of capacity. Fixed by always trying a capped exact solve (as if capacity
+      were the threshold) as one candidate even above the threshold, comparing it
+      against the heuristic's full-capacity result and keeping whichever earns more -
+      the capped solution is always a valid allocation for the larger ship too (it just
+      doesn't try to use the extra capacity), so this can only help, never hurt. Also
+      added `allocation_is_exact()` and a footer disclosure on `/mixed-routes` and
+      `/multi-stop-route` ("cargo allocation above 25 SCU is approximate, not
+      proven-optimal") for the cases where even the capped-plus-heuristic result still
+      isn't a proven optimum - the review's second point, that the approximation went
+      undisclosed in the commands' own wording, was also valid on its own.
+    Both were reproduced against the real data first (patching a stale local snapshot's
+    schema to add a since-added column rather than trusting a synthetic guess), and both
+    new tests were confirmed to actually catch their bug - not just pass - by temporarily
+    reverting each fix and watching the test fail before restoring it, same discipline as
+    entries 38-40. Constructing a *synthetic* regression test for the traversal-order bug
+    took real care: Python's set iteration order for small ints turned out not to follow
+    insertion order or numeric order in any way that was easy to predict or lean on, so
+    the working version instead controls order directly through a dict-insertion-order
+    trick (decoy edges inserted before the real one, all from a shared origin) rather
+    than relying on set/hash behavior at all. 218 tests passing (3 new).
 
 ## Where to look for what
 
@@ -971,7 +1017,7 @@ guessed at.
   branch. Local (PC) and the Pi's databases have been fully merged at least twice now; the
   established practice is to back up both sides before any such merge and pull the Pi's
   backup down to the PC afterward, so nothing valuable lives only on the Pi's disk. The full
-  suite has 215 passing tests. Re-check live service and branch state rather than assuming
+  suite has 218 passing tests. Re-check live service and branch state rather than assuming
   this point-in-time operational note is still current.
 - The data collectors in `bot/cogs/intelligence.py` only pay off once they've been running a
   while - most of the `ROADMAP.md` intelligence backlog depends on accumulated history, so

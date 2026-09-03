@@ -1,4 +1,5 @@
 """Tests for multi-stop (2-3 leg) trade chain building."""
+import bot.uex.multi_stop_routes as multi_stop_routes
 from bot.uex.multi_stop_routes import build_multi_stop_routes
 
 
@@ -146,3 +147,27 @@ def test_a_real_budget_ranking_keeps_an_affordable_chain_from_being_crowded_out(
     ]
     routes = build_multi_stop_routes(rows, ship_capacity_scu=10, budget=100)
     assert any(route.stops == (1, 2, 3) for route in routes)
+
+
+def test_exploration_visits_the_most_promising_edges_first_not_insertion_order(monkeypatch):
+    """Regression: on the real collected market snapshot, a 24-SCU ship with a
+    100,000-aUEC budget found only a 323,124-profit chain while a valid 426,056-profit
+    chain existed - the shared MAX_CHAINS_EXPLORED budget was being consumed in whatever
+    order the opportunities dict happened to iterate in, not by how promising each edge
+    actually was. 20 decoy first-legs from the same starting terminal (each a dead end,
+    inserted before the real chain so insertion order is stacked against it) must not be
+    able to exhaust a small exploration budget before the one edge that actually leads
+    to a valid, far more profitable chain ever gets tried."""
+    monkeypatch.setattr(multi_stop_routes, "MAX_CHAINS_EXPLORED", 5)
+    rows = []
+    for i in range(20):
+        rows.append(_row(100 + i, 1, f"Decoy{i}", "Start", price_buy=10, scu_buy=10))
+        rows.append(_row(100 + i, 3 + i, f"Decoy{i}", f"DeadEnd{i}", price_sell=11, scu_sell=10))
+    rows += [
+        _row(1, 1, "Good", "Start", price_buy=10, scu_buy=10),
+        _row(1, 2, "Good", "Midpoint", price_sell=1010, scu_sell=10),
+        _row(2, 2, "Good2", "Midpoint", price_buy=10, scu_buy=10),
+        _row(2, 999, "Good2", "Final", price_sell=1010, scu_sell=10),
+    ]
+    routes = build_multi_stop_routes(rows, ship_capacity_scu=10, limit=5)
+    assert any(route.stops == (1, 2, 999) for route in routes)

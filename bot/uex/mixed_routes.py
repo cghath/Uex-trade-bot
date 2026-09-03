@@ -264,26 +264,49 @@ def allocate_pair_cargo(
     two-ordering approximation, documented as a deliberate speed trade-off, not a claim
     of universal optimality.
 
+    Capacity above EXACT_SEARCH_MAX_CAPACITY still gets a capped exact solve (as if the
+    ship only had EXACT_SEARCH_MAX_CAPACITY SCU) compared against the heuristic's
+    full-capacity result, keeping whichever earns more - the capped solution is always a
+    valid allocation for the larger ship too (it just doesn't try to use the extra
+    capacity), so this can only help. Without it, crossing the threshold could make a
+    *bigger* ship score worse than a smaller one would for identical data (confirmed: 26
+    SCU scoring worse than 25 SCU, purely from losing access to the exact solve a 25-SCU
+    ship still gets) - callers whose recommendation could be at or near this boundary
+    should disclose that larger loads are approximate above it.
+
     ``min_commodities`` matters because different strategies can reach a different
     *number* of commodities loaded, not just different profit totals: an ordering that
     doesn't reach min_commodities is never preferred over one that does, regardless of
     its profit (build_mixed_routes needs 2; a single commodity that fills the ship is
     /best-route's job, not a mixed load). Ties keep today's per-unit-first result.
     """
-    if len(pairs) <= EXACT_SEARCH_MAX_CANDIDATES and capacity <= EXACT_SEARCH_MAX_CAPACITY:
-        return _exact_allocate(
-            pairs,
-            capacity=int(capacity),
-            budget=budget,
-            max_commodities=max_commodities,
-            min_commodities=min_commodities,
+    candidates: list[list[MixedCargoItem]] = []
+    if len(pairs) <= EXACT_SEARCH_MAX_CANDIDATES:
+        capped_capacity = min(int(capacity), EXACT_SEARCH_MAX_CAPACITY)
+        candidates.append(
+            _exact_allocate(
+                pairs,
+                capacity=capped_capacity,
+                budget=budget,
+                max_commodities=max_commodities,
+                min_commodities=min_commodities,
+            )
         )
-    by_margin = _greedy_fill(pairs, capacity=capacity, budget=budget, max_commodities=max_commodities, key=_profit_per_unit)
-    by_efficiency = _greedy_fill(pairs, capacity=capacity, budget=budget, max_commodities=max_commodities, key=_profit_per_auec)
-    qualifying = [cargo for cargo in (by_margin, by_efficiency) if len(cargo) >= min_commodities]
+    if capacity > EXACT_SEARCH_MAX_CAPACITY or len(pairs) > EXACT_SEARCH_MAX_CANDIDATES:
+        by_margin = _greedy_fill(pairs, capacity=capacity, budget=budget, max_commodities=max_commodities, key=_profit_per_unit)
+        by_efficiency = _greedy_fill(pairs, capacity=capacity, budget=budget, max_commodities=max_commodities, key=_profit_per_auec)
+        candidates.extend([by_margin, by_efficiency])
+    qualifying = [cargo for cargo in candidates if len(cargo) >= min_commodities]
     if qualifying:
         return max(qualifying, key=lambda cargo: sum(item.profit for item in cargo))
-    return by_margin
+    return candidates[0] if candidates else []
+
+
+def allocation_is_exact(*, num_pairs: int, capacity: float) -> bool:
+    """True when allocate_pair_cargo's result for this pair count/capacity is a proven
+    global optimum, not an approximation - callers can use this to disclose when a
+    recommendation might not be the true best (see allocate_pair_cargo's docstring)."""
+    return num_pairs <= EXACT_SEARCH_MAX_CANDIDATES and capacity <= EXACT_SEARCH_MAX_CAPACITY
 
 
 def build_mixed_routes(

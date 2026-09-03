@@ -97,6 +97,27 @@ def test_allocate_pair_cargo_still_returns_a_qualifying_result_past_the_exact_th
     assert sum(item.quantity_scu for item in cargo) <= 30
 
 
+def test_a_bigger_ship_never_scores_worse_than_a_smaller_one_at_the_exact_threshold():
+    """Regression: capacity above EXACT_SEARCH_MAX_CAPACITY (25) used to fall straight to
+    the two-ordering heuristic, with no exact solve at all. On this data (equal per-unit
+    margins for A and B, so a tie-broken greedy commits fully to one commodity before
+    ever trying the other) BOTH greedy orderings land on a single commodity alone -
+    filling all 26 capacity with just one of them - which fails the 2-commodity minimum,
+    so a real, valid 475-profit two-commodity load found at 25 SCU would have vanished
+    entirely at 26 SCU. allocate_pair_cargo must still try a capped exact solve (as if
+    capacity were the threshold) and prefer it over a worse or absent heuristic result -
+    a bigger ship must never do worse than a smaller one would on identical data."""
+    source_a = _row(1, 1, "A", "Origin", price_buy=15, scu_buy=1000)
+    dest_a = _row(1, 2, "A", "Destination", price_sell=34, scu_sell=1000)
+    source_b = _row(2, 1, "B", "Origin", price_buy=4, scu_buy=1000)
+    dest_b = _row(2, 2, "B", "Destination", price_sell=23, scu_sell=1000)
+    pairs = [(source_a, dest_a), (source_b, dest_b)]
+    at_threshold = allocate_pair_cargo(pairs, capacity=25, budget=1_000_000, max_commodities=3, min_commodities=2)
+    past_threshold = allocate_pair_cargo(pairs, capacity=26, budget=1_000_000, max_commodities=3, min_commodities=2)
+    assert len(past_threshold) >= 2
+    assert sum(item.profit for item in past_threshold) >= sum(item.profit for item in at_threshold)
+
+
 def test_allocate_pair_cargo_prefers_efficiency_over_raw_margin_when_budget_binds():
     """Greedy-by-per-unit-margin alone can pick badly under a binding budget: A's per-unit
     margin (50) beats B's (9), but A is so expensive that the budget barely affords 1

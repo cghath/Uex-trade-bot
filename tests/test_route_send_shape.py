@@ -177,6 +177,47 @@ def test_multi_stop_route_fallback_preserves_warnings(tmp_path):
     asyncio.run(run())
 
 
+def test_mixed_routes_discloses_when_cargo_allocation_is_approximate(tmp_path):
+    """A ship above EXACT_SEARCH_MAX_CAPACITY only gets a capped exact solve plus a
+    heuristic for the rest (see mixed_routes.allocate_pair_cargo) - the "five best"
+    recommendation isn't a proven optimum in that case, and the footer must say so."""
+    async def run():
+        db = Database(tmp_path / "mixed_routes_disclosure.sqlite3", Fernet(Fernet.generate_key()))
+        await db.init()
+        await db.record_terminal_market_snapshot(_MIXED_ROUTES_ROWS)
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            path = request.url.path
+            if "vehicles" in path:
+                return httpx.Response(200, json={"status": "ok", "data": [{"name": "BigShip", "scu": 30, "pad_type": "M"}]})
+            return httpx.Response(200, json={"status": "ok", "data": []})
+
+        client = UexClient(app_token="test", base_url="https://uex.test")
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+        bot = type("FakeBot", (), {})()
+        bot.db = db
+        bot.uex = client
+        cog = Prices.__new__(Prices)
+        cog.bot = bot
+        interaction = _FakeInteraction(111)
+
+        try:
+            await cog.mixed_routes.callback(cog, interaction, ship="BigShip")
+
+            assert interaction.followup.sent, "expected at least one followup"
+            _, kwargs = interaction.followup.sent[0]
+            embeds = kwargs.get("embeds") or []
+            assert embeds, f"expected at least one embed, got: {interaction.followup.sent}"
+            footer_text = embeds[0].footer.text or ""
+            assert "approximate" in footer_text.lower(), f"expected an approximation disclosure, got footer: {footer_text!r}"
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
 def test_mixed_routes_still_sends_one_batched_message(tmp_path):
     """/mixed-routes' embeds are small enough that batching is fine and intentional -
     this pins that down so a future fix doesn't accidentally swap the two commands'
