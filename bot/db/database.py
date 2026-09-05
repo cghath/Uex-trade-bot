@@ -2362,13 +2362,26 @@ class Database:
                 (status, quantity_sold, unsold, job_id),
             )
             await db.commit()
+            # A job only ever reaches needs_confirmation with listing_id still NULL via an
+            # ambiguous POST (mark_inventory_post_failed(ambiguous=True) - a network error or
+            # missing id_listing after the POST itself) or an interrupted-while-posting flag
+            # (flag_stale_inventory_post_jobs) - in both cases UEX's own acceptance of that
+            # POST was never confirmed one way or the other, so a still-live, un-tracked
+            # listing may already exist. Every other needs_confirmation path (both call sites
+            # of mark_inventory_post_needs_confirmation) only fires after independently
+            # observing GET /marketplace_listings return empty for that listing_id - i.e. the
+            # listing is confirmed gone - so relisting there is safe. Releasing the local
+            # reservation above is always safe (it never touches UEX); only *automatically
+            # queuing a new POST* risks a real duplicate, so only that is gated here.
+            original_listing_unresolved = job["listing_id"] is None
             return {
                 "inventory_id": job["inventory_id"],
                 "unsold": unsold,
                 "sold": quantity_sold,
-                "auto_relist": bool(job["auto_relist"]),
+                "auto_relist": bool(job["auto_relist"]) and not original_listing_unresolved,
                 "relist_count": job["relist_count"] + 1,
                 "pricing_strategy": job["pricing_strategy"],
+                "original_listing_unresolved": original_listing_unresolved,
             }
 
     @staticmethod

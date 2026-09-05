@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 import time
 from datetime import datetime, timezone
@@ -933,6 +934,13 @@ class PersonalInventory(commands.Cog):
                 )
                 return
             relist_note = f" The **{result['unsold']}** unsold item(s) were safely rescheduled as job #{new_jobs[0]}."
+        elif result["unsold"] and result["original_listing_unresolved"]:
+            relist_note = (
+                f" Job #{job_id}'s original post to UEX was never confirmed as accepted or rejected, so the bot "
+                f"cannot rule out a live listing already existing for it. The **{result['unsold']}** unsold item(s) "
+                "were NOT automatically relisted - check your UEX marketplace listings for a stray duplicate, then "
+                "use `/inventory-sell` yourself once you've confirmed there isn't one."
+            )
         await interaction.response.send_message(
             f"Recorded **{result['sold']}** sold for job #{job_id}.{relist_note}", ephemeral=True
         )
@@ -1184,6 +1192,21 @@ class PersonalInventory(commands.Cog):
                     user_id=int(job["user_id"]),
                     strategy=job.get("pricing_strategy", "balanced"),
                 )
+
+            # `job`'s own minimum_price column is frozen the instant claim_inventory_post_job()
+            # marks it 'posting' (set_inventory_minimum_price only updates 'pending', 'listed',
+            # and 'needs_confirmation' jobs) - so a floor raised anywhere during this coroutine's
+            # awaits above (fetching live prices can take real network round trips) would
+            # otherwise never reach the write below. Re-reading the live floor right before
+            # building the payload closes that window; a custom price already re-validated
+            # above against `job`'s snapshot still gets this second, live check too.
+            current_entry = await self.bot.db.get_inventory_item(int(job["user_id"]), int(job["inventory_id"]))
+            live_minimum_price = int(current_entry["minimum_price"]) if current_entry else int(job["minimum_price"])
+            if recommendation.price < live_minimum_price:
+                recommendation = dataclasses.replace(
+                    recommendation, price=live_minimum_price, floor_applied=True
+                )
+
             payload = build_inventory_listing_payload(
                 job, quantity=int(job["quantity"]), price=recommendation.price
             )

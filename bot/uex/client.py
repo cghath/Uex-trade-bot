@@ -226,6 +226,16 @@ class UexClient:
             if status == "error":
                 raise UexApiError(f"UEX API error on {path}: {message}{code_part}")
 
+            if status != "ok" and method in ("POST", "DELETE"):
+                # Unlike a GET's "nothing matched" statuses (see below), every documented
+                # non-"ok" status on a write endpoint (missing_id, listing_not_found,
+                # user_not_verified, user_active_listings_limit_reached, etc.) is a genuine
+                # rejection of the write itself - there is no soft/empty-but-valid case for a
+                # POST/DELETE. Treating any of these as success (the old behavior for any
+                # status not already in _AUTH_ERROR_STATUSES or literally "error") let a
+                # rejected DELETE be reported back to callers as a successful deletion.
+                raise UexApiError(f"UEX rejected {method} {path}: {status} {message}{code_part}".strip())
+
             # Any other status (e.g. "no_trades_found", "invalid_type") is an endpoint-specific
             # "nothing matched" signal, not a fatal error - UEX sends these with non-2xx HTTP
             # codes even though `data` (usually []) is the real, valid answer. Log for visibility

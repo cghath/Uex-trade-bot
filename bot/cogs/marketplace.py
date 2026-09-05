@@ -145,6 +145,17 @@ class ConfirmListingView(discord.ui.View):
 
     @discord.ui.button(label="Post listing", style=discord.ButtonStyle.green)
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        # Two already-dispatched callbacks (a double-click, or Discord redelivering the
+        # interaction) can both reach here before either's `edit_message` round-trip
+        # disables the button on Discord's side - the disabled-button UI update alone is
+        # not a lock. Checking `resolved` here and only then setting it is: asyncio is
+        # single-threaded and nothing awaits between the check and the set, so the second
+        # callback to run this line always sees the first one's write.
+        if self.resolved:
+            await interaction.response.send_message(
+                "This listing confirmation was already resolved.", ephemeral=True
+            )
+            return
         self.resolved = True
         for item in self.children:
             item.disabled = True
@@ -164,6 +175,11 @@ class ConfirmListingView(discord.ui.View):
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.grey)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if self.resolved:
+            await interaction.response.send_message(
+                "This listing confirmation was already resolved.", ephemeral=True
+            )
+            return
         self.resolved = True
         for item in self.children:
             item.disabled = True

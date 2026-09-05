@@ -8,13 +8,21 @@ from datetime import datetime, timezone
 from cryptography.fernet import Fernet
 import httpx
 
-from bot.cogs.marketplace import Marketplace
+from bot.cogs.marketplace import ConfirmListingView, Marketplace
 from bot.db.database import Database
 from bot.uex.client import UexClient
+from unittest.mock import AsyncMock
 
 
 def _make_db(tmp_path) -> Database:
     return Database(tmp_path / "marketplace.sqlite3", Fernet(Fernet.generate_key()))
+
+
+async def _yield_once(**kwargs):
+    # A real interaction.response.edit_message() round-trips to Discord - forcing an actual
+    # scheduler checkpoint here reproduces two concurrent callbacks genuinely being in
+    # flight together, rather than one running to completion before the other even starts.
+    await asyncio.sleep(0)
 
 
 class _FakeResponse:
@@ -242,5 +250,38 @@ def test_delete_listing_does_not_record_local_stock_when_uex_delete_fails(tmp_pa
             assert job["status"] == "listed"
         finally:
             await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_confirm_listing_view_only_posts_once_on_concurrent_double_click():
+    """Real defect (audit finding A02): ConfirmListingView.confirm set self.resolved = True
+    but never checked it first - two already-dispatched callbacks (a double-click, or a
+    redelivered interaction) could both get past that line before either's edit_message
+    round-trip disabled the button on Discord's side, so both reached the real POST. The
+    fix must check-then-set: asyncio is single-threaded and nothing awaits between the
+    check and the set, so the second callback to run always observes the first one's write
+    and never gets past it."""
+    from types import SimpleNamespace as NS
+
+    def interaction():
+        return NS(
+            user=NS(id=1),
+            response=NS(send_message=AsyncMock(), edit_message=AsyncMock(side_effect=_yield_once)),
+            followup=NS(send=AsyncMock()),
+        )
+
+    async def run():
+        uex = NS(post_marketplace_advertise=AsyncMock(return_value={"id_listing": 999}))
+        bot = NS(uex=uex)
+        view = ConfirmListingView(bot, "fake-secret", {"title": "Test"}, 1)
+
+        first, second = interaction(), interaction()
+        await asyncio.gather(view.confirm.callback(first), view.confirm.callback(second))
+
+        assert uex.post_marketplace_advertise.await_count == 1, uex.post_marketplace_advertise.await_count
+        assert second.response.send_message.await_count == 1
+        (message,), _ = second.response.send_message.call_args
+        assert "already resolved" in message.lower()
 
     asyncio.run(run())

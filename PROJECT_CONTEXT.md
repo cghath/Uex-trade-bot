@@ -842,6 +842,76 @@ they're in sync).
     exact production error when the fix is temporarily reverted. Side benefit: the full
     test suite got noticeably faster (roughly halved) purely from WAL's cheaper commits.
     228 tests passing (2 new).
+45. **A full project audit (`data/full-audit-20260905/AUDIT_REPORT.md`, 15 findings: 4 P1,
+    11 P2) landed 2026-09-05 - all 4 P1s fixed and independently verified same day**,
+    each confirmed against real code first, then reproduced failing before the fix and
+    passing after (fix temporarily reverted, test re-run, restored):
+    - **A01 - a rejected listing deletion was reported as successful.** `client.py`'s
+      `_request` only ever raised for `_AUTH_ERROR_STATUSES` or a literal `"error"`
+      status; any other status (built for GET's soft "nothing matched" cases like
+      `no_trades_found`) fell through to "log and return data" - so DELETE
+      `/marketplace_listings` rejecting with a real documented status like
+      `user_not_verified` (confirmed against `docs/UEX_API_2.0_reference.md`'s own DELETE
+      status list) returned normally with `data: null`, and `_cancel_listed_job` reported
+      the listing deleted and released the reservation even though nothing was actually
+      deleted on UEX. Fixed by making `_request` require an explicit `"ok"` status for
+      POST/DELETE specifically (both of this client's only two write endpoints document
+      exclusively real rejection reasons alongside `"ok"` - no soft-empty-result case
+      exists for either) while leaving GET's existing soft-status handling untouched.
+      `tests/test_client_write_status.py` (new) plus
+      `tests/test_personal_inventory.py::test_rejected_delete_must_not_release_inventory`.
+    - **A02 - a double-click could post the same listing twice.**
+      `ConfirmListingView.confirm` (`bot/cogs/marketplace.py`) set `self.resolved = True`
+      but never checked it - two already-dispatched callbacks could both get past that
+      line before either's `edit_message` round-trip disabled the button on Discord's
+      side, so both reached the real POST. Fixed with a check-before-set guard on both
+      `confirm` and `cancel`: safe because asyncio is single-threaded and nothing awaits
+      between the check and the set, so the second callback to actually run always
+      observes the first one's write. `tests/test_marketplace.py::
+      test_confirm_listing_view_only_posts_once_on_concurrent_double_click` reproduced
+      `await_count == 2` before the fix.
+    - **A03 - confirming an uncertain POST's sale could queue a live duplicate.**
+      `inventory_confirm_sale` auto-relisted a job's unsold remainder whenever
+      `auto_relist` was set, with no check on whether the *original* POST's outcome was
+      ever actually confirmed. A job only reaches `needs_confirmation` with `listing_id`
+      still NULL via `mark_inventory_post_failed(ambiguous=True)` (a network error or
+      missing `id_listing` right after the POST) or `flag_stale_inventory_post_jobs` - in
+      both cases UEX's own acceptance of that POST was never verified, so a live,
+      untracked listing may already exist. Every *other* `needs_confirmation` path (both
+      call sites of `mark_inventory_post_needs_confirmation`) only fires after
+      independently observing an empty `GET /marketplace_listings` for that `listing_id` -
+      i.e. already confirmed gone - so relisting there was always safe and had to stay
+      allowed. Fixed in `confirm_ambiguous_inventory_sale` (`bot/db/database.py`): compute
+      `original_listing_unresolved = job["listing_id"] is None` and AND it into the
+      returned `auto_relist` flag; the cog surfaces a distinct message telling the user to
+      manually check UEX for a stray duplicate before using `/inventory-sell` themselves
+      in that case. Releasing the local reservation stays unconditional either way (it
+      never touches UEX, so it's always safe) - only the automatic *new POST* is gated.
+      `tests/test_personal_inventory.py`:
+      `test_uncertain_post_cannot_relist_without_resolving_live_listing`,
+      `test_uncertain_post_message_tells_the_user_to_check_uex_manually`, and
+      `test_resolved_ambiguous_listing_can_still_auto_relist` (the contrast case, proving
+      the fix doesn't over-block the safe path).
+    - **A04 - a floor raised during posting could be silently ignored.**
+      `set_inventory_minimum_price` deliberately excludes jobs in `'posting'` status from
+      its `UPDATE` (a currently-posting job's in-flight write shouldn't be edited out from
+      under it) - but `_post_one_job` then used that same frozen `job["minimum_price"]`
+      snapshot (read before `claim_inventory_post_job` even ran) for both the custom-price
+      floor check and the live-pricing floor, so a floor raised anywhere during the
+      pricing fetch's real network round trips (`_fetch_live_price`) was never honored by
+      the actual write. Fixed by re-reading the item's live `minimum_price` from
+      `get_inventory_item` right before building the POST payload (after pricing
+      completes, not before) and re-flooring the recommendation against that live value
+      via `dataclasses.replace` (`PriceRecommendation` is frozen) - applies to both the
+      custom and computed pricing paths, closing the window regardless of which one hit
+      it. `tests/test_personal_inventory.py::test_floor_increase_during_pricing_is_respected`
+      and `test_custom_price_still_checked_against_a_floor_raised_during_posting`.
+
+    The remaining 11 P2 findings (recovery fidelity, negotiation-alert scoping, embed
+    total-size budgeting, scanner sold-out filtering, data-health staleness, a transient
+    DB error killing a collector task, and three deploy/revert-script gaps) are not yet
+    fixed - see the audit report for full detail and suggested repair order. 238 tests
+    passing (10 new).
 
 ## Where to look for what
 
@@ -1117,13 +1187,14 @@ guessed at.
   after three hours; hourly liquidity and Marketplace data warn after two. The rating-shift
   queries request four gainers and four losers independently so one direction cannot crowd
   out the other, and the fields are separated to stay below Discord's 1,024-character limit.
-- **Current staging state (2026-08-27)**: `TestBranch` is deployed and running live on the
+- **Current staging state (2026-09-05)**: `TestBranch` is deployed and running live on the
   Pi (`uex-trade-bot.service`, host `arkwatcher`) - it is no longer just a local-validation
   branch. Local (PC) and the Pi's databases have been fully merged at least twice now; the
   established practice is to back up both sides before any such merge and pull the Pi's
   backup down to the PC afterward, so nothing valuable lives only on the Pi's disk. The full
-  suite has 228 passing tests. Re-check live service and branch state rather than assuming
-  this point-in-time operational note is still current.
+  suite has 238 passing tests (see entry 45 - the 4 P1 audit fixes landed this session are
+  not yet deployed to the Pi as of this note). Re-check live service and branch state rather
+  than assuming this point-in-time operational note is still current.
 - The data collectors in `bot/cogs/intelligence.py` only pay off once they've been running a
   while - most of the `ROADMAP.md` intelligence backlog depends on accumulated history, so
   those features will look broken/empty if built and tested against a fresh database.
