@@ -41,19 +41,28 @@ BACKUP_DB="$BACKUP_DIR/$(basename "$db_path")"
 [ -f "$BACKUP_DB" ] || { echo "Backup DB file $BACKUP_DB is missing - refusing to revert from an incomplete backup." >&2; exit 1; }
 git cat-file -e "${commit}^{commit}" 2>/dev/null || { echo "Recorded commit $commit does not exist in this repo - refusing to revert to an unknown commit." >&2; exit 1; }
 
-echo "Reverting to commit $commit (snapshotted $timestamp_utc from branch $branch)..."
+echo "Reverting to commit $commit (snapshotted ${timestamp_utc:-unknown} from branch ${branch:-unknown})..."
 
 echo "Stopping $SERVICE_NAME..."
 sudo systemctl stop "$SERVICE_NAME"
 
 # Snapshot the state being discarded too, in case the revert itself needs undoing.
 CURRENT_COMMIT="$(git rev-parse --short HEAD)"
-PRE_REVERT_DIR="$BACKUP_ROOT/$(date -u +%Y%m%d-%H%M%S)_${CURRENT_COMMIT}_pre-revert"
+CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+PRE_REVERT_TIMESTAMP="$(date -u +%Y%m%d-%H%M%S)"
+PRE_REVERT_DIR="$BACKUP_ROOT/${PRE_REVERT_TIMESTAMP}_${CURRENT_COMMIT}_pre-revert"
 mkdir -p "$PRE_REVERT_DIR"
 if [ -f "$db_path" ]; then
     cp "$db_path" "$PRE_REVERT_DIR/$(basename "$db_path")"
+    # Same complete field set deploy_and_backup.sh writes (timestamp_utc, commit, branch,
+    # db_path) - a prior version of this file wrote only commit/db_path, which meant
+    # reverting to THIS pre-revert snapshot later (undoing the revert) crashed with
+    # "timestamp_utc: unbound variable" under this script's own `set -u`, since the loader
+    # below unconditionally expands both fields.
     {
+        echo "timestamp_utc=$PRE_REVERT_TIMESTAMP"
         echo "commit=$CURRENT_COMMIT"
+        echo "branch=$CURRENT_BRANCH"
         echo "db_path=$db_path"
     } > "$PRE_REVERT_DIR/meta.txt"
     echo "Saved the state being discarded ($CURRENT_COMMIT) to $PRE_REVERT_DIR"
@@ -69,7 +78,19 @@ git checkout "$commit"
 
 if ! git diff --quiet "$CURRENT_COMMIT" "$commit" -- requirements.txt requirements-dev.txt; then
     echo "requirements*.txt differs between the discarded and reverted-to commit - reinstalling dependencies..."
-    .venv/bin/pip install -r requirements.txt
+    # Local dev clones use .venv; the Pi's own clone uses venv (no dot) - same detection as
+    # deploy_and_backup.sh, which this script previously didn't match (hardcoded .venv only,
+    # so a requirements-changing revert on the Pi failed here after the code/DB were already
+    # restored but before the service restarted).
+    if [ -x ".venv/bin/pip" ]; then
+        VENV_PIP=".venv/bin/pip"
+    elif [ -x "venv/bin/pip" ]; then
+        VENV_PIP="venv/bin/pip"
+    else
+        echo "Could not find a virtualenv's pip at .venv/bin/pip or venv/bin/pip - aborting." >&2
+        exit 1
+    fi
+    "$VENV_PIP" install -r requirements.txt
 fi
 
 echo "Starting $SERVICE_NAME..."

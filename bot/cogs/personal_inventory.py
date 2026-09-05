@@ -40,6 +40,39 @@ MAX_BATCH_POSTS = 10
 MAX_TRACKED_POSTS_PER_CYCLE = 50
 RECONCILE_FETCH_BATCH_SIZE = 10
 
+# Discord's real limit is on one embed's TOTAL text (title + description + every field's
+# name and value + footer), not just each individual field's own 1024-char cap - ten
+# individually-legal inventory fields (long locations/notes, active-job status lines) can
+# still sum well past this, and Discord rejects the entire send in that case. Reserve
+# leaves headroom for this command's own title/description/footer overhead, computed once
+# rather than re-measured per page.
+DISCORD_EMBED_TOTAL_CHAR_LIMIT = 6000
+_INVENTORY_EMBED_OVERHEAD_RESERVE = 400
+
+
+def _paginate_inventory_fields(
+    fields: list[tuple[str, str]], *, max_per_page: int
+) -> list[list[tuple[str, str]]]:
+    """Group (name, value) field pairs into pages honoring both a max row count per page
+    and Discord's combined embed-size limit - a fixed row-count cap alone doesn't protect
+    the total, so a page that would otherwise overflow splits into an extra page instead of
+    either failing to send or silently dropping rows."""
+    pages: list[list[tuple[str, str]]] = []
+    current: list[tuple[str, str]] = []
+    current_chars = 0
+    budget = DISCORD_EMBED_TOTAL_CHAR_LIMIT - _INVENTORY_EMBED_OVERHEAD_RESERVE
+    for name, value in fields:
+        field_chars = len(name) + len(value)
+        if current and (len(current) >= max_per_page or current_chars + field_chars > budget):
+            pages.append(current)
+            current = []
+            current_chars = 0
+        current.append((name, value))
+        current_chars += field_chars
+    if current:
+        pages.append(current)
+    return pages or [[]]
+
 # Fresh listings may not be visible via GET /marketplace_listings yet if UEX staff approval
 # is still pending. This grace period is an unvalidated guess, not an observed figure - we
 # have no confirmed data on real approval latency. Tune once that's actually been observed;
@@ -734,19 +767,9 @@ class PersonalInventory(commands.Cog):
         jobs_by_inventory: dict[int, list[dict[str, Any]]] = {}
         for job in await self.bot.db.list_active_inventory_jobs(interaction.user.id):
             jobs_by_inventory.setdefault(int(job["inventory_id"]), []).append(job)
-        page_count = max(1, (len(rows) + INVENTORY_PAGE_SIZE - 1) // INVENTORY_PAGE_SIZE)
-        page = max(1, min(int(page), page_count))
-        start = (page - 1) * INVENTORY_PAGE_SIZE
-        embed = discord.Embed(
-            title=f"Personal inventory · page {page}/{page_count}",
-            description=(
-                "Item names open matching UEX postings, including sold-out rows UEX still exposes "
-                "(useful asking-price evidence, not proof of the final deal price). "
-                "Sellability is the same 0–100 rating used by `/liquidity-rank`."
-            ),
-            color=discord.Color.blurple(),
-        )
-        for row in rows[start : start + INVENTORY_PAGE_SIZE]:
+
+        fields: list[tuple[str, str]] = []
+        for row in rows:
             available = int(row["quantity"]) - int(row["reserved_quantity"])
             score = row.get("sellability_score")
             score_text = f"**{float(score):.0f}/100**" if score is not None else "still collecting"
@@ -763,7 +786,25 @@ class PersonalInventory(commands.Cog):
                 value += f"\n{_format_job_status(job)}"
             if row.get("notes"):
                 value += f"\nPrivate notes: {str(row['notes'])[:300]}"
-            embed.add_field(name=f"Inventory #{row['id']}", value=value[:1024], inline=False)
+            fields.append((f"Inventory #{row['id']}", value[:1024]))
+
+        # Page boundaries follow both the row-count cap AND Discord's total embed-size
+        # limit - a page that would otherwise overflow (long locations/notes, several
+        # active jobs per stack) splits into an extra page instead of failing to send.
+        pages = _paginate_inventory_fields(fields, max_per_page=INVENTORY_PAGE_SIZE)
+        page_count = len(pages)
+        page = max(1, min(int(page), page_count))
+        embed = discord.Embed(
+            title=f"Personal inventory · page {page}/{page_count}",
+            description=(
+                "Item names open matching UEX postings, including sold-out rows UEX still exposes "
+                "(useful asking-price evidence, not proof of the final deal price). "
+                "Sellability is the same 0–100 rating used by `/liquidity-rank`."
+            ),
+            color=discord.Color.blurple(),
+        )
+        for name, value in pages[page - 1]:
+            embed.add_field(name=name, value=value, inline=False)
         embed.set_footer(text="Use /inventory-sell to check off stacks for guarded automatic posting.")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -923,6 +964,7 @@ class PersonalInventory(commands.Cog):
                             "auto_relist": True,
                             "relist_count": result["relist_count"],
                             "pricing_strategy": result["pricing_strategy"],
+                            "custom_price": result["custom_price"],
                         }
                     ],
                 )

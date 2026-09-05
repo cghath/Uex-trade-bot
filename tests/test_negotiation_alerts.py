@@ -163,11 +163,26 @@ def test_negotiation_message_seen_is_deduplicated(tmp_path):
     async def run():
         db = _make_db(tmp_path)
         await db.init()
-        assert await db.is_negotiation_message_seen(9001) is False
-        await db.mark_negotiation_message_seen(9001)
-        assert await db.is_negotiation_message_seen(9001) is True
-        await db.mark_negotiation_message_seen(9001)  # must not raise on a duplicate mark
-        assert await db.is_negotiation_message_seen(9001) is True
+        assert await db.is_negotiation_message_seen(1, 9001) is False
+        await db.mark_negotiation_message_seen(1, 9001)
+        assert await db.is_negotiation_message_seen(1, 9001) is True
+        await db.mark_negotiation_message_seen(1, 9001)  # must not raise on a duplicate mark
+        assert await db.is_negotiation_message_seen(1, 9001) is True
+
+    asyncio.run(run())
+
+
+def test_negotiation_message_seen_is_scoped_per_user(tmp_path):
+    """A06: a bare message_id primary key made one user's seen-state (from their own
+    baseline seed or delivered notification) silently suppress a DIFFERENT user's still-
+    pending notification for the exact same message - e.g. two different Discord users each
+    independently watching the same negotiation from opposite sides."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await db.mark_negotiation_message_seen(1, 9001)
+        assert await db.is_negotiation_message_seen(1, 9001) is True
+        assert await db.is_negotiation_message_seen(2, 9001) is False
 
     asyncio.run(run())
 
@@ -226,8 +241,9 @@ def test_enable_seeds_baseline_then_only_new_messages_from_the_other_party_notif
         cog = NegotiationAlerts.__new__(NegotiationAlerts)
         cog.bot = bot
 
-        async def _fake_notify(target_user_id: int, message: str) -> None:
+        async def _fake_notify(target_user_id: int, message: str) -> bool:
             sent_dms.append((target_user_id, message))
+            return True
 
         cog._notify_user = _fake_notify
 
@@ -237,8 +253,8 @@ def test_enable_seeds_baseline_then_only_new_messages_from_the_other_party_notif
             seeded = await cog._seed_baseline(user_id, "sk_test")
             assert seeded == 1
             assert sent_dms == []
-            assert await db.is_negotiation_message_seen(1) is True
-            assert await db.is_negotiation_message_seen(2) is True
+            assert await db.is_negotiation_message_seen(user_id, 1) is True
+            assert await db.is_negotiation_message_seen(user_id, 2) is True
 
             # A poll cycle later, UEX reports date_modified advanced and a third message
             # exists. Only that new, other-party message should trigger a DM.
@@ -303,8 +319,9 @@ def test_new_message_notification_links_the_item_via_the_listing_lookup(tmp_path
         cog = NegotiationAlerts.__new__(NegotiationAlerts)
         cog.bot = bot
 
-        async def _fake_notify(target_user_id: int, message: str) -> None:
+        async def _fake_notify(target_user_id: int, message: str) -> bool:
             sent_dms.append((target_user_id, message))
+            return True
 
         cog._notify_user = _fake_notify
 
@@ -371,5 +388,65 @@ def test_a_failed_messages_fetch_does_not_advance_the_checkpoint_and_is_retried(
             assert (await db.get_negotiation_last_modified(user_id))[77] == 2000
         finally:
             await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_failed_dm_delivery_is_retried_not_permanently_discarded(tmp_path):
+    """A07: _notify_user catches Discord HTTP failures (DMs closed, a transient outage),
+    but the caller previously marked the message seen regardless of whether it actually
+    reached the user - permanently discarding a notification the moment send() raised,
+    with no way for it to ever go out. A failed delivery must leave the message unseen so
+    the next poll cycle retries it."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        negotiation = {
+            "id": 7, "id_listing": 999, "date_modified": 100,
+            "is_listing_advertiser": 1, "advertiser_username": "Alice", "client_username": "Bob",
+        }
+        message = {"id": 42, "date_added": 99, "message": "Interested", "user_username": "Bob"}
+        from types import SimpleNamespace
+
+        failure = discord.HTTPException(
+            SimpleNamespace(status=503, reason="Service Unavailable"), {"message": "Temporary failure"}
+        )
+
+        class _FailThenSucceedUser:
+            def __init__(self):
+                self.send_calls = 0
+
+            async def send(self, message):
+                self.send_calls += 1
+                if self.send_calls == 1:
+                    raise failure
+
+        user = _FailThenSucceedUser()
+        uex = type("FakeUex", (), {})()
+
+        async def get_messages(**kwargs):
+            return [message]
+
+        async def get_listings(**kwargs):
+            return []
+
+        uex.get_marketplace_negotiations_messages = get_messages
+        uex.get_marketplace_listings = get_listings
+        bot = type("FakeBot", (), {})()
+        bot.db = db
+        bot.uex = uex
+        bot.get_user = lambda _: user
+        cog = NegotiationAlerts.__new__(NegotiationAlerts)
+        cog.bot = bot
+
+        # First attempt: delivery fails - the message must stay unseen.
+        await cog._check_negotiation(1, "fake", negotiation, 7)
+        assert user.send_calls == 1
+        assert await db.is_negotiation_message_seen(1, 42) is False
+
+        # A later poll cycle retries the same still-unseen message and this time succeeds.
+        await cog._check_negotiation(1, "fake", negotiation, 7)
+        assert user.send_calls == 2
+        assert await db.is_negotiation_message_seen(1, 42) is True
 
     asyncio.run(run())

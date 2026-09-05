@@ -354,7 +354,16 @@ class Marketplace(commands.Cog):
         activity = extract_item_activity(rows)
         if not activity:
             return
-        await self.bot.db.upsert_marketplace_item_activity(activity)
+        try:
+            await self.bot.db.upsert_marketplace_item_activity(activity)
+        except Exception:
+            # A transient DB error (e.g. sqlite3.OperationalError: database is locked from
+            # another collector writing at the same moment) must not escape this
+            # coroutine - tasks.loop's own auto-reconnect only covers a specific set of
+            # network exceptions, not arbitrary ones, so anything else raised here
+            # permanently stops this loop until the bot is restarted. Skipping this cycle
+            # and letting the next scheduled run retry is far safer than that.
+            logger.exception("Failed to store marketplace item activity snapshot")
 
         # Second half of the snapshot: keep the per-tier "sub-item" stats table current
         # from the bulk averages dump. Each averages row is one (item, quality_tier,
@@ -378,15 +387,23 @@ class Marketplace(commands.Cog):
             average_rows = []
         tier_stats = extract_tier_stats(average_rows)
         if tier_stats:
-            await self.bot.db.upsert_marketplace_tier_stats(tier_stats)
+            try:
+                await self.bot.db.upsert_marketplace_tier_stats(tier_stats)
+            except Exception:
+                logger.exception("Failed to store marketplace tier stats")
 
-        total = await self.bot.db.count_marketplace_item_activity()
-        tier_combos, tier_items = await self.bot.db.count_marketplace_tier_stats()
-        logger.info(
-            "Marketplace item activity snapshot: %d items updated, %d total tracked, "
-            "%d tier combos across %d quality-bearing items",
-            len(activity), total, tier_combos, tier_items,
-        )
+        try:
+            total = await self.bot.db.count_marketplace_item_activity()
+            tier_combos, tier_items = await self.bot.db.count_marketplace_tier_stats()
+            logger.info(
+                "Marketplace item activity snapshot: %d items updated, %d total tracked, "
+                "%d tier combos across %d quality-bearing items",
+                len(activity), total, tier_combos, tier_items,
+            )
+        except Exception:
+            # Purely a logging summary - a DB error here must never take down the loop
+            # after the actual writes above already succeeded.
+            logger.exception("Failed to log marketplace item activity snapshot summary")
 
     @snapshot_item_activity.before_loop
     async def before_snapshot_item_activity(self) -> None:

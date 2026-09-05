@@ -197,3 +197,67 @@ def test_resolved_ambiguous_listing_can_still_auto_relist(tmp_path):
         assert len(due) == 1, "a resolved (confirmed-gone) listing's remainder should still auto-relist"
 
     asyncio.run(run())
+
+
+def test_inventory_page_fits_the_total_embed_limit_even_with_long_fields(tmp_path):
+    """A08: the per-page row-count cap (10) alone doesn't protect Discord's separate,
+    combined 6000-character total-embed-text limit - ten valid-but-verbose inventory
+    stacks (long locations/notes, an active job line each) can sum well past 6000 even
+    though no single field is anywhere near its own 1024-char cap, and Discord rejects the
+    ENTIRE send in that case. The fix must split into more pages rather than lose rows or
+    fail to send."""
+    async def run():
+        db = _make_db(tmp_path, "embed_budget.sqlite3")
+        await db.init()
+        for i in range(10):
+            await db.add_inventory_item(
+                user_id=1, id_item=i + 1, id_category=36, item_name=f"Example item {i}",
+                item_slug=None, quantity=1, quality=0, location="L" * 200,
+                minimum_price=100, notes="N" * 300,
+            )
+        cog = _cog(db, NS())
+
+        total_rows_shown = 0
+        page = 1
+        while True:
+            inter = _interaction()
+            await cog.inventory.callback(cog, inter, page=page)
+            embed = inter.response.send_message.call_args.kwargs["embed"]
+            assert len(embed) <= 6000, (page, len(embed))
+            total_rows_shown += len(embed.fields)
+            if page >= int(embed.title.split("/")[-1]):
+                break
+            page += 1
+
+        assert total_rows_shown == 10, "every inventory row must still show up somewhere"
+
+    asyncio.run(run())
+
+
+def test_custom_price_survives_relist_after_ambiguous_sale_resolution(tmp_path):
+    """A05: recovery retained pricing_strategy='custom' but never carried custom_price into
+    the replacement job - a custom price of 200 with a minimum of 100 became an attempted
+    custom price of 0 (the missing key defaults to 0 in create_inventory_post_jobs), which
+    validation then rejected as below the floor, leaving the user to reschedule manually."""
+    async def run():
+        db, inv, job_id = await _fixture(tmp_path, "custom_relist.sqlite3", custom=True)
+        await db.claim_inventory_post_job(job_id)
+        await db.mark_inventory_post_listed(
+            job_id, listing_id=999, listing_url=None, posted_price=200, date_expiration=None
+        )
+        await db.mark_inventory_post_needs_confirmation(
+            job_id, "Listing disappeared from UEX without a final remaining-stock value"
+        )
+        cog = _cog(db, NS())
+        inter = _interaction()
+
+        await cog.inventory_confirm_sale.callback(cog, inter, job_id=job_id, quantity_sold=0)
+
+        due = await db.list_due_inventory_post_jobs()
+        assert len(due) == 1, due
+        assert due[0]["pricing_strategy"] == "custom"
+        assert due[0]["custom_price"] == 200
+        (message,), _ = inter.response.send_message.call_args
+        assert "rescheduled" in message.lower()
+
+    asyncio.run(run())

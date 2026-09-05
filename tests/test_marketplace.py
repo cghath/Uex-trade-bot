@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from datetime import datetime, timezone
 
 from cryptography.fernet import Fernet
@@ -283,5 +284,46 @@ def test_confirm_listing_view_only_posts_once_on_concurrent_double_click():
         assert second.response.send_message.await_count == 1
         (message,), _ = second.response.send_message.call_args
         assert "already resolved" in message.lower()
+
+    asyncio.run(run())
+
+
+def test_transient_database_error_does_not_kill_marketplace_collector():
+    """A12: snapshot_item_activity's DB write sat outside its own try/except - an
+    sqlite3.OperationalError (e.g. "database is locked" from another collector writing at
+    the same moment) propagated out of the @tasks.loop coroutine uncaught. tasks.loop's own
+    auto-reconnect only covers a specific set of network exceptions, not arbitrary ones, so
+    this permanently stopped the whole hourly collector until the bot was restarted."""
+    async def run():
+        db = type("FakeDb", (), {})()
+        db.upsert_marketplace_item_activity = AsyncMock(
+            side_effect=sqlite3.OperationalError("database is locked")
+        )
+        db.update_liquidity_scores = AsyncMock(return_value=0)
+        db.upsert_marketplace_tier_stats = AsyncMock()
+        db.count_marketplace_item_activity = AsyncMock(return_value=0)
+        db.count_marketplace_tier_stats = AsyncMock(return_value=(0, 0))
+        uex = type("FakeUex", (), {})()
+        uex.get_marketplace_trends = AsyncMock(
+            return_value=[{"id_item": 1, "item_name": "Ore", "negotiations_count": 1}]
+        )
+        uex.get_marketplace_prices_averages_all = AsyncMock(return_value=[])
+        bot = type("FakeBot", (), {})()
+        bot.db = db
+        bot.uex = uex
+        bot.wait_until_ready = AsyncMock()
+        instance = Marketplace.__new__(Marketplace)
+        instance.bot = bot
+
+        task = instance.snapshot_item_activity.start()
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=2)
+        except (sqlite3.OperationalError, asyncio.TimeoutError):
+            pass
+        finally:
+            instance.snapshot_item_activity.cancel()
+
+        assert not instance.snapshot_item_activity.failed(), "collector task terminated after one database error"
+        db.upsert_marketplace_item_activity.assert_awaited_once()
 
     asyncio.run(run())

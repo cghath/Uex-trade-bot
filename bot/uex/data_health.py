@@ -2,7 +2,30 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
+
+# The data-health collector (bot/cogs/intelligence.py) runs hourly. This is deliberately
+# several times that interval, not a tight 1h cutoff - a couple of missed cycles (a
+# restart, a slow poll) shouldn't itself flip a terminal to "unknown"; only collection
+# that has genuinely stopped should.
+LOCAL_COLLECTION_STALE_HOURS = 6.0
+
+
+def _parse_last_seen(value: Any) -> datetime | None:
+    if not value:
+        return None
+    text = str(value)
+    try:
+        parsed = datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 @dataclass(frozen=True)
@@ -20,12 +43,21 @@ class TerminalDataHealth:
         return self.status in {"limited", "stale", "unknown"}
 
 
-def classify_terminal_health(row: dict[str, Any]) -> TerminalDataHealth:
+def classify_terminal_health(row: dict[str, Any], *, now: datetime | None = None) -> TerminalDataHealth:
     """Classify UEX data-monitor state from its explicit age and TTL fields.
 
     ``has_recent_reports`` only means that pending, unconsolidated report ids exist. It is
     retained for diagnostics, but it must not influence freshness. Coverage describes how
     many known prices were updated within the TTL window.
+
+    ``row["last_seen"]`` (when present) is this row's own local collection timestamp -
+    distinct from every other field above, which UEX computed relative to ITS OWN clock at
+    collection time and which this bot just stores verbatim. If the collector that writes
+    this row stops running (a crash, a bug, a long outage), the last successfully stored
+    row keeps whatever age/TTL numbers UEX reported back then forever - so a terminal that
+    hasn't actually been re-checked in days could still classify as "fresh" purely because
+    it looked fresh the one time it was last collected. `now` is only ever overridden in
+    tests; production always uses the real current time.
     """
     has_recent = bool(row.get("has_recent_reports"))
     coverage_raw = row.get("prices_updated_percentage")
@@ -58,6 +90,16 @@ def classify_terminal_health(row: dict[str, Any]) -> TerminalDataHealth:
         status = "recent"
     else:
         status = "fresh"
+
+    last_seen = _parse_last_seen(row.get("last_seen"))
+    if last_seen is not None and status in ("fresh", "recent"):
+        elapsed_hours = ((now or datetime.now(timezone.utc)) - last_seen).total_seconds() / 3600
+        if elapsed_hours > LOCAL_COLLECTION_STALE_HOURS:
+            # UEX's own numbers said "fresh" as of whenever they were captured, but our own
+            # collection of this row has itself gone stale enough that we can no longer
+            # trust that classification - "unknown" (not "stale") since this is doubt about
+            # OUR data, not a claim that UEX's underlying prices expired.
+            status = "unknown"
 
     return TerminalDataHealth(
         terminal_name=str(row.get("terminal_name") or "Unknown terminal"),

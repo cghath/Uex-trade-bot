@@ -274,6 +274,68 @@ def test_pending_report_queue_is_not_used_as_terminal_freshness():
     assert expired_with_pending_report.status == "stale"
 
 
+def test_old_collected_health_is_not_still_fresh():
+    """A10: classify_terminal_health used only UEX's own age/TTL fields, captured at
+    whatever moment the row was last collected - if the collector stops running (a crash,
+    a bug, a long outage), the last successfully stored row keeps looking "fresh" forever,
+    purely because it looked fresh the one time it actually ran."""
+    from datetime import datetime, timezone
+
+    health = classify_terminal_health(
+        {
+            "terminal_name": "Example", "prices_updated_percentage": 100,
+            "last_update_days": 0, "last_update_days_limit": 3,
+            "last_update_days_percentage": 100, "last_seen": "2020-01-01 00:00:00",
+        },
+        now=datetime(2026, 9, 5, tzinfo=timezone.utc),
+    )
+    assert health.status == "unknown"
+
+
+def test_recently_collected_health_is_unaffected_by_the_staleness_check():
+    from datetime import datetime, timezone
+
+    health = classify_terminal_health(
+        {
+            "terminal_name": "Example", "prices_updated_percentage": 100,
+            "last_update_days": 0, "last_update_days_limit": 3,
+            "last_update_days_percentage": 100, "last_seen": "2026-09-05 11:30:00",
+        },
+        now=datetime(2026, 9, 5, 12, 0, 0, tzinfo=timezone.utc),
+    )
+    assert health.status == "fresh"
+
+
+def test_missing_last_seen_does_not_trigger_the_staleness_check():
+    """Not every caller/row is guaranteed to carry last_seen - its absence must not be
+    treated as "infinitely stale"."""
+    health = classify_terminal_health(
+        {
+            "terminal_name": "Example", "prices_updated_percentage": 100,
+            "last_update_days": 0, "last_update_days_limit": 3,
+            "last_update_days_percentage": 100,
+        }
+    )
+    assert health.status == "fresh"
+
+
+def test_local_staleness_does_not_override_an_already_stale_or_limited_status():
+    """The local-collection check only ever downgrades "fresh"/"recent" to "unknown" - it
+    must never relabel a status UEX's own TTL already marked stale/limited, which carries
+    more specific information than a generic "unknown"."""
+    from datetime import datetime, timezone
+
+    stale = classify_terminal_health(
+        {
+            "terminal_name": "Example", "prices_updated_percentage": 100,
+            "last_update_days": 5, "last_update_days_limit": 3,
+            "last_update_days_percentage": 0, "last_seen": "2020-01-01 00:00:00",
+        },
+        now=datetime(2026, 9, 5, tzinfo=timezone.utc),
+    )
+    assert stale.status == "stale"
+
+
 def test_cross_system_note_never_prints_none_as_a_system_name():
     incomplete = _format_cross_system_note(None, "Stanton")
     assert incomplete is not None
@@ -427,6 +489,51 @@ def test_terminal_market_shifts_compare_oldest_and_newest_observation(tmp_path):
         (shift,) = await db.get_terminal_market_shifts()
         assert shift["supply_change"] == 30
         assert shift["demand_change"] == -30
+
+    asyncio.run(run())
+
+
+def test_terminal_market_shifts_reports_a_single_recent_change_against_an_old_baseline(tmp_path):
+    """A11: a long-stable market (nothing recorded for two days) followed by exactly one
+    recent change only ever has ONE observation inside a 24h window - the original query
+    required 2+ in-window rows before it would report anything, silently dropping this
+    real, large shift. The fix compares the latest observation against the closest prior
+    baseline even when that baseline sits outside the window entirely."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        async with db.connect() as sqlite:
+            await sqlite.executescript(
+                """INSERT INTO terminal_market_observations
+                   (id_commodity,id_terminal,observed_at,commodity_name,terminal_name,scu_buy,scu_sell)
+                   VALUES (1,1,datetime('now','-2 days'),'Ore','Terminal',100,200);
+                   INSERT INTO terminal_market_observations
+                   (id_commodity,id_terminal,observed_at,commodity_name,terminal_name,scu_buy,scu_sell)
+                   VALUES (1,1,datetime('now','-1 hour'),'Ore','Terminal',600,200);"""
+            )
+            await sqlite.commit()
+        (shift,) = await db.get_terminal_market_shifts()
+        assert shift["supply_change"] == 500
+        assert shift["demand_change"] == 0
+
+    asyncio.run(run())
+
+
+def test_terminal_market_shifts_excludes_a_pair_with_only_one_ever_observation(tmp_path):
+    """A single ever-recorded data point has no earlier state to compare against - must not
+    show up as a "change" of 0 (which would be indistinguishable from a genuinely unchanged
+    market), it should be excluded entirely."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        async with db.connect() as sqlite:
+            await sqlite.execute(
+                """INSERT INTO terminal_market_observations
+                   (id_commodity,id_terminal,observed_at,commodity_name,terminal_name,scu_buy,scu_sell)
+                   VALUES (1,1,datetime('now','-1 hour'),'Ore','Terminal',100,200)"""
+            )
+            await sqlite.commit()
+        assert await db.get_terminal_market_shifts() == []
 
     asyncio.run(run())
 

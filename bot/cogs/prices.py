@@ -67,12 +67,30 @@ def _chunk_lines(lines: list[str], max_length: int = 1024) -> list[str]:
     return chunks
 
 
-def _add_chunked_fields(embed: discord.Embed, *, name: str, lines: list[str]) -> None:
-    """Add one logical field as many Discord-safe continuation fields as needed."""
+# Discord's real limit on one embed's TOTAL text (title + description + every field's
+# name and value + footer, matching discord.py's own Embed.__len__) - not the same thing
+# as any individual field's 1024-char limit. A handful of individually-legal fields can
+# still sum well past this, and Discord rejects the ENTIRE send in that case, silently
+# losing every field, not just the overflow ones.
+DISCORD_EMBED_TOTAL_CHAR_LIMIT = 6000
+# Reserve room for a final "N more omitted" notice a caller may still add after this
+# function stops, so that notice itself never pushes the embed over the real limit.
+_TRUNCATION_NOTICE_RESERVE = 100
+
+
+def _add_chunked_fields(embed: discord.Embed, *, name: str, lines: list[str]) -> bool:
+    """Add one logical field as many Discord-safe continuation fields as needed, refusing
+    to add a chunk that would push the embed's total text past Discord's combined 6000-char
+    limit. Returns False the moment a chunk had to be skipped for that reason, so a caller
+    that's adding several logical fields in a loop (e.g. one per route) can stop early and
+    surface a truncation notice instead of the whole send failing later."""
     for index, chunk in enumerate(_chunk_lines(lines), 1):
         suffix = f" (continued {index})" if index > 1 else ""
         safe_name = f"{name[:256 - len(suffix)]}{suffix}"
+        if len(embed) + len(safe_name) + len(chunk) > DISCORD_EMBED_TOTAL_CHAR_LIMIT - _TRUNCATION_NOTICE_RESERVE:
+            return False
         embed.add_field(name=safe_name, value=chunk, inline=False)
+    return True
 
 
 async def commodity_name_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:

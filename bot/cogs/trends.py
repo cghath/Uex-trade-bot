@@ -399,6 +399,7 @@ class Trends(commands.Cog):
         )
 
         embed = discord.Embed(title=title, color=discord.Color.green())
+        routes_shown = 0
         for i, r in enumerate(entries, start=1):
             name, value = _build_route_field(i, r, ship_vehicle, ship_cargo_scu, status_lookup)
             warnings = []
@@ -437,13 +438,24 @@ class Trends(commands.Cog):
             risk_note = format_commodity_risk(commodity_references.get(r.id_commodity))
             if risk_note:
                 value += f"\n{risk_note}"
-            _add_chunked_fields(embed, name=name, lines=value.splitlines())
+            # Per-field/name truncation alone doesn't protect Discord's combined 6000-char
+            # embed limit - many individually-legal route fields can still sum past it, and
+            # Discord rejects the whole send in that case (losing every route, not just the
+            # overflow ones). Routes are already score-sorted, so stopping here keeps the
+            # best-ranked ones and drops only the tail, with an explicit note below rather
+            # than a silent gap or a failed command.
+            if not _add_chunked_fields(embed, name=name, lines=value.splitlines()):
+                break
+            routes_shown += 1
 
         footer = footer_note + " · " + SELL_SIDE_STATUS_CLARIFIER
         if updated_at:
             footer += f" · refreshed {updated_at.strftime('%Y-%m-%d %H:%M UTC')}"
         if not ship_vehicle:
             footer += " · set a default ship with /set-default-ship for cargo/run-profit numbers"
+        omitted = len(entries) - routes_shown
+        if omitted > 0:
+            footer += f" · {omitted} more route(s) omitted - message size limit"
         embed.set_footer(text=footer)
         await interaction.followup.send(embed=embed)
 

@@ -912,6 +912,156 @@ they're in sync).
     DB error killing a collector task, and three deploy/revert-script gaps) are not yet
     fixed - see the audit report for full detail and suggested repair order. 238 tests
     passing (10 new).
+46. **All 11 P2 findings from the same audit (entry 45) fixed and independently verified
+    the same session** - each confirmed against real code, reproduced failing before its
+    fix and passing after (temporarily reverted, test re-run, restored):
+    - **A05 - a custom relist price silently became 0.** `confirm_ambiguous_inventory_sale`
+      retained `pricing_strategy: custom` into its returned dict but dropped
+      `custom_price` entirely; `inventory_confirm_sale`'s replacement-job spec then never
+      included it, so `create_inventory_post_jobs` defaulted it to 0 and rejected the
+      replacement as below the floor - the user's stack fell out of the automatic system
+      with no explanation beyond "could not be rescheduled." Fixed by carrying
+      `custom_price` through both the DB method's return value and the cog's spec dict.
+      `tests/test_personal_inventory.py::test_custom_price_survives_relist_after_ambiguous_sale_resolution`.
+    - **A06 - one user's seen-state suppressed a different user's pending notification.**
+      `negotiation_message_seen` was keyed on a bare `message_id PRIMARY KEY` - genuinely
+      global, not per-recipient, confirmed straight from the schema. Two different Discord
+      users each independently watching the same negotiation (opposite sides, or even both
+      watching the same listing) shared one row per message, so whichever user's baseline
+      seed or delivered DM reached it first silently marked it seen for the other too.
+      Fixed with a `(user_id, message_id)` composite primary key, via the same
+      detect-and-rebuild pattern as `_migrate_pricing_strategy_check`
+      (`_migrate_negotiation_message_seen_scope`, `bot/db/database.py`) - pre-migration
+      rows carried no per-user attribution at all, so each old message_id is copied to
+      every user who had alerts enabled *at migration time* (the closest safe
+      approximation: it can't under-notify anyone who already saw it via a real poll, and
+      a user enabling alerts afterward always re-seeds from scratch regardless of this
+      table's contents anyway). `is_negotiation_message_seen`/`mark_negotiation_message_seen`
+      now take `user_id`; both call sites in `bot/cogs/negotiation_alerts.py` updated.
+      `tests/test_negotiation_alerts.py::test_negotiation_message_seen_is_scoped_per_user`.
+    - **A07 - a failed DM was recorded as delivered.** `_notify_user` swallowed
+      `discord.HTTPException` (DMs closed, a transient outage) and returned nothing, but
+      its caller (`_check_negotiation`) still called `mark_negotiation_message_seen`
+      unconditionally right after - a permanently-discarded notification the instant
+      `send()` raised, with no path back. Fixed by making `_notify_user` return whether
+      delivery actually succeeded, and only marking the message seen when it did; an
+      unseen message naturally gets retried on the next 5-minute poll cycle - a real,
+      bounded retry, not a special-cased mechanism.
+      `tests/test_negotiation_alerts.py::test_failed_dm_delivery_is_retried_not_permanently_discarded`.
+    - **A08 - per-field/name limits (1024/256 chars) don't protect Discord's separate
+      6000-char TOTAL embed limit.** Confirmed on both cited surfaces: ten valid inventory
+      entries reached 7,642 characters, and ten warning-rich routes reached 10,078 -
+      neither had any single field anywhere near its own 1024-char cap, so nothing existing
+      would have caught it, and Discord rejects the entire send in that case (losing every
+      field, not just the overflow). Fixed differently per surface, matching each one's
+      existing UX rather than forcing a shared shape: `/inventory` already has real
+      page/page_count navigation, so `_paginate_inventory_fields`
+      (`bot/cogs/personal_inventory.py`) now splits pages on the total-char budget *in
+      addition to* the existing 10-row cap - nothing is dropped, a page that would overflow
+      just becomes two pages. `/top-routes` (`_send_ranked_routes`, `bot/cogs/trends.py`)
+      has no such paging concept and sends one embed per call, so the shared
+      `_add_chunked_fields` helper (`bot/cogs/prices.py`, used by several route commands)
+      now returns `False` the moment adding a chunk would push the embed's total past
+      budget (measured via discord.py's own `len(embed)`, the same total Discord enforces);
+      `_send_ranked_routes` stops adding further routes at that point and appends
+      "N more route(s) omitted - message size limit" to the footer, so a truncation is
+      visible rather than a silent gap. Routes are already score-sorted, so what's kept is
+      always the best-ranked subset. New `tests/test_trends_embed_budget.py` and
+      `tests/test_personal_inventory.py::test_inventory_page_fits_the_total_embed_limit_even_with_long_fields`.
+    - **A09 - a sold-out listing could be flagged as a live steal.** `find_steals`
+      (`bot/uex/scanner.py`) compared price against the fair-price index with no
+      availability check at all - a listing marked sold out with zero remaining stock
+      still qualified as a 90%-below-average deal, even though nothing is actually
+      purchasable at that price. Fixed with an `is_sold_out`/`in_stock<=0` exclusion,
+      reusing `_flag` from `bot/uex/inventory.py` rather than duplicating the same
+      string/bool/int parsing a second time. An unreported (missing) stock value is *not*
+      treated as zero - only a confirmed unavailability excludes a listing.
+      `tests/test_scanner.py` gained 4 new cases (sold-out, zero-stock-not-flagged,
+      still-flags-in-stock, unreported-stock-not-excluded).
+    - **A10 - stored terminal health never aged between collections.**
+      `classify_terminal_health` (`bot/uex/data_health.py`) classified purely from UEX's
+      own age/TTL fields, captured once at collection time - if the hourly data-health
+      collector stops running (a crash, a bug, an outage), the last successfully stored
+      row keeps whatever numbers UEX reported back then forever, so a terminal not
+      actually re-checked in days could still read "fresh." Fixed by comparing the row's
+      own `last_seen` (this bot's local collection timestamp, always present on
+      `terminal_data_health_state`) against a new `now` parameter (defaults to real time,
+      injectable for tests): past `LOCAL_COLLECTION_STALE_HOURS` (6h - several missed
+      cycles' worth of slack above the collector's own 1h interval, not a tight cutoff), a
+      "fresh"/"recent" classification downgrades to "unknown" - not "stale", since this is
+      doubt about the bot's own data, not a claim that UEX's underlying prices expired; an
+      already-stale/limited classification is left alone, since it carries more specific
+      information than a generic "unknown" would. `tests/test_intelligence.py` gained 4
+      cases (old collection → unknown, recent collection unaffected, missing `last_seen`
+      unaffected, staleness never overrides an existing stale/limited status).
+    - **A11 - a single recent supply/demand change could disappear entirely.**
+      `get_terminal_market_shifts` (`bot/db/database.py`) first restricted to the 24h
+      window, then required 2+ observations *inside* it - since this table records changes
+      rather than periodic samples, a long-stable market with exactly one recent change
+      has only one in-window row and was silently dropped, however large that change was.
+      The first fix attempt (compare against the closest baseline strictly *before* the
+      window) broke an existing, equally valid case: a commodity/terminal pair only ever
+      observed recently, with no earlier baseline at all (nothing predates the window,
+      e.g. newly tracked) - `test_terminal_market_shifts_compare_oldest_and_newest_observation`
+      caught this immediately (both its observations sit inside a 2-hour span). The actual
+      fix ranks candidate baselines in priority order per pair - prefer the most recent
+      observation at or before the window start, however old; fall back to the earliest
+      observation still inside the window otherwise - via one combined ranked CTE rather
+      than two separately-joined ones, so both cases resolve correctly in a single query. A
+      pair with no observation earlier than its own latest one (a single-ever data point)
+      still has no baseline candidate and is correctly excluded, same as before. Two new
+      tests in `tests/test_intelligence.py` (single-change-against-an-old-baseline,
+      single-observation-pair-excluded) alongside the pre-existing multi-observation test,
+      all three now passing together.
+    - **A12 - a transient DB error could permanently stop marketplace collection.**
+      `snapshot_item_activity` (`bot/cogs/marketplace.py`) only wrapped its UEX fetch in
+      try/except; the DB write (`upsert_marketplace_item_activity`) and two further steps
+      (`upsert_marketplace_tier_stats`, the summary-logging queries) sat unguarded -
+      `discord.ext.tasks`' own auto-reconnect only covers a specific set of network
+      exceptions, not arbitrary ones, so an uncaught `sqlite3.OperationalError` (e.g. a
+      lock collision with another collector writing at the same moment) permanently killed
+      this hourly loop until the bot was restarted, confirmed by directly starting the real
+      decorated task with an injected error and checking `.failed()`. Fixed by wrapping all
+      three remaining unguarded steps in their own try/except, matching the pattern
+      `update_liquidity_scores` already used - one failed step no longer prevents the
+      others from running, and no failure here ever escapes the loop.
+      `tests/test_marketplace.py::test_transient_database_error_does_not_kill_marketplace_collector`.
+    - **A13 - deployment's missing-pip abort bypassed its own rollback.** bash's `ERR`
+      trap does not fire for an explicit `exit N` (only for a command that itself fails
+      under `set -e`) - `deploy_and_backup.sh`'s missing-virtualenv branch calls `exit 1`
+      directly, which `trap rollback_on_failure ERR` silently let bypass the promised
+      rollback entirely, leaving the service stopped with no recovery attempted. Fixed by
+      switching to `trap rollback_on_failure EXIT`, which fires on every termination path
+      (a failing command, an explicit exit, or normal completion) - `rollback_on_failure`'s
+      own `DEPLOY_SUCCEEDED`/`SERVICE_STOPPED` guards are what keep it a no-op on success,
+      not the trap type, so this needed no other change. Verified directly: a throwaway
+      harness reproducing the same trap/guard structure confirmed rollback now fires on an
+      injected `exit 1` where it previously wouldn't have.
+    - **A14 - revert still assumed the wrong Pi virtualenv path.** Unlike
+      `deploy_and_backup.sh` (fixed in entry from a prior session), `revert_last_deploy.sh`
+      still hardcoded `.venv/bin/pip`, so a requirements-changing revert on the Pi (which
+      uses `venv`, no dot) would fail after the code/DB were already restored but before
+      the service restarted. Fixed with the identical `.venv`-then-`venv` detection.
+      Verified directly (three branches - `.venv` present, `venv` present, neither -
+      confirmed to resolve correctly via a throwaway harness using `-f` checks, since
+      Windows Git-Bash's `/tmp` doesn't honor `chmod +x` for a reliable `-x` test - same
+      known limitation as before; the real Linux Pi is unaffected).
+    - **A15 - revert wrote a backup its own loader couldn't read.** The pre-revert
+      snapshot `revert_last_deploy.sh` writes before undoing a revert (so the revert itself
+      is undoable) only recorded `commit`/`db_path` into `meta.txt`, but the loader
+      unconditionally expands `timestamp_utc` and `branch` under `set -u` - reverting to
+      *that* snapshot later (undoing the undo) crashed with `timestamp_utc: unbound
+      variable` before touching anything. Fixed by writing the same complete 4-field
+      format `deploy_and_backup.sh` already uses, and defensively defaulting the two
+      informational-only fields (`${timestamp_utc:-unknown}`, `${branch:-unknown}`) at
+      their one point of use, so a meta.txt from any other source missing just those two
+      degrades gracefully instead of crashing - `commit`/`db_path` stay hard-required via
+      the pre-existing explicit checks, since the revert logic actually needs them.
+      Verified directly: the fixed writer's output loads cleanly, the defensive defaults
+      handle the old incomplete format, and removing the defaults reproduces the exact
+      original crash against that same old format.
+
+    256 tests passing (18 new since entry 45).
 
 ## Where to look for what
 
@@ -1192,9 +1342,10 @@ guessed at.
   branch. Local (PC) and the Pi's databases have been fully merged at least twice now; the
   established practice is to back up both sides before any such merge and pull the Pi's
   backup down to the PC afterward, so nothing valuable lives only on the Pi's disk. The full
-  suite has 238 passing tests (see entry 45 - the 4 P1 audit fixes landed this session are
-  not yet deployed to the Pi as of this note). Re-check live service and branch state rather
-  than assuming this point-in-time operational note is still current.
+  suite has 256 passing tests (see entries 45-46 - all 15 audit findings, 4 P1 and 11 P2,
+  are now fixed; deployment status of the P2 round specifically had not been decided as of
+  this note - check git log on the Pi rather than assume). Re-check live service and branch
+  state rather than assuming this point-in-time operational note is still current.
 - The data collectors in `bot/cogs/intelligence.py` only pay off once they've been running a
   while - most of the `ROADMAP.md` intelligence backlog depends on accumulated history, so
   those features will look broken/empty if built and tested against a fresh database.

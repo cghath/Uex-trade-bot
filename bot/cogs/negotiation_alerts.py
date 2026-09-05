@@ -100,7 +100,7 @@ class NegotiationAlerts(commands.Cog):
             for row in messages:
                 message_id = _as_int(row.get("id"))
                 if message_id is not None:
-                    await self.bot.db.mark_negotiation_message_seen(message_id)
+                    await self.bot.db.mark_negotiation_message_seen(user_id, message_id)
             await self.bot.db.set_negotiation_last_modified(
                 user_id, id_negotiation, _as_int(negotiation.get("date_modified")) or 0
             )
@@ -159,17 +159,22 @@ class NegotiationAlerts(commands.Cog):
             # messages are never worth a DM - only the other party's real chat text is.
             if message_id is None or not text or sender == own_username:
                 continue
-            if await self.bot.db.is_negotiation_message_seen(message_id):
+            if await self.bot.db.is_negotiation_message_seen(user_id, message_id):
                 continue
             if not id_item_resolved:
                 id_item = await self._resolve_listing_item_id(negotiation.get("id_listing"))
                 id_item_resolved = True
             listing_name = marketplace_item_link(negotiation.get("listing_title") or "a listing", id_item)
-            await self._notify_user(
+            delivered = await self._notify_user(
                 user_id,
                 f"New negotiation message on **{listing_name}** from **{sender}**: {text}",
             )
-            await self.bot.db.mark_negotiation_message_seen(message_id)
+            # Only a delivered DM counts as "seen" - a failed send (DMs closed, a transient
+            # Discord outage) must leave the message unseen so the next 5-minute poll
+            # naturally retries it, instead of the notification being silently discarded
+            # forever the moment send() raised.
+            if delivered:
+                await self.bot.db.mark_negotiation_message_seen(user_id, message_id)
         return True
 
     async def _resolve_listing_item_id(self, id_listing: Any) -> int | None:
@@ -185,12 +190,14 @@ class NegotiationAlerts(commands.Cog):
             return None
         return rows[0].get("id_item") if rows else None
 
-    async def _notify_user(self, user_id: int, message: str) -> None:
+    async def _notify_user(self, user_id: int, message: str) -> bool:
         try:
             user = self.bot.get_user(user_id) or await self.bot.fetch_user(user_id)
             await user.send(message)
+            return True
         except (discord.HTTPException, AttributeError):
             logger.warning("Could not DM negotiation alert to user %s", user_id)
+            return False
 
     @poll_negotiation_messages.before_loop
     async def before_poll_negotiation_messages(self) -> None:

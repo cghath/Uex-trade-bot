@@ -43,7 +43,14 @@ rollback_on_failure() {
     git checkout "$OLD_COMMIT" || echo "Could not check out $OLD_COMMIT - repo may be in a partial state, fix manually." >&2
     sudo systemctl start "$SERVICE_NAME" || echo "Could not restart $SERVICE_NAME - check it manually." >&2
 }
-trap rollback_on_failure ERR
+# EXIT, not ERR: bash's ERR trap does not fire for an explicit `exit N` (only for a
+# command that itself fails under `set -e`) - the missing-pip branch below calls `exit 1`
+# directly, which an ERR-only trap silently let bypass this rollback entirely, leaving the
+# service stopped with no recovery attempted. EXIT fires unconditionally on every script
+# termination (a failing command under set -e, an explicit exit, or normal completion), so
+# rollback_on_failure's own DEPLOY_SUCCEEDED/SERVICE_STOPPED guards are what keep it a
+# no-op on the success path, not the trap type.
+trap rollback_on_failure EXIT
 
 echo "Stopping $SERVICE_NAME (so the DB backup is quiesced, not mid-write)..."
 sudo systemctl stop "$SERVICE_NAME"

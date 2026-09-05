@@ -106,11 +106,17 @@ CREATE TABLE IF NOT EXISTS negotiation_last_seen (
     PRIMARY KEY (user_id, id_negotiation)
 );
 
--- The actual notify-dedup source of truth. A message only ever needs notifying to its one
--- non-sending party, so a bare message id (not scoped per-user) is unambiguous.
+-- The actual notify-dedup source of truth. Scoped per (user, message): a negotiation can
+-- have two different Discord users each independently watching it (each as the opposite
+-- party, or even the same listing watched by two different accounts), and one user's
+-- baseline-seed or delivered notification for a message must never suppress the OTHER
+-- user's still-pending notification for that same message - a bare message_id primary key
+-- collapsed both into one shared row (see the negotiation_message_seen_scope migration).
 CREATE TABLE IF NOT EXISTS negotiation_message_seen (
-    message_id INTEGER PRIMARY KEY,
-    seen_at TEXT NOT NULL DEFAULT (datetime('now'))
+    user_id INTEGER NOT NULL,
+    message_id INTEGER NOT NULL,
+    seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (user_id, message_id)
 );
 
 CREATE TABLE IF NOT EXISTS guild_digest_config (
@@ -493,6 +499,7 @@ class Database:
                 "CREATE INDEX IF NOT EXISTS idx_liquidity_scores_id_item ON liquidity_scores (id_item)"
             )
             await self._migrate_pricing_strategy_check(db)
+            await self._migrate_negotiation_message_seen_scope(db)
             await db.commit()
 
     async def _migrate_pricing_strategy_check(self, db: aiosqlite.Connection) -> None:
@@ -565,6 +572,49 @@ class Database:
         )
         await db.execute("PRAGMA foreign_keys=on")
         logger.info("Migrated marketplace_post_jobs to allow pricing_strategy='custom'")
+
+    async def _migrate_negotiation_message_seen_scope(self, db: aiosqlite.Connection) -> None:
+        """SQLite has no ALTER TABLE for a primary key - moving negotiation_message_seen
+        from a bare `message_id PRIMARY KEY` to `(user_id, message_id)` needs a full
+        rebuild. Detected via the stored CREATE TABLE text, same as
+        _migrate_pricing_strategy_check, so this only runs once.
+
+        A pre-migration row only ever recorded a bare message_id, with no record of which
+        user's poll actually marked it - but the only way a message ever got marked seen at
+        all was via a poll or baseline-seed for some user who had alerts enabled at the
+        time, so scoping each old row to every CURRENTLY enabled user is the closest safe
+        approximation: it preserves the "don't re-flood existing history" guarantee those
+        users already had, without guessing at attribution. A user who enables alerts after
+        this migration is unaffected either way, since enabling always re-seeds that user's
+        own baseline from scratch (_seed_baseline) regardless of this table's contents.
+        """
+        cursor = await db.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'negotiation_message_seen'"
+        )
+        row = await cursor.fetchone()
+        if row is None or "user_id" in row[0]:
+            return
+        cursor = await db.execute("SELECT message_id FROM negotiation_message_seen")
+        old_message_ids = [r[0] for r in await cursor.fetchall()]
+        cursor = await db.execute("SELECT user_id FROM negotiation_alert_settings WHERE enabled = 1")
+        enabled_user_ids = [r[0] for r in await cursor.fetchall()]
+
+        await db.execute("ALTER TABLE negotiation_message_seen RENAME TO negotiation_message_seen_pre_scope")
+        await db.execute(
+            """CREATE TABLE negotiation_message_seen (
+                user_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (user_id, message_id)
+            )"""
+        )
+        if old_message_ids and enabled_user_ids:
+            await db.executemany(
+                "INSERT OR IGNORE INTO negotiation_message_seen (user_id, message_id) VALUES (?, ?)",
+                [(user_id, message_id) for user_id in enabled_user_ids for message_id in old_message_ids],
+            )
+        await db.execute("DROP TABLE negotiation_message_seen_pre_scope")
+        logger.info("Migrated negotiation_message_seen to scope seen-state per user")
 
     async def _run_migrations(self, db: aiosqlite.Connection) -> None:
         """Additive-only migrations for columns added to a table after it may have already
@@ -1343,17 +1393,19 @@ class Database:
             )
             await db.commit()
 
-    async def is_negotiation_message_seen(self, message_id: int) -> bool:
+    async def is_negotiation_message_seen(self, user_id: int, message_id: int) -> bool:
         async with self.connect() as db:
             cursor = await db.execute(
-                "SELECT 1 FROM negotiation_message_seen WHERE message_id = ?", (message_id,)
+                "SELECT 1 FROM negotiation_message_seen WHERE user_id = ? AND message_id = ?",
+                (user_id, message_id),
             )
             return await cursor.fetchone() is not None
 
-    async def mark_negotiation_message_seen(self, message_id: int) -> None:
+    async def mark_negotiation_message_seen(self, user_id: int, message_id: int) -> None:
         async with self.connect() as db:
             await db.execute(
-                "INSERT OR IGNORE INTO negotiation_message_seen (message_id) VALUES (?)", (message_id,)
+                "INSERT OR IGNORE INTO negotiation_message_seen (user_id, message_id) VALUES (?, ?)",
+                (user_id, message_id),
             )
             await db.commit()
 
@@ -1419,27 +1471,53 @@ class Database:
             }
 
     async def get_terminal_market_shifts(self, hours: int = 24) -> list[dict[str, Any]]:
-        """Supply and demand changes between each market's oldest/newest observations."""
+        """Supply and demand changes between each market's most recent observation and the
+        best available baseline before it.
+
+        Requiring 2+ observations strictly inside the window (the original approach) missed
+        a long-stable market that then had exactly one recent change: with only one
+        in-window row, there was nothing to diff against even though a real, large shift
+        just happened. The fix compares the latest observation against a baseline chosen in
+        priority order: (1) the most recent observation at or before the window start (a
+        true "state ~`hours` ago" reference, however old it actually is), falling back to
+        (2) the earliest observation still inside the window, for a commodity/terminal only
+        ever observed recently (nothing predates the window at all, e.g. newly tracked) -
+        this fallback is what the original approach got right and a naive "require a
+        pre-window baseline" rewrite would have broken. A pair with no observation earlier
+        than its own latest one (a single ever-recorded data point) has no baseline
+        candidate at all and is correctly excluded, same as before.
+        """
         async with self.connect() as db:
             cursor = await db.execute(
                 """WITH windowed AS (
                        SELECT * FROM terminal_market_observations
                        WHERE observed_at >= datetime('now', ?)
-                   ), bounds AS (
-                       SELECT id_commodity, id_terminal, MIN(observed_at) first_at, MAX(observed_at) last_at
-                       FROM windowed GROUP BY id_commodity, id_terminal HAVING COUNT(*) >= 2
+                   ), latest AS (
+                       SELECT *, ROW_NUMBER() OVER (
+                           PARTITION BY id_commodity, id_terminal ORDER BY observed_at DESC
+                       ) AS rn
+                       FROM windowed
+                   ), candidates AS (
+                       SELECT o.*, ROW_NUMBER() OVER (
+                           PARTITION BY o.id_commodity, o.id_terminal
+                           ORDER BY (CASE WHEN o.observed_at < datetime('now', ?) THEN 0 ELSE 1 END),
+                                    o.observed_at DESC
+                       ) AS rn
+                       FROM terminal_market_observations o
+                       JOIN latest l ON l.id_commodity = o.id_commodity AND l.id_terminal = o.id_terminal
+                        AND l.rn = 1 AND o.observed_at < l.observed_at
                    )
                    SELECT latest.commodity_name, latest.terminal_name,
-                          earliest.scu_buy AS previous_supply, latest.scu_buy AS current_supply,
-                          earliest.scu_sell AS previous_demand, latest.scu_sell AS current_demand,
-                          COALESCE(latest.scu_buy, 0) - COALESCE(earliest.scu_buy, 0) AS supply_change,
-                          COALESCE(latest.scu_sell, 0) - COALESCE(earliest.scu_sell, 0) AS demand_change
-                   FROM bounds
-                   JOIN windowed earliest ON earliest.id_commodity=bounds.id_commodity
-                     AND earliest.id_terminal=bounds.id_terminal AND earliest.observed_at=bounds.first_at
-                   JOIN windowed latest ON latest.id_commodity=bounds.id_commodity
-                     AND latest.id_terminal=bounds.id_terminal AND latest.observed_at=bounds.last_at""",
-                (f"-{hours} hours",),
+                          baseline.scu_buy AS previous_supply, latest.scu_buy AS current_supply,
+                          baseline.scu_sell AS previous_demand, latest.scu_sell AS current_demand,
+                          COALESCE(latest.scu_buy, 0) - COALESCE(baseline.scu_buy, 0) AS supply_change,
+                          COALESCE(latest.scu_sell, 0) - COALESCE(baseline.scu_sell, 0) AS demand_change
+                   FROM latest
+                   JOIN candidates baseline
+                     ON baseline.id_commodity = latest.id_commodity
+                    AND baseline.id_terminal = latest.id_terminal AND baseline.rn = 1
+                   WHERE latest.rn = 1""",
+                (f"-{hours} hours", f"-{hours} hours"),
             )
             return [dict(row) for row in await cursor.fetchall()]
 
@@ -2381,6 +2459,7 @@ class Database:
                 "auto_relist": bool(job["auto_relist"]) and not original_listing_unresolved,
                 "relist_count": job["relist_count"] + 1,
                 "pricing_strategy": job["pricing_strategy"],
+                "custom_price": job["custom_price"],
                 "original_listing_unresolved": original_listing_unresolved,
             }
 
