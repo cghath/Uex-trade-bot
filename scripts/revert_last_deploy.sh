@@ -64,17 +64,47 @@ rollback_on_failure() {
     fi
     echo "" >&2
     echo "Revert failed - restoring the pre-revert state and restarting $SERVICE_NAME..." >&2
-    if [ "$DB_OVERWRITTEN" -eq 1 ] && [ -f "$PRE_REVERT_DIR/$(basename "$db_path")" ]; then
-        cp "$PRE_REVERT_DIR/$(basename "$db_path")" "$db_path" \
-            || echo "Could not restore the pre-revert DB from $PRE_REVERT_DIR - fix manually." >&2
-        for suffix in -wal -shm; do
-            rm -f "${db_path}${suffix}"
-            [ -f "$PRE_REVERT_DIR/$(basename "$db_path")${suffix}" ] \
-                && cp "$PRE_REVERT_DIR/$(basename "$db_path")${suffix}" "${db_path}${suffix}"
-        done
+
+    # A restart is only safe once every piece of the pre-revert state is actually back in
+    # place - a prior version started the service unconditionally here, so a failed
+    # restoration cp (persistent disk/I/O problem) only printed a warning and fell straight
+    # through to sidecar handling, git checkout, and systemctl start, potentially running
+    # the bot against a partially-written or stale database. restore_ok tracks whether every
+    # step below actually succeeded; the restart at the end is gated on it.
+    restore_ok=1
+
+    if [ "$DB_OVERWRITTEN" -eq 1 ]; then
+        if [ -f "$PRE_REVERT_DIR/$(basename "$db_path")" ]; then
+            if cp "$PRE_REVERT_DIR/$(basename "$db_path")" "$db_path"; then
+                for suffix in -wal -shm; do
+                    rm -f "${db_path}${suffix}"
+                    if [ -f "$PRE_REVERT_DIR/$(basename "$db_path")${suffix}" ]; then
+                        cp "$PRE_REVERT_DIR/$(basename "$db_path")${suffix}" "${db_path}${suffix}" \
+                            || { echo "Could not restore sidecar ${db_path}${suffix} from $PRE_REVERT_DIR." >&2; restore_ok=0; }
+                    fi
+                done
+            else
+                echo "Could not restore the pre-revert DB from $PRE_REVERT_DIR." >&2
+                restore_ok=0
+            fi
+        else
+            echo "No pre-revert DB backup found at $PRE_REVERT_DIR." >&2
+            restore_ok=0
+        fi
     fi
-    git checkout "$CURRENT_COMMIT" || echo "Could not check out $CURRENT_COMMIT - repo may be in a partial state, fix manually." >&2
-    sudo systemctl start "$SERVICE_NAME" || echo "Could not restart $SERVICE_NAME - check it manually." >&2
+
+    if ! git checkout "$CURRENT_COMMIT"; then
+        echo "Could not check out $CURRENT_COMMIT - repo may be in a partial state." >&2
+        restore_ok=0
+    fi
+
+    if [ "$restore_ok" -eq 1 ]; then
+        sudo systemctl start "$SERVICE_NAME" || echo "Could not restart $SERVICE_NAME - check it manually." >&2
+    else
+        echo "Pre-revert state could not be fully restored - leaving $SERVICE_NAME stopped rather than" >&2
+        echo "risk starting it against bad data. Fix $db_path (and/or the git checkout) manually using" >&2
+        echo "the backup in $PRE_REVERT_DIR, then start $SERVICE_NAME yourself once it's verified." >&2
+    fi
 }
 # EXIT, not ERR: bash's ERR trap does not fire for an explicit `exit N` (only for a command
 # that itself fails under `set -e`) - see deploy_and_backup.sh's own A13 fix for why EXIT is

@@ -1314,6 +1314,36 @@ they're in sync).
     3 new regression tests (2 promoted from the review's own probes, 1 shell-only finding
     verified via harness rather than pytest, matching this repo's established practice for
     scripts), each confirmed to fail without its fix and pass with it. 277 tests passing.
+51. **A fifth external follow-up review (`data/audit-33d659f/REVIEW.md`, 2026-09-06),
+    against entry 50's own commit, found 1 more gap in the same function entry 50 had just
+    touched.** `revert_last_deploy.sh`'s `rollback_on_failure` moving `DB_OVERWRITTEN=1`
+    before the destructive copy (entry 50) correctly fixed the skipped-restoration path,
+    but the *recovery* copy itself (`cp "$PRE_REVERT_DIR/..." "$db_path"`) still only did
+    `|| echo "...fix manually." >&2` on failure and fell straight through to sidecar
+    handling, `git checkout`, and an unconditional `sudo systemctl start` - so if the
+    original copy failed for a persistent reason (disk/I/O problem), the recovery copy
+    could fail the exact same way, and the bot would still be started against whatever
+    was left in `db_path` (unrestored, possibly still the partially-written file from the
+    original failure). The sidecar cleanup/copy loop ran unconditionally afterward too,
+    regardless of whether the main file actually came back. Verified via a throwaway
+    harness (extracting the real `rollback_on_failure` function verbatim via `sed` and
+    driving it with mocked `cp`/`git`/`sudo`, matching entry 50's own verification style):
+    confirmed the pre-fix function called `systemctl start` in all three failure
+    scenarios (main DB restore cp fails, sidecar restore cp fails, `git checkout` back to
+    `CURRENT_COMMIT` fails) - none of the three left the service stopped. Fixed by
+    tracking a `restore_ok` flag through every recovery step (main DB cp, each sidecar cp,
+    and `git checkout`) and gating the final `sudo systemctl start` on all of them having
+    actually succeeded; on any failure the handler now says so explicitly and leaves the
+    service stopped rather than starting it against unverified state. `git checkout`
+    failure was folded into the same gate even though the review's reproduction only
+    named the DB/sidecar copies - it's the identical "continue past a failed recovery
+    step toward an unconditional restart" shape, one line further down in the same
+    function, and entry 49's own generalized lesson is to check a fix's bug shape against
+    every place it appears, not just the specific line a report named. Re-ran the same
+    harness against the fix: all three failure scenarios now correctly leave the service
+    stopped, and the clean-recovery control case still restarts normally. 277 tests
+    passing (bash-only fix, no new pytest cases - matching entry 50's precedent for
+    shell-script findings).
 
 ## Where to look for what
 
@@ -1594,14 +1624,16 @@ guessed at.
   branch. Local (PC) and the Pi's databases have been fully merged at least twice now; the
   established practice is to back up both sides before any such merge and pull the Pi's
   backup down to the PC afterward, so nothing valuable lives only on the Pi's disk. The full
-  suite has 277 passing tests (see entries 45-50 - all 15 original audit findings plus 19
-  gaps found across four rounds of review/audit of those fixes, three external and one
+  suite has 277 passing tests (see entries 45-51 - all 15 original audit findings plus 20
+  gaps found across five rounds of review/audit of those fixes, four external and one
   self-directed, are now fixed; check git log on the Pi rather than assume how much of this
-  has actually been deployed there). This chain has now run FOUR review rounds past the
-  original audit, each finding real gaps in the round before it (5, then 2, then 9, then 3)
-  - there is no established pattern of the count trending to zero, so don't assume round N+1
-  won't find anything just because round N's count was small. Re-check live service and
-  branch state rather than assuming this point-in-time operational note is still current.
+  has actually been deployed there). This chain has now run FIVE review rounds past the
+  original audit, each finding real gaps in the round before it (5, then 2, then 9, then 3,
+  then 1) - there is no established pattern of the count trending to zero, so don't assume
+  round N+1 won't find anything just because round N's count was small (the 9-then-3 dip
+  already looked like convergence before this 1-finding round showed it wasn't a trend, just
+  variance). Re-check live service and branch state rather than assuming this point-in-time
+  operational note is still current.
 - The data collectors in `bot/cogs/intelligence.py` only pay off once they've been running a
   while - most of the `ROADMAP.md` intelligence backlog depends on accumulated history, so
   those features will look broken/empty if built and tested against a fresh database.
