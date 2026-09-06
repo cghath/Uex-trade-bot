@@ -1,5 +1,6 @@
-"""Saved per-user route-filter defaults, applied by /best-route, /top-routes,
-/mixed-routes, and /multi-stop-route whenever their matching option is left unset."""
+"""Saved per-user route-filter defaults (plus your default ship), applied by /best-route,
+/top-routes, /mixed-routes, and /multi-stop-route whenever their matching option is left
+unset."""
 from __future__ import annotations
 
 import discord
@@ -7,6 +8,9 @@ from discord import app_commands
 from discord.ext import commands
 
 from bot.cogs.prices import SYSTEM_CHOICES
+from bot.cogs.ships import ship_name_autocomplete
+from bot.uex.exceptions import UexApiError, describe_uex_api_error
+from bot.uex.ships import resolve_ship
 from bot.uex.trading_preferences import UNSET, format_trading_preferences
 
 SYSTEM_PREFERENCE_CHOICES = [*SYSTEM_CHOICES, app_commands.Choice(name="Any (no restriction)", value="any")]
@@ -27,6 +31,7 @@ class TradingPreferences(commands.Cog):
         description="Save route-filter defaults so you don't have to repeat them every call.",
     )
     @app_commands.describe(
+        ship="Your default ship - also settable via /set-default-ship, same underlying setting",
         space_only="mixed-routes/multi-stop-route default: require confirmed space stations only",
         capital_ship_access="mixed-routes/multi-stop-route default: force XL-hangar/freight-elevator filtering, any ship",
         auto_load_only="Default auto-load-only for all 4 route commands",
@@ -40,9 +45,11 @@ class TradingPreferences(commands.Cog):
         risk_tolerance="risk-tolerance",
     )
     @app_commands.choices(system=SYSTEM_PREFERENCE_CHOICES, risk_tolerance=RISK_TOLERANCE_CHOICES)
+    @app_commands.autocomplete(ship=ship_name_autocomplete)
     async def set_trading_preferences(
         self,
         interaction: discord.Interaction,
+        ship: str | None = None,
         space_only: bool | None = None,
         capital_ship_access: bool | None = None,
         auto_load_only: bool | None = None,
@@ -50,7 +57,8 @@ class TradingPreferences(commands.Cog):
         risk_tolerance: app_commands.Choice[str] | None = None,
     ) -> None:
         if (
-            space_only is None
+            ship is None
+            and space_only is None
             and capital_ship_access is None
             and auto_load_only is None
             and system is None
@@ -63,8 +71,26 @@ class TradingPreferences(commands.Cog):
             )
             return
 
+        resolved_ship_name: str | None | object = UNSET
+        if ship is not None:
+            try:
+                vehicles = await self.bot.uex.get_vehicles()
+            except UexApiError as exc:
+                await interaction.response.send_message(describe_uex_api_error(exc), ephemeral=True)
+                return
+            vehicle = resolve_ship(vehicles, ship)
+            if vehicle is None:
+                await interaction.response.send_message(
+                    f"Couldn't find a single unambiguous match for '{ship}'. Try the full ship "
+                    "name and pick from the autocomplete suggestions.",
+                    ephemeral=True,
+                )
+                return
+            resolved_ship_name = vehicle.get("name")
+
         prefs = await self.bot.db.set_trading_preferences(
             interaction.user.id,
+            ship_name=resolved_ship_name,
             space_only=space_only if space_only is not None else UNSET,
             capital_ship_access=capital_ship_access if capital_ship_access is not None else UNSET,
             auto_load_only=auto_load_only if auto_load_only is not None else UNSET,
@@ -80,11 +106,16 @@ class TradingPreferences(commands.Cog):
 
     @app_commands.command(
         name="clear-trading-preferences",
-        description="Reset all saved trading preferences back to their defaults.",
+        description="Reset ALL saved trading preferences, including your default ship, back to their defaults.",
     )
     async def clear_trading_preferences(self, interaction: discord.Interaction) -> None:
         removed = await self.bot.db.clear_trading_preferences(interaction.user.id)
-        msg = "Trading preferences cleared." if removed else "You don't have any saved trading preferences."
+        msg = (
+            "Trading preferences cleared, including your default ship. Use /set-default-ship "
+            "to set a ship again without touching the other preferences."
+            if removed
+            else "You don't have any saved trading preferences."
+        )
         await interaction.response.send_message(msg, ephemeral=True)
 
     @app_commands.command(

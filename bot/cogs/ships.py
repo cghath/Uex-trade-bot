@@ -1,4 +1,11 @@
-"""Per-user default ship, used by /best-route to show real haulable cargo (SCU)."""
+"""Per-user default ship, used by /best-route to show real haulable cargo (SCU).
+
+Storage lives in user_trading_preferences (bot/db/database.py) alongside the other saved
+route-filter preferences, not a dedicated table - set_default_ship/get_default_ship/
+clear_default_ship are thin wrappers over Database.set_trading_preferences/
+get_trading_preferences. /set-trading-preferences can set the ship too; these commands and
+that one both read/write the same underlying row.
+"""
 from __future__ import annotations
 
 import discord

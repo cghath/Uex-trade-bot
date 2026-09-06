@@ -1414,6 +1414,78 @@ they're in sync).
     cog command behavior, and route-command wiring) plus 2 new assertions in
     `tests/test_mixed_routes.py` for the `has_freight_elevator`/`has_docking_port` fix.
     298 tests passing.
+53. **Default ship folded into Saved Trading Preferences (user follow-up on entry 52) -
+    `user_ship_preference` is superseded by a `ship_name` column on
+    `user_trading_preferences`, and a real SQLite grammar limitation was found and
+    worked around along the way.** The user's reasoning: a ship shapes route
+    recommendations the same way space-only/auto-load/system do, so it belongs in the
+    same saved-preferences row, not a separate table. `get_default_ship`/
+    `set_default_ship`/`clear_default_ship` (`bot/db/database.py`) are now thin wrappers
+    over `get_trading_preferences`/`set_trading_preferences` - `/set-default-ship`,
+    `/clear-default-ship`, and `/my-ship` (`bot/cogs/ships.py`) needed zero code changes
+    beyond a docstring, since they only ever called those three methods by name.
+    `/set-trading-preferences` gained a `ship` option with the same `resolve_ship`
+    validation and `ship_name_autocomplete` `/set-default-ship` already used. Two
+    deliberately different clear semantics: `/clear-default-ship` only clears the ship
+    (`clear_default_ship` reads the current value first, so its existing bool-return
+    contract - "was anything actually cleared" - still holds); `/clear-trading-
+    preferences` now clears the ship too, since it's the same row (`DELETE FROM
+    user_trading_preferences`) - both the command description and confirmation message
+    say so explicitly, since this is a real behavior change from entry 52's version of
+    that command.
+
+    **Migrating real, already-live data**: the Pi already has a real user's saved ship
+    in `user_ship_preference` (confirmed against a copy of the local dev DB too - a
+    `Polaris`, coincidentally a capital ship). `_migrate_ship_preference_into_
+    trading_preferences` (`bot/db/database.py`, called from `init()` after
+    `_run_migrations` so the new `ship_name` column exists first) copies it over,
+    designed to run on every startup, not once: new rows are inserted where none exist
+    yet, and a NULL `ship_name` on an existing row is backfilled - but a `ship_name`
+    already set via the new path (`/set-trading-preferences` or `/set-default-ship`,
+    both of which write here now) is never overwritten by a stale value from the old
+    table on a later restart. `user_ship_preference` itself is left in place, unwritten,
+    matching this codebase's additive-only/never-drop convention for tables that have
+    held real data.
+
+    **A genuine SQLite grammar limitation, not a typo**: the first version of that
+    migration used one statement - `INSERT INTO user_trading_preferences (...) SELECT
+    ... FROM user_ship_preference ON CONFLICT(user_id) DO UPDATE SET ... WHERE
+    ship_name IS NULL` - and failed with `near "DO": syntax error` on this project's
+    actual SQLite build (3.50.4, bundled with Python 3.13). Confirmed via a standalone
+    repro this ISN'T a mistake in the query: SQLite's own documented upsert-from-SELECT
+    example (the `phonebook2`/`tempPhonebook` example from sqlite.org's UPSERT page)
+    fails identically on this build, while the exact same `ON CONFLICT DO UPDATE`
+    clause after `INSERT INTO ... VALUES (...)` (used everywhere else in this file)
+    works fine - the limitation is specifically pairing `ON CONFLICT` with an INSERT
+    whose source is a SELECT, not `ON CONFLICT`/`DO UPDATE` in general. `DO NOTHING`
+    and a CTE-wrapped SELECT both failed the same way, ruling out `DO UPDATE`
+    specifically or the SELECT's own shape as the cause. Worked around with two plain
+    statements (an `INSERT ... SELECT ... WHERE user_id NOT IN (...)` for brand-new
+    rows, then an `UPDATE ... SET ship_name = (SELECT ...) WHERE ship_name IS NULL AND
+    user_id IN (...)` for backfilling existing rows) instead of hunting for alternate
+    upsert syntax - both statement forms are unambiguously supported, and the two-step
+    version was verified for correctness and idempotency (new-row, backfill, and
+    already-set-don't-clobber cases, run 3x in a row) before being trusted. Worth
+    remembering if a future migration reaches for `INSERT ... SELECT ... ON CONFLICT
+    DO UPDATE/NOTHING` again on this project: it doesn't work here regardless of how
+    correct the SQL looks against SQLite's own docs - test it standalone first.
+
+    Verified against real data, not just synthetic tests: ran the actual migration
+    against a byte-for-byte copy of the local dev database (which has one real saved
+    ship) and confirmed the ship migrated correctly and stayed stable across 3 repeated
+    `init()` calls - the first attempt at this check appeared to fail (`ship_name` came
+    back `None`), which turned out to be a test-harness artifact (a git-bash-style
+    absolute path like `/c/Users/...` doesn't resolve correctly when handed to the
+    native Windows Python 3.13 used for this check, silently opening a fresh empty
+    database at a misinterpreted path instead of erroring) - re-run with a plain
+    relative path confirmed the migration was correct all along. Also re-ran the same
+    stop-Pi/run-local/restart-Pi verification as entry 52 (same live token constraint):
+    confirmed `Loaded extension bot.cogs.trading_preferences` and `Synced 59 commands`
+    against the real local dev DB (not just a fresh test DB) with no errors, and
+    confirmed via direct query afterward that the real `Polaris` row had actually been
+    copied into `user_trading_preferences`. 10 new tests (migration correctness/
+    idempotency/non-clobbering, ship round-trip through the new storage, clear-ship-only
+    vs. clear-everything semantics). 308 tests passing.
 
 ## Where to look for what
 
@@ -1699,13 +1771,13 @@ guessed at.
   branch. Local (PC) and the Pi's databases have been fully merged at least twice now; the
   established practice is to back up both sides before any such merge and pull the Pi's
   backup down to the PC afterward, so nothing valuable lives only on the Pi's disk. The full
-  suite has 298 passing tests (see entries 45-52 - all 15 original audit findings plus 20
+  suite has 308 passing tests (see entries 45-53 - all 15 original audit findings plus 20
   gaps found across five rounds of review/audit of those fixes, four external and one
-  self-directed, are now fixed, plus entry 52's new Saved Trading Preferences feature).
-  The Pi was brought up to `3ec9e9c` (entry 51's commit) via `scripts/deploy_and_backup.sh`'s
-  first real run on 2026-09-06 - but entry 52's feature (Saved Trading Preferences, 3 new
-  slash commands, a new `user_trading_preferences` table) has NOT been deployed yet as of
-  this writing, so the Pi is currently one commit behind `origin/TestBranch` once that
+  self-directed, are now fixed, plus entry 52's new Saved Trading Preferences feature and
+  entry 53's default-ship consolidation into it). The Pi was brought up to `e0a1657`
+  (entry 52's commit) via `scripts/deploy_and_backup.sh` on 2026-09-06 - but entry 53's
+  ship-consolidation work (not yet committed as of this writing) has NOT been deployed,
+  so the Pi is currently one commit behind `origin/TestBranch` once that
   work is committed. Re-check git log on the Pi before assuming either point is still
   true, since it will drift the moment another round of fixes or features is committed
   without a matching deploy. This chain has now run FIVE review rounds past the

@@ -66,8 +66,12 @@ CREATE TABLE IF NOT EXISTS user_ship_preference (
 -- Saved route-filtering defaults, applied whenever a route command's matching option is
 -- left unset so a user doesn't have to repeat the same options every call. risk_tolerance
 -- is stored and shown but not yet enforced by any route command - filtering on it is a
--- separate follow-up. preferred_system/risk_tolerance NULL means "no preference set", not
--- "explicitly disabled".
+-- separate follow-up. preferred_system/risk_tolerance/ship_name NULL means "no preference
+-- set", not "explicitly disabled". ship_name supersedes the older user_ship_preference
+-- table (kept, but no longer written to, purely as the one-time migration source run in
+-- Database.init() - see _migrate_ship_preference_into_trading_preferences) - the user's
+-- ship shapes route recommendations the same way the other fields here do, so it now
+-- lives in the same per-user row instead of a separate table.
 CREATE TABLE IF NOT EXISTS user_trading_preferences (
     user_id INTEGER PRIMARY KEY,
     space_only INTEGER NOT NULL DEFAULT 0,
@@ -75,6 +79,7 @@ CREATE TABLE IF NOT EXISTS user_trading_preferences (
     auto_load_only INTEGER NOT NULL DEFAULT 0,
     preferred_system TEXT,
     risk_tolerance TEXT,
+    ship_name TEXT,
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -517,6 +522,7 @@ class Database:
             )
             await self._migrate_pricing_strategy_check(db)
             await self._migrate_negotiation_message_seen_scope(db)
+            await self._migrate_ship_preference_into_trading_preferences(db)
             await db.commit()
 
     async def _migrate_pricing_strategy_check(self, db: aiosqlite.Connection) -> None:
@@ -633,6 +639,40 @@ class Database:
         await db.execute("DROP TABLE negotiation_message_seen_pre_scope")
         logger.info("Migrated negotiation_message_seen to scope seen-state per user")
 
+    async def _migrate_ship_preference_into_trading_preferences(self, db: aiosqlite.Connection) -> None:
+        """One-time-per-startup backfill: user_ship_preference predates user_trading_preferences,
+        and real users already have rows there - folding ship selection into the same
+        per-user preferences row (per user direction) means those existing saved ships need
+        copying over, not just newly-set ones. Runs every startup, but is idempotent and safe
+        to repeat: a ship already set via the new path (/set-trading-preferences or
+        /set-default-ship, both of which now write here) is never clobbered by a stale value
+        from the old table on a later restart. user_ship_preference itself is intentionally
+        left in place, unwritten - this codebase's tables are additive-only, never dropped
+        once real data has lived there.
+
+        Two plain statements, not one INSERT...SELECT...ON CONFLICT DO UPDATE: this SQLite
+        build rejects that combination outright ("near \"DO\": syntax error") even for
+        SQLite's own documented upsert-from-SELECT example - INSERT...VALUES...ON CONFLICT
+        works fine (used everywhere else in this file), only pairing ON CONFLICT with an
+        INSERT whose source is a SELECT does not. Confirmed via a standalone repro before
+        writing this workaround, not assumed.
+        """
+        await db.execute(
+            """INSERT INTO user_trading_preferences (user_id, ship_name, updated_at)
+               SELECT user_id, ship_name, datetime('now') FROM user_ship_preference
+               WHERE user_id NOT IN (SELECT user_id FROM user_trading_preferences)"""
+        )
+        await db.execute(
+            """UPDATE user_trading_preferences
+               SET ship_name = (
+                       SELECT ship_name FROM user_ship_preference
+                       WHERE user_ship_preference.user_id = user_trading_preferences.user_id
+                   ),
+                   updated_at = datetime('now')
+               WHERE ship_name IS NULL
+                 AND user_id IN (SELECT user_id FROM user_ship_preference)"""
+        )
+
     async def _run_migrations(self, db: aiosqlite.Connection) -> None:
         """Additive-only migrations for columns added to a table after it may have already
         been created (via CREATE TABLE IF NOT EXISTS above, which only creates - it never
@@ -667,6 +707,7 @@ class Database:
             "ALTER TABLE terminal_data_health_observations ADD COLUMN last_update_days_limit INTEGER",
             "ALTER TABLE terminal_data_health_observations ADD COLUMN last_update_days_percentage INTEGER",
             "ALTER TABLE marketplace_post_jobs ADD COLUMN custom_price INTEGER",
+            "ALTER TABLE user_trading_preferences ADD COLUMN ship_name TEXT",
         ]
         for statement in migrations:
             try:
@@ -1271,37 +1312,29 @@ class Database:
     # a stale id pointing at the wrong thing.
 
     async def set_default_ship(self, user_id: int, ship_name: str) -> None:
-        async with self.connect() as db:
-            await db.execute(
-                """INSERT INTO user_ship_preference (user_id, ship_name, updated_at)
-                   VALUES (?, ?, datetime('now'))
-                   ON CONFLICT(user_id) DO UPDATE SET
-                       ship_name = excluded.ship_name,
-                       updated_at = datetime('now')""",
-                (user_id, ship_name),
-            )
-            await db.commit()
+        """Thin wrapper over set_trading_preferences - ship_name now lives in
+        user_trading_preferences alongside the other route-shaping preferences, not its own
+        table (user_ship_preference predates this and is now migration-source-only, see
+        _migrate_ship_preference_into_trading_preferences)."""
+        await self.set_trading_preferences(user_id, ship_name=ship_name)
 
     async def get_default_ship(self, user_id: int) -> str | None:
-        async with self.connect() as db:
-            cursor = await db.execute(
-                "SELECT ship_name FROM user_ship_preference WHERE user_id = ?", (user_id,)
-            )
-            row = await cursor.fetchone()
-            return row["ship_name"] if row else None
+        prefs = await self.get_trading_preferences(user_id)
+        return prefs["ship_name"]
 
     async def clear_default_ship(self, user_id: int) -> bool:
-        async with self.connect() as db:
-            cursor = await db.execute(
-                "DELETE FROM user_ship_preference WHERE user_id = ?", (user_id,)
-            )
-            await db.commit()
-            return cursor.rowcount > 0
+        """Only clears the ship, not the other 5 trading preferences - distinct from
+        clear_trading_preferences, which resets the whole row including the ship."""
+        current = await self.get_trading_preferences(user_id)
+        if current["ship_name"] is None:
+            return False
+        await self.set_trading_preferences(user_id, ship_name=None)
+        return True
 
-    # -- saved trading preferences (route-filter defaults) -------------------
+    # -- saved trading preferences (route-filter defaults + default ship) ----
 
     async def get_trading_preferences(self, user_id: int) -> dict[str, Any]:
-        """Always returns all 5 fields, defaulted, so callers never null-check a missing row."""
+        """Always returns all 6 fields, defaulted, so callers never null-check a missing row."""
         async with self.connect() as db:
             cursor = await db.execute(
                 "SELECT * FROM user_trading_preferences WHERE user_id = ?", (user_id,)
@@ -1315,6 +1348,7 @@ class Database:
             "auto_load_only": bool(row["auto_load_only"]),
             "preferred_system": row["preferred_system"],
             "risk_tolerance": row["risk_tolerance"],
+            "ship_name": row["ship_name"],
         }
 
     async def set_trading_preferences(
@@ -1326,10 +1360,11 @@ class Database:
         auto_load_only: bool | object = UNSET,
         preferred_system: str | None | object = UNSET,
         risk_tolerance: str | None | object = UNSET,
+        ship_name: str | None | object = UNSET,
     ) -> dict[str, Any]:
         """Partial update: a field left at UNSET (the default) keeps its current value -
         only fields the caller explicitly passes are changed, so a single-option
-        /set-trading-preferences call never resets the other 4."""
+        /set-trading-preferences call never resets the other 5."""
         current = await self.get_trading_preferences(user_id)
         if space_only is not UNSET:
             current["space_only"] = bool(space_only)
@@ -1341,18 +1376,21 @@ class Database:
             current["preferred_system"] = preferred_system
         if risk_tolerance is not UNSET:
             current["risk_tolerance"] = risk_tolerance
+        if ship_name is not UNSET:
+            current["ship_name"] = ship_name
         async with self.connect() as db:
             await db.execute(
                 """INSERT INTO user_trading_preferences
                    (user_id, space_only, capital_ship_access, auto_load_only,
-                    preferred_system, risk_tolerance, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+                    preferred_system, risk_tolerance, ship_name, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
                    ON CONFLICT(user_id) DO UPDATE SET
                        space_only = excluded.space_only,
                        capital_ship_access = excluded.capital_ship_access,
                        auto_load_only = excluded.auto_load_only,
                        preferred_system = excluded.preferred_system,
                        risk_tolerance = excluded.risk_tolerance,
+                       ship_name = excluded.ship_name,
                        updated_at = excluded.updated_at""",
                 (
                     user_id,
@@ -1361,6 +1399,7 @@ class Database:
                     int(current["auto_load_only"]),
                     current["preferred_system"],
                     current["risk_tolerance"],
+                    current["ship_name"],
                 ),
             )
             await db.commit()

@@ -159,6 +159,133 @@ def test_trading_preferences_are_isolated_per_user(tmp_path):
     asyncio.run(run())
 
 
+# -- default ship, now stored in user_trading_preferences, not a dedicated table -------
+
+
+def test_default_ship_round_trips_through_trading_preferences(tmp_path):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await db.set_default_ship(1, "Freelancer")
+        assert await db.get_default_ship(1) == "Freelancer"
+        assert (await db.get_trading_preferences(1))["ship_name"] == "Freelancer"
+
+    asyncio.run(run())
+
+
+def test_set_default_ship_does_not_disturb_other_saved_preferences(tmp_path):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await db.set_trading_preferences(1, space_only=True, auto_load_only=True)
+        await db.set_default_ship(1, "Freelancer")
+        prefs = await db.get_trading_preferences(1)
+        assert prefs["ship_name"] == "Freelancer"
+        assert prefs["space_only"] is True
+        assert prefs["auto_load_only"] is True
+
+    asyncio.run(run())
+
+
+def test_clear_default_ship_only_clears_the_ship(tmp_path):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await db.set_trading_preferences(1, space_only=True)
+        await db.set_default_ship(1, "Freelancer")
+        assert await db.clear_default_ship(1) is True
+        assert await db.clear_default_ship(1) is False
+        prefs = await db.get_trading_preferences(1)
+        assert prefs["ship_name"] is None
+        assert prefs["space_only"] is True  # untouched by clearing just the ship
+
+    asyncio.run(run())
+
+
+def test_clear_trading_preferences_also_clears_the_ship(tmp_path):
+    # Distinct from clear_default_ship above: clearing ALL trading preferences resets
+    # everything in the same row, ship included - this is the behavior change the user
+    # asked for when folding the ship into trading preferences.
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await db.set_default_ship(1, "Freelancer")
+        await db.clear_trading_preferences(1)
+        assert await db.get_default_ship(1) is None
+
+    asyncio.run(run())
+
+
+# -- migrating existing user_ship_preference rows into user_trading_preferences --------
+
+
+def test_migration_copies_a_ship_with_no_existing_trading_preferences_row(tmp_path):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        async with db.connect() as conn:
+            await conn.execute(
+                "INSERT INTO user_ship_preference (user_id, ship_name) VALUES (1, 'Old Ship')"
+            )
+            await conn.commit()
+        # Re-running init() is exactly what happens on every real bot restart.
+        await db.init()
+        assert await db.get_default_ship(1) == "Old Ship"
+
+    asyncio.run(run())
+
+
+def test_migration_backfills_a_null_ship_on_an_existing_preferences_row(tmp_path):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await db.set_trading_preferences(1, space_only=True)  # creates a row, no ship
+        async with db.connect() as conn:
+            await conn.execute(
+                "INSERT INTO user_ship_preference (user_id, ship_name) VALUES (1, 'Old Ship')"
+            )
+            await conn.commit()
+        await db.init()
+        prefs = await db.get_trading_preferences(1)
+        assert prefs["ship_name"] == "Old Ship"
+        assert prefs["space_only"] is True
+
+    asyncio.run(run())
+
+
+def test_migration_never_overwrites_a_ship_already_set_via_the_new_path(tmp_path):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await db.set_default_ship(1, "New Ship")
+        async with db.connect() as conn:
+            await conn.execute(
+                "INSERT INTO user_ship_preference (user_id, ship_name) VALUES (1, 'Stale Old Ship')"
+            )
+            await conn.commit()
+        await db.init()
+        assert await db.get_default_ship(1) == "New Ship"
+
+    asyncio.run(run())
+
+
+def test_migration_is_idempotent_across_repeated_startups(tmp_path):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        async with db.connect() as conn:
+            await conn.execute(
+                "INSERT INTO user_ship_preference (user_id, ship_name) VALUES (1, 'Old Ship')"
+            )
+            await conn.commit()
+        await db.init()
+        await db.init()
+        await db.init()
+        assert await db.get_default_ship(1) == "Old Ship"
+
+    asyncio.run(run())
+
+
 # -- /set-trading-preferences, /clear-trading-preferences, /my-trading-preferences -----
 
 
@@ -176,7 +303,8 @@ def test_set_trading_preferences_command_requires_at_least_one_option(tmp_path):
         cog.bot = NS(db=db)
         interaction = _FakeInteraction(1)
         await cog.set_trading_preferences.callback(
-            cog, interaction, None, None, None, None, None
+            cog, interaction, ship=None, space_only=None, capital_ship_access=None,
+            auto_load_only=None, system=None, risk_tolerance=None,
         )
         message = interaction.response.send_message.call_args.args[0]
         assert "at least one option" in message
@@ -193,7 +321,8 @@ def test_set_trading_preferences_command_updates_and_confirms(tmp_path):
         cog.bot = NS(db=db)
         interaction = _FakeInteraction(1)
         await cog.set_trading_preferences.callback(
-            cog, interaction, True, None, None, None, None
+            cog, interaction, ship=None, space_only=True, capital_ship_access=None,
+            auto_load_only=None, system=None, risk_tolerance=None,
         )
         message = interaction.response.send_message.call_args.args[0]
         assert "Space-only terminals: **Yes**" in message
@@ -214,9 +343,51 @@ def test_set_trading_preferences_command_any_system_choice_clears_preference(tmp
         interaction = _FakeInteraction(1)
         any_choice = app_commands.Choice(name="Any (no restriction)", value="any")
         await cog.set_trading_preferences.callback(
-            cog, interaction, None, None, None, any_choice, None
+            cog, interaction, ship=None, space_only=None, capital_ship_access=None,
+            auto_load_only=None, system=any_choice, risk_tolerance=None,
         )
         assert (await db.get_trading_preferences(1))["preferred_system"] is None
+
+    asyncio.run(run())
+
+
+def test_set_trading_preferences_command_sets_ship_with_validation(tmp_path):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        cog = TradingPreferences.__new__(TradingPreferences)
+        uex = NS(get_vehicles=AsyncMock(return_value=[dict(name="Cutlass Black", scu=46)]))
+        cog.bot = NS(db=db, uex=uex)
+        interaction = _FakeInteraction(1)
+        await cog.set_trading_preferences.callback(
+            cog, interaction, ship="Cutlass", space_only=None, capital_ship_access=None,
+            auto_load_only=None, system=None, risk_tolerance=None,
+        )
+        message = interaction.response.send_message.call_args.args[0]
+        assert "Default ship: **Cutlass Black**" in message
+        prefs = await db.get_trading_preferences(1)
+        assert prefs["ship_name"] == "Cutlass Black"
+        # /set-default-ship and /my-ship read the same underlying value.
+        assert await db.get_default_ship(1) == "Cutlass Black"
+
+    asyncio.run(run())
+
+
+def test_set_trading_preferences_command_rejects_an_ambiguous_ship(tmp_path):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        cog = TradingPreferences.__new__(TradingPreferences)
+        uex = NS(get_vehicles=AsyncMock(return_value=[]))
+        cog.bot = NS(db=db, uex=uex)
+        interaction = _FakeInteraction(1)
+        await cog.set_trading_preferences.callback(
+            cog, interaction, ship="Nonexistent Ship", space_only=None,
+            capital_ship_access=None, auto_load_only=None, system=None, risk_tolerance=None,
+        )
+        message = interaction.response.send_message.call_args.args[0]
+        assert "unambiguous match" in message
+        assert (await db.get_trading_preferences(1))["ship_name"] is None
 
     asyncio.run(run())
 
