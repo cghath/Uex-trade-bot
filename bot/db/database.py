@@ -14,6 +14,8 @@ from typing import Any, AsyncIterator
 import aiosqlite
 from cryptography.fernet import Fernet, InvalidToken
 
+from bot.uex.trading_preferences import DEFAULT_TRADING_PREFERENCES, UNSET
+
 logger = logging.getLogger("uexbot.database")
 
 from bot.uex.marketplace import compute_liquidity_score
@@ -58,6 +60,21 @@ CREATE TABLE IF NOT EXISTS user_credentials (
 CREATE TABLE IF NOT EXISTS user_ship_preference (
     user_id INTEGER PRIMARY KEY,
     ship_name TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Saved route-filtering defaults, applied whenever a route command's matching option is
+-- left unset so a user doesn't have to repeat the same options every call. risk_tolerance
+-- is stored and shown but not yet enforced by any route command - filtering on it is a
+-- separate follow-up. preferred_system/risk_tolerance NULL means "no preference set", not
+-- "explicitly disabled".
+CREATE TABLE IF NOT EXISTS user_trading_preferences (
+    user_id INTEGER PRIMARY KEY,
+    space_only INTEGER NOT NULL DEFAULT 0,
+    capital_ship_access INTEGER NOT NULL DEFAULT 0,
+    auto_load_only INTEGER NOT NULL DEFAULT 0,
+    preferred_system TEXT,
+    risk_tolerance TEXT,
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -1277,6 +1294,82 @@ class Database:
         async with self.connect() as db:
             cursor = await db.execute(
                 "DELETE FROM user_ship_preference WHERE user_id = ?", (user_id,)
+            )
+            await db.commit()
+            return cursor.rowcount > 0
+
+    # -- saved trading preferences (route-filter defaults) -------------------
+
+    async def get_trading_preferences(self, user_id: int) -> dict[str, Any]:
+        """Always returns all 5 fields, defaulted, so callers never null-check a missing row."""
+        async with self.connect() as db:
+            cursor = await db.execute(
+                "SELECT * FROM user_trading_preferences WHERE user_id = ?", (user_id,)
+            )
+            row = await cursor.fetchone()
+        if row is None:
+            return dict(DEFAULT_TRADING_PREFERENCES)
+        return {
+            "space_only": bool(row["space_only"]),
+            "capital_ship_access": bool(row["capital_ship_access"]),
+            "auto_load_only": bool(row["auto_load_only"]),
+            "preferred_system": row["preferred_system"],
+            "risk_tolerance": row["risk_tolerance"],
+        }
+
+    async def set_trading_preferences(
+        self,
+        user_id: int,
+        *,
+        space_only: bool | object = UNSET,
+        capital_ship_access: bool | object = UNSET,
+        auto_load_only: bool | object = UNSET,
+        preferred_system: str | None | object = UNSET,
+        risk_tolerance: str | None | object = UNSET,
+    ) -> dict[str, Any]:
+        """Partial update: a field left at UNSET (the default) keeps its current value -
+        only fields the caller explicitly passes are changed, so a single-option
+        /set-trading-preferences call never resets the other 4."""
+        current = await self.get_trading_preferences(user_id)
+        if space_only is not UNSET:
+            current["space_only"] = bool(space_only)
+        if capital_ship_access is not UNSET:
+            current["capital_ship_access"] = bool(capital_ship_access)
+        if auto_load_only is not UNSET:
+            current["auto_load_only"] = bool(auto_load_only)
+        if preferred_system is not UNSET:
+            current["preferred_system"] = preferred_system
+        if risk_tolerance is not UNSET:
+            current["risk_tolerance"] = risk_tolerance
+        async with self.connect() as db:
+            await db.execute(
+                """INSERT INTO user_trading_preferences
+                   (user_id, space_only, capital_ship_access, auto_load_only,
+                    preferred_system, risk_tolerance, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+                   ON CONFLICT(user_id) DO UPDATE SET
+                       space_only = excluded.space_only,
+                       capital_ship_access = excluded.capital_ship_access,
+                       auto_load_only = excluded.auto_load_only,
+                       preferred_system = excluded.preferred_system,
+                       risk_tolerance = excluded.risk_tolerance,
+                       updated_at = excluded.updated_at""",
+                (
+                    user_id,
+                    int(current["space_only"]),
+                    int(current["capital_ship_access"]),
+                    int(current["auto_load_only"]),
+                    current["preferred_system"],
+                    current["risk_tolerance"],
+                ),
+            )
+            await db.commit()
+        return current
+
+    async def clear_trading_preferences(self, user_id: int) -> bool:
+        async with self.connect() as db:
+            cursor = await db.execute(
+                "DELETE FROM user_trading_preferences WHERE user_id = ?", (user_id,)
             )
             await db.commit()
             return cursor.rowcount > 0

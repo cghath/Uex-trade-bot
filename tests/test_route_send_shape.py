@@ -24,6 +24,7 @@ from bot.db.database import Database
 from bot.uex.client import UexClient
 from bot.uex.mixed_routes import MixedCargoItem, MixedRoute
 from bot.uex.multi_stop_routes import MultiStopLeg, MultiStopRoute
+from bot.uex.trading_preferences import DEFAULT_TRADING_PREFERENCES
 
 
 class _FakeResponse:
@@ -368,6 +369,7 @@ def test_multi_stop_route_falls_back_to_plain_text_when_only_the_warnings_sectio
         bot = type("FakeBot", (), {})()
         bot.db = type("FakeDb", (), {})()
         bot.db.get_default_ship = AsyncMock(return_value="Ship")
+        bot.db.get_trading_preferences = AsyncMock(return_value=dict(DEFAULT_TRADING_PREFERENCES))
         bot.db.get_mixed_route_market_rows = AsyncMock(return_value=[])
         bot.db.get_terminal_data_health_by_ids = AsyncMock(return_value={
             i: dict(
@@ -615,6 +617,7 @@ def test_mixed_routes_falls_back_to_plain_text_when_the_combined_batch_is_too_la
 
         db = NS(
             get_default_ship=AsyncMock(return_value="Ship"),
+            get_trading_preferences=AsyncMock(return_value=dict(DEFAULT_TRADING_PREFERENCES)),
             get_mixed_route_market_rows=AsyncMock(return_value=[]),
             get_terminal_data_health_by_ids=AsyncMock(return_value={}),
         )
@@ -670,6 +673,7 @@ def test_mixed_routes_fallback_preserves_the_approximation_disclosure(monkeypatc
 
         db = NS(
             get_default_ship=AsyncMock(return_value="Ship"),
+            get_trading_preferences=AsyncMock(return_value=dict(DEFAULT_TRADING_PREFERENCES)),
             get_mixed_route_market_rows=AsyncMock(return_value=[]),
             get_terminal_data_health_by_ids=AsyncMock(return_value={}),
         )

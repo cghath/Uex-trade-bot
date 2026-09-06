@@ -1344,6 +1344,76 @@ they're in sync).
     stopped, and the clean-recovery control case still restarts normally. 277 tests
     passing (bash-only fix, no new pytest cases - matching entry 50's precedent for
     shell-script findings).
+52. **Saved Trading Preferences (roadmap item, not an audit fix) - a new
+    `bot.cogs.trading_preferences` cog storing per-user route-filter defaults, applied by
+    `/best-route`, `/top-routes`, `/mixed-routes`, and `/multi-stop-route` whenever their
+    matching option is left unset.** `/set-trading-preferences` (space-only,
+    capital-ship-access, auto-load-only, system, risk-tolerance - all optional, only
+    passed fields change, matching `negotiation_alert_settings`'s partial-update UPSERT
+    idiom via a `bot/uex/trading_preferences.py` `UNSET` sentinel), `/clear-trading-
+    preferences`, `/my-trading-preferences`. Two design decisions made with the user
+    before implementation, since neither mapped cleanly onto anything that already
+    existed:
+    - **"Capital-ship access" is a new independent force-on toggle, not just "use my
+      capital ship."** Previously, `capital_access_only` in `build_mixed_routes`/
+      `build_multi_stop_routes` was ONLY ever derived from `requires_capital_cargo_access
+      (ship_vehicle)` - there was no way to preview capital-tier routes without actually
+      setting a capital ship as your default. The saved preference now ORs into that same
+      variable (`requires_capital_cargo_access(ship_vehicle) or prefs["capital_ship_
+      access"]`) rather than replacing it, so a genuine capital ship still always
+      triggers the filter regardless of the preference. Per the user's own spec ("extra
+      large hangers or external freight elevators, docking is always buggy"),
+      `supports_capital_cargo_access` (`bot/uex/mixed_routes.py`) was also fixed to check
+      the terminal's own `has_freight_elevator` field - already joined into every market
+      row by `get_mixed_route_market_rows` (`t.has_freight_elevator` has been in that
+      SELECT since before this feature) but never actually checked by this function,
+      which only looked at `has_loading_dock`/`station_has_loading_dock` and
+      `station_pad_types`. `has_docking_port` (a real, separate `/terminals` field per
+      `docs/UEX_API_2.0_reference.md`) is deliberately never referenced - Star Citizen's
+      docking-collar mechanic is exactly the unreliable case the user wanted excluded, and
+      UEX's own doc-comment convention (`/commodities_routes`' `has_loading_dock_*`
+      fields are documented as `// external freight elevator / autoload area`) confirms
+      `has_loading_dock` means freight/autoload infrastructure, not the docking mechanic,
+      so including it was already safe.
+    - **Risk tolerance is stored and shown, but deliberately NOT enforced yet.** The
+      user chose "store now, filter later" over building real filtering immediately.
+      `risk_tolerance` accepts low/medium/high via `/set-trading-preferences` and is
+      surfaced in `/my-trading-preferences` and route-command footers via
+      `describe_active_preferences`, but no route command excludes any commodity based on
+      it - every occurrence is labeled "(not yet enforced)" so this isn't mistaken for a
+      real guarantee. Building the actual filter (against `is_illegal`/`is_explosive`/
+      `is_volatile_qt`/`is_volatile_time`/`is_buggy`) is future work.
+
+    A real scoping gap, surfaced deliberately rather than silently: **space-only and
+    capital-ship-access preferences only affect `/mixed-routes` and `/multi-stop-route`**,
+    because those are the only two commands whose underlying pure functions
+    (`build_pair_opportunities`) already support `space_only`/`capital_access_only` as
+    filters at all - `/best-route` and `/top-routes` have no equivalent filter capability
+    today (they don't use `get_mixed_route_market_rows`/`build_pair_opportunities` at
+    all). Extending those two commands to support space-only/capital-ship filtering would
+    mean porting filtering logic across genuinely different code paths - correctly
+    bucketed as part of the future Centralized Route Presentation roadmap item, not
+    silently done here under a "low complexity" feature. `auto_load_only` and
+    `preferred_system`, by contrast, already existed uniformly on all 4 commands, so
+    those two preferences apply everywhere. `/my-trading-preferences` and
+    `/set-trading-preferences`'s option descriptions both say "mixed-routes/multi-stop-
+    route only" next to the two scoped fields so this isn't discoverable only by reading
+    code.
+
+    Verified end-to-end, not just via pytest: stopped the live Pi service (same Discord
+    bot token as local dev, confirmed with the user first since running both
+    simultaneously would fight over one gateway connection), ran the local bot with
+    `PYTHONUNBUFFERED=1` and confirmed `Loaded extension bot.cogs.trading_preferences`
+    and `Synced 59 commands` (was 56) with no errors, then immediately restarted the Pi
+    service (confirmed back to normal, 56 commands - the Pi hasn't been redeployed with
+    this feature yet). Actually invoking the new commands in a live Discord server was
+    not completed this round (Claude in Chrome wasn't connected, and downtime on the live
+    Pi bot was minimized by not troubleshooting that further) - that's the one item on
+    `CONTRIBUTING.md`'s pre-flight checklist still open for this feature. 21 new tests in
+    `tests/test_trading_preferences.py` (pure formatting, DB partial-update semantics,
+    cog command behavior, and route-command wiring) plus 2 new assertions in
+    `tests/test_mixed_routes.py` for the `has_freight_elevator`/`has_docking_port` fix.
+    298 tests passing.
 
 ## Where to look for what
 
@@ -1629,13 +1699,16 @@ guessed at.
   branch. Local (PC) and the Pi's databases have been fully merged at least twice now; the
   established practice is to back up both sides before any such merge and pull the Pi's
   backup down to the PC afterward, so nothing valuable lives only on the Pi's disk. The full
-  suite has 277 passing tests (see entries 45-51 - all 15 original audit findings plus 20
+  suite has 298 passing tests (see entries 45-52 - all 15 original audit findings plus 20
   gaps found across five rounds of review/audit of those fixes, four external and one
-  self-directed, are now fixed). The Pi was brought up to `3ec9e9c` (entry 51's commit) via
-  `scripts/deploy_and_backup.sh`'s first real run on 2026-09-06, so as of that date the Pi
-  is fully caught up with `origin/TestBranch` - but re-check git log on the Pi before
-  assuming that's still true, since it will drift the moment another round of fixes is
-  committed without a matching deploy. This chain has now run FIVE review rounds past the
+  self-directed, are now fixed, plus entry 52's new Saved Trading Preferences feature).
+  The Pi was brought up to `3ec9e9c` (entry 51's commit) via `scripts/deploy_and_backup.sh`'s
+  first real run on 2026-09-06 - but entry 52's feature (Saved Trading Preferences, 3 new
+  slash commands, a new `user_trading_preferences` table) has NOT been deployed yet as of
+  this writing, so the Pi is currently one commit behind `origin/TestBranch` once that
+  work is committed. Re-check git log on the Pi before assuming either point is still
+  true, since it will drift the moment another round of fixes or features is committed
+  without a matching deploy. This chain has now run FIVE review rounds past the
   original audit, each finding real gaps in the round before it (5, then 2, then 9, then 3,
   then 1) - there is no established pattern of the count trending to zero, so don't assume
   round N+1 won't find anything just because round N's count was small (the 9-then-3 dip

@@ -36,6 +36,7 @@ from bot.uex.commodity_risk import format_commodity_risk
 from bot.uex.ships import estimate_route_cargo, resolve_ship
 from bot.uex.status import build_status_lookup, resolve_status_label
 from bot.uex.supply_demand import has_sell_side_demand
+from bot.uex.trading_preferences import describe_active_preferences
 from bot.uex.trends import (
     ScoredRouteEntry,
     TrendingEntry,
@@ -309,6 +310,7 @@ class Trends(commands.Cog):
         display_limit: int,
         auto_load_only: bool = False,
         system: str | None = None,
+        risk_tolerance: str | None = None,
     ) -> None:
         await interaction.response.defer()
 
@@ -411,6 +413,11 @@ class Trends(commands.Cog):
             footer += f" · refreshed {updated_at.strftime('%Y-%m-%d %H:%M UTC')}"
         if not ship_vehicle:
             footer += " · set a default ship with /set-default-ship for cargo/run-profit numbers"
+        preferences_note = describe_active_preferences(
+            auto_load_only=auto_load_only, system=system, risk_tolerance=risk_tolerance
+        )
+        if preferences_note:
+            footer += " · " + preferences_note
 
         embed = discord.Embed(title=title, color=discord.Color.green())
         embed.set_footer(text=footer)
@@ -483,9 +490,13 @@ class Trends(commands.Cog):
         interaction: discord.Interaction,
         strict: bool = False,
         ship: str | None = None,
-        auto_load_only: bool = False,
+        auto_load_only: bool | None = None,
         system: app_commands.Choice[str] | None = None,
     ) -> None:
+        prefs = await self.bot.db.get_trading_preferences(interaction.user.id)
+        if auto_load_only is None:
+            auto_load_only = prefs["auto_load_only"]
+        system_value = system.value if system else prefs["preferred_system"]
         if strict:
             async with self._top_in_stock_routes_lock:
                 entries = list(self._top_in_stock_routes)
@@ -521,7 +532,8 @@ class Trends(commands.Cog):
             log_label="/top-routes",
             display_limit=TOP_IN_STOCK_ROUTES_KEEP if strict else TOP_SCORED_ROUTES_KEEP,
             auto_load_only=auto_load_only,
-            system=system.value if system else None,
+            system=system_value,
+            risk_tolerance=prefs["risk_tolerance"],
         )
 
     # -- /movers: single bulk call, computed on demand -----------------------

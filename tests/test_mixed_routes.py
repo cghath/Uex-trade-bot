@@ -284,6 +284,15 @@ def test_capital_ship_and_terminal_access_use_explicit_uex_metadata():
     assert supports_capital_cargo_access({"station_pad_types": "S|M|L|XL"})
     assert not supports_capital_cargo_access({"station_pad_types": "S|M|L"})
     assert not supports_capital_cargo_access({})
+    # A saved "capital-ship access" preference asked specifically for XL hangars or
+    # external freight elevators - has_freight_elevator is a distinct terminal-level field
+    # from has_loading_dock and was previously never checked here despite already being
+    # joined into every market row (get_mixed_route_market_rows selects t.has_freight_elevator).
+    assert supports_capital_cargo_access({"has_freight_elevator": 1})
+    # has_docking_port is deliberately never checked: UEX's docking-collar mechanic is a
+    # known-unreliable way to service a capital ship, so it must not count as access on
+    # its own even if a future terminal_reference join ever adds that column.
+    assert not supports_capital_cargo_access({"has_docking_port": 1})
 
 
 def test_capital_access_filter_fails_closed_for_unverified_terminal():

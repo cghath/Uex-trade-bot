@@ -46,4 +46,72 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
 
 - [ ] **Volatility Alerts**: Notify users of sudden price swings in specific commodities.
 - [ ] **Quality Premium Analysis**: Data visualization of how much extra UEC is paid for higher quality tiers.
-- [ ] **User Dashboard**: A summary of the user's current "Portfolio" (linked accounts, current holdings, and active listings).
+
+### Personalization & Workflow
+
+- [ ] **Saved Trading Preferences** *(complexity: Low)*: Store per-user defaults for
+  space-only terminals, capital-ship access, auto-loading, cross-system travel, and risk
+  tolerance. Route commands read these as defaults instead of requiring the options every
+  time, and show which settings are currently active so a user can't accidentally get a
+  route that ignores them. Same shape as the existing `user_ship_preference` table -
+  gates the personalized brief item below.
+- [ ] **Personalized `/intelligence-brief` Entry Point** *(complexity: Medium, depends on
+  Saved Trading Preferences)*: Answer "what should I do right now?" using the user's
+  saved ship, available budget, preferred systems, and safety settings to surface a
+  handful of good options with buttons/links into the relevant commands, instead of
+  requiring the user to already know which command to run.
+- [ ] **Unified Inventory & Selling Workflow** *(complexity: High)*: One private view
+  covering what you own, what's listed, open negotiations, completed sales, and items
+  needing attention, with suggested prices and Sellability Ratings explained inline and
+  clear controls for minimum prices, relisting, and pausing automation. Supersedes the
+  earlier "User Dashboard" idea - negotiations aren't currently linked to
+  `personal_inventory`/`marketplace_post_jobs` by anything but `id_listing`, so this
+  needs real design work, not just a bigger embed.
+
+### Recommendation Trust & Transparency
+
+- [ ] **Load-Limiting Explanations** *(complexity: Low)*: State plainly whether cargo
+  space, budget, stock, demand, or approximate allocation prevented a better load, so a
+  user knows whether a bigger ship or more capital would actually help.
+  `_exact_allocate` already tracks `market_available` vs. `search_bound` separately -
+  mostly a matter of surfacing what's already computed.
+- [ ] **Evidence-Level Labels** *(complexity: Low)*: Distinguish current reported stock,
+  older observations, inferred trends, and approximate calculations on every
+  recommendation, and make "no information" look different from "no demand." Builds on
+  data already tracked by Terminal Data Health and Route Confidence Rating rather than
+  new computation - mostly a consistency pass across display surfaces.
+- [ ] **Recommendation Outcome Tracking** *(complexity: High)*: Let a user select a
+  route, then report what they actually bought/sold or where stock/access didn't match
+  the recommendation. Comparing predicted vs. actual profit surfaces which
+  recommendations are dependable. A genuinely new subsystem (a "planned trade" state
+  machine + schema + analytics) - nothing existing to build this on top of.
+
+### Route Economics Depth
+
+- [ ] **Fuel-Aware Profit**: Estimate fuel costs and show route profit after fuel for the
+  user's selected ship.
+- [ ] **Travel-Aware Ranking** *(complexity: High, needs scoping)*: Offer estimated
+  profit-per-minute alongside total profit, with transparent travel/loading assumptions,
+  visible uncertainty, and total-profit ranking always still available. The real
+  complexity is the travel-time model itself - Star Citizen quantum travel isn't
+  `distance / speed` (spool-up, interdiction, calibration) - so this needs a deliberate
+  decision on how seriously to model it before it gets an estimate.
+
+### Platform & Reliability
+
+- [ ] **Collector Health Dashboard** *(complexity: Medium)*: Show each background
+  collector's last successful run, consecutive failure count, and next attempt; retry
+  transient database failures with a bounded delay; notify when failures persist.
+  Mechanical instrumentation across the existing `tasks.loop` collectors rather than new
+  design.
+- [ ] **Centralized Route Presentation** *(complexity: Medium)*: Share the code that
+  assembles warnings, confidence, approximation notices, and Discord-size-safe messages
+  across `/best-route`, `/top-routes`, `/mixed-routes`, `/multi-stop-route`, and
+  `/intelligence-brief` instead of each maintaining its own copy. This is *why* repeated
+  audits kept finding a fix applied to one command and not another - do this before
+  Load-Limiting Explanations and Evidence-Level Labels so those land once, not four times.
+- [ ] **Codebase Consolidation** *(complexity: High, ongoing)*: Beyond route rendering,
+  organize `bot/db/database.py`'s ~30 tables by feature and keep one authoritative
+  description of current behavior. Broader than a single ticket - Centralized Route
+  Presentation above is its first concrete slice; the rest is an ongoing practice rather
+  than a one-time PR.

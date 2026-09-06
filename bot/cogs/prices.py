@@ -20,6 +20,7 @@ from bot.uex.status import build_status_lookup, resolve_status_label
 from bot.uex.trading import best_buy_locations, best_routes, best_sell_locations
 from bot.uex.mixed_routes import build_mixed_routes, requires_capital_cargo_access
 from bot.uex.multi_stop_routes import build_multi_stop_routes
+from bot.uex.trading_preferences import describe_active_preferences
 
 logger = logging.getLogger("uexbot.prices")
 
@@ -264,11 +265,17 @@ class Prices(commands.Cog):
         interaction: discord.Interaction,
         commodity: str,
         ship: str | None = None,
-        auto_load_only: bool = False,
+        auto_load_only: bool | None = None,
         system: app_commands.Choice[str] | None = None,
     ) -> None:
         await interaction.response.defer()
-        system_value = system.value if system else None
+        prefs = await self.bot.db.get_trading_preferences(interaction.user.id)
+        if auto_load_only is None:
+            auto_load_only = prefs["auto_load_only"]
+        system_value = system.value if system else prefs["preferred_system"]
+        preferences_note = describe_active_preferences(
+            auto_load_only=auto_load_only, system=system_value, risk_tolerance=prefs["risk_tolerance"]
+        )
         try:
             rows = await self.bot.uex.get_commodities_prices(commodity_name=commodity)
         except UexApiError as exc:
@@ -383,6 +390,8 @@ class Prices(commands.Cog):
             footer = "Data from UEX Corp /commodities_routes"
             if not ship_vehicle:
                 footer += " · set a default ship with /set-default-ship for cargo/run-profit numbers"
+            if preferences_note:
+                footer += " · " + preferences_note
             embed.set_footer(text=footer)
             routes_shown = 0
             for r in ranked:
@@ -569,6 +578,8 @@ class Prices(commands.Cog):
         footer = "Data from UEX Corp · does not account for travel time between terminals"
         if not ship_vehicle:
             footer += " · set a default ship with /set-default-ship for cargo/run-profit numbers"
+        if preferences_note:
+            footer += " · " + preferences_note
         embed.set_footer(text=footer)
         routes_shown = 0
         for route in routes:
@@ -686,12 +697,17 @@ class Prices(commands.Cog):
         interaction: discord.Interaction,
         ship: str | None = None,
         budget: app_commands.Range[float, 1, 1_000_000_000] | None = None,
-        space_only: bool = False,
-        auto_load_only: bool = False,
+        space_only: bool | None = None,
+        auto_load_only: bool | None = None,
         system: app_commands.Choice[str] | None = None,
     ) -> None:
         await interaction.response.defer()
-        system_value = system.value if system else None
+        prefs = await self.bot.db.get_trading_preferences(interaction.user.id)
+        if space_only is None:
+            space_only = prefs["space_only"]
+        if auto_load_only is None:
+            auto_load_only = prefs["auto_load_only"]
+        system_value = system.value if system else prefs["preferred_system"]
 
         ship_query = ship or await self.bot.db.get_default_ship(interaction.user.id)
         if not ship_query:
@@ -714,7 +730,10 @@ class Prices(commands.Cog):
             return
 
         market_rows = await self.bot.db.get_mixed_route_market_rows()
-        capital_access_only = requires_capital_cargo_access(ship_vehicle)
+        # OR'd with the saved preference, not replaced by it - either a genuine capital
+        # ship or an explicit "always require capital-ship access" preference should force
+        # this filter on; the ship-derived signal never gets to silently disable it.
+        capital_access_only = requires_capital_cargo_access(ship_vehicle) or prefs["capital_ship_access"]
         if capital_access_only:
             try:
                 stations = await self.bot.uex.get_space_stations()
@@ -933,12 +952,17 @@ class Prices(commands.Cog):
         interaction: discord.Interaction,
         ship: str | None = None,
         budget: app_commands.Range[float, 1, 1_000_000_000] | None = None,
-        space_only: bool = False,
-        auto_load_only: bool = False,
+        space_only: bool | None = None,
+        auto_load_only: bool | None = None,
         system: app_commands.Choice[str] | None = None,
     ) -> None:
         await interaction.response.defer()
-        system_value = system.value if system else None
+        prefs = await self.bot.db.get_trading_preferences(interaction.user.id)
+        if space_only is None:
+            space_only = prefs["space_only"]
+        if auto_load_only is None:
+            auto_load_only = prefs["auto_load_only"]
+        system_value = system.value if system else prefs["preferred_system"]
 
         ship_query = ship or await self.bot.db.get_default_ship(interaction.user.id)
         if not ship_query:
@@ -961,7 +985,10 @@ class Prices(commands.Cog):
             return
 
         market_rows = await self.bot.db.get_mixed_route_market_rows()
-        capital_access_only = requires_capital_cargo_access(ship_vehicle)
+        # OR'd with the saved preference, not replaced by it - either a genuine capital
+        # ship or an explicit "always require capital-ship access" preference should force
+        # this filter on; the ship-derived signal never gets to silently disable it.
+        capital_access_only = requires_capital_cargo_access(ship_vehicle) or prefs["capital_ship_access"]
         if capital_access_only:
             try:
                 stations = await self.bot.uex.get_space_stations()

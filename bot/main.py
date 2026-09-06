@@ -40,6 +40,7 @@ INITIAL_COGS = (
     "bot.cogs.liquidity",
     "bot.cogs.personal_inventory",
     "bot.cogs.negotiation_alerts",
+    "bot.cogs.trading_preferences",
 )
 
 

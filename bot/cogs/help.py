@@ -26,6 +26,9 @@ CATEGORIES: list[tuple[str, str, list[str]]] = [
     ("🚀 Ship & Cargo", "Save a ship once to calculate cargo limits and per-run profit.", [
         "set-default-ship", "clear-default-ship", "my-ship",
     ]),
+    ("⚙️ Trading Preferences", "Save route-filter defaults once instead of repeating them every call.", [
+        "set-trading-preferences", "clear-trading-preferences", "my-trading-preferences",
+    ]),
     ("🔔 Alerts & Notifications", "Price targets, Marketplace matches, restocks, and DM delivery checks.", [
         "alert-add", "stock-alert-add", "marketplace-alert-add",
         "alert-list", "alert-remove", "negotiation-alerts", "test-dm",

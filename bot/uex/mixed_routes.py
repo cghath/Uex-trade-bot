@@ -403,12 +403,19 @@ def requires_capital_cargo_access(vehicle: dict[str, Any]) -> bool:
 
 
 def supports_capital_cargo_access(terminal: dict[str, Any]) -> bool:
-    """Require a confirmed external cargo dock or XL-capable station hangar.
+    """Require a confirmed external freight elevator/cargo dock or XL-capable station hangar.
 
-    Missing station metadata fails closed. Terminal-level loading-dock data still permits
-    surface locations with an explicitly reported external cargo elevator.
+    Missing station metadata fails closed. Terminal-level loading-dock/freight-elevator
+    data still permits surface locations with explicitly reported external cargo
+    infrastructure. Deliberately does NOT check has_docking_port - UEX's docking-collar
+    mechanic is a known-unreliable way to service a capital ship, so it doesn't count as
+    confirmed access the way a physical dock/elevator/XL pad does.
     """
-    if _truthy(terminal.get("has_loading_dock")) or _truthy(terminal.get("station_has_loading_dock")):
+    if (
+        _truthy(terminal.get("has_loading_dock"))
+        or _truthy(terminal.get("has_freight_elevator"))
+        or _truthy(terminal.get("station_has_loading_dock"))
+    ):
         return True
     pad_types = {
         part.strip().upper()
