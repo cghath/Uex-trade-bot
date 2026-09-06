@@ -1533,6 +1533,72 @@ they're in sync).
     12 new tests in `tests/test_mixed_routes.py` (stock/demand/cargo-space/budget/tie,
     each via both the exact and greedy solver paths where applicable, plus the
     local-vs-aggregate regression above). 317 tests passing.
+55. **A sixth external review (`data/audit-f562ae0/REVIEW.md`, 2026-09-06), covering
+    entries 52-54's whole arc (saved preferences, ship consolidation, load-limiting
+    explanations), found 4 more P2 gaps - all reproduced independently before fixing,
+    all fixed:**
+    - **The ship migration re-applied a ship the user had just deliberately cleared.**
+      `_migrate_ship_preference_into_trading_preferences` (entry 53) guarded only on
+      "does `user_trading_preferences.ship_name` look empty" - which `/clear-default-ship`
+      (sets it to NULL) and `/clear-trading-preferences` (deletes the whole row) both
+      satisfy just as well as "never migrated yet," so the legacy ship silently came back
+      on the very next restart regardless of what the user had just asked to clear.
+      Fixed with a new `ship_preference_migrated (user_id)` marker table that neither
+      clear path touches - once a user is marked, the migration never looks at their row
+      again, and their `ship_name` is entirely under their own control from then on.
+    - **`set_trading_preferences` had a real lost-update race.** It read the whole
+      preferences row, applied its one field change in Python, then wrote the whole row
+      back - two concurrent calls touching DIFFERENT fields (e.g. one setting
+      `space_only`, the other `auto_load_only`) could both read the same pre-change row,
+      each merge their own change onto that same stale copy, and whichever wrote last
+      would silently discard the other's change. Reproduced with a synchronized
+      interleaving forcing both reads before either write. Fixed by rebuilding the method
+      around a single atomic `INSERT ... ON CONFLICT DO UPDATE` whose `DO UPDATE SET`
+      clause names ONLY the columns the caller actually passed (built dynamically from
+      the same six fixed, hardcoded column names - never string-built from caller input) -
+      two concurrent calls touching different columns now can never clobber each other,
+      regardless of interleaving, since neither statement's `SET` clause even mentions the
+      other's column. `DEFAULT_TRADING_PREFERENCES` still supplies fallback values for the
+      `INSERT` branch (a brand-new row has no prior state), but those defaults are never
+      named in `DO UPDATE SET`, so an untouched field on an existing row is never touched.
+    - **The load-limiting explanation (entry 54) exposed the exact solver's own internal
+      25-SCU search cap as if it were the ship's real capacity.** Above
+      `EXACT_SEARCH_MAX_CAPACITY`, `_exact_allocate` is still run capped at 25 (as if the
+      ship only had 25 SCU) and compared against the uncapped greedy passes - when that
+      capped result wins, `_annotate_exact_allocation_limits` was checking bindingness
+      against the SAME capped value it searched with, not the ship's real capacity, so a
+      26-SCU ship with 1 SCU of real spare room got told "cargo space" limited it,
+      identically to a genuinely full ship. Confirmed with the review's own reproduction
+      (26-SCU ship, 25 SCU used, both items labeled cargo-space-limited despite 1,000
+      stock/demand and a 1,000,000 budget on each). Fixed by threading the REAL,
+      uncapped ship capacity through `_exact_allocate` as a separate `real_capacity`
+      parameter (search bounding still uses the capped value, unchanged), checking
+      cargo-space bindingness against `real_capacity` instead, and adding a genuinely new
+      fifth factor - `"search cap"` - for the case where none of the four real
+      constraints (stock, demand, real cargo space, budget) explain an item's quantity
+      but the search itself stopped at its own internal boundary. Telling a player "bring
+      a bigger ship" when the ship they already have has room to spare is actively worse
+      than not explaining at all.
+    - **`/set-trading-preferences` could exceed Discord's ~3s initial-response deadline.**
+      When a `ship` option is passed, the command awaited `self.bot.uex.get_vehicles()`
+      (and then the DB write) before ever acknowledging the interaction - a cold UEX
+      vehicle-list cache or a slow/retried request could exceed that window, and the
+      eventual `interaction.response.send_message` call then fails with an
+      expired-interaction error even though the preferences may have already been saved,
+      leaving the user with an apparently-failed command and silently changed settings.
+      Fixed by deferring (ephemerally) immediately after the cheap "at least one option
+      passed" validation and before any network/DB work, routing every response after
+      that point through `interaction.followup.send` instead of
+      `interaction.response.send_message`. The validation-only early return (no
+      network/DB work at all) deliberately keeps responding immediately rather than
+      deferring first, since there's nothing slow on that path to defer around.
+
+    17 new tests across `tests/test_mixed_routes.py` and `tests/test_trading_preferences.py`
+    (migration-survives-both-clear-paths x2, concurrent-partial-update-preservation,
+    search-cap-vs-real-cargo-space, defer-before-network-fetch, plus updating 4 existing
+    command tests to read from `interaction.followup.send` instead of
+    `interaction.response.send_message` now that the command defers first). 322 tests
+    passing.
 
 ## Where to look for what
 
@@ -1818,22 +1884,27 @@ guessed at.
   branch. Local (PC) and the Pi's databases have been fully merged at least twice now; the
   established practice is to back up both sides before any such merge and pull the Pi's
   backup down to the PC afterward, so nothing valuable lives only on the Pi's disk. The full
-  suite has 317 passing tests (see entries 45-54 - all 15 original audit findings plus 20
-  gaps found across five rounds of review/audit of those fixes, four external and one
-  self-directed, are now fixed, plus entry 52's new Saved Trading Preferences feature,
-  entry 53's default-ship consolidation into it, and entry 54's load-limiting
-  explanations). The Pi was brought up to `8bc2e8c` (entry 53's commit) via
-  `scripts/deploy_and_backup.sh` on 2026-09-06 - but entry 54's work (not yet committed
-  as of this writing) has NOT been deployed, so the Pi is currently one commit behind
-  `origin/TestBranch` once that
-  work is committed. Re-check git log on the Pi before assuming either point is still
+  suite has 322 passing tests (see entries 45-55). Two separate review chains so far:
+  the original audit-fix chain (entries 45-51 - 15 original findings plus 20 more gaps
+  across five follow-up rounds, four external and one self-directed, all fixed) and a
+  newer one specific to the trading-preferences feature work (entries 52-55 - Saved
+  Trading Preferences, default-ship consolidation, load-limiting explanations, and a
+  first review round against all three that found 4 more P2 gaps, also fixed) - don't
+  conflate the two chains' round/gap counts, they're reviewing different bodies of work.
+  The Pi was brought up to `8bc2e8c` (entry 53's commit) via `scripts/deploy_and_backup.sh`
+  on 2026-09-06 - entries 54 and 55 (not yet committed as of this writing) have NOT been
+  deployed, so the Pi is currently two commits behind `origin/TestBranch` once entry 55's
+  fixes are committed. Re-check git log on the Pi before assuming either point is still
   true, since it will drift the moment another round of fixes or features is committed
-  without a matching deploy. This chain has now run FIVE review rounds past the
-  original audit, each finding real gaps in the round before it (5, then 2, then 9, then 3,
-  then 1) - there is no established pattern of the count trending to zero, so don't assume
-  round N+1 won't find anything just because round N's count was small (the 9-then-3 dip
-  already looked like convergence before this 1-finding round showed it wasn't a trend, just
-  variance). Re-check live service and branch state rather than assuming this point-in-time
+  without a matching deploy. The audit-fix chain alone has now run FIVE review rounds past
+  the original audit, each finding real gaps in the round before it (5, then 2, then 9,
+  then 3, then 1) - there is no established pattern of the count trending to zero, so
+  don't assume round N+1 won't find anything just because round N's count was small (the
+  9-then-3 dip already looked like convergence before the next round showed it wasn't a
+  trend, just variance). The newer trading-preferences chain is only one round in (4
+  gaps) - too early to draw any trend conclusion from, but the audit-fix chain's own
+  history argues against assuming a second round would find nothing. Re-check live
+  service and branch state rather than assuming this point-in-time
   operational note is still current.
 - The data collectors in `bot/cogs/intelligence.py` only pay off once they've been running a
   while - most of the `ROADMAP.md` intelligence backlog depends on accumulated history, so

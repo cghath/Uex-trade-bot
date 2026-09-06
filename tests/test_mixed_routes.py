@@ -420,6 +420,30 @@ def test_limiting_factors_identifies_cargo_space_via_the_exact_solver():
     assert cargo[0].limiting_factors == ("cargo space",)
 
 
+def test_limiting_factors_does_not_call_the_internal_search_cap_a_cargo_space_limit():
+    """Follow-up review finding: above EXACT_SEARCH_MAX_CAPACITY (25), _exact_allocate is
+    still run capped at 25 (as if the ship only had 25 SCU) and compared against the
+    uncapped greedy passes. When that capped-at-25 result wins, the annotation was
+    checking bindingness against the SAME capped value it searched with (25), not the
+    ship's real capacity (26 here) - so a real ship with 1 SCU of spare room got told
+    "cargo space" limited it, exactly the same as if it were genuinely full. A real ship
+    capacity limit should say so; an artifact of the solver's own bounded search should
+    not be reported as if it were one - "bring a bigger ship" is simply false when the
+    ship you already have has room to spare."""
+    source_a = _row(1, 1, "A", "Origin", price_buy=15, scu_buy=1000)
+    dest_a = _row(1, 2, "A", "Destination", price_sell=34, scu_sell=1000)
+    source_b = _row(2, 1, "B", "Origin", price_buy=4, scu_buy=1000)
+    dest_b = _row(2, 2, "B", "Destination", price_sell=23, scu_sell=1000)
+    cargo = allocate_pair_cargo(
+        [(source_a, dest_a), (source_b, dest_b)],
+        capacity=26, budget=1_000_000, max_commodities=3, min_commodities=2,
+    )
+    assert sum(item.quantity_scu for item in cargo) == 25
+    for item in cargo:
+        assert "cargo space" not in item.limiting_factors, (item.commodity_name, item.limiting_factors)
+        assert item.limiting_factors == ("search cap",), (item.commodity_name, item.limiting_factors)
+
+
 def test_limiting_factors_identifies_budget_via_the_exact_solver():
     source = _row(1, 1, "A", "Origin", price_buy=10, scu_buy=1000)
     dest = _row(1, 2, "A", "Destination", price_sell=20, scu_sell=1000)

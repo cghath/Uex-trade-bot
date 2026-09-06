@@ -64,6 +64,8 @@ class TradingPreferences(commands.Cog):
             and system is None
             and risk_tolerance is None
         ):
+            # No network/DB work on this path - safe to respond immediately rather than
+            # deferring first.
             await interaction.response.send_message(
                 "Pass at least one option to change. Use /my-trading-preferences to see your "
                 "current settings.",
@@ -71,16 +73,27 @@ class TradingPreferences(commands.Cog):
             )
             return
 
+        # Deferred before any network/DB work, not after: a cold UEX vehicle-list cache or
+        # a slow/retried request can take longer than Discord's ~3s initial-response
+        # deadline. A follow-up review confirmed the original code called
+        # self.bot.uex.get_vehicles() (and the DB write) before ever acknowledging the
+        # interaction - on a slow fetch the eventual send_message call fails with an
+        # expired-interaction error even though the preferences may have already been
+        # saved, leaving the user with an apparently-failed command and silently changed
+        # settings. Deferring first means every response below goes through
+        # interaction.followup instead of interaction.response.
+        await interaction.response.defer(ephemeral=True)
+
         resolved_ship_name: str | None | object = UNSET
         if ship is not None:
             try:
                 vehicles = await self.bot.uex.get_vehicles()
             except UexApiError as exc:
-                await interaction.response.send_message(describe_uex_api_error(exc), ephemeral=True)
+                await interaction.followup.send(describe_uex_api_error(exc), ephemeral=True)
                 return
             vehicle = resolve_ship(vehicles, ship)
             if vehicle is None:
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     f"Couldn't find a single unambiguous match for '{ship}'. Try the full ship "
                     "name and pick from the autocomplete suggestions.",
                     ephemeral=True,
@@ -99,7 +112,7 @@ class TradingPreferences(commands.Cog):
             ),
             risk_tolerance=UNSET if risk_tolerance is None else risk_tolerance.value,
         )
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"Trading preferences updated.\n{format_trading_preferences(prefs)}",
             ephemeral=True,
         )

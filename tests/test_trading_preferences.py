@@ -136,6 +136,43 @@ def test_set_trading_preferences_default_kwarg_is_unset_not_a_real_value(tmp_pat
     asyncio.run(run())
 
 
+def test_concurrent_partial_updates_do_not_clobber_each_other(tmp_path):
+    """Follow-up review finding: set_trading_preferences used to read the whole row,
+    apply its one field change in Python, then write the whole row back - a genuine
+    lost-update race. Two concurrent calls touching DIFFERENT fields could both read the
+    same pre-change row, each build their own merged copy on top of it, and whichever
+    wrote last would silently overwrite the other's change with the stale value it read.
+    Reproduced by forcing both calls to read before either writes, using an asyncio.Event
+    to synchronize the interleaving deterministically rather than hoping a race occurs."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        real_read = db.get_trading_preferences
+        ready = asyncio.Event()
+        count = 0
+
+        async def synchronized_read(user_id):
+            nonlocal count
+            row = await real_read(user_id)
+            count += 1
+            if count == 2:
+                ready.set()
+            await ready.wait()  # both calls have read before either proceeds to write
+            return row
+
+        db.get_trading_preferences = synchronized_read
+        await asyncio.gather(
+            db.set_trading_preferences(1, space_only=True),
+            db.set_trading_preferences(1, auto_load_only=True),
+        )
+        db.get_trading_preferences = real_read
+        prefs = await db.get_trading_preferences(1)
+        assert prefs["space_only"] is True
+        assert prefs["auto_load_only"] is True
+
+    asyncio.run(run())
+
+
 def test_clear_trading_preferences_removes_the_row(tmp_path):
     async def run():
         db = _make_db(tmp_path)
@@ -286,13 +323,63 @@ def test_migration_is_idempotent_across_repeated_startups(tmp_path):
     asyncio.run(run())
 
 
+def test_clearing_a_migrated_ship_survives_a_restart(tmp_path):
+    """Follow-up review finding: the migration's old guard ("copy over the legacy ship
+    whenever the preferences row's ship_name is NULL") couldn't tell "never migrated yet"
+    apart from "migrated, then the user deliberately cleared it" - clear_default_ship
+    sets ship_name back to NULL, which looked exactly like an un-migrated user to that
+    guard, so the legacy ship silently came back on the next restart. Both clearing
+    methods must stay cleared."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        async with db.connect() as conn:
+            await conn.execute(
+                "INSERT INTO user_ship_preference (user_id, ship_name) VALUES (1, 'Old Ship')"
+            )
+            await conn.commit()
+        await db.init()
+        assert await db.get_default_ship(1) == "Old Ship"
+
+        await db.clear_default_ship(1)
+        assert await db.get_default_ship(1) is None
+        await db.init()
+        assert await db.get_default_ship(1) is None
+
+    asyncio.run(run())
+
+
+def test_clearing_all_trading_preferences_for_a_migrated_user_survives_a_restart(tmp_path):
+    """Same as the clear_default_ship case above, but via clear_trading_preferences,
+    which deletes the WHOLE preferences row (not just ship_name) - an even more complete
+    version of "looks like never migrated" to the old NULL-based guard."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        async with db.connect() as conn:
+            await conn.execute(
+                "INSERT INTO user_ship_preference (user_id, ship_name) VALUES (1, 'Old Ship')"
+            )
+            await conn.commit()
+        await db.init()
+        assert await db.get_default_ship(1) == "Old Ship"
+
+        await db.clear_trading_preferences(1)
+        assert await db.get_default_ship(1) is None
+        await db.init()
+        assert await db.get_default_ship(1) is None
+
+    asyncio.run(run())
+
+
 # -- /set-trading-preferences, /clear-trading-preferences, /my-trading-preferences -----
 
 
 class _FakeInteraction:
     def __init__(self, user_id: int) -> None:
         self.user = NS(id=user_id)
-        self.response = NS(send_message=AsyncMock())
+        self.response = NS(send_message=AsyncMock(), defer=AsyncMock())
+        self.followup = NS(send=AsyncMock())
 
 
 def test_set_trading_preferences_command_requires_at_least_one_option(tmp_path):
@@ -324,7 +411,8 @@ def test_set_trading_preferences_command_updates_and_confirms(tmp_path):
             cog, interaction, ship=None, space_only=True, capital_ship_access=None,
             auto_load_only=None, system=None, risk_tolerance=None,
         )
-        message = interaction.response.send_message.call_args.args[0]
+        interaction.response.defer.assert_awaited_once()
+        message = interaction.followup.send.call_args.args[0]
         assert "Space-only terminals: **Yes**" in message
         assert (await db.get_trading_preferences(1))["space_only"] is True
 
@@ -363,7 +451,8 @@ def test_set_trading_preferences_command_sets_ship_with_validation(tmp_path):
             cog, interaction, ship="Cutlass", space_only=None, capital_ship_access=None,
             auto_load_only=None, system=None, risk_tolerance=None,
         )
-        message = interaction.response.send_message.call_args.args[0]
+        interaction.response.defer.assert_awaited_once()
+        message = interaction.followup.send.call_args.args[0]
         assert "Default ship: **Cutlass Black**" in message
         prefs = await db.get_trading_preferences(1)
         assert prefs["ship_name"] == "Cutlass Black"
@@ -385,9 +474,41 @@ def test_set_trading_preferences_command_rejects_an_ambiguous_ship(tmp_path):
             cog, interaction, ship="Nonexistent Ship", space_only=None,
             capital_ship_access=None, auto_load_only=None, system=None, risk_tolerance=None,
         )
-        message = interaction.response.send_message.call_args.args[0]
+        interaction.response.defer.assert_awaited_once()
+        message = interaction.followup.send.call_args.args[0]
         assert "unambiguous match" in message
         assert (await db.get_trading_preferences(1))["ship_name"] is None
+
+    asyncio.run(run())
+
+
+def test_set_trading_preferences_command_defers_before_the_ship_lookup(tmp_path):
+    """Follow-up review finding: the command called self.bot.uex.get_vehicles() (and then
+    the DB write) before ever acknowledging the interaction. Discord requires an
+    interaction's first response within ~3 seconds; a cold UEX vehicle-list cache or a
+    slow/retried request can exceed that, and the eventual interaction.response.send_
+    message call then fails with an expired-interaction error even though the
+    preferences may have already been saved - an apparently-failed command with silently
+    changed settings. The fetch itself must observe the deferral having already
+    happened, not just that defer is called at some point during the whole command."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        cog = TradingPreferences.__new__(TradingPreferences)
+        interaction = _FakeInteraction(1)
+
+        async def fetch_vehicles():
+            assert interaction.response.defer.await_count == 1, (
+                "get_vehicles was awaited before the interaction was acknowledged"
+            )
+            return [dict(name="Ship", scu=100)]
+
+        cog.bot = NS(db=db, uex=NS(get_vehicles=fetch_vehicles))
+        await cog.set_trading_preferences.callback(
+            cog, interaction, ship="Ship", space_only=None, capital_ship_access=None,
+            auto_load_only=None, system=None, risk_tolerance=None,
+        )
+        interaction.followup.send.assert_awaited_once()
 
     asyncio.run(run())
 

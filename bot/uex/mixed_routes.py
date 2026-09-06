@@ -114,13 +114,19 @@ def _classify_item_limit(
     demand_cap: float,
     cargo_space_binding: bool,
     budget_binding: bool,
+    search_capped: bool = False,
 ) -> tuple[str, ...]:
     """Why couldn't this item's quantity be higher? Checked in this order: the item's own
     stock/demand cap first (a fact about this specific commodity, true regardless of why
     the solver picked this exact quantity), falling back to the shared cargo-space/budget
     pool only when neither market cap was reached - a market cap and a shared-pool limit
     are never both genuinely binding for the same item (if stock/demand already explains
-    the quantity, more cargo space or budget wouldn't let this item grow anyway).
+    the quantity, more cargo space or budget wouldn't let this item grow anyway). If
+    NONE of those four real constraints explain it, `search_capped` means the true
+    reason is _exact_allocate's own internal search boundary above
+    EXACT_SEARCH_MAX_CAPACITY, not a real market/ship/budget limit - reported as its own
+    "search cap" factor rather than silently folded into "cargo space", which would tell
+    a player a bigger ship would help when it already has room to spare.
     """
     factors: list[str] = []
     if quantity >= stock_cap:
@@ -132,8 +138,10 @@ def _classify_item_limit(
             factors.append("cargo space")
         if budget_binding:
             factors.append("budget")
+        if not factors and search_capped:
+            factors.append("search cap")
     # Every item allocate_pair_cargo actually builds is provably capped by at least one
-    # of the four - see allocate_pair_cargo's docstring - but fail closed rather than
+    # of the five - see allocate_pair_cargo's docstring - but fail closed rather than
     # silently empty if that invariant is ever violated by a future change.
     return tuple(factors) if factors else ("allocation limit",)
 
@@ -235,6 +243,7 @@ def _exact_allocate(
     pairs: list[tuple[dict[str, Any], dict[str, Any]]],
     *,
     capacity: int,
+    real_capacity: float,
     budget: float,
     max_commodities: int,
     min_commodities: int,
@@ -247,6 +256,13 @@ def _exact_allocate(
     only one item left to decide, using as much of it as still fits is always at least
     as good as using less (profit per unit is always positive here). Exhausting every
     subset this way finds the true global optimum, not an approximation.
+
+    ``capacity`` bounds the search itself (capped at EXACT_SEARCH_MAX_CAPACITY by
+    allocate_pair_cargo for ships above it, purely to keep the brute force fast).
+    ``real_capacity`` is the ship's actual, uncapped capacity - used only by the
+    limiting-factor annotation below, never the search, so a bigger ship's real spare
+    room is never reported as "cargo space limited" just because the search itself
+    stopped looking at EXACT_SEARCH_MAX_CAPACITY.
     """
     n = len(pairs)
     best_profit = 0.0
@@ -306,27 +322,39 @@ def _exact_allocate(
                         for item, quantity in zip(items, quantities)
                         if quantity > 0
                     ]
-    return _annotate_exact_allocation_limits(best_cargo, capacity=capacity, budget=budget)
+    return _annotate_exact_allocation_limits(
+        best_cargo, search_capacity=capacity, real_capacity=real_capacity, budget=budget
+    )
 
 
 def _annotate_exact_allocation_limits(
-    cargo: list[MixedCargoItem], *, capacity: float, budget: float
+    cargo: list[MixedCargoItem], *, search_capacity: float, real_capacity: float, budget: float
 ) -> list[MixedCargoItem]:
     """Label each item in an exact-solver winning combo with why its quantity couldn't be
     higher. Unlike the greedy path (see _greedy_fill's own local per-item check), using
     the FINAL aggregate remaining capacity/budget here is exact, not an approximation:
     _exact_allocate searches every valid combination jointly, not sequentially, so if any
     item's quantity were below its own stock/demand cap AND increasing it by one unit
-    still fit both capacity and budget, that strictly-more-profitable combo (every
+    still fit both REAL capacity and budget, that strictly-more-profitable combo (every
     included item has positive profit per unit) would have been found and returned
     instead - see allocate_pair_cargo's docstring.
+
+    Cargo-space bindingness is checked against real_capacity (the ship's actual size),
+    not search_capacity (the solver's own internal search boundary, capped at
+    EXACT_SEARCH_MAX_CAPACITY above that threshold) - a prior version conflated the two,
+    reporting "cargo space" whenever the search-capped total was reached even when the
+    real ship still had room to spare. When neither a real constraint (stock, demand,
+    real cargo space, budget) explains an item's quantity, but the search itself stopped
+    at search_capacity, that's search_capped - a limitation of this solver's own bounded
+    search, not anything about the ship, market, or budget.
     """
     if not cargo:
         return cargo
     total_scu = sum(item.quantity_scu for item in cargo)
     total_investment = sum(item.investment for item in cargo)
-    remaining_capacity = capacity - total_scu
+    remaining_real_capacity = real_capacity - total_scu
     remaining_budget = budget - total_investment
+    search_capped = search_capacity < real_capacity and total_scu >= search_capacity
     annotated = []
     for item in cargo:
         stock_cap = math.floor(float(item.source.get("scu_buy") or 0))
@@ -335,8 +363,9 @@ def _annotate_exact_allocation_limits(
             item.quantity_scu,
             stock_cap=stock_cap,
             demand_cap=demand_cap,
-            cargo_space_binding=remaining_capacity < 1,
+            cargo_space_binding=remaining_real_capacity < 1,
             budget_binding=(not math.isinf(remaining_budget)) and remaining_budget < item.buy_price,
+            search_capped=search_capped,
         )
         annotated.append(dataclasses.replace(item, limiting_factors=factors))
     return annotated
@@ -391,6 +420,7 @@ def allocate_pair_cargo(
             _exact_allocate(
                 pairs,
                 capacity=capped_capacity,
+                real_capacity=capacity,
                 budget=budget,
                 max_commodities=max_commodities,
                 min_commodities=min_commodities,

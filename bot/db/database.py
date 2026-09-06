@@ -83,6 +83,18 @@ CREATE TABLE IF NOT EXISTS user_trading_preferences (
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Tracks which users have already had their legacy user_ship_preference row folded into
+-- user_trading_preferences.ship_name, independent of whether user_trading_preferences
+-- still has a row for them or a non-NULL ship. Migrating a user is a one-time event -
+-- without this, clearing the ship (clear_default_ship) or all preferences
+-- (clear_trading_preferences) looked identical to "never migrated yet" to the migration
+-- itself, so the legacy ship reappeared on the very next restart. Never written to by
+-- anything except the migration; never read by anything else.
+CREATE TABLE IF NOT EXISTS ship_preference_migrated (
+    user_id INTEGER PRIMARY KEY,
+    migrated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS marketplace_alerts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
@@ -640,37 +652,57 @@ class Database:
         logger.info("Migrated negotiation_message_seen to scope seen-state per user")
 
     async def _migrate_ship_preference_into_trading_preferences(self, db: aiosqlite.Connection) -> None:
-        """One-time-per-startup backfill: user_ship_preference predates user_trading_preferences,
+        """One-time-per-user backfill: user_ship_preference predates user_trading_preferences,
         and real users already have rows there - folding ship selection into the same
         per-user preferences row (per user direction) means those existing saved ships need
-        copying over, not just newly-set ones. Runs every startup, but is idempotent and safe
-        to repeat: a ship already set via the new path (/set-trading-preferences or
-        /set-default-ship, both of which now write here) is never clobbered by a stale value
-        from the old table on a later restart. user_ship_preference itself is intentionally
-        left in place, unwritten - this codebase's tables are additive-only, never dropped
-        once real data has lived there.
+        copying over, not just newly-set ones. Runs every startup, but each user is only
+        ever actually migrated once - see below for why that had to be per-user state, not
+        just "is ship_name NULL". user_ship_preference itself is intentionally left in
+        place, unwritten - this codebase's tables are additive-only, never dropped once
+        real data has lived there.
 
-        Two plain statements, not one INSERT...SELECT...ON CONFLICT DO UPDATE: this SQLite
-        build rejects that combination outright ("near \"DO\": syntax error") even for
-        SQLite's own documented upsert-from-SELECT example - INSERT...VALUES...ON CONFLICT
-        works fine (used everywhere else in this file), only pairing ON CONFLICT with an
-        INSERT whose source is a SELECT does not. Confirmed via a standalone repro before
-        writing this workaround, not assumed.
+        Guarded by ship_preference_migrated, not just "ship_name IS NULL on the
+        preferences row": a follow-up review found that guard couldn't distinguish "never
+        migrated yet" from "migrated, then the user deliberately cleared it" -
+        /clear-default-ship sets ship_name back to NULL (see clear_default_ship), and
+        /clear-trading-preferences deletes the whole preferences row outright, and either
+        one looked identical to "not migrated" to the old NULL-based check, so the legacy
+        ship reappeared on the very next restart regardless of what the user had just
+        asked to clear. ship_preference_migrated survives both of those operations (it's
+        a separate table neither one touches), so once a user is marked, this function
+        never looks at their row again - their ship_name is then entirely under their own
+        control.
+
+        Two plain statements per step, not one INSERT...SELECT...ON CONFLICT DO UPDATE:
+        this SQLite build rejects that combination outright ("near \"DO\": syntax error")
+        even for SQLite's own documented upsert-from-SELECT example - INSERT...VALUES...
+        ON CONFLICT works fine (used everywhere else in this file), only pairing ON
+        CONFLICT with an INSERT whose source is a SELECT does not. Confirmed via a
+        standalone repro before writing this workaround, not assumed.
         """
+        not_yet_migrated = "s.user_id NOT IN (SELECT user_id FROM ship_preference_migrated)"
         await db.execute(
-            """INSERT INTO user_trading_preferences (user_id, ship_name, updated_at)
-               SELECT user_id, ship_name, datetime('now') FROM user_ship_preference
-               WHERE user_id NOT IN (SELECT user_id FROM user_trading_preferences)"""
+            f"""INSERT INTO user_trading_preferences (user_id, ship_name, updated_at)
+                SELECT s.user_id, s.ship_name, datetime('now') FROM user_ship_preference AS s
+                WHERE s.user_id NOT IN (SELECT user_id FROM user_trading_preferences)
+                  AND {not_yet_migrated}"""
         )
         await db.execute(
-            """UPDATE user_trading_preferences
-               SET ship_name = (
-                       SELECT ship_name FROM user_ship_preference
-                       WHERE user_ship_preference.user_id = user_trading_preferences.user_id
-                   ),
-                   updated_at = datetime('now')
-               WHERE ship_name IS NULL
-                 AND user_id IN (SELECT user_id FROM user_ship_preference)"""
+            f"""UPDATE user_trading_preferences
+                SET ship_name = (
+                        SELECT ship_name FROM user_ship_preference AS s
+                        WHERE s.user_id = user_trading_preferences.user_id
+                    ),
+                    updated_at = datetime('now')
+                WHERE ship_name IS NULL
+                  AND user_id IN (
+                      SELECT s.user_id FROM user_ship_preference AS s WHERE {not_yet_migrated}
+                  )"""
+        )
+        await db.execute(
+            """INSERT INTO ship_preference_migrated (user_id, migrated_at)
+               SELECT user_id, datetime('now') FROM user_ship_preference AS s
+               WHERE s.user_id NOT IN (SELECT user_id FROM ship_preference_migrated)"""
         )
 
     async def _run_migrations(self, db: aiosqlite.Connection) -> None:
@@ -1351,6 +1383,10 @@ class Database:
             "ship_name": row["ship_name"],
         }
 
+    # Column -> coercion applied before storage, for the fields set_trading_preferences
+    # actually persists (used by both the INSERT-defaults fallback and any provided value).
+    _TRADING_PREFERENCE_BOOL_COLUMNS = ("space_only", "capital_ship_access", "auto_load_only")
+
     async def set_trading_preferences(
         self,
         user_id: int,
@@ -1364,46 +1400,57 @@ class Database:
     ) -> dict[str, Any]:
         """Partial update: a field left at UNSET (the default) keeps its current value -
         only fields the caller explicitly passes are changed, so a single-option
-        /set-trading-preferences call never resets the other 5."""
-        current = await self.get_trading_preferences(user_id)
-        if space_only is not UNSET:
-            current["space_only"] = bool(space_only)
-        if capital_ship_access is not UNSET:
-            current["capital_ship_access"] = bool(capital_ship_access)
-        if auto_load_only is not UNSET:
-            current["auto_load_only"] = bool(auto_load_only)
-        if preferred_system is not UNSET:
-            current["preferred_system"] = preferred_system
-        if risk_tolerance is not UNSET:
-            current["risk_tolerance"] = risk_tolerance
-        if ship_name is not UNSET:
-            current["ship_name"] = ship_name
+        /set-trading-preferences call never resets the other 5.
+
+        Built as ONE atomic INSERT ... ON CONFLICT DO UPDATE whose DO UPDATE SET clause
+        names ONLY the columns the caller actually passed - not a Python-side
+        read-then-merge-then-write. A follow-up review found the earlier read-modify-write
+        version was a real lost-update race: two concurrent calls (e.g. one setting
+        space_only, the other auto_load_only) could both read the same pre-change row,
+        each apply their own field on top of that same stale copy, and whichever wrote
+        last would silently discard the other's change - reproduced with a synchronized
+        interleaving that lost auto_load_only entirely. Naming only the touched columns in
+        DO UPDATE SET means two concurrent calls touching different fields can never
+        clobber each other, regardless of interleaving - each writes only what it means to
+        change. UNSET fields still need a value for the INSERT branch (a brand-new row has
+        no prior state to fall back on); DEFAULT_TRADING_PREFERENCES supplies that, but
+        they're never named in DO UPDATE SET, so an existing row's value for an untouched
+        field is left completely alone.
+        """
+        provided: dict[str, Any] = {}
+        for column, value in (
+            ("space_only", space_only),
+            ("capital_ship_access", capital_ship_access),
+            ("auto_load_only", auto_load_only),
+            ("preferred_system", preferred_system),
+            ("risk_tolerance", risk_tolerance),
+            ("ship_name", ship_name),
+        ):
+            if value is not UNSET:
+                provided[column] = value
+        if not provided:
+            return await self.get_trading_preferences(user_id)
+
+        def _coerce(column: str, value: Any) -> Any:
+            return int(value) if column in self._TRADING_PREFERENCE_BOOL_COLUMNS else value
+
+        all_columns = list(DEFAULT_TRADING_PREFERENCES.keys())
+        insert_values = [
+            _coerce(column, provided.get(column, DEFAULT_TRADING_PREFERENCES[column]))
+            for column in all_columns
+        ]
+        set_clause = ", ".join(f"{column} = excluded.{column}" for column in provided)
         async with self.connect() as db:
             await db.execute(
-                """INSERT INTO user_trading_preferences
-                   (user_id, space_only, capital_ship_access, auto_load_only,
-                    preferred_system, risk_tolerance, ship_name, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
-                   ON CONFLICT(user_id) DO UPDATE SET
-                       space_only = excluded.space_only,
-                       capital_ship_access = excluded.capital_ship_access,
-                       auto_load_only = excluded.auto_load_only,
-                       preferred_system = excluded.preferred_system,
-                       risk_tolerance = excluded.risk_tolerance,
-                       ship_name = excluded.ship_name,
-                       updated_at = excluded.updated_at""",
-                (
-                    user_id,
-                    int(current["space_only"]),
-                    int(current["capital_ship_access"]),
-                    int(current["auto_load_only"]),
-                    current["preferred_system"],
-                    current["risk_tolerance"],
-                    current["ship_name"],
-                ),
+                f"""INSERT INTO user_trading_preferences
+                    (user_id, {", ".join(all_columns)}, updated_at)
+                    VALUES (?, {", ".join("?" for _ in all_columns)}, datetime('now'))
+                    ON CONFLICT(user_id) DO UPDATE SET
+                        {set_clause}, updated_at = excluded.updated_at""",
+                (user_id, *insert_values),
             )
             await db.commit()
-        return current
+        return await self.get_trading_preferences(user_id)
 
     async def clear_trading_preferences(self, user_id: int) -> bool:
         async with self.connect() as db:
