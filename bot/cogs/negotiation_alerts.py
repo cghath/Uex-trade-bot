@@ -135,8 +135,12 @@ class NegotiationAlerts(commands.Cog):
         self, user_id: int, secret_key: str, negotiation: dict[str, Any], id_negotiation: int
     ) -> bool:
         """Returns False, without advancing the caller's checkpoint, when the messages fetch
-        itself failed - otherwise a transient error would look identical to "nothing new
-        happened" and whatever arrived right around the failure would never be checked again."""
+        itself failed OR when any message that needed delivering wasn't actually delivered -
+        otherwise a transient error (or a transient DM failure) would look identical to
+        "nothing new happened," the checkpoint would advance to this negotiation's current
+        date_modified anyway, and - since the poller skips a negotiation whose date_modified
+        hasn't advanced past the checkpoint - the undelivered message would never be looked
+        at again unless the negotiation happens to get further, unrelated activity later."""
         is_advertiser = bool(negotiation.get("is_listing_advertiser"))
         own_username = negotiation.get("advertiser_username") if is_advertiser else negotiation.get("client_username")
         try:
@@ -151,6 +155,7 @@ class NegotiationAlerts(commands.Cog):
         # means one extra lookup by id_listing, not one per message in this negotiation.
         id_item: int | None = None
         id_item_resolved = False
+        all_delivered = True
         for row in sorted(messages, key=lambda r: _as_int(r.get("date_added")) or 0):
             message_id = _as_int(row.get("id"))
             text = row.get("message")
@@ -175,7 +180,9 @@ class NegotiationAlerts(commands.Cog):
             # forever the moment send() raised.
             if delivered:
                 await self.bot.db.mark_negotiation_message_seen(user_id, message_id)
-        return True
+            else:
+                all_delivered = False
+        return all_delivered
 
     async def _resolve_listing_item_id(self, id_listing: Any) -> int | None:
         """UEX's negotiations don't carry id_item directly - resolve it from the listing.

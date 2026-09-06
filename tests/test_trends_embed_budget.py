@@ -9,6 +9,7 @@ though no single field is anywhere near its own 1024-char cap.
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock
 
@@ -113,5 +114,71 @@ def test_a_small_number_of_routes_is_never_truncated():
         embed = inter.followup.send.call_args.kwargs["embed"]
         assert len(embed.fields) == 2
         assert "omitted" not in (embed.footer.text or "").lower()
+
+    asyncio.run(run())
+
+
+def test_route_budget_accounts_for_the_final_footer():
+    """Follow-up review finding: _add_chunked_fields reserved only 100 characters while
+    packing fields, but the real footer (explanation + refresh timestamp + ship note) is
+    attached AFTER the loop and can be much longer than that reserve - confirmed to let the
+    final assembled embed land at 6,009 characters (254-character footer) with a
+    longer-terminal-name fixture. The fix sets the real footer BEFORE the loop so the
+    budget check already accounts for it. Sweeping terminal-name padding from 0 to 150
+    chars covers the exact boundary where the original bug only showed up near the limit."""
+    async def run():
+        for padding in range(0, 151):
+            cog, _ = _make_cog(10)
+            entries = _routes(10)
+            for entry in entries:
+                entry.origin_terminal_name += "x" * padding
+                entry.destination_terminal_name += "x" * padding
+            inter = _interaction()
+            await cog._send_ranked_routes(
+                inter, entries=entries, updated_at=datetime.now(timezone.utc),
+                ship=None, title="Top routes", footer_note="Collected data",
+                log_label="test", display_limit=10,
+            )
+            embed = inter.followup.send.call_args.kwargs["embed"]
+            assert len(embed) <= 6000, (padding, len(embed), len(embed.footer.text), len(embed.fields))
+
+    asyncio.run(run())
+
+
+def test_top_routes_never_shows_a_route_without_its_risk_warning():
+    """Follow-up review finding: _add_chunked_fields' old per-chunk budget check could add
+    a route's first chunk and then refuse its second, leaving the route visible with its
+    trailing cargo-risk warning silently missing - a visible route with no visible warning
+    reads as "checked and safe." The fix (see test_prices_chunked_fields.py) makes adding a
+    logical field all-or-nothing; this confirms the effect end-to-end: every route field
+    that IS shown carries its risk warning, across a sweep of terminal-name paddings."""
+    async def run():
+        for padding in range(0, 101, 10):
+            cog, db = _make_cog(10)
+            db.get_default_ship.return_value = "RSI Constellation Taurus"
+            cog.bot.uex.get_vehicles.return_value = [dict(name="RSI Constellation Taurus", scu=100)]
+            cog.bot.uex.get_commodities_status.return_value = {
+                "buy": [dict(code=1, name_short="High Supply")],
+                "sell": [dict(code=1, name_short="Low Inventory")],
+            }
+            entries = _routes(10)
+            for entry in entries:
+                entry.origin_terminal_name += "x" * padding
+                entry.destination_terminal_name += "x" * padding
+                entry.price_origin = 5000
+                entry.price_destination = 25000
+            inter = _interaction()
+            await cog._send_ranked_routes(
+                inter, entries=entries, updated_at=None, ship=None,
+                title="Top routes", footer_note="Collected data", log_label="test", display_limit=10,
+            )
+            embed = inter.followup.send.call_args.kwargs["embed"]
+            groups: dict[str, str] = {}
+            for field in embed.fields:
+                route_number = field.name.split(".")[0]
+                groups[route_number] = groups.get(route_number, "") + field.value
+            assert all("Cargo risk:" in text for text in groups.values()), (
+                padding, [(number, "Cargo risk:" in text) for number, text in groups.items()],
+            )
 
     asyncio.run(run())

@@ -1480,43 +1480,63 @@ class Database:
         just happened. The fix compares the latest observation against a baseline chosen in
         priority order: (1) the most recent observation at or before the window start (a
         true "state ~`hours` ago" reference, however old it actually is), falling back to
-        (2) the earliest observation still inside the window, for a commodity/terminal only
+        (2) the EARLIEST observation still inside the window, for a commodity/terminal only
         ever observed recently (nothing predates the window at all, e.g. newly tracked) -
         this fallback is what the original approach got right and a naive "require a
-        pre-window baseline" rewrite would have broken. A pair with no observation earlier
-        than its own latest one (a single ever-recorded data point) has no baseline
-        candidate at all and is correctly excluded, same as before.
+        pre-window baseline" rewrite would have broken.
+
+        These two candidates need OPPOSITE orderings (most-recent-first for the pre-window
+        baseline; earliest-first for the in-window fallback), so they're two separate
+        ranked CTEs, not one shared ORDER BY - an earlier version tried to rank both cases
+        in a single CTE ordered `... DESC` throughout, which is correct for the pre-window
+        tier but silently picks the MOST recent in-window observation as the "fallback"
+        instead of the earliest, understating (or reversing the sign of) the reported
+        change for a newly tracked pair with 3+ in-window observations (confirmed: 100 @
+        -3h, 600 @ -2h, 200 @ -1h(latest) reported -400 instead of the correct +100 against
+        the true earliest baseline). The window boundary is treated consistently as
+        belonging to the baseline side ("at or before") - `windowed` uses a strict `>` and
+        the pre-window CTE uses `<=` - so a hypothetical observation landing exactly on the
+        boundary is never double-counted as its own baseline. A pair with no observation
+        earlier than its own latest one (a single ever-recorded data point) has no baseline
+        candidate at all (both CTEs empty for it) and is correctly excluded, same as before.
         """
         async with self.connect() as db:
             cursor = await db.execute(
                 """WITH windowed AS (
                        SELECT * FROM terminal_market_observations
-                       WHERE observed_at >= datetime('now', ?)
+                       WHERE observed_at > datetime('now', ?)
                    ), latest AS (
                        SELECT *, ROW_NUMBER() OVER (
                            PARTITION BY id_commodity, id_terminal ORDER BY observed_at DESC
                        ) AS rn
                        FROM windowed
-                   ), candidates AS (
-                       SELECT o.*, ROW_NUMBER() OVER (
-                           PARTITION BY o.id_commodity, o.id_terminal
-                           ORDER BY (CASE WHEN o.observed_at < datetime('now', ?) THEN 0 ELSE 1 END),
-                                    o.observed_at DESC
+                   ), pre_window_baseline AS (
+                       SELECT *, ROW_NUMBER() OVER (
+                           PARTITION BY id_commodity, id_terminal ORDER BY observed_at DESC
                        ) AS rn
-                       FROM terminal_market_observations o
-                       JOIN latest l ON l.id_commodity = o.id_commodity AND l.id_terminal = o.id_terminal
-                        AND l.rn = 1 AND o.observed_at < l.observed_at
+                       FROM terminal_market_observations
+                       WHERE observed_at <= datetime('now', ?)
+                   ), in_window_earliest AS (
+                       SELECT *, ROW_NUMBER() OVER (
+                           PARTITION BY id_commodity, id_terminal ORDER BY observed_at ASC
+                       ) AS rn
+                       FROM windowed
                    )
                    SELECT latest.commodity_name, latest.terminal_name,
-                          baseline.scu_buy AS previous_supply, latest.scu_buy AS current_supply,
-                          baseline.scu_sell AS previous_demand, latest.scu_sell AS current_demand,
-                          COALESCE(latest.scu_buy, 0) - COALESCE(baseline.scu_buy, 0) AS supply_change,
-                          COALESCE(latest.scu_sell, 0) - COALESCE(baseline.scu_sell, 0) AS demand_change
+                          COALESCE(pwb.scu_buy, iwe.scu_buy) AS previous_supply,
+                          latest.scu_buy AS current_supply,
+                          COALESCE(pwb.scu_sell, iwe.scu_sell) AS previous_demand,
+                          latest.scu_sell AS current_demand,
+                          COALESCE(latest.scu_buy, 0) - COALESCE(COALESCE(pwb.scu_buy, iwe.scu_buy), 0) AS supply_change,
+                          COALESCE(latest.scu_sell, 0) - COALESCE(COALESCE(pwb.scu_sell, iwe.scu_sell), 0) AS demand_change
                    FROM latest
-                   JOIN candidates baseline
-                     ON baseline.id_commodity = latest.id_commodity
-                    AND baseline.id_terminal = latest.id_terminal AND baseline.rn = 1
-                   WHERE latest.rn = 1""",
+                   LEFT JOIN pre_window_baseline pwb
+                     ON pwb.id_commodity = latest.id_commodity AND pwb.id_terminal = latest.id_terminal
+                    AND pwb.rn = 1
+                   LEFT JOIN in_window_earliest iwe
+                     ON iwe.id_commodity = latest.id_commodity AND iwe.id_terminal = latest.id_terminal
+                    AND iwe.rn = 1 AND iwe.observed_at < latest.observed_at
+                   WHERE latest.rn = 1 AND (pwb.id_commodity IS NOT NULL OR iwe.id_commodity IS NOT NULL)""",
                 (f"-{hours} hours", f"-{hours} hours"),
             )
             return [dict(row) for row in await cursor.fetchall()]

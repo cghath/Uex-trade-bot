@@ -79,16 +79,26 @@ _TRUNCATION_NOTICE_RESERVE = 100
 
 
 def _add_chunked_fields(embed: discord.Embed, *, name: str, lines: list[str]) -> bool:
-    """Add one logical field as many Discord-safe continuation fields as needed, refusing
-    to add a chunk that would push the embed's total text past Discord's combined 6000-char
-    limit. Returns False the moment a chunk had to be skipped for that reason, so a caller
-    that's adding several logical fields in a loop (e.g. one per route) can stop early and
-    surface a truncation notice instead of the whole send failing later."""
+    """Add one logical field as many Discord-safe continuation fields as needed - but only
+    if the WHOLE set fits within Discord's combined 6000-char embed limit, never just part
+    of it. All-or-nothing, not a per-chunk check: a route's cargo-risk warning often lands
+    in a trailing continuation chunk (built after the price/summary lines fill the first
+    1024-char chunk), so a per-chunk budget check that added the first chunk and only then
+    discovered the second didn't fit left that route visible on screen with its warning
+    silently missing - worse than omitting the whole route, since a visible route with no
+    warning reads as "checked and safe." Returns False (adding nothing at all) the moment
+    the full set would overflow, so a caller adding several logical fields in a loop (e.g.
+    one per route) can treat this one as entirely omitted and stop early."""
+    chunks = []
+    projected_total = len(embed)
     for index, chunk in enumerate(_chunk_lines(lines), 1):
         suffix = f" (continued {index})" if index > 1 else ""
         safe_name = f"{name[:256 - len(suffix)]}{suffix}"
-        if len(embed) + len(safe_name) + len(chunk) > DISCORD_EMBED_TOTAL_CHAR_LIMIT - _TRUNCATION_NOTICE_RESERVE:
-            return False
+        projected_total += len(safe_name) + len(chunk)
+        chunks.append((safe_name, chunk))
+    if projected_total > DISCORD_EMBED_TOTAL_CHAR_LIMIT - _TRUNCATION_NOTICE_RESERVE:
+        return False
+    for safe_name, chunk in chunks:
         embed.add_field(name=safe_name, value=chunk, inline=False)
     return True
 
@@ -367,6 +377,13 @@ class Prices(commands.Cog):
             embed = discord.Embed(title=f"{commodity_display} — Best Trade Routes", color=discord.Color.green())
             if risk_warning:
                 embed.description = risk_warning
+            # Set before the field loop, not after - _add_chunked_fields' budget check
+            # measures the embed's real total via len(embed), which only reflects the
+            # footer once it's actually attached.
+            footer = "Data from UEX Corp /commodities_routes"
+            if not ship_vehicle:
+                footer += " · set a default ship with /set-default-ship for cargo/run-profit numbers"
+            embed.set_footer(text=footer)
             for r in ranked:
                 origin = r.get("origin_terminal_name", "Unknown")
                 dest = r.get("destination_terminal_name", "Unknown")
@@ -464,10 +481,6 @@ class Prices(commands.Cog):
                 )
                 value_lines.extend(practical_notes)
                 _add_chunked_fields(embed, name=f"{origin} → {dest}", lines=value_lines)
-            footer = "Data from UEX Corp /commodities_routes"
-            if not ship_vehicle:
-                footer += " · set a default ship with /set-default-ship for cargo/run-profit numbers"
-            embed.set_footer(text=footer)
             await interaction.followup.send(embed=embed)
             return
 
@@ -543,6 +556,11 @@ class Prices(commands.Cog):
         )
         if risk_warning:
             embed.description = risk_warning
+        # Set before the field loop, not after - see the matching comment above.
+        footer = "Data from UEX Corp · does not account for travel time between terminals"
+        if not ship_vehicle:
+            footer += " · set a default ship with /set-default-ship for cargo/run-profit numbers"
+        embed.set_footer(text=footer)
         for route in routes:
             value_lines = [
                 f"Buy {route.buy_price:.2f} / Sell {route.sell_price:.2f}\n"
@@ -632,10 +650,6 @@ class Prices(commands.Cog):
                 lines=value_lines,
             )
 
-        footer = "Data from UEX Corp · does not account for travel time between terminals"
-        if not ship_vehicle:
-            footer += " · set a default ship with /set-default-ship for cargo/run-profit numbers"
-        embed.set_footer(text=footer)
         await interaction.followup.send(embed=embed)
 
     @app_commands.command(
@@ -961,6 +975,22 @@ class Prices(commands.Cog):
                 ),
                 color=discord.Color.green(),
             )
+            # Set before the per-leg field loop, not after - see the matching comment in
+            # /best-route above. This route's footer depends only on already-known
+            # per-command options and route.is_exact, all available before the loop runs.
+            route_footer = (
+                "Collected UEX data + live UEX distance · prices can change before arrival · "
+                "warnings do not change profit ranking"
+            )
+            if budget is not None:
+                route_footer += f" · starting budget {float(budget):,.0f} aUEC"
+            if space_only:
+                route_footer += " · surface terminals excluded"
+            if capital_access_only:
+                route_footer += " · capital access confirmed at every stop"
+            if not route.is_exact:
+                route_footer += " · per-leg cargo allocation for this route is approximate, not proven-optimal"
+            route_embed.set_footer(text=route_footer)
             warnings: list[str] = []
             leg_confidences = []
             total_distance_gm = 0.0
@@ -1071,19 +1101,6 @@ class Prices(commands.Cog):
             route_embed.add_field(name="Route summary", value="\n".join(summary_lines), inline=False)
             unique_warnings = list(dict.fromkeys(warnings))
             _add_chunked_fields(route_embed, name="Warnings & practical checks", lines=unique_warnings)
-            footer = (
-                "Collected UEX data + live UEX distance · prices can change before arrival · "
-                "warnings do not change profit ranking"
-            )
-            if budget is not None:
-                footer += f" · starting budget {float(budget):,.0f} aUEC"
-            if space_only:
-                footer += " · surface terminals excluded"
-            if capital_access_only:
-                footer += " · capital access confirmed at every stop"
-            if not route.is_exact:
-                footer += " · per-leg cargo allocation for this route is approximate, not proven-optimal"
-            route_embed.set_footer(text=footer)
             # Sent one route per message, not batched like /mixed-routes: a multi-leg
             # route's per-leg cargo/warning fields can push a single embed close to
             # Discord's combined 6,000-character-per-message embed limit on their own,

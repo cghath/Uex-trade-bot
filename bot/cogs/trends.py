@@ -398,7 +398,22 @@ class Trends(commands.Cog):
             [route.id_commodity for route in entries]
         )
 
+        # Built and attached BEFORE the field loop below, not after: _add_chunked_fields'
+        # budget check measures the embed's real total via len(embed), which only includes
+        # the footer once it's actually been set - setting it afterward meant the loop
+        # under-reserved for real footer text (explanation + refresh timestamp + ship note),
+        # confirmed to let the final assembled embed land at 6,009 characters despite the
+        # loop's own bookkeeping. The omission-count suffix is appended afterward, once
+        # routes_shown is known - it's a short, bounded-length addition that the reserve
+        # margin below already accounts for.
+        footer = footer_note + " · " + SELL_SIDE_STATUS_CLARIFIER
+        if updated_at:
+            footer += f" · refreshed {updated_at.strftime('%Y-%m-%d %H:%M UTC')}"
+        if not ship_vehicle:
+            footer += " · set a default ship with /set-default-ship for cargo/run-profit numbers"
+
         embed = discord.Embed(title=title, color=discord.Color.green())
+        embed.set_footer(text=footer)
         routes_shown = 0
         for i, r in enumerate(entries, start=1):
             name, value = _build_route_field(i, r, ship_vehicle, ship_cargo_scu, status_lookup)
@@ -448,15 +463,9 @@ class Trends(commands.Cog):
                 break
             routes_shown += 1
 
-        footer = footer_note + " · " + SELL_SIDE_STATUS_CLARIFIER
-        if updated_at:
-            footer += f" · refreshed {updated_at.strftime('%Y-%m-%d %H:%M UTC')}"
-        if not ship_vehicle:
-            footer += " · set a default ship with /set-default-ship for cargo/run-profit numbers"
         omitted = len(entries) - routes_shown
         if omitted > 0:
-            footer += f" · {omitted} more route(s) omitted - message size limit"
-        embed.set_footer(text=footer)
+            embed.set_footer(text=footer + f" · {omitted} more route(s) omitted - message size limit")
         await interaction.followup.send(embed=embed)
 
     @app_commands.command(name="top-routes", description="Top trade routes by UEX score, with live-stock filtering.")

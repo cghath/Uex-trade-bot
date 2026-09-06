@@ -3,6 +3,7 @@ enable -> seed -> poll -> notify cycle against a faked UEX API."""
 from __future__ import annotations
 
 import asyncio
+from unittest.mock import AsyncMock
 
 from cryptography.fernet import Fernet
 import discord
@@ -373,9 +374,15 @@ def test_a_failed_messages_fetch_does_not_advance_the_checkpoint_and_is_retried(
         await client._client.aclose()
         client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
 
+        from types import SimpleNamespace as NS
+
         bot = type("FakeBot", (), {})()
         bot.db = db
         bot.uex = client
+        # A working recipient - this test is only about the messages-fetch failure gating
+        # the checkpoint, not delivery success/failure, so delivery must actually succeed
+        # here or the checkpoint-advance assertion below would be exercising the wrong gate.
+        bot.get_user = lambda _: NS(send=AsyncMock())
         cog = NegotiationAlerts.__new__(NegotiationAlerts)
         cog.bot = bot
 
@@ -388,6 +395,51 @@ def test_a_failed_messages_fetch_does_not_advance_the_checkpoint_and_is_retried(
             assert (await db.get_negotiation_last_modified(user_id))[77] == 2000
         finally:
             await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_failed_dm_does_not_advance_the_poll_checkpoint(tmp_path):
+    """Follow-up review finding: A07's fix made _notify_user's caller only mark a message
+    seen on successful delivery, but _check_negotiation still returned True unconditionally
+    - so poll_negotiation_messages advanced this negotiation's date_modified checkpoint
+    regardless of whether delivery actually succeeded. Since the poller skips a negotiation
+    whose date_modified hasn't advanced past the checkpoint, that meant a failed-delivery
+    message was never retried on the NEXT poll either (the negotiation looks "already
+    caught up" even though the one message that mattered was never delivered) - only some
+    later, unrelated negotiation activity bumping date_modified further would surface it
+    again. This exercises two real poll cycles (not _check_negotiation directly, which
+    bypasses the checkpoint gate entirely) with the first delivery failing and the second
+    succeeding."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        user_id = 1
+        await db.set_user_secret_key(user_id, "sk_test")
+        await db.set_negotiation_alerts_enabled(user_id, True)
+        negotiation = dict(
+            id=7, id_listing=999, date_modified=100,
+            is_listing_advertiser=1, advertiser_username="Alice", client_username="Bob",
+        )
+        uex = type("FakeUex", (), {})()
+        uex.get_marketplace_negotiations = AsyncMock(return_value=[negotiation])
+        uex.get_marketplace_negotiations_messages = AsyncMock(return_value=[
+            dict(id=42, date_added=99, message="Interested", user_username="Bob")
+        ])
+        uex.get_marketplace_listings = AsyncMock(return_value=[])
+        cog = NegotiationAlerts.__new__(NegotiationAlerts)
+        cog.bot = type("FakeBot", (), {})()
+        cog.bot.db = db
+        cog.bot.uex = uex
+        cog._notify_user = AsyncMock(side_effect=[False, True])
+
+        await cog.poll_negotiation_messages.coro(cog)
+        await cog.poll_negotiation_messages.coro(cog)
+
+        assert cog._notify_user.await_count == 2, (
+            cog._notify_user.await_count, await db.get_negotiation_last_modified(user_id)
+        )
+        assert await db.is_negotiation_message_seen(user_id, 42) is True
 
     asyncio.run(run())
 

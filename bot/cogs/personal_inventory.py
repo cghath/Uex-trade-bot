@@ -13,7 +13,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
-from bot.uex.exceptions import UexApiError
+from bot.uex.exceptions import UexApiError, UexRejectedError
 from bot.uex.inventory import (
     DEFAULT_MARKETPLACE_TIMEZONE,
     PriceRecommendation,
@@ -1268,13 +1268,14 @@ class PersonalInventory(commands.Cog):
             created = await self.bot.uex.post_marketplace_advertise(secret_key=secret_key, **payload)
         except UexApiError as exc:
             message = str(exc)
-            lowered = message.lower()
-            definitely_rejected = (
-                lowered.startswith("uex api error")
-                or lowered.startswith("uex auth error")
-                or "quota reached" in lowered
-            )
-            ambiguous = not definitely_rejected
+            # UexRejectedError means UEX responded and explicitly rejected the request - a
+            # definite outcome, nothing was created. Anything else (UexApiError's own
+            # network-level/malformed-response cases) is genuinely ambiguous. This used to
+            # classify by matching prefixes of the exception's message text, which broke
+            # silently the moment a new rejection path's message stopped starting with one
+            # of the recognized strings - checking the exception's actual type is stable
+            # against message-text changes in a way string matching never was.
+            ambiguous = not isinstance(exc, UexRejectedError)
             await self.bot.db.mark_inventory_post_failed(int(job["id"]), message, ambiguous=ambiguous)
             action = (
                 "UEX may have received it, so the bot stopped without retrying. Check the linked item page, then use "

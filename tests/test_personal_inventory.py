@@ -88,6 +88,42 @@ def test_rejected_delete_must_not_release_inventory(tmp_path):
     asyncio.run(run())
 
 
+def test_definite_post_rejection_is_not_treated_as_ambiguous(tmp_path):
+    """Follow-up review finding: client.py's A01 fix started raising UexRejectedError (a
+    real, definite rejection) for a non-"ok" POST status like
+    user_active_listings_limit_reached - but _post_one_job's own classifier still matched
+    the OLD message-text prefixes ("uex api error"/"uex auth error"/"quota reached") to
+    decide "definitely rejected" vs "ambiguous," and the new error's message never matched
+    any of them. So a POST UEX explicitly and definitely rejected was treated as an
+    ambiguous outcome anyway - reserving the inventory and telling the user to manually
+    reconcile a possibly-live listing that UEX never actually created. Fixed by checking
+    `isinstance(exc, UexRejectedError)` instead of parsing message text."""
+    async def run():
+        db, inv, job_id = await _fixture(tmp_path, "definite_rejection.sqlite3")
+        await db.claim_inventory_post_job(job_id)
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200, json={"status": "user_active_listings_limit_reached", "message": "Too many active listings", "data": None}
+            )
+
+        uex = UexClient("fake", base_url="https://audit.invalid")
+        await uex._client.aclose()
+        uex._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        try:
+            cog = _cog(db, uex)
+            cog._fetch_live_price = AsyncMock(return_value=PriceRecommendation(100, "Low", (), False))
+            job = await db.get_inventory_post_job(1, job_id)
+            result = await cog._post_one_job(job, notify=False)
+            entry = await db.get_inventory_item(1, inv)
+            assert not result.get("ambiguous"), result
+            assert entry["reserved_quantity"] == 0, entry["reserved_quantity"]
+        finally:
+            await uex.aclose()
+
+    asyncio.run(run())
+
+
 def test_floor_increase_during_pricing_is_respected(tmp_path):
     """A04: _post_one_job used the job row's own minimum_price - a snapshot taken before
     claim_inventory_post_job() marks it 'posting', at which point set_inventory_minimum_price

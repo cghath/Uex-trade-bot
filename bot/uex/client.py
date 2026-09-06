@@ -22,7 +22,7 @@ from typing import Any
 
 import httpx
 
-from .exceptions import UexApiError, UexAuthError, UexRateLimitError
+from .exceptions import UexApiError, UexAuthError, UexRateLimitError, UexRejectedError
 
 logger = logging.getLogger(__name__)
 
@@ -224,7 +224,7 @@ class UexClient:
                 raise UexAuthError(f"UEX auth error on {path}: {status} {message}{code_part}".strip())
 
             if status == "error":
-                raise UexApiError(f"UEX API error on {path}: {message}{code_part}")
+                raise UexRejectedError(f"UEX API error on {path}: {message}{code_part}")
 
             if status != "ok" and method in ("POST", "DELETE"):
                 # Unlike a GET's "nothing matched" statuses (see below), every documented
@@ -234,7 +234,7 @@ class UexClient:
                 # POST/DELETE. Treating any of these as success (the old behavior for any
                 # status not already in _AUTH_ERROR_STATUSES or literally "error") let a
                 # rejected DELETE be reported back to callers as a successful deletion.
-                raise UexApiError(f"UEX rejected {method} {path}: {status} {message}{code_part}".strip())
+                raise UexRejectedError(f"UEX rejected {method} {path}: {status} {message}{code_part}".strip())
 
             # Any other status (e.g. "no_trades_found", "invalid_type") is an endpoint-specific
             # "nothing matched" signal, not a fatal error - UEX sends these with non-2xx HTTP

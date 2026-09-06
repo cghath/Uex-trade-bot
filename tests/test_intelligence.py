@@ -538,6 +538,34 @@ def test_terminal_market_shifts_excludes_a_pair_with_only_one_ever_observation(t
     asyncio.run(run())
 
 
+def test_terminal_market_shifts_new_market_uses_earliest_not_most_recent_fallback(tmp_path):
+    """Follow-up review finding: the fix for the single-recent-change bug ranked both the
+    pre-window baseline AND the in-window fallback in one CTE ordered `... DESC` throughout
+    - correct for the pre-window tier (want the most recent one, closest to the window
+    boundary) but wrong for the in-window fallback tier, which should use the EARLIEST
+    in-window observation (the original, pre-fix behavior for this exact case). With no
+    pre-window baseline and three in-window observations (100 @ -3h, 600 @ -2h, 200 @ -1h =
+    latest), the buggy ordering picked -2h (600) as "baseline" - the second most recent,
+    not the earliest - reporting -400 instead of the correct +100 against the true
+    earliest reference point."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        async with db.connect() as sqlite:
+            for hours, stock in [(3, 100), (2, 600), (1, 200)]:
+                await sqlite.execute(
+                    """INSERT INTO terminal_market_observations
+                       (id_commodity,id_terminal,observed_at,commodity_name,terminal_name,scu_buy,scu_sell)
+                       VALUES (1,1,datetime('now',?),'Ore','Terminal',?,100)""",
+                    (f"-{hours} hours", stock),
+                )
+            await sqlite.commit()
+        (shift,) = await db.get_terminal_market_shifts()
+        assert shift["supply_change"] == 100, shift
+
+    asyncio.run(run())
+
+
 def test_marketplace_tier_history_seeds_an_existing_current_state(tmp_path):
     async def run():
         db = _make_db(tmp_path)

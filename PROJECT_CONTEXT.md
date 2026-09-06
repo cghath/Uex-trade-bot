@@ -1062,6 +1062,87 @@ they're in sync).
       original crash against that same old format.
 
     256 tests passing (18 new since entry 45).
+47. **A follow-up review of `b1170e8`/`bd2d50b` (`data/audit-bd2d50b/REVIEW.md`, 2026-09-05)
+    found 5 P2 gaps INTRODUCED BY those two fix rounds themselves - not new independent
+    defects, but places where a fix was subtly incomplete or its own regression tests
+    happened to bypass the exact mechanism that still had a hole.** All 5 fixed and
+    verified the same session, each confirmed to fail without its fix and pass with it:
+    - **A failed DM still let the negotiation checkpoint advance.** The A07 fix (entry 46)
+      made `_check_negotiation` skip marking a failed-delivery message as seen, but the
+      function still unconditionally `return`ed `True` - so `poll_negotiation_messages`
+      still advanced that negotiation's `date_modified` checkpoint. Since the poller skips
+      any negotiation whose `date_modified` hasn't moved past its checkpoint, the
+      undelivered message was never retried unless the negotiation got further, unrelated
+      activity later. A07's own regression test called `_check_negotiation` directly,
+      bypassing the poller's checkpoint gate entirely - missing exactly this interaction.
+      Fixed by tracking `all_delivered` across the loop and returning that instead of a
+      hardcoded `True`. New test drives two real `poll_negotiation_messages` cycles (not
+      `_check_negotiation` directly) with delivery failing then succeeding.
+    - **The A11 (entry 46) fallback baseline picked the wrong end of the window.** The
+      unified ranked-candidates CTE ordered every tier `... DESC` - correct for the
+      pre-window-baseline tier (want the closest one to the window boundary, i.e. most
+      recent), but wrong for the in-window fallback tier, which needs the EARLIEST
+      in-window observation, not the most recent. A newly tracked pair with 3+ in-window
+      observations (100 @ -3h, 600 @ -2h, 200 @ -1h = latest) picked -2h (600) as
+      "baseline" instead of -3h (100), reporting -400 instead of the correct +100 - the
+      existing 2-observation test couldn't distinguish "most recent other row" from
+      "earliest row" since with only 2 rows they're the same row. Fixed by splitting back
+      into two separately-ranked CTEs (`pre_window_baseline` DESC, `in_window_earliest`
+      ASC) and `COALESCE`-preferring the pre-window one - each tier gets the ordering it
+      actually needs. Also made the window boundary consistent with the "at or before"
+      policy stated in the fix's own docstring (`windowed` now `>`, `pre_window_baseline`
+      now `<=`, complementary rather than both using non-matching comparisons). New test
+      reproduces the exact 3-observation case; the 2-observation and single-observation
+      tests from entry 46 still pass unchanged.
+    - **A confirmed rejection was still classified as ambiguous.** The A01 fix (entry 45)
+      made `UexClient._request` raise for any non-"ok" POST/DELETE status, but
+      `_post_one_job`'s classifier still matched `str(exc)` against the OLD message
+      prefixes (`"uex api error"`, `"uex auth error"`, `"quota reached"`) to decide
+      "definitely rejected" vs. "ambiguous" - the new `"UEX rejected POST ..."` message
+      never matched any of them, so a definite, documented rejection
+      (`user_active_listings_limit_reached`) was treated as ambiguous, reserving inventory
+      and telling the user to manually check for a listing UEX never created. Root cause:
+      classifying an outcome by parsing exception message text is inherently fragile to
+      message-format changes - exactly what A01 did while fixing something else entirely.
+      Fixed structurally: new `UexRejectedError(UexApiError)` (`bot/uex/exceptions.py`)
+      marks a response UEX explicitly and definitely rejected; `UexAuthError` and
+      `UexRateLimitError` now inherit from it (both were already treated as definite by
+      the old string classifier); `_request`'s two raise-on-rejection sites now raise
+      `UexRejectedError`; `_post_one_job` now checks `isinstance(exc, UexRejectedError)`
+      instead of message prefixes. Stable against any future message-text change.
+    - **The A08 (entry 46) route-embed budget didn't reserve for the real footer.**
+      `_add_chunked_fields`'s 100-char reserve assumed only a short truncation notice would
+      follow, but `/top-routes`' real footer (explanation + refresh timestamp + ship note)
+      is attached AFTER the field loop and can run well past 100 characters - confirmed to
+      let the final assembled embed land at 6,009 characters (254-char footer) with
+      longer-than-fixture terminal names. Fixed by computing and attaching the real footer
+      BEFORE the field loop in `_send_ranked_routes`, so `_add_chunked_fields`' own
+      `len(embed)` check already reflects it; the omission-count suffix is appended
+      afterward as a short, bounded addition the existing reserve still covers. Applied the
+      same reordering to `/best-route`'s two branches and `/multi-stop-route`'s per-route
+      embed in `bot/cogs/prices.py` for consistency, since all three had the identical
+      footer-after-loop shape (`/multi-stop-route`'s already has a full plain-text fallback
+      on `discord.HTTPException` that independently guarantees no data loss even before
+      this fix, so it was lower risk, but still worth correcting to avoid needlessly
+      triggering that fallback). New test sweeps terminal-name padding 0-150 checking
+      `len(embed) <= 6000` throughout, reproducing the exact 6,009-char/254-char-footer
+      case from the review at padding=80.
+    - **The A08 budget check could keep a route but silently drop its trailing warning.**
+      `_add_chunked_fields` added each chunk of a logical field one at a time, checking
+      budget before each - so a route whose first chunk (price/summary) fit but whose
+      second chunk (a cargo-risk warning, which lands in a trailing continuation chunk)
+      didn't would end up with its first chunk visible and its warning silently missing.
+      The caller only tracks whole-route omission, so this route wasn't even counted as
+      "omitted" in the footer - it looked like a normal, fully-displayed, warning-free
+      (i.e. safe-looking) route. Fixed by making `_add_chunked_fields` preflight the total
+      length of ALL chunks before adding any of them - all-or-nothing, never partial. New
+      `tests/test_prices_chunked_fields.py` unit-tests the helper directly (reproducing the
+      review's exact byte-length fixture); `tests/test_trends_embed_budget.py` adds an
+      end-to-end sweep confirming every displayed route field carries "Cargo risk:" text,
+      reproducing the review's route-5-visible-without-its-warning case exactly.
+
+    All 6 of the review's own probes (`data/audit-bd2d50b/test_fix_review.py`) pass against
+    the fixes. 264 tests passing (8 new).
 
 ## Where to look for what
 
@@ -1342,9 +1423,9 @@ guessed at.
   branch. Local (PC) and the Pi's databases have been fully merged at least twice now; the
   established practice is to back up both sides before any such merge and pull the Pi's
   backup down to the PC afterward, so nothing valuable lives only on the Pi's disk. The full
-  suite has 256 passing tests (see entries 45-46 - all 15 audit findings, 4 P1 and 11 P2,
-  are now fixed; deployment status of the P2 round specifically had not been decided as of
-  this note - check git log on the Pi rather than assume). Re-check live service and branch
+  suite has 264 passing tests (see entries 45-47 - all 15 original audit findings plus the
+  5 follow-up-review gaps in those fixes are now fixed; check git log on the Pi rather than
+  assume how much of this has actually been deployed there). Re-check live service and branch
   state rather than assuming this point-in-time operational note is still current.
 - The data collectors in `bot/cogs/intelligence.py` only pay off once they've been running a
   while - most of the `ROADMAP.md` intelligence backlog depends on accumulated history, so
