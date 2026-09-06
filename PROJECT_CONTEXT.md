@@ -1549,12 +1549,17 @@ guessed at.
   *and* `operation` together) - not fixed, see the API-facts note above for detail.
 - `Local-model-handoff` remains available as a backup, but current development happens on
   `TestBranch`.
-- **`scripts/deploy_and_backup.sh`/`scripts/revert_last_deploy.sh` need a real-Pi run**
-  (timeline entry 27). Logic is verified against a fake git repo with stubbed
-  `sudo`/`systemctl`, but not against the actual `uex-trade-bot.service` unit or a real
-  `data/uexbot.sqlite3` - confirm on the next Pi deploy that `sudo systemctl` doesn't
-  prompt for a password non-interactively (would hang the script) and that the detected
-  `DATABASE_PATH` matches what's actually in the Pi's `.env`.
+- **`scripts/deploy_and_backup.sh` had its first real-Pi run on 2026-09-06** (deploying
+  `bcf9631` → `3ec9e9c`, see entry 51's staging note) - confirmed passwordless
+  `sudo systemctl stop`/`start` works non-interactively, the plain `data/uexbot.sqlite3`
+  default path is correct, the explicit-refspec fetch handles the Pi's main-only
+  auto-fetch quirk, and the post-deploy service came up clean (18 cogs, 56 commands
+  synced, no errors). **`scripts/revert_last_deploy.sh` still hasn't had a real-Pi run**
+  (timeline entry 27) - its logic is verified against a fake git repo with stubbed
+  `sudo`/`systemctl`/`cp`/`git` (most recently entries 49-51's harness rounds), but never
+  against the actual `uex-trade-bot.service` unit or a real `data/uexbot.sqlite3`. Exercise
+  it for real the next time a Pi deploy needs undoing, rather than assuming the harness
+  coverage transfers completely.
 - **Liquidity rating** is deliberately an indicator, not a predicted percentage chance of
   sale. It is bounded to 0-100 so users can interpret it at a glance. The history/movers view
   needs at least two hourly Marketplace snapshots before it can show a comparison.
@@ -1626,8 +1631,11 @@ guessed at.
   backup down to the PC afterward, so nothing valuable lives only on the Pi's disk. The full
   suite has 277 passing tests (see entries 45-51 - all 15 original audit findings plus 20
   gaps found across five rounds of review/audit of those fixes, four external and one
-  self-directed, are now fixed; check git log on the Pi rather than assume how much of this
-  has actually been deployed there). This chain has now run FIVE review rounds past the
+  self-directed, are now fixed). The Pi was brought up to `3ec9e9c` (entry 51's commit) via
+  `scripts/deploy_and_backup.sh`'s first real run on 2026-09-06, so as of that date the Pi
+  is fully caught up with `origin/TestBranch` - but re-check git log on the Pi before
+  assuming that's still true, since it will drift the moment another round of fixes is
+  committed without a matching deploy. This chain has now run FIVE review rounds past the
   original audit, each finding real gaps in the round before it (5, then 2, then 9, then 3,
   then 1) - there is no established pattern of the count trending to zero, so don't assume
   round N+1 won't find anything just because round N's count was small (the 9-then-3 dip
