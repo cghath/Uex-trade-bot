@@ -886,8 +886,19 @@ class Prices(commands.Cog):
             if not _add_chunked_fields(route_embed, name="Warnings & practical checks", lines=unique_warnings):
                 all_embeds_fit = False
             embeds.append(route_embed)
+            # Includes footer last - it carries the route.is_exact approximation
+            # disclosure plus the budget/space-only/capital-access notes, none of which
+            # the embed path would ever drop (they're in route_embed's own footer above),
+            # so the fallback must not silently lose them either.
+            # Includes footer last - it carries the route.is_exact approximation
+            # disclosure plus the budget/space-only/capital-access notes, none of which
+            # the embed path would ever drop (they're in route_embed's own footer above),
+            # so the fallback must not silently lose them either.
             fallback_route_texts.append(
-                "\n".join([f"**#{index} {route.origin_name} → {route.destination_name}**", *value_lines, *unique_warnings])
+                "\n".join([
+                    f"**#{index} {route.origin_name} → {route.destination_name}**",
+                    *value_lines, *unique_warnings, footer,
+                ])
             )
 
         if all_embeds_fit:

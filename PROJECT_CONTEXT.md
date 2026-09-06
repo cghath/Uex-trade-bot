@@ -1277,6 +1277,43 @@ they're in sync).
 
     9 new regression tests, each confirmed to fail without its fix and pass with it.
     275 tests passing.
+50. **A fourth external follow-up review (`data/audit-b21aba0/REVIEW.md`, 2026-09-06),
+    against entry 49's own commit, found 3 more gaps - confirming the staging note's own
+    prediction that this chain hadn't necessarily terminated.** All 3 fixed:
+    - **`revert_last_deploy.sh`'s `DB_OVERWRITTEN` flag was set AFTER the destructive
+      copy succeeded, not before.** `cp` can fail partway through (disk exhaustion, an
+      I/O error) after already truncating/partially overwriting `db_path` - under
+      `set -e` that failure exits immediately, so a flag set only on success left
+      `rollback_on_failure` thinking the DB was never touched, skipping restoration of a
+      destination that might now hold a partially-written, corrupt file. Verified via a
+      throwaway harness reproducing the exact failure both ways: with the flag set
+      after the copy, a simulated mid-copy failure left the corrupted content in place;
+      with it moved before the copy, the same failure correctly triggered restoration
+      from `PRE_REVERT_DIR`. Also brought this script's `PRE_REVERT_DIR` snapshot and its
+      rollback restoration up to parity with `deploy_and_backup.sh`'s own backup step,
+      which already backs up the `-wal`/`-shm` sidecars alongside the main DB file -
+      this script's pre-revert snapshot and its recovery path had never done either.
+    - **`/mixed-routes`' plain-text fallback (added earlier this session) dropped the
+      footer entirely** - which is where the `route.is_exact` approximation disclosure
+      and the budget/space-only/capital-access notes actually live. An approximate
+      route's qualification silently vanished the moment the batch send was rejected or
+      a route's own warnings didn't fit, unlike `/multi-stop-route`'s fallback, which
+      already includes its equivalent disclosure explicitly. Fixed by appending `footer`
+      itself to each route's fallback text block.
+    - **The 3-observation/NULL-baseline fix (entry 47/48) only made the BASELINE side of
+      `get_terminal_market_shifts` NULL-safe - the CURRENT (`latest`) side was still
+      wrapped in `COALESCE(latest.scu_buy, 0)`.** A known baseline (500) paired with a
+      genuinely unknown current value (UEX simply didn't report `scu_buy` this cycle)
+      computed `0 - 500 = -500`, inventing a complete-depletion shift that
+      `current_supply` itself correctly reports as unknown, not zero. Fixed by making
+      each `*_change` NULL whenever EITHER side is NULL, symmetrically (`CASE WHEN
+      baseline.scu_buy IS NULL OR latest.scu_buy IS NULL THEN NULL ELSE latest.scu_buy -
+      baseline.scu_buy END`), removing the now-unnecessary `COALESCE`-to-zero entirely
+      rather than layering a second guard on top of it.
+
+    3 new regression tests (2 promoted from the review's own probes, 1 shell-only finding
+    verified via harness rather than pytest, matching this repo's established practice for
+    scripts), each confirmed to fail without its fix and pass with it. 277 tests passing.
 
 ## Where to look for what
 
@@ -1552,20 +1589,19 @@ guessed at.
   after three hours; hourly liquidity and Marketplace data warn after two. The rating-shift
   queries request four gainers and four losers independently so one direction cannot crowd
   out the other, and the fields are separated to stay below Discord's 1,024-character limit.
-- **Current staging state (2026-09-05)**: `TestBranch` is deployed and running live on the
+- **Current staging state (2026-09-06)**: `TestBranch` is deployed and running live on the
   Pi (`uex-trade-bot.service`, host `arkwatcher`) - it is no longer just a local-validation
   branch. Local (PC) and the Pi's databases have been fully merged at least twice now; the
   established practice is to back up both sides before any such merge and pull the Pi's
   backup down to the PC afterward, so nothing valuable lives only on the Pi's disk. The full
-  suite has 275 passing tests (see entries 45-49 - all 15 original audit findings, 7 gaps
-  found across two rounds of external follow-up review, and 9 more found by a self-directed
-  two-subagent audit are now fixed; check git log on the Pi rather than assume how much of
-  this has actually been deployed there). Given how many rounds this one review/audit chain
-  has already gone through - and that entry 49's own audit found MORE gaps than either of
-  the two external follow-up rounds that preceded it - don't assume the chain has
-  necessarily terminated just because a given round's count happens to be small. Re-check
-  live service and branch state rather than assuming this point-in-time operational note is
-  still current.
+  suite has 277 passing tests (see entries 45-50 - all 15 original audit findings plus 19
+  gaps found across four rounds of review/audit of those fixes, three external and one
+  self-directed, are now fixed; check git log on the Pi rather than assume how much of this
+  has actually been deployed there). This chain has now run FOUR review rounds past the
+  original audit, each finding real gaps in the round before it (5, then 2, then 9, then 3)
+  - there is no established pattern of the count trending to zero, so don't assume round N+1
+  won't find anything just because round N's count was small. Re-check live service and
+  branch state rather than assuming this point-in-time operational note is still current.
 - The data collectors in `bot/cogs/intelligence.py` only pay off once they've been running a
   while - most of the `ROADMAP.md` intelligence backlog depends on accumulated history, so
   those features will look broken/empty if built and tested against a fresh database.

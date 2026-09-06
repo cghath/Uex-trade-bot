@@ -67,6 +67,11 @@ rollback_on_failure() {
     if [ "$DB_OVERWRITTEN" -eq 1 ] && [ -f "$PRE_REVERT_DIR/$(basename "$db_path")" ]; then
         cp "$PRE_REVERT_DIR/$(basename "$db_path")" "$db_path" \
             || echo "Could not restore the pre-revert DB from $PRE_REVERT_DIR - fix manually." >&2
+        for suffix in -wal -shm; do
+            rm -f "${db_path}${suffix}"
+            [ -f "$PRE_REVERT_DIR/$(basename "$db_path")${suffix}" ] \
+                && cp "$PRE_REVERT_DIR/$(basename "$db_path")${suffix}" "${db_path}${suffix}"
+        done
     fi
     git checkout "$CURRENT_COMMIT" || echo "Could not check out $CURRENT_COMMIT - repo may be in a partial state, fix manually." >&2
     sudo systemctl start "$SERVICE_NAME" || echo "Could not restart $SERVICE_NAME - check it manually." >&2
@@ -86,6 +91,9 @@ PRE_REVERT_DIR="$BACKUP_ROOT/${PRE_REVERT_TIMESTAMP}_${CURRENT_COMMIT}_pre-rever
 mkdir -p "$PRE_REVERT_DIR"
 if [ -f "$db_path" ]; then
     cp "$db_path" "$PRE_REVERT_DIR/$(basename "$db_path")"
+    for suffix in -wal -shm; do
+        [ -f "${db_path}${suffix}" ] && cp "${db_path}${suffix}" "$PRE_REVERT_DIR/$(basename "$db_path")${suffix}"
+    done
     # Same complete field set deploy_and_backup.sh writes (timestamp_utc, commit, branch,
     # db_path) - a prior version of this file wrote only commit/db_path, which meant
     # reverting to THIS pre-revert snapshot later (undoing the revert) crashed with
@@ -100,8 +108,13 @@ if [ -f "$db_path" ]; then
     echo "Saved the state being discarded ($CURRENT_COMMIT) to $PRE_REVERT_DIR"
 fi
 
-cp "$BACKUP_DIR/$(basename "$db_path")" "$db_path"
+# Set BEFORE the copy, not after it succeeds: cp itself can fail partway through (disk
+# exhaustion, an I/O error) after already truncating/partially overwriting db_path - under
+# set -e that failure exits immediately, and setting this flag only on success would have
+# left rollback_on_failure thinking the DB was never touched, skipping restoration of a
+# destination that may now hold a partially-written, corrupt file.
 DB_OVERWRITTEN=1
+cp "$BACKUP_DIR/$(basename "$db_path")" "$db_path"
 for suffix in -wal -shm; do
     rm -f "${db_path}${suffix}"  # stale sidecars from the discarded run
     [ -f "$BACKUP_DIR/$(basename "$db_path")${suffix}" ] && cp "$BACKUP_DIR/$(basename "$db_path")${suffix}" "${db_path}${suffix}"

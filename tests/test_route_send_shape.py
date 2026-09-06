@@ -22,7 +22,7 @@ from bot.cogs import prices as prices_module
 from bot.cogs.prices import Prices
 from bot.db.database import Database
 from bot.uex.client import UexClient
-from bot.uex.mixed_routes import MixedCargoItem
+from bot.uex.mixed_routes import MixedCargoItem, MixedRoute
 from bot.uex.multi_stop_routes import MultiStopLeg, MultiStopRoute
 
 
@@ -646,5 +646,49 @@ def test_mixed_routes_falls_back_to_plain_text_when_the_combined_batch_is_too_la
         fallback_text = "\n".join(kwargs.get("content", "") for _, kwargs in interaction.followup.sent)
         for r in range(1, 4):
             assert f"Origin {r}" in fallback_text, fallback_text
+
+    asyncio.run(run())
+
+
+def test_mixed_routes_fallback_preserves_the_approximation_disclosure(monkeypatch):
+    """Follow-up review finding: /mixed-routes' plain-text fallback (added earlier this
+    session to handle the combined-batch-too-large case) copied the route heading,
+    cargo/financial lines, and warnings, but never included the footer - which is where
+    the route.is_exact approximation disclosure (and the budget/space-only/capital-access
+    notes) actually live. An approximate route silently lost that qualification the
+    moment the batch send was rejected or a route's own warnings didn't fit. The
+    multi-stop-route fallback already includes its equivalent disclosure explicitly;
+    /mixed-routes' fallback just never carried its footer at all."""
+    async def run():
+        source = dict(scu_buy=10, status_buy=1)
+        destination = dict(scu_sell=10, status_sell=1)
+        cargo = (MixedCargoItem(1, "Ore", 10, 100, 200, 10, 1000, 1000, source, destination),)
+        # is_exact=False - this route's cargo allocation is only the heuristic
+        # approximation, so the footer must say so.
+        route = MixedRoute(1, "Origin", 2, "Destination", cargo, 10, 1000, 2000, 1000, False)
+        monkeypatch.setattr(prices_module, "build_mixed_routes", lambda *a, **k: [route])
+
+        db = NS(
+            get_default_ship=AsyncMock(return_value="Ship"),
+            get_mixed_route_market_rows=AsyncMock(return_value=[]),
+            get_terminal_data_health_by_ids=AsyncMock(return_value={}),
+        )
+        uex = NS(get_vehicles=AsyncMock(return_value=[dict(name="Ship", scu=100)]))
+        cog = Prices.__new__(Prices)
+        cog.bot = NS(db=db, uex=uex)
+        cog._get_status_lookup = AsyncMock(return_value={})
+
+        delivered = []
+
+        async def send(**kwargs):
+            if "embeds" in kwargs:
+                raise discord.HTTPException(NS(status=400, reason="Bad Request", headers={}), "Embed too large")
+            delivered.append(kwargs.get("content", ""))
+
+        interaction = NS(user=NS(id=1), response=NS(defer=AsyncMock()), followup=NS(send=send))
+        await cog.mixed_routes.callback(cog, interaction)
+
+        fallback_text = "\n".join(delivered)
+        assert "approximate" in fallback_text.lower(), fallback_text
 
     asyncio.run(run())

@@ -639,6 +639,36 @@ def test_terminal_market_shifts_never_mixes_measurements_from_two_baseline_rows(
     asyncio.run(run())
 
 
+def test_terminal_market_shifts_unknown_current_supply_is_not_reported_as_zero(tmp_path):
+    """Follow-up review finding: the previous fix preserved a NULL BASELINE measurement
+    (previous_supply/previous_demand) instead of fabricating a change against it - but the
+    symmetric case on the CURRENT (latest) side was still wrapped in
+    COALESCE(latest.scu_buy, 0), so a known baseline (500) paired with a genuinely unknown
+    CURRENT value (UEX simply didn't report scu_buy this cycle) computed 0 - 500 = -500,
+    inventing a complete-depletion shift that current_supply itself reports as unknown,
+    not zero. Each *_change must be NULL whenever EITHER side is unknown, symmetrically."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        async with db.connect() as sqlite:
+            await sqlite.execute(
+                """INSERT INTO terminal_market_observations
+                   (id_commodity,id_terminal,observed_at,commodity_name,terminal_name,scu_buy,scu_sell)
+                   VALUES (1,1,datetime('now','-48 hours'),'Ore','Terminal',500,100)"""
+            )
+            await sqlite.execute(
+                """INSERT INTO terminal_market_observations
+                   (id_commodity,id_terminal,observed_at,commodity_name,terminal_name,scu_buy,scu_sell)
+                   VALUES (1,1,datetime('now','-1 hour'),'Ore','Terminal',NULL,100)"""
+            )
+            await sqlite.commit()
+        (shift,) = await db.get_terminal_market_shifts()
+        assert shift["current_supply"] is None, shift
+        assert shift["supply_change"] is None, shift
+
+    asyncio.run(run())
+
+
 def test_marketplace_tier_history_seeds_an_existing_current_state(tmp_path):
     async def run():
         db = _make_db(tmp_path)

@@ -1512,11 +1512,19 @@ class Database:
         a single "since-baseline" comparison built from two different points in time. The
         `baseline` CTE below picks the row ONCE (`pwb` if it exists at all, else `iwe`) and
         takes both measurements from that one row - a genuinely NULL measurement on the
-        chosen row stays NULL (not silently replaced by a different row's value), and its
-        corresponding *_change is NULL rather than a fabricated number computed against an
-        unknown starting point (0-arg `COALESCE`-to-zero previously). A NULL *_change is
-        naturally excluded by intelligence_brief.py's `if r["supply_change"]` ranking
-        filter, since None is falsy - no separate handling needed downstream.
+        chosen row stays NULL (not silently replaced by a different row's value).
+
+        Both sides of each *_change get the same NULL-preserving treatment, not just the
+        baseline side: an earlier version still wrapped the CURRENT (`latest`) measurement
+        in `COALESCE(latest.scu_buy, 0)`, so a known baseline (e.g. 500) paired with a
+        genuinely unknown current value (`latest.scu_buy IS NULL` - UEX simply didn't
+        report it this cycle) computed `0 - 500 = -500`, inventing a complete-depletion
+        shift `current_supply` itself reports as unknown, not zero. A real numeric zero
+        (an actual observed depletion) is a perfectly valid change and is not the case being
+        guarded against here - only a missing measurement is. Each *_change is NULL exactly
+        when EITHER side is NULL, on both sides symmetrically. A NULL *_change is naturally
+        excluded by intelligence_brief.py's `if r["supply_change"]` ranking filter, since
+        None is falsy - no separate handling needed downstream.
         """
         async with self.connect() as db:
             cursor = await db.execute(
@@ -1555,10 +1563,10 @@ class Database:
                    SELECT latest.commodity_name, latest.terminal_name,
                           baseline.scu_buy AS previous_supply, latest.scu_buy AS current_supply,
                           baseline.scu_sell AS previous_demand, latest.scu_sell AS current_demand,
-                          CASE WHEN baseline.scu_buy IS NULL THEN NULL
-                               ELSE COALESCE(latest.scu_buy, 0) - baseline.scu_buy END AS supply_change,
-                          CASE WHEN baseline.scu_sell IS NULL THEN NULL
-                               ELSE COALESCE(latest.scu_sell, 0) - baseline.scu_sell END AS demand_change
+                          CASE WHEN baseline.scu_buy IS NULL OR latest.scu_buy IS NULL THEN NULL
+                               ELSE latest.scu_buy - baseline.scu_buy END AS supply_change,
+                          CASE WHEN baseline.scu_sell IS NULL OR latest.scu_sell IS NULL THEN NULL
+                               ELSE latest.scu_sell - baseline.scu_sell END AS demand_change
                    FROM latest
                    JOIN baseline
                      ON baseline.id_commodity = latest.id_commodity AND baseline.id_terminal = latest.id_terminal
