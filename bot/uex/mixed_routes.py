@@ -1,6 +1,7 @@
 """Mixed-commodity route allocation from the locally collected market snapshot."""
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 import itertools
 import math
@@ -22,6 +23,12 @@ class MixedCargoItem:
     profit: float
     source: dict[str, Any]
     destination: dict[str, Any]
+    # Which constraint(s) this item's quantity is tied to: "stock" (origin scu_buy),
+    # "demand" (destination scu_sell), "cargo space" (the ship's shared SCU pool), or
+    # "budget" (the shared aUEC pool) - see _classify_item_limit. Defaults to () only for
+    # callers/tests that predate this field; every item allocate_pair_cargo actually
+    # returns has at least one factor.
+    limiting_factors: tuple[str, ...] = ()
 
     @property
     def profit_per_scu(self) -> float:
@@ -100,6 +107,46 @@ def build_pair_opportunities(
     return opportunities
 
 
+def _classify_item_limit(
+    quantity: float,
+    *,
+    stock_cap: float,
+    demand_cap: float,
+    cargo_space_binding: bool,
+    budget_binding: bool,
+) -> tuple[str, ...]:
+    """Why couldn't this item's quantity be higher? Checked in this order: the item's own
+    stock/demand cap first (a fact about this specific commodity, true regardless of why
+    the solver picked this exact quantity), falling back to the shared cargo-space/budget
+    pool only when neither market cap was reached - a market cap and a shared-pool limit
+    are never both genuinely binding for the same item (if stock/demand already explains
+    the quantity, more cargo space or budget wouldn't let this item grow anyway).
+    """
+    factors: list[str] = []
+    if quantity >= stock_cap:
+        factors.append("stock")
+    if quantity >= demand_cap:
+        factors.append("demand")
+    if not factors:
+        if cargo_space_binding:
+            factors.append("cargo space")
+        if budget_binding:
+            factors.append("budget")
+    # Every item allocate_pair_cargo actually builds is provably capped by at least one
+    # of the four - see allocate_pair_cargo's docstring - but fail closed rather than
+    # silently empty if that invariant is ever violated by a future change.
+    return tuple(factors) if factors else ("allocation limit",)
+
+
+def format_limiting_factors(factors: tuple[str, ...]) -> str:
+    """Short parenthetical for display: '(limited by stock)', '(limited by cargo space
+    & budget)'. Empty input (a MixedCargoItem predating this field) reads as unknown
+    rather than an empty string."""
+    if not factors:
+        return "limit unknown"
+    return "limited by " + " & ".join(factors)
+
+
 def _greedy_fill(
     pairs: list[tuple[dict[str, Any], dict[str, Any]]],
     *,
@@ -123,13 +170,22 @@ def _greedy_fill(
             break
         buy_price = float(source["price_buy"])
         sell_price = float(destination["price_sell"])
-        available = math.floor(min(float(source["scu_buy"]), float(destination["scu_sell"])))
+        stock_cap = math.floor(float(source["scu_buy"]))
+        demand_cap = math.floor(float(destination["scu_sell"]))
+        available = min(stock_cap, demand_cap)
         affordable = remaining_scu if math.isinf(remaining_budget) else math.floor(remaining_budget / buy_price)
         quantity = min(available, remaining_scu, affordable)
         if quantity < 1:
             continue
         investment = quantity * buy_price
         profit = quantity * (sell_price - buy_price)
+        # Local (at-the-time-of-this-pick) remaining_scu/affordable, not the final totals
+        # after the whole greedy pass - this loop never revisits an earlier item once
+        # later items consume more of the shared pools, so checking against the FINAL
+        # aggregate remaining would misattribute an item that was actually stock/budget
+        # bound as "cargo space"-bound just because something later used up what was left.
+        cargo_space_binding = quantity == remaining_scu
+        budget_binding = (not math.isinf(remaining_budget)) and quantity == affordable
         cargo.append(
             MixedCargoItem(
                 id_commodity=int(source["id_commodity"]),
@@ -142,6 +198,13 @@ def _greedy_fill(
                 profit=profit,
                 source=source,
                 destination=destination,
+                limiting_factors=_classify_item_limit(
+                    quantity,
+                    stock_cap=stock_cap,
+                    demand_cap=demand_cap,
+                    cargo_space_binding=cargo_space_binding,
+                    budget_binding=budget_binding,
+                ),
             )
         )
         remaining_scu -= quantity
@@ -243,7 +306,40 @@ def _exact_allocate(
                         for item, quantity in zip(items, quantities)
                         if quantity > 0
                     ]
-    return best_cargo
+    return _annotate_exact_allocation_limits(best_cargo, capacity=capacity, budget=budget)
+
+
+def _annotate_exact_allocation_limits(
+    cargo: list[MixedCargoItem], *, capacity: float, budget: float
+) -> list[MixedCargoItem]:
+    """Label each item in an exact-solver winning combo with why its quantity couldn't be
+    higher. Unlike the greedy path (see _greedy_fill's own local per-item check), using
+    the FINAL aggregate remaining capacity/budget here is exact, not an approximation:
+    _exact_allocate searches every valid combination jointly, not sequentially, so if any
+    item's quantity were below its own stock/demand cap AND increasing it by one unit
+    still fit both capacity and budget, that strictly-more-profitable combo (every
+    included item has positive profit per unit) would have been found and returned
+    instead - see allocate_pair_cargo's docstring.
+    """
+    if not cargo:
+        return cargo
+    total_scu = sum(item.quantity_scu for item in cargo)
+    total_investment = sum(item.investment for item in cargo)
+    remaining_capacity = capacity - total_scu
+    remaining_budget = budget - total_investment
+    annotated = []
+    for item in cargo:
+        stock_cap = math.floor(float(item.source.get("scu_buy") or 0))
+        demand_cap = math.floor(float(item.destination.get("scu_sell") or 0))
+        factors = _classify_item_limit(
+            item.quantity_scu,
+            stock_cap=stock_cap,
+            demand_cap=demand_cap,
+            cargo_space_binding=remaining_capacity < 1,
+            budget_binding=(not math.isinf(remaining_budget)) and remaining_budget < item.buy_price,
+        )
+        annotated.append(dataclasses.replace(item, limiting_factors=factors))
+    return annotated
 
 
 def allocate_pair_cargo(

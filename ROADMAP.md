@@ -49,14 +49,21 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
 
 ### Personalization & Workflow
 
-- [ ] **Saved Trading Preferences** *(complexity: Low)*: Store per-user defaults for
-  space-only terminals, capital-ship access, auto-loading, cross-system travel, and risk
-  tolerance. Route commands read these as defaults instead of requiring the options every
-  time, and show which settings are currently active so a user can't accidentally get a
-  route that ignores them. Same shape as the existing `user_ship_preference` table -
-  gates the personalized brief item below.
-- [ ] **Personalized `/intelligence-brief` Entry Point** *(complexity: Medium, depends on
-  Saved Trading Preferences)*: Answer "what should I do right now?" using the user's
+- [x] **Saved Trading Preferences**: Shipped 2026-09-06. `/set-trading-preferences`,
+  `/clear-trading-preferences`, `/my-trading-preferences` store per-user defaults for
+  space-only terminals, capital-ship access, auto-loading, preferred system, and risk
+  tolerance (risk tolerance is stored/shown, not yet enforced - a deliberate scoping
+  choice). Applied automatically by `/best-route`, `/top-routes`, `/mixed-routes`, and
+  `/multi-stop-route` whenever their matching option is left unset; space-only/
+  capital-ship-access only affect the latter two today. Default ship (`/set-default-ship`)
+  was folded into the same `user_trading_preferences` row rather than kept in its own
+  table, per user direction - see `PROJECT_CONTEXT.md` entries 52-53 for the full design
+  history, the real SQLite migration bug found and fixed along the way, and the known
+  gap (space-only/capital-access filtering doesn't exist yet for `/best-route`/
+  `/top-routes` - bundled into Centralized Route Presentation below instead).
+- [ ] **Personalized `/intelligence-brief` Entry Point** *(complexity: Medium - dependency
+  now satisfied, Saved Trading Preferences shipped above)*: Answer "what should I do right
+  now?" using the user's
   saved ship, available budget, preferred systems, and safety settings to surface a
   handful of good options with buttons/links into the relevant commands, instead of
   requiring the user to already know which command to run.
@@ -70,11 +77,15 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
 
 ### Recommendation Trust & Transparency
 
-- [ ] **Load-Limiting Explanations** *(complexity: Low)*: State plainly whether cargo
-  space, budget, stock, demand, or approximate allocation prevented a better load, so a
-  user knows whether a bigger ship or more capital would actually help.
-  `_exact_allocate` already tracks `market_available` vs. `search_bound` separately -
-  mostly a matter of surfacing what's already computed.
+- [x] **Load-Limiting Explanations**: Shipped 2026-09-06. Every `/mixed-routes`/
+  `/multi-stop-route` cargo item now states which constraint capped its quantity - stock,
+  demand, cargo space, or budget (approximate-allocation disclosure already existed
+  separately via `route.is_exact`). Turned out to be less "just surface what's already
+  computed" than expected: `_exact_allocate`'s aggregate totals give an exact answer, but
+  `_greedy_fill`'s sequential, never-revisited processing needed each item's own local
+  remaining capacity/budget at pick time, not the final totals - see
+  `PROJECT_CONTEXT.md` entry 54 for the real misattribution bug this distinction caught
+  before it shipped.
 - [ ] **Evidence-Level Labels** *(complexity: Low)*: Distinguish current reported stock,
   older observations, inferred trends, and approximate calculations on every
   recommendation, and make "no information" look different from "no demand." Builds on

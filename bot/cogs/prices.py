@@ -18,7 +18,7 @@ from bot.uex.supply_demand import analyze_terminal_market_history, has_sell_side
 from bot.uex.ships import estimate_route_cargo, resolve_ship
 from bot.uex.status import build_status_lookup, resolve_status_label
 from bot.uex.trading import best_buy_locations, best_routes, best_sell_locations
-from bot.uex.mixed_routes import build_mixed_routes, requires_capital_cargo_access
+from bot.uex.mixed_routes import build_mixed_routes, format_limiting_factors, requires_capital_cargo_access
 from bot.uex.multi_stop_routes import build_multi_stop_routes
 from bot.uex.trading_preferences import describe_active_preferences
 
@@ -817,17 +817,7 @@ class Prices(commands.Cog):
             for item in route.cargo:
                 if risk := format_commodity_risk(item.source):
                     warnings.append(f"{item.commodity_name}: {risk}")
-                source_stock = float(item.source.get("scu_buy") or 0)
-                destination_demand = float(item.destination.get("scu_sell") or 0)
-                if item.available_scu < float(ship_vehicle["scu"]):
-                    if source_stock <= destination_demand:
-                        warnings.append(
-                            f"⚠️ {item.commodity_name}: origin stock limits this load to {item.available_scu:,.0f} SCU"
-                        )
-                    else:
-                        warnings.append(
-                            f"⚠️ {item.commodity_name}: destination demand limits this load to {item.available_scu:,.0f} SCU"
-                        )
+                warnings.append(f"{item.commodity_name}: {format_limiting_factors(item.limiting_factors)}")
                 buy_status = resolve_status_label(status_lookup, "buy", item.source.get("status_buy"))
                 sell_status = resolve_status_label(status_lookup, "sell", item.destination.get("status_sell"))
                 if buy_status or sell_status:
@@ -1121,19 +1111,9 @@ class Prices(commands.Cog):
                 for item in leg.cargo:
                     if risk := format_commodity_risk(item.source):
                         warnings.append(f"Leg {leg_index} {item.commodity_name}: {risk}")
-                    source_stock = float(item.source.get("scu_buy") or 0)
-                    destination_demand = float(item.destination.get("scu_sell") or 0)
-                    if item.available_scu < float(ship_vehicle["scu"]):
-                        if source_stock <= destination_demand:
-                            warnings.append(
-                                f"⚠️ Leg {leg_index} {item.commodity_name}: origin stock limits this load to "
-                                f"{item.available_scu:,.0f} SCU"
-                            )
-                        else:
-                            warnings.append(
-                                f"⚠️ Leg {leg_index} {item.commodity_name}: destination demand limits this load to "
-                                f"{item.available_scu:,.0f} SCU"
-                            )
+                    warnings.append(
+                        f"Leg {leg_index} {item.commodity_name}: {format_limiting_factors(item.limiting_factors)}"
+                    )
                     buy_status = resolve_status_label(status_lookup, "buy", item.source.get("status_buy"))
                     sell_status = resolve_status_label(status_lookup, "sell", item.destination.get("status_sell"))
                     if buy_status or sell_status:

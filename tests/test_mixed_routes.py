@@ -5,6 +5,7 @@ from bot.uex.mixed_routes import (
     allocate_pair_cargo,
     allocation_is_exact,
     build_mixed_routes,
+    format_limiting_factors,
     is_space_terminal,
     requires_capital_cargo_access,
     supports_capital_cargo_access,
@@ -366,3 +367,121 @@ def test_system_filter_keeps_a_route_confirmed_in_system_at_both_ends():
         _row(2, 2, "B", "Pyro Destination", price_sell=20, scu_sell=2, star_system_name="Pyro"),
     ]
     assert build_mixed_routes(rows, ship_capacity_scu=10, system="Pyro")
+
+
+# -- limiting_factors: which constraint actually capped each item's quantity -----------
+
+
+def test_format_limiting_factors_formats_zero_one_and_multiple_factors():
+    assert format_limiting_factors(()) == "limit unknown"
+    assert format_limiting_factors(("stock",)) == "limited by stock"
+    assert format_limiting_factors(("stock", "demand")) == "limited by stock & demand"
+
+
+def test_limiting_factors_identifies_stock_via_the_exact_solver():
+    source = _row(1, 1, "A", "Origin", price_buy=10, scu_buy=3)
+    dest = _row(1, 2, "A", "Destination", price_sell=20, scu_sell=100)
+    cargo = allocate_pair_cargo(
+        [(source, dest)], capacity=100, budget=float("inf"), max_commodities=3, min_commodities=1
+    )
+    assert cargo[0].quantity_scu == 3
+    assert cargo[0].limiting_factors == ("stock",)
+
+
+def test_limiting_factors_identifies_demand_via_the_exact_solver():
+    source = _row(1, 1, "A", "Origin", price_buy=10, scu_buy=100)
+    dest = _row(1, 2, "A", "Destination", price_sell=20, scu_sell=4)
+    cargo = allocate_pair_cargo(
+        [(source, dest)], capacity=100, budget=float("inf"), max_commodities=3, min_commodities=1
+    )
+    assert cargo[0].quantity_scu == 4
+    assert cargo[0].limiting_factors == ("demand",)
+
+
+def test_limiting_factors_reports_both_when_stock_and_demand_tie():
+    source = _row(1, 1, "A", "Origin", price_buy=10, scu_buy=5)
+    dest = _row(1, 2, "A", "Destination", price_sell=20, scu_sell=5)
+    cargo = allocate_pair_cargo(
+        [(source, dest)], capacity=100, budget=float("inf"), max_commodities=3, min_commodities=1
+    )
+    assert cargo[0].quantity_scu == 5
+    assert cargo[0].limiting_factors == ("stock", "demand")
+
+
+def test_limiting_factors_identifies_cargo_space_via_the_exact_solver():
+    # Huge stock/demand, tiny ship - the exact solver's capped-at-EXACT_SEARCH_MAX_CAPACITY
+    # path is exercised here since capacity (6) is well under the 25-unit threshold.
+    source = _row(1, 1, "A", "Origin", price_buy=10, scu_buy=1000)
+    dest = _row(1, 2, "A", "Destination", price_sell=20, scu_sell=1000)
+    cargo = allocate_pair_cargo(
+        [(source, dest)], capacity=6, budget=float("inf"), max_commodities=3, min_commodities=1
+    )
+    assert cargo[0].quantity_scu == 6
+    assert cargo[0].limiting_factors == ("cargo space",)
+
+
+def test_limiting_factors_identifies_budget_via_the_exact_solver():
+    source = _row(1, 1, "A", "Origin", price_buy=10, scu_buy=1000)
+    dest = _row(1, 2, "A", "Destination", price_sell=20, scu_sell=1000)
+    cargo = allocate_pair_cargo(
+        [(source, dest)], capacity=1000, budget=55, max_commodities=3, min_commodities=1
+    )
+    assert cargo[0].quantity_scu == 5  # floor(55 / 10)
+    assert cargo[0].limiting_factors == ("budget",)
+
+
+def test_limiting_factors_identifies_cargo_space_via_the_greedy_path():
+    # Capacity above EXACT_SEARCH_MAX_CAPACITY (25) forces allocate_pair_cargo to also try
+    # the uncapped greedy passes - for a single always-profitable item, greedy (which can
+    # use the full 30 capacity) beats the exact solver's 25-unit-capped result, so this
+    # exercises _greedy_fill's own local (not aggregate) limiting-factor computation.
+    source = _row(1, 1, "A", "Origin", price_buy=10, scu_buy=1000)
+    dest = _row(1, 2, "A", "Destination", price_sell=20, scu_sell=1000)
+    cargo = allocate_pair_cargo(
+        [(source, dest)], capacity=30, budget=float("inf"), max_commodities=3, min_commodities=1
+    )
+    assert cargo[0].quantity_scu == 30
+    assert cargo[0].limiting_factors == ("cargo space",)
+
+
+def test_limiting_factors_identifies_budget_via_the_greedy_path():
+    pairs = []
+    for i in range(10):  # past EXACT_SEARCH_MAX_CANDIDATES (8), forces the greedy path
+        source = _row(i, 1, f"C{i}", "Origin", price_buy=10, scu_buy=1000)
+        dest = _row(i, 2, f"C{i}", "Destination", price_sell=20, scu_sell=1000)
+        pairs.append((source, dest))
+    cargo = allocate_pair_cargo(pairs, capacity=1000, budget=12, max_commodities=1, min_commodities=1)
+    assert len(cargo) == 1
+    assert cargo[0].quantity_scu == 1  # floor(12 / 10)
+    assert cargo[0].limiting_factors == ("budget",)
+
+
+def test_greedy_path_does_not_misattribute_an_earlier_budget_bound_item_as_cargo_space():
+    """_greedy_fill must classify each item using the LOCAL remaining capacity/budget at
+    the moment it was picked, not the FINAL totals after the whole pass - this loop never
+    revisits an earlier item once later ones consume more of the shared pools, so using
+    final aggregate values can misattribute an item that was genuinely only budget-bound
+    as also cargo-space-bound, just because a LATER item happened to exhaust whatever
+    capacity remained. Concretely: A (buy 10, huge stock/demand) is budget-bound first
+    (affordable=2 within a 25 budget, while 3 SCU of capacity are still available - the
+    capacity ceiling was never the reason for A's quantity). B (buy 1) is then genuinely
+    cargo-space-bound, using the last 1 SCU. A must be reported as budget-only; reusing
+    the FINAL remaining capacity (0, exhausted by B) for A's own classification would
+    incorrectly add "cargo space" to A too. 7 filler pairs push the candidate count past
+    EXACT_SEARCH_MAX_CANDIDATES so only the greedy path is exercised, and max_commodities
+    caps the pick at exactly A and B so the fillers are never reached."""
+    source_a = _row(1, 1, "A", "Origin", price_buy=10, scu_buy=1000)
+    dest_a = _row(1, 2, "A", "Destination", price_sell=110, scu_sell=1000)
+    source_b = _row(2, 1, "B", "Origin", price_buy=1, scu_buy=1000)
+    dest_b = _row(2, 2, "B", "Destination", price_sell=3, scu_sell=1000)
+    pairs = [(source_a, dest_a), (source_b, dest_b)]
+    for i in range(7):  # low-profit fillers, ranked below A and B under both orderings
+        source = _row(10 + i, 1, f"Filler{i}", "Origin", price_buy=1, scu_buy=1000)
+        dest = _row(10 + i, 2, f"Filler{i}", "Destination", price_sell=1.1, scu_sell=1000)
+        pairs.append((source, dest))
+    cargo = allocate_pair_cargo(pairs, capacity=3, budget=25, max_commodities=2, min_commodities=1)
+    by_name = {item.commodity_name: item for item in cargo}
+    assert by_name["A"].quantity_scu == 2
+    assert by_name["A"].limiting_factors == ("budget",)
+    assert by_name["B"].quantity_scu == 1
+    assert by_name["B"].limiting_factors == ("cargo space",)

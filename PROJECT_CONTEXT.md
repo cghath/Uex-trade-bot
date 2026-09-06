@@ -1486,6 +1486,53 @@ they're in sync).
     copied into `user_trading_preferences`. 10 new tests (migration correctness/
     idempotency/non-clobbering, ship round-trip through the new storage, clear-ship-only
     vs. clear-everything semantics). 308 tests passing.
+54. **Load-Limiting Explanations (roadmap item) - every `/mixed-routes`/`/multi-stop-route`
+    cargo item now says which constraint actually capped its quantity: stock, demand,
+    cargo space, or budget.** `MixedCargoItem` gained a `limiting_factors: tuple[str,
+    ...]` field (`bot/uex/mixed_routes.py`), and a proof (in `allocate_pair_cargo`'s
+    docstring) that every item is provably capped by at least one of the four: since
+    every included item has strictly positive profit per unit, an item below its own
+    stock/demand cap must be capacity- or budget-bound instead, or a strictly more
+    profitable allocation (one more unit of that item) would have been found and chosen
+    instead. That proof only holds for `_exact_allocate`'s FINAL/aggregate totals,
+    though - it explores every valid combination jointly, not sequentially, so nothing
+    about "what remained at some intermediate point" matters there. `_greedy_fill` is
+    different: it processes commodities in a fixed order and never revisits an earlier
+    one once a later one consumes more of the shared capacity/budget pool, so it needs
+    each item's own LOCAL remaining capacity/budget at the moment it was actually picked,
+    not the final totals after the whole pass. Confirmed this distinction matters, not
+    just theoretically: a standalone repro using final-aggregate values for the greedy
+    path misattributed an item that was genuinely only budget-bound as also "cargo
+    space"-bound, purely because a later item exhausted whatever capacity happened to
+    remain - `test_greedy_path_does_not_misattribute_an_earlier_budget_bound_item_as_
+    cargo_space` (`tests/test_mixed_routes.py`) reproduces this exact scenario through
+    the public `allocate_pair_cargo` API (2 real commodities + 7 low-profit fillers to
+    force the greedy path past `EXACT_SEARCH_MAX_CANDIDATES`) and was verified to fail
+    against the aggregate-based version before being restored to the correct local-value
+    one.
+
+    Display: replaced the old imprecise per-item warning (`"origin stock limits this
+    load to N SCU"`, which fired whenever the market's own stock/demand was below the
+    ship's FULL capacity - not necessarily related to why THIS item's actual allocated
+    quantity ended up what it did) with a warning built from the new precise
+    `format_limiting_factors(item.limiting_factors)` in both `/mixed-routes` and
+    `/multi-stop-route`. First attempt put this text inline on the cargo line itself
+    instead of in the `warnings` list - wrong, because `/multi-stop-route`'s plain-text
+    overflow fallback explicitly omits per-leg cargo-line detail ("Full leg-by-leg cargo/
+    distance details omitted") and only carries `warnings`, so the new explanation would
+    have silently vanished in exactly the large/complex-route scenario where it matters
+    most. Moved into `warnings` instead, matching where the old (now-replaced) stock/
+    demand warning already lived - `test_multi_stop_route_fallback_preserves_warnings`
+    (already existing, updated for the new wording) confirms this survives the fallback
+    path. Two existing tests needed their synthetic fixtures updated after the old
+    warning's removal shortened the warnings section enough to no longer trigger the
+    size-overflow condition they were built to test - not a logic bug, just recalibrating
+    manually-constructed `MixedCargoItem`s that never previously specified
+    `limiting_factors` at all.
+
+    12 new tests in `tests/test_mixed_routes.py` (stock/demand/cargo-space/budget/tie,
+    each via both the exact and greedy solver paths where applicable, plus the
+    local-vs-aggregate regression above). 317 tests passing.
 
 ## Where to look for what
 
@@ -1771,13 +1818,14 @@ guessed at.
   branch. Local (PC) and the Pi's databases have been fully merged at least twice now; the
   established practice is to back up both sides before any such merge and pull the Pi's
   backup down to the PC afterward, so nothing valuable lives only on the Pi's disk. The full
-  suite has 308 passing tests (see entries 45-53 - all 15 original audit findings plus 20
+  suite has 317 passing tests (see entries 45-54 - all 15 original audit findings plus 20
   gaps found across five rounds of review/audit of those fixes, four external and one
-  self-directed, are now fixed, plus entry 52's new Saved Trading Preferences feature and
-  entry 53's default-ship consolidation into it). The Pi was brought up to `e0a1657`
-  (entry 52's commit) via `scripts/deploy_and_backup.sh` on 2026-09-06 - but entry 53's
-  ship-consolidation work (not yet committed as of this writing) has NOT been deployed,
-  so the Pi is currently one commit behind `origin/TestBranch` once that
+  self-directed, are now fixed, plus entry 52's new Saved Trading Preferences feature,
+  entry 53's default-ship consolidation into it, and entry 54's load-limiting
+  explanations). The Pi was brought up to `8bc2e8c` (entry 53's commit) via
+  `scripts/deploy_and_backup.sh` on 2026-09-06 - but entry 54's work (not yet committed
+  as of this writing) has NOT been deployed, so the Pi is currently one commit behind
+  `origin/TestBranch` once that
   work is committed. Re-check git log on the Pi before assuming either point is still
   true, since it will drift the moment another round of fixes or features is committed
   without a matching deploy. This chain has now run FIVE review rounds past the

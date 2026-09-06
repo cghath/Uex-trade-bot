@@ -175,8 +175,8 @@ def test_multi_stop_route_fallback_preserves_warnings(tmp_path):
             for args, kwargs in interaction.followup.sent:
                 assert "embed" not in kwargs, "the embed send should have been rejected, not succeeded"
             fallback_text = "\n".join(kwargs["content"] for _, kwargs in interaction.followup.sent)
-            assert "stock limits this load to 5 SCU" in fallback_text, (
-                f"expected the stock-limit warning to survive into the fallback, got: {fallback_text!r}"
+            assert "Stileron: limited by stock" in fallback_text, (
+                f"expected the stock-limit explanation to survive into the fallback, got: {fallback_text!r}"
             )
         finally:
             await client.aclose()
@@ -359,7 +359,10 @@ def test_multi_stop_route_falls_back_to_plain_text_when_only_the_warnings_sectio
                 star_system_name="Pyro" if leg % 2 == 0 else "Stanton",
             )
             cargo = tuple(
-                MixedCargoItem(i, f"Commodity {i}", 10, 100, 200, 10, 1000, 1000, source, destination)
+                MixedCargoItem(
+                    i, f"Commodity {i}", 10, 100, 200, 10, 1000, 1000, source, destination,
+                    limiting_factors=("stock", "demand"),
+                )
                 for i in range(1, 4)
             )
             legs.append(MultiStopLeg(leg + 1, f"Station {leg + 1}", leg + 2, f"Station {leg + 2}", cargo, 3000, 6000, 3000, True))
