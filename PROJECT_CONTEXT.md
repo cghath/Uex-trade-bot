@@ -1185,6 +1185,98 @@ they're in sync).
 
     Both of the review's own probes (`data/audit-b95390c/test_followup.py`) pass against
     the fixes. 266 tests passing (2 new).
+49. **Self-directed audit of the whole `be40410..bcf9631` fix chain (2026-09-05/06), not
+    prompted by an external review this time** - two general-purpose subagents each
+    independently audited half the changed files (data/API layer vs. Discord-cogs/scripts),
+    plus a `security-review` skill pass over the same range. The security pass found
+    nothing (this chain only strengthens existing security properties - see its own report
+    for the specific areas checked and cleared). The two correctness subagents together
+    found 9 more real gaps, all following the exact same shape this whole chain has shown
+    repeatedly: a shared helper's contract improves, and a caller nobody re-checked keeps
+    the old, now-unsafe assumption. All 9 fixed and independently verified:
+    - **`/best-route`'s two branches never checked `_add_chunked_fields`'s return value**
+      (`bot/cogs/prices.py`) - unlike `/top-routes` (trends.py), which already stops and
+      discloses. A route past budget just vanished with no "N more omitted" note. Fixed
+      identically on both branches (the primary UEX-routes path and the derive-routes-
+      ourselves fallback), each independently, since they're materially different code
+      paths sharing only the same bug shape.
+    - **`/multi-stop-route`'s per-leg loop had the same unchecked-return-value gap** - and
+      it's worse than a missing disclosure: the route's title and "Route summary" field
+      both unconditionally describe ALL of `route.legs` regardless of which leg fields
+      actually got added, so a silently-dropped middle leg left the embed
+      self-contradictory (claims N legs, shows fewer, still totals profit for all N).
+      Fixed by tracking `all_legs_fit` and folding it into the existing `embed_too_large`
+      check already used for the warnings section (entry 48) - a dropped leg now routes
+      into the same full-fidelity plain-text fallback as a real send failure. Found and
+      fixed a second bug while implementing this: the gate right after
+      (`if warnings_fit:`) only checked the warnings flag, not the combined
+      `embed_too_large` - so a route with a dropped leg but warnings that DID fit would
+      still have sent the incomplete embed anyway. Changed to `if not embed_too_large:`.
+    - **`/mixed-routes` had no embed-size budget protection at all**, and batches up to 5
+      embeds into ONE message with no try/except. Discord enforces its 6,000-char embed
+      limit as a SUM across every embed in one message, not per individual embed -
+      confirmed by this same codebase's own comment in `/multi-stop-route` (which
+      switched to one-embed-per-message after discovering exactly this in testing).
+      Reproduced separately: 5 realistic routes each measured ~2,092 chars individually
+      (fine) but ~10,460 combined - an unhandled `discord.HTTPException`, the exact
+      "stuck thinking, no followup ever sent" failure this codebase already fixed once for
+      `/multi-stop-route` and never checked for `/mixed-routes`. Fixed by switching the
+      warnings section to the atomic `_add_chunked_fields` (checked), building a
+      plain-text fallback string per route alongside each embed, and wrapping the batched
+      send in the same try/except-then-fallback pattern already proven for
+      `/multi-stop-route`.
+    - **`ConfirmDeleteListingView` had no double-click guard at all**
+      (`bot/cogs/marketplace.py`) - unlike its sibling `ConfirmListingView` (fixed under
+      A02), which shares the identical real-DELETE-behind-a-button shape. Fixed with the
+      same check-then-set `resolved` guard, applied to both `confirm` and `cancel`.
+    - **`revert_last_deploy.sh` had no rollback trap at all** - unlike
+      `deploy_and_backup.sh` (fixed under A13), any failure between stopping the service
+      and restarting it left the bot down with no automatic recovery. Adapted (not
+      copied) for this script's different shape: `deploy_and_backup.sh` never overwrites
+      the DB so its rollback only restores the commit, but `revert_last_deploy.sh` DOES
+      overwrite `db_path` partway through - so its `rollback_on_failure` also restores
+      the DB from the just-taken `PRE_REVERT_DIR` snapshot whenever the failure happens
+      after that overwrite. `CURRENT_COMMIT`/`CURRENT_BRANCH` moved to the top of the
+      script (before anything destructive) so they're always defined by the time the trap
+      could ever need them. Verified via a throwaway harness simulating a mid-script
+      failure after the DB overwrite: confirmed the DB is restored, the original commit
+      checked out, and the service restarted.
+    - **`revert_last_deploy.sh`'s closing note still referenced `$branch` unguarded**,
+      unlike line 44's `${branch:-unknown}` (A15's own fix, applied to only one of the two
+      places `$branch` appears) - a meta.txt missing that field would crash on the very
+      last line under `set -u`, AFTER the DB restore/checkout/restart had already fully
+      succeeded, reporting a false failure at the least helpful possible moment.
+    - **A DELETE retried after a network error, then rejected, was misclassified as a
+      definite rejection.** `UexClient._request` never auto-retries POST after a network
+      failure (the request may have already reached UEX), but DOES retry DELETE (documented
+      as safe since "a repeated DELETE just gets listing_not_found the second time") - true
+      before A01, but A01 made ANY non-"ok" DELETE status raise `UexRejectedError`
+      ("definitely nothing happened, no reconciliation needed"). A `listing_not_found` on a
+      network-retried DELETE is genuinely ambiguous, though: it could mean the listing never
+      existed, OR that the FIRST (lost-response) attempt already deleted it. Fixed by
+      raising the plain, ambiguous `UexApiError` instead specifically when `method ==
+      "DELETE" and last_error is not None` (i.e. this attempt followed an earlier network-
+      level failure) - a DELETE rejected on its first attempt is untouched, still a genuine
+      `UexRejectedError`. `_cancel_listed_job` (`personal_inventory.py`) doesn't currently
+      branch on the exception type for this call, so this fix's practical effect today is
+      restoring the accuracy of `UexRejectedError`'s own contract for any future caller that
+      reasonably trusts it (exactly why that type was introduced in the first place -
+      entry 47's finding 3).
+    - **`format_health_note` never learned about A10's new "unknown" cause.**
+      `classify_terminal_health` can reach `status == "unknown"` two structurally different
+      ways: UEX's own TTL metadata being absent (the original cause), or UEX's metadata
+      saying "fresh" while the BOT's own collection has gone stale (A10, entry 46) - but
+      `format_health_note` kept hardcoding "TTL metadata missing" for both, which is
+      actively wrong for the second cause (the metadata is very much present and says the
+      opposite). Confirmed self-contradictory in practice: a locally-stale row showed
+      "TTL metadata missing; last update 0d ago" - claiming metadata is missing while
+      quoting an age figure that came from that same "missing" metadata. Fixed by adding
+      `TerminalDataHealth.locally_stale: bool` (set by `classify_terminal_health` at the
+      same point it downgrades to "unknown" for this reason) and branching on it in
+      `format_health_note` for a message that actually describes what's wrong.
+
+    9 new regression tests, each confirmed to fail without its fix and pass with it.
+    275 tests passing.
 
 ## Where to look for what
 
@@ -1465,14 +1557,15 @@ guessed at.
   branch. Local (PC) and the Pi's databases have been fully merged at least twice now; the
   established practice is to back up both sides before any such merge and pull the Pi's
   backup down to the PC afterward, so nothing valuable lives only on the Pi's disk. The full
-  suite has 266 passing tests (see entries 45-48 - all 15 original audit findings plus 7
-  gaps found across two rounds of follow-up review of those fixes are now fixed; check git
-  log on the Pi rather than assume how much of this has actually been deployed there).
-  Given how many rounds this one review chain has already gone through, a THIRD follow-up
-  review of `b95390c`'s successor commit would not be surprising - don't assume the chain
-  has necessarily terminated just because the two most recent rounds each found "only" 2.
-  Re-check live service and branch
-  state rather than assuming this point-in-time operational note is still current.
+  suite has 275 passing tests (see entries 45-49 - all 15 original audit findings, 7 gaps
+  found across two rounds of external follow-up review, and 9 more found by a self-directed
+  two-subagent audit are now fixed; check git log on the Pi rather than assume how much of
+  this has actually been deployed there). Given how many rounds this one review/audit chain
+  has already gone through - and that entry 49's own audit found MORE gaps than either of
+  the two external follow-up rounds that preceded it - don't assume the chain has
+  necessarily terminated just because a given round's count happens to be small. Re-check
+  live service and branch state rather than assuming this point-in-time operational note is
+  still current.
 - The data collectors in `bot/cogs/intelligence.py` only pay off once they've been running a
   while - most of the `ROADMAP.md` intelligence backlog depends on accumulated history, so
   those features will look broken/empty if built and tested against a fresh database.

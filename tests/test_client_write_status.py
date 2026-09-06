@@ -17,7 +17,7 @@ import httpx
 import pytest
 
 from bot.uex.client import UexClient
-from bot.uex.exceptions import UexApiError
+from bot.uex.exceptions import UexApiError, UexRejectedError
 
 
 def test_delete_with_undocumented_rejection_status_raises(tmp_path):
@@ -60,6 +60,64 @@ def test_post_with_undocumented_rejection_status_raises(tmp_path):
         try:
             with pytest.raises(UexApiError):
                 await client.post_marketplace_advertise(secret_key="fake", id_category=1)
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_delete_retried_after_network_error_is_ambiguous_not_rejected(tmp_path):
+    """Follow-up review finding: DELETE is retried after a network-level failure (unlike
+    POST, which never retries), so a "not found"-style status on the RETRY (e.g.
+    listing_not_found) is genuinely uncertain - the first attempt's response was lost, so
+    it may have already reached UEX and completed the deletion before the connection
+    dropped. Raising UexRejectedError here (whose documented contract is "definitely
+    nothing happened, no reconciliation needed") would be actively wrong in that case;
+    this must be the plain, ambiguous UexApiError instead."""
+    async def run():
+        attempts = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                raise httpx.ReadError("connection dropped", request=request)
+            return httpx.Response(
+                200, json={"status": "listing_not_found", "message": "Listing not found", "data": None}
+            )
+
+        client = UexClient("fake", base_url="https://client-test.invalid")
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        try:
+            with pytest.raises(UexApiError) as exc_info:
+                await client.delete_marketplace_listing(listing_id=999, secret_key="fake")
+            assert not isinstance(exc_info.value, UexRejectedError), (
+                "a retried DELETE's ambiguous outcome must not be reported as a definite rejection"
+            )
+            assert attempts["n"] == 2
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_delete_rejected_on_the_first_attempt_is_still_a_definite_rejection(tmp_path):
+    """Regression guard: the retry-ambiguity fix above must not weaken the original A01
+    fix - a DELETE rejected on its FIRST attempt (no prior network error at all) is still
+    a real, definite rejection, not downgraded to ambiguous just because DELETE is
+    generally retry-eligible."""
+    async def run():
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200, json={"status": "listing_not_found", "message": "Listing not found", "data": None}
+            )
+
+        client = UexClient("fake", base_url="https://client-test.invalid")
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        try:
+            with pytest.raises(UexRejectedError):
+                await client.delete_marketplace_listing(listing_id=999, secret_key="fake")
         finally:
             await client.aclose()
 

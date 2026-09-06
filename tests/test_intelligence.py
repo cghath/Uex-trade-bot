@@ -292,6 +292,43 @@ def test_old_collected_health_is_not_still_fresh():
     assert health.status == "unknown"
 
 
+def test_locally_stale_health_note_does_not_claim_ttl_metadata_is_missing():
+    """Follow-up review finding: classify_terminal_health's A10 fix added a SECOND,
+    distinct cause of status=='unknown' (the bot's own collection has gone stale, even
+    though UEX's TTL fields say fresh) - but format_health_note was never updated to
+    match, and kept hardcoding the message for the ORIGINAL cause ("TTL metadata
+    missing"). For the local-staleness path, TTL metadata is NOT missing - it's fully
+    present and says the data looked fine; the real problem is the bot hasn't re-checked
+    it recently. The old message was self-contradictory (claims metadata is missing while
+    showing an age figure that came from that same "missing" metadata)."""
+    from datetime import datetime, timezone
+
+    locally_stale = classify_terminal_health(
+        {
+            "terminal_name": "Example", "prices_updated_percentage": 100,
+            "last_update_days": 0, "last_update_days_limit": 3,
+            "last_update_days_percentage": 100, "last_seen": "2020-01-01 00:00:00",
+        },
+        now=datetime(2026, 9, 5, tzinfo=timezone.utc),
+    )
+    assert locally_stale.status == "unknown"
+    assert locally_stale.locally_stale is True
+    note = format_health_note(locally_stale)
+    assert "metadata missing" not in note.lower(), note
+    assert "stalled" in note.lower() or "hasn't re-checked" in note.lower(), note
+
+
+def test_genuinely_missing_ttl_metadata_still_gets_its_own_message():
+    """Regression guard: the locally_stale distinction must not swallow the ORIGINAL
+    "unknown" cause - a row with no TTL fields at all (and no last_seen) still gets the
+    "TTL metadata missing" message, unchanged."""
+    missing_ttl = classify_terminal_health({"terminal_name": "Example"})
+    assert missing_ttl.status == "unknown"
+    assert missing_ttl.locally_stale is False
+    note = format_health_note(missing_ttl)
+    assert "metadata missing" in note.lower(), note
+
+
 def test_recently_collected_health_is_unaffected_by_the_staleness_check():
     from datetime import datetime, timezone
 

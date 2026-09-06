@@ -384,6 +384,7 @@ class Prices(commands.Cog):
             if not ship_vehicle:
                 footer += " · set a default ship with /set-default-ship for cargo/run-profit numbers"
             embed.set_footer(text=footer)
+            routes_shown = 0
             for r in ranked:
                 origin = r.get("origin_terminal_name", "Unknown")
                 dest = r.get("destination_terminal_name", "Unknown")
@@ -480,7 +481,15 @@ class Prices(commands.Cog):
                     terminal_references.get(destination_id),
                 )
                 value_lines.extend(practical_notes)
-                _add_chunked_fields(embed, name=f"{origin} → {dest}", lines=value_lines)
+                # Per-field/name truncation alone doesn't protect Discord's combined
+                # 6000-char embed limit - stop and disclose instead of silently dropping
+                # the tail (see /top-routes' identical pattern in trends.py).
+                if not _add_chunked_fields(embed, name=f"{origin} → {dest}", lines=value_lines):
+                    break
+                routes_shown += 1
+            omitted = len(ranked) - routes_shown
+            if omitted > 0:
+                embed.set_footer(text=footer + f" · {omitted} more route(s) omitted - message size limit")
             await interaction.followup.send(embed=embed)
             return
 
@@ -561,6 +570,7 @@ class Prices(commands.Cog):
         if not ship_vehicle:
             footer += " · set a default ship with /set-default-ship for cargo/run-profit numbers"
         embed.set_footer(text=footer)
+        routes_shown = 0
         for route in routes:
             value_lines = [
                 f"Buy {route.buy_price:.2f} / Sell {route.sell_price:.2f}\n"
@@ -644,12 +654,17 @@ class Prices(commands.Cog):
             else:
                 value_lines.append("⚠️ Travel time/distance is not included in this ranking")
 
-            _add_chunked_fields(
+            if not _add_chunked_fields(
                 embed,
                 name=f"{route.buy_terminal} → {route.sell_terminal}",
                 lines=value_lines,
-            )
+            ):
+                break
+            routes_shown += 1
 
+        omitted = len(routes) - routes_shown
+        if omitted > 0:
+            embed.set_footer(text=footer + f" · {omitted} more route(s) omitted - message size limit")
         await interaction.followup.send(embed=embed)
 
     @app_commands.command(
@@ -752,6 +767,16 @@ class Prices(commands.Cog):
         health_rows = await self.bot.db.get_terminal_data_health_by_ids(terminal_ids)
         status_lookup = await self._get_status_lookup()
         embeds: list[discord.Embed] = []
+        fallback_route_texts: list[str] = []
+        # Discord enforces its 6,000-char embed-text limit as a SUM across every embed in
+        # one message, not per individual embed - confirmed by this same command's sibling,
+        # /multi-stop-route (see its own comment further down), which switched to one embed
+        # per message after bundling up to 5 hit exactly that limit in testing. This command
+        # still bundles up to 5 embeds into one message, so it needs the same fallback
+        # /multi-stop-route already has: build a plain-text equivalent for every route
+        # alongside its embed, and use it if either a single route's own content doesn't
+        # fit its embed, or the final batched send is rejected as too large overall.
+        all_embeds_fit = True
         for index, route in enumerate(routes, 1):
             origin_health = (
                 classify_terminal_health(health_rows[route.origin_id])
@@ -828,30 +853,6 @@ class Prices(commands.Cog):
                 f"Profit: **{route.profit:,.0f} aUEC** · ROI: **{route.roi_pct:.1f}%**",
                 f"Confidence: **{confidence.label} ({confidence.score}/100)**",
             ]
-            route_embed = discord.Embed(
-                title=f"#{index} {route.origin_name} → {route.destination_name}",
-                description=(
-                    f"Mixed load for **{ship_vehicle.get('name', ship_query)}** · "
-                    f"ranked by estimated haul profit{' · space stations only' if space_only else ''}"
-                ),
-                color=discord.Color.green(),
-            )
-            route_embed.add_field(
-                name="Cargo plan",
-                value="\n".join(value_lines),
-                inline=False,
-            )
-            # Keep warnings in their own field so Discord's 1,024-character route-field
-            # limit can never silently trim them from a profitable-looking result.
-            unique_warnings = list(dict.fromkeys(warnings))
-            warning_chunks = _chunk_lines(unique_warnings)
-            for warning_index, warning_chunk in enumerate(warning_chunks, 1):
-                continuation = f" (continued {warning_index})" if warning_index > 1 else ""
-                route_embed.add_field(
-                    name=f"Warnings & practical checks{continuation}",
-                    value=warning_chunk,
-                    inline=False,
-                )
             footer = "Collected UEX data · prices can change before arrival · warnings do not change profit ranking"
             if budget is not None:
                 footer += f" · budget {float(budget):,.0f} aUEC"
@@ -861,9 +862,46 @@ class Prices(commands.Cog):
                 footer += " · capital access confirmed at both ends"
             if not route.is_exact:
                 footer += " · cargo allocation for this route is approximate, not proven-optimal"
+
+            route_embed = discord.Embed(
+                title=f"#{index} {route.origin_name} → {route.destination_name}",
+                description=(
+                    f"Mixed load for **{ship_vehicle.get('name', ship_query)}** · "
+                    f"ranked by estimated haul profit{' · space stations only' if space_only else ''}"
+                ),
+                color=discord.Color.green(),
+            )
+            # Footer set before any budget-checked field is added, so _add_chunked_fields'
+            # len(embed) check below already accounts for it.
             route_embed.set_footer(text=footer)
+            route_embed.add_field(
+                name="Cargo plan",
+                value="\n".join(value_lines),
+                inline=False,
+            )
+            unique_warnings = list(dict.fromkeys(warnings))
+            # Atomic, budget-checked - never leaves this route's embed with its first
+            # warning chunk shown and a later one silently missing (the exact class of bug
+            # already fixed for /multi-stop-route's own warnings section).
+            if not _add_chunked_fields(route_embed, name="Warnings & practical checks", lines=unique_warnings):
+                all_embeds_fit = False
             embeds.append(route_embed)
-        await interaction.followup.send(embeds=embeds)
+            fallback_route_texts.append(
+                "\n".join([f"**#{index} {route.origin_name} → {route.destination_name}**", *value_lines, *unique_warnings])
+            )
+
+        if all_embeds_fit:
+            try:
+                await interaction.followup.send(embeds=embeds)
+                return
+            except discord.HTTPException:
+                pass
+        # Plain-message fallback, mirroring /multi-stop-route's: either a single route's
+        # warnings didn't fit its own embed, or the batched send was rejected as too large
+        # overall (the combined-across-embeds limit) - either way, resend everything as
+        # chunked plain text rather than silently losing routes or warnings.
+        for chunk in _chunk_lines(fallback_route_texts, max_length=1900):
+            await interaction.followup.send(content=chunk)
 
     @app_commands.command(
         name="multi-stop-route",
@@ -995,6 +1033,7 @@ class Prices(commands.Cog):
             leg_confidences = []
             total_distance_gm = 0.0
             distance_partial = False
+            all_legs_fit = True
             for leg_index, leg in enumerate(route.legs, 1):
                 origin_health = (
                     classify_terminal_health(health_rows[leg.origin_id])
@@ -1024,11 +1063,20 @@ class Prices(commands.Cog):
                     f"Investment: **{leg.investment:,.0f}** · Revenue: **{leg.revenue:,.0f} aUEC** · "
                     f"Profit: **{leg.profit:,.0f} aUEC** · {distance_note}",
                 ]
-                _add_chunked_fields(
+                # Unlike /top-routes (where one route missing is just one omitted route),
+                # a route embed's title and "Route summary" field both unconditionally
+                # describe ALL of route.legs - if a leg's own field silently failed to
+                # fit, the embed would claim (and still total the profit/investment for)
+                # a leg it never actually shows. Tracked here and folded into
+                # embed_too_large below so that case routes into the same full-fidelity
+                # plain-text fallback as a real send failure, rather than sending a
+                # self-contradictory embed.
+                if not _add_chunked_fields(
                     route_embed,
                     name=f"Leg {leg_index}: {leg.origin_name} → {leg.destination_name}",
                     lines=leg_lines,
-                )
+                ):
+                    all_legs_fit = False
                 for side, health in (("Origin", origin_health), ("Destination", destination_health)):
                     if note := format_health_note(health):
                         warnings.append(f"Leg {leg_index} {side}: {note}")
@@ -1119,8 +1167,8 @@ class Prices(commands.Cog):
             # and bundling up to 5 of them (as one message with multiple embeds) hit that
             # limit in testing - with nothing catching the send failure, Discord never
             # got a followup at all and the interaction looked permanently "thinking."
-            embed_too_large = not warnings_fit
-            if warnings_fit:
+            embed_too_large = not warnings_fit or not all_legs_fit
+            if not embed_too_large:
                 try:
                     await interaction.followup.send(embed=route_embed)
                 except discord.HTTPException:

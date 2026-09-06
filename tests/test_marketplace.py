@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from cryptography.fernet import Fernet
 import httpx
 
-from bot.cogs.marketplace import ConfirmListingView, Marketplace
+from bot.cogs.marketplace import ConfirmDeleteListingView, ConfirmListingView, Marketplace
 from bot.db.database import Database
 from bot.uex.client import UexClient
 from unittest.mock import AsyncMock
@@ -281,6 +281,42 @@ def test_confirm_listing_view_only_posts_once_on_concurrent_double_click():
         await asyncio.gather(view.confirm.callback(first), view.confirm.callback(second))
 
         assert uex.post_marketplace_advertise.await_count == 1, uex.post_marketplace_advertise.await_count
+        assert second.response.send_message.await_count == 1
+        (message,), _ = second.response.send_message.call_args
+        assert "already resolved" in message.lower()
+
+    asyncio.run(run())
+
+
+def test_confirm_delete_listing_view_only_deletes_once_on_concurrent_double_click():
+    """Follow-up review finding: ConfirmDeleteListingView had no resolved-flag guard at
+    all, unlike its sibling ConfirmListingView (fixed under A02) - the exact same
+    double-click/redelivered-interaction shape could reach the real DELETE call twice.
+    Same check-then-set fix, same reasoning: asyncio is single-threaded and nothing awaits
+    between the check and the set, so the second callback to run always observes the
+    first one's write."""
+    from types import SimpleNamespace as NS
+
+    def interaction():
+        return NS(
+            user=NS(id=1),
+            response=NS(send_message=AsyncMock(), edit_message=AsyncMock(side_effect=_yield_once)),
+            followup=NS(send=AsyncMock()),
+        )
+
+    async def run():
+        db = NS(
+            get_inventory_post_job_by_listing=AsyncMock(return_value=None),
+            cancel_tracked_inventory_listing=AsyncMock(return_value=False),
+        )
+        uex = NS(delete_marketplace_listing=AsyncMock(return_value=None))
+        bot = NS(db=db, uex=uex)
+        view = ConfirmDeleteListingView(bot, 999, "fake-secret", 1)
+
+        first, second = interaction(), interaction()
+        await asyncio.gather(view.confirm.callback(first), view.confirm.callback(second))
+
+        assert uex.delete_marketplace_listing.await_count == 1, uex.delete_marketplace_listing.await_count
         assert second.response.send_message.await_count == 1
         (message,), _ = second.response.send_message.call_args
         assert "already resolved" in message.lower()

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock
 
 from cryptography.fernet import Fernet
@@ -397,10 +398,178 @@ def test_multi_stop_route_falls_back_to_plain_text_when_only_the_warnings_sectio
     asyncio.run(run())
 
 
+def test_best_route_discloses_when_routes_are_truncated_for_size(tmp_path, monkeypatch):
+    """Second follow-up review finding: /best-route's primary branch (UEX's own
+    /commodities_routes data) calls the atomic _add_chunked_fields for each ranked route
+    but never checks its return value or discloses a truncation, unlike /top-routes
+    (trends.py) which stops and appends an "N more omitted" footer note. A route that
+    silently failed to fit would just vanish with no visible sign anything was omitted.
+    Forces the second of three ranked routes to fail deterministically."""
+    async def run():
+        db = Database(tmp_path / "best_route_budget.sqlite3", Fernet(Fernet.generate_key()))
+        await db.init()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            path = request.url.path
+            if "commodities_prices" in path:
+                return httpx.Response(200, json={"status": "ok", "data": [
+                    {"id_commodity": 1, "commodity_name": "Gold"}
+                ]})
+            if "commodities_routes" in path:
+                return httpx.Response(200, json={"status": "ok", "data": [
+                    {
+                        "id_terminal_origin": i, "id_terminal_destination": i + 100,
+                        "origin_terminal_name": f"Origin {i}", "destination_terminal_name": f"Destination {i}",
+                        "price_origin": 100, "price_destination": 200, "price_margin": 50, "price_roi": 100,
+                        "distance": 5, "score": 100 - i, "scu_origin": 10, "scu_destination": 10,
+                        "status_origin": 1, "status_destination": 1, "profit": 100 - i,
+                    }
+                    for i in range(1, 4)
+                ]})
+            return httpx.Response(200, json={"status": "ok", "data": []})
+
+        client = UexClient(app_token="test", base_url="https://uex.test")
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+        bot = type("FakeBot", (), {})()
+        bot.db = db
+        bot.uex = client
+        cog = Prices.__new__(Prices)
+        cog.bot = bot
+        interaction = _FakeInteraction(1)
+
+        call_count = {"n": 0}
+        real_add_chunked_fields = prices_module._add_chunked_fields
+
+        def flaky_add_chunked_fields(embed, *, name, lines):
+            call_count["n"] += 1
+            if call_count["n"] == 2:
+                return False
+            return real_add_chunked_fields(embed, name=name, lines=lines)
+
+        monkeypatch.setattr(prices_module, "_add_chunked_fields", flaky_add_chunked_fields)
+
+        try:
+            await cog.best_route.callback(cog, interaction, commodity="Gold")
+        finally:
+            await client.aclose()
+
+        assert interaction.followup.sent, "expected at least one followup"
+        _, kwargs = interaction.followup.sent[0]
+        embed = kwargs["embed"]
+        assert len(embed.fields) == 1, "the second route's field should have been skipped, not the third's"
+        assert "omitted" in (embed.footer.text or "").lower(), (embed.footer.text,)
+
+    asyncio.run(run())
+
+
+def test_best_route_fallback_branch_discloses_when_routes_are_truncated_for_size(tmp_path, monkeypatch):
+    """Same finding as the primary-branch test above, for /best-route's OTHER branch -
+    the one used when UEX has no /commodities_routes data for this commodity and the bot
+    derives routes itself from raw /commodities_prices rows via best_routes(). This is a
+    materially different code path (different data source, different loop variables), so
+    it needed its own independent check rather than assuming the primary branch's fix
+    covered it."""
+    async def run():
+        db = Database(tmp_path / "best_route_fallback_budget.sqlite3", Fernet(Fernet.generate_key()))
+        await db.init()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            path = request.url.path
+            if "commodities_prices" in path:
+                return httpx.Response(200, json={"status": "ok", "data": [
+                    {"id_commodity": 1, "commodity_name": "Gold", "id_terminal": 1, "terminal_name": "Buy A",
+                     "price_buy": 10, "price_sell": 0},
+                    {"id_commodity": 1, "commodity_name": "Gold", "id_terminal": 2, "terminal_name": "Buy B",
+                     "price_buy": 20, "price_sell": 0},
+                    {"id_commodity": 1, "commodity_name": "Gold", "id_terminal": 3, "terminal_name": "Sell A",
+                     "price_buy": 0, "price_sell": 100},
+                    {"id_commodity": 1, "commodity_name": "Gold", "id_terminal": 4, "terminal_name": "Sell B",
+                     "price_buy": 0, "price_sell": 90},
+                ]})
+            if "commodities_routes" in path:
+                return httpx.Response(200, json={"status": "ok", "data": []})
+            return httpx.Response(200, json={"status": "ok", "data": []})
+
+        client = UexClient(app_token="test", base_url="https://uex.test")
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+        bot = type("FakeBot", (), {})()
+        bot.db = db
+        bot.uex = client
+        cog = Prices.__new__(Prices)
+        cog.bot = bot
+        interaction = _FakeInteraction(1)
+
+        call_count = {"n": 0}
+        real_add_chunked_fields = prices_module._add_chunked_fields
+
+        def flaky_add_chunked_fields(embed, *, name, lines):
+            call_count["n"] += 1
+            if call_count["n"] == 2:
+                return False
+            return real_add_chunked_fields(embed, name=name, lines=lines)
+
+        monkeypatch.setattr(prices_module, "_add_chunked_fields", flaky_add_chunked_fields)
+
+        try:
+            await cog.best_route.callback(cog, interaction, commodity="Gold")
+        finally:
+            await client.aclose()
+
+        assert interaction.followup.sent, "expected at least one followup"
+        _, kwargs = interaction.followup.sent[0]
+        embed = kwargs["embed"]
+        assert len(embed.fields) == 1, f"expected exactly the first route's field, got {len(embed.fields)}"
+        assert "omitted" in (embed.footer.text or "").lower(), (embed.footer.text,)
+
+    asyncio.run(run())
+
+
+def test_multi_stop_route_falls_back_to_plain_text_when_a_leg_field_does_not_fit(tmp_path, monkeypatch):
+    """Second follow-up review finding: /multi-stop-route's per-leg loop called the
+    atomic _add_chunked_fields for each leg's own field but never checked its return
+    value - unlike the warnings-section call right after the loop, which the previous
+    review round already fixed to check it. If a middle leg's field silently failed to
+    fit (while an earlier and/or later leg's smaller field still fit into the same
+    remaining budget), the route embed's title and "Route summary" field would both still
+    unconditionally describe ALL legs (built from route.legs and route.investment/
+    revenue/profit, not from which leg fields actually got added) while the embed itself
+    visibly showed fewer legs than it claimed - a self-contradictory result that also
+    never triggered the existing too-large fallback, since a route missing one leg's
+    field is smaller, not bigger, and sends "successfully." Forces the SECOND leg's field
+    to fail deterministically rather than depending on exact byte counts."""
+    async def run():
+        call_count = {"n": 0}
+        real_add_chunked_fields = prices_module._add_chunked_fields
+
+        def flaky_add_chunked_fields(embed, *, name, lines):
+            if name.startswith("Leg 2"):
+                return False
+            return real_add_chunked_fields(embed, name=name, lines=lines)
+
+        monkeypatch.setattr(prices_module, "_add_chunked_fields", flaky_add_chunked_fields)
+
+        interaction = await _run_command(
+            tmp_path, "multi_stop_leg_drop.sqlite3", _MULTI_STOP_ROWS,
+            lambda cog, interaction: cog.multi_stop_route.callback(cog, interaction, ship="TestShip"),
+        )
+
+        assert interaction.followup.sent, "expected at least one followup"
+        for args, kwargs in interaction.followup.sent:
+            assert "embed" not in kwargs, "a route embed missing one of its legs must not be sent as if complete"
+
+    asyncio.run(run())
+
+
 def test_mixed_routes_still_sends_one_batched_message(tmp_path):
-    """/mixed-routes' embeds are small enough that batching is fine and intentional -
-    this pins that down so a future fix doesn't accidentally swap the two commands'
-    send shape again."""
+    """/mixed-routes batches its (normally small) embeds into one message when they fit -
+    this pins that down so a future fix doesn't accidentally swap the two commands' send
+    shape again. This is no longer an unconditional assumption, though (see the follow-up
+    review finding below): the command now has its own fallback for when they don't fit,
+    matching /multi-stop-route's."""
     async def run():
         interaction = await _run_command(
             tmp_path, "mixed_routes.sqlite3", _MIXED_ROUTES_ROWS,
@@ -409,5 +578,73 @@ def test_mixed_routes_still_sends_one_batched_message(tmp_path):
         assert len(interaction.followup.sent) == 1, "expected exactly one batched followup"
         _, kwargs = interaction.followup.sent[0]
         assert "embeds" in kwargs and isinstance(kwargs["embeds"], list)
+
+    asyncio.run(run())
+
+
+def test_mixed_routes_falls_back_to_plain_text_when_the_combined_batch_is_too_large(monkeypatch):
+    """Second follow-up review finding: Discord enforces its 6,000-char embed-text limit
+    as a SUM across every embed in one message, not per individual embed - confirmed by
+    this command's own sibling /multi-stop-route's history (see its comment further up:
+    bundling up to 5 embeds hit exactly this limit in testing, which is why it sends one
+    embed per message instead). /mixed-routes still batches up to 5 embeds into one
+    message and had no protection against this at all - reproduced separately (outside
+    this test) with 5 realistic routes (3 commodities each, all illegal/volatile/stale-
+    health-flagged): each INDIVIDUAL embed measured ~2,092 chars (comfortably under
+    6,000), but the summed total across the 5-embed batch was ~10,460 - an unhandled
+    discord.HTTPException with no followup ever sent (the "stuck thinking" bug this
+    codebase already fixed once for /multi-stop-route, never checked for /mixed-routes).
+    This test forces the same failure mode deterministically (via the shared
+    _add_chunked_fields helper, same as test_prices_chunked_fields.py) rather than
+    depending on exact byte counts from a hand-built fixture."""
+    async def run():
+        source = dict(
+            scu_buy=10, status_buy=1, max_container_size=8, has_freight_elevator=0,
+            has_loading_dock=0, is_player_owned=1, is_refuel=1, is_repair=1, is_cargo_center=1,
+            star_system_name="Stanton",
+        )
+        destination = dict(source, scu_sell=10, status_sell=1, star_system_name="Stanton")
+        routes = []
+        for r in range(1, 4):
+            cargo = (MixedCargoItem(r, f"Commodity {r}", 10, 100, 200, 10, 1000, 1000, source, destination),)
+            routes.append(NS(
+                origin_name=f"Origin {r}", destination_name=f"Destination {r}",
+                origin_id=2 * r - 1, destination_id=2 * r, cargo=cargo,
+                cargo_scu=10, investment=1000, revenue=2000, profit=1000, roi_pct=100.0, is_exact=True,
+            ))
+
+        db = NS(
+            get_default_ship=AsyncMock(return_value="Ship"),
+            get_mixed_route_market_rows=AsyncMock(return_value=[]),
+            get_terminal_data_health_by_ids=AsyncMock(return_value={}),
+        )
+        uex = NS(get_vehicles=AsyncMock(return_value=[dict(name="Ship", scu=100)]))
+        cog = Prices.__new__(Prices)
+        cog.bot = NS(db=db, uex=uex)
+        cog._get_status_lookup = AsyncMock(return_value={"buy": {}, "sell": {}})
+        interaction = _FakeInteraction(1)
+
+        # Force the SECOND route's warnings section to fail to fit, simulating the
+        # combined-batch-too-large case deterministically instead of depending on exact
+        # byte counts.
+        real_add_chunked_fields = prices_module._add_chunked_fields
+        call_count = {"n": 0}
+
+        def flaky_add_chunked_fields(embed, *, name, lines):
+            call_count["n"] += 1
+            if call_count["n"] == 2:
+                return False
+            return real_add_chunked_fields(embed, name=name, lines=lines)
+
+        monkeypatch.setattr(prices_module, "build_mixed_routes", lambda *a, **k: routes)
+        monkeypatch.setattr(prices_module, "_add_chunked_fields", flaky_add_chunked_fields)
+        await cog.mixed_routes.callback(cog, interaction)
+
+        assert interaction.followup.sent, "expected at least one followup"
+        for _, kwargs in interaction.followup.sent:
+            assert "embeds" not in kwargs, "a batch that doesn't fully fit must not be sent as if it did"
+        fallback_text = "\n".join(kwargs.get("content", "") for _, kwargs in interaction.followup.sent)
+        for r in range(1, 4):
+            assert f"Origin {r}" in fallback_text, fallback_text
 
     asyncio.run(run())

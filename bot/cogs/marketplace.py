@@ -197,6 +197,7 @@ class ConfirmDeleteListingView(discord.ui.View):
         self.listing_id = listing_id
         self.secret_key = secret_key
         self.author_id = author_id
+        self.resolved = False
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.author_id:
@@ -205,11 +206,22 @@ class ConfirmDeleteListingView(discord.ui.View):
         return True
 
     async def on_timeout(self) -> None:
+        self.resolved = True
         for item in self.children:
             item.disabled = True
 
     @discord.ui.button(label="Delete listing", style=discord.ButtonStyle.red)
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        # Same check-then-set race guard as ConfirmListingView.confirm - two already-
+        # dispatched callbacks (a double-click, or Discord redelivering the interaction)
+        # could otherwise both reach the real DELETE below before either's edit_message
+        # round-trip disables the button on Discord's side.
+        if self.resolved:
+            await interaction.response.send_message(
+                "This deletion was already resolved.", ephemeral=True
+            )
+            return
+        self.resolved = True
         for item in self.children:
             item.disabled = True
         await interaction.response.edit_message(view=self)
@@ -269,6 +281,12 @@ class ConfirmDeleteListingView(discord.ui.View):
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.grey)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if self.resolved:
+            await interaction.response.send_message(
+                "This deletion was already resolved.", ephemeral=True
+            )
+            return
+        self.resolved = True
         for item in self.children:
             item.disabled = True
         await interaction.response.edit_message(view=self)

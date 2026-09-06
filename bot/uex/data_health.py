@@ -37,6 +37,12 @@ class TerminalDataHealth:
     last_update_days_percentage: float | None
     coverage_percentage: int | None
     has_recent_reports: bool
+    # "unknown" has two structurally different causes that format_health_note must not
+    # describe identically: UEX's own TTL metadata being absent (locally_stale=False), or
+    # UEX's TTL metadata saying "fresh" while the BOT's own collection of this row has gone
+    # stale (locally_stale=True) - the latter's TTL metadata is very much present and says
+    # the opposite of "missing."
+    locally_stale: bool = False
 
     @property
     def warning(self) -> bool:
@@ -91,6 +97,7 @@ def classify_terminal_health(row: dict[str, Any], *, now: datetime | None = None
     else:
         status = "fresh"
 
+    locally_stale = False
     last_seen = _parse_last_seen(row.get("last_seen"))
     if last_seen is not None and status in ("fresh", "recent"):
         elapsed_hours = ((now or datetime.now(timezone.utc)) - last_seen).total_seconds() / 3600
@@ -100,6 +107,7 @@ def classify_terminal_health(row: dict[str, Any], *, now: datetime | None = None
             # trust that classification - "unknown" (not "stale") since this is doubt about
             # OUR data, not a claim that UEX's underlying prices expired.
             status = "unknown"
+            locally_stale = True
 
     return TerminalDataHealth(
         terminal_name=str(row.get("terminal_name") or "Unknown terminal"),
@@ -107,6 +115,7 @@ def classify_terminal_health(row: dict[str, Any], *, now: datetime | None = None
         last_update_days=age,
         last_update_days_limit=age_limit,
         last_update_days_percentage=ttl_remaining,
+        locally_stale=locally_stale,
         coverage_percentage=coverage,
         has_recent_reports=has_recent,
     )
@@ -117,6 +126,11 @@ def format_health_note(health: TerminalDataHealth | None) -> str | None:
     if health is None or not health.warning:
         return None
     if health.status == "unknown":
+        if health.locally_stale:
+            return (
+                "⚠️ terminal data collection appears stalled (UEX itself reported this fresh, "
+                f"but the bot hasn't re-checked it in over {LOCAL_COLLECTION_STALE_HOURS:g}h)"
+            )
         age = f"; last update {health.last_update_days:g}d ago" if health.last_update_days is not None else ""
         return f"⚠️ terminal freshness unavailable (TTL metadata missing{age})"
     if health.status == "limited":

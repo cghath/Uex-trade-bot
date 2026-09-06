@@ -12,6 +12,12 @@ SERVICE_NAME="${UEX_BOT_SERVICE:-uex-trade-bot}"
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
+# Computed early (before anything destructive) so they're always defined by the time
+# SERVICE_STOPPED could ever become 1 below - rollback_on_failure needs both to restore
+# exactly the state this run is discarding.
+CURRENT_COMMIT="$(git rev-parse --short HEAD)"
+CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+
 BACKUP_ROOT="$REPO_ROOT/backups/pi"
 
 if [ $# -ge 1 ]; then
@@ -43,12 +49,38 @@ git cat-file -e "${commit}^{commit}" 2>/dev/null || { echo "Recorded commit $com
 
 echo "Reverting to commit $commit (snapshotted ${timestamp_utc:-unknown} from branch ${branch:-unknown})..."
 
+# Without this, any failure between "stop" and "start" below (a failing cp, a git checkout
+# that can't complete, a broken pip install) left the service stopped with no automatic
+# recovery - set -e just exits mid-script. Unlike deploy_and_backup.sh (which never
+# overwrites the DB, so its own rollback only needs to restore the commit), this script DOES
+# overwrite db_path partway through - so rollback also restores it from PRE_REVERT_DIR
+# (just snapshotted below) whenever the failure happens after that overwrite.
+SERVICE_STOPPED=0
+DB_OVERWRITTEN=0
+REVERT_SUCCEEDED=0
+rollback_on_failure() {
+    if [ "$REVERT_SUCCEEDED" -eq 1 ] || [ "$SERVICE_STOPPED" -eq 0 ]; then
+        return
+    fi
+    echo "" >&2
+    echo "Revert failed - restoring the pre-revert state and restarting $SERVICE_NAME..." >&2
+    if [ "$DB_OVERWRITTEN" -eq 1 ] && [ -f "$PRE_REVERT_DIR/$(basename "$db_path")" ]; then
+        cp "$PRE_REVERT_DIR/$(basename "$db_path")" "$db_path" \
+            || echo "Could not restore the pre-revert DB from $PRE_REVERT_DIR - fix manually." >&2
+    fi
+    git checkout "$CURRENT_COMMIT" || echo "Could not check out $CURRENT_COMMIT - repo may be in a partial state, fix manually." >&2
+    sudo systemctl start "$SERVICE_NAME" || echo "Could not restart $SERVICE_NAME - check it manually." >&2
+}
+# EXIT, not ERR: bash's ERR trap does not fire for an explicit `exit N` (only for a command
+# that itself fails under `set -e`) - see deploy_and_backup.sh's own A13 fix for why EXIT is
+# the one that actually covers every termination path.
+trap rollback_on_failure EXIT
+
 echo "Stopping $SERVICE_NAME..."
 sudo systemctl stop "$SERVICE_NAME"
+SERVICE_STOPPED=1
 
 # Snapshot the state being discarded too, in case the revert itself needs undoing.
-CURRENT_COMMIT="$(git rev-parse --short HEAD)"
-CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 PRE_REVERT_TIMESTAMP="$(date -u +%Y%m%d-%H%M%S)"
 PRE_REVERT_DIR="$BACKUP_ROOT/${PRE_REVERT_TIMESTAMP}_${CURRENT_COMMIT}_pre-revert"
 mkdir -p "$PRE_REVERT_DIR"
@@ -69,6 +101,7 @@ if [ -f "$db_path" ]; then
 fi
 
 cp "$BACKUP_DIR/$(basename "$db_path")" "$db_path"
+DB_OVERWRITTEN=1
 for suffix in -wal -shm; do
     rm -f "${db_path}${suffix}"  # stale sidecars from the discarded run
     [ -f "$BACKUP_DIR/$(basename "$db_path")${suffix}" ] && cp "$BACKUP_DIR/$(basename "$db_path")${suffix}" "${db_path}${suffix}"
@@ -97,6 +130,7 @@ echo "Starting $SERVICE_NAME..."
 sudo systemctl start "$SERVICE_NAME"
 sudo systemctl status "$SERVICE_NAME" --no-pager
 
+REVERT_SUCCEEDED=1
 echo ""
 echo "Reverted to $commit."
-echo "Note: this is a detached checkout, not a branch - run 'git checkout $branch' (or your branch of choice) when you're ready to move forward again."
+echo "Note: this is a detached checkout, not a branch - run 'git checkout ${branch:-TestBranch}' (or your branch of choice) when you're ready to move forward again."

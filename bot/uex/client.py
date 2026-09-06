@@ -227,6 +227,22 @@ class UexClient:
                 raise UexRejectedError(f"UEX API error on {path}: {message}{code_part}")
 
             if status != "ok" and method in ("POST", "DELETE"):
+                if method == "DELETE" and last_error is not None:
+                    # This DELETE was retried after an earlier attempt's network-level
+                    # failure (see the httpx.HTTPError branch above) - we never saw that
+                    # attempt's real response, so we don't know whether it actually reached
+                    # UEX and completed the deletion before the connection dropped. A
+                    # "not found"-style status on the retry (e.g. listing_not_found) is
+                    # genuinely ambiguous in that case: it could mean the listing never
+                    # existed, OR that our own earlier attempt already deleted it.
+                    # UexRejectedError's contract ("definitely nothing happened, no
+                    # reconciliation needed") would be actively wrong in the second case, so
+                    # this is the plain, ambiguous UexApiError instead.
+                    raise UexApiError(
+                        f"UEX rejected DELETE {path} on a retried request: {status} {message}{code_part} "
+                        "- an earlier attempt's response was lost to a network error, so it may have "
+                        "already succeeded before this retry ran".strip()
+                    )
                 # Unlike a GET's "nothing matched" statuses (see below), every documented
                 # non-"ok" status on a write endpoint (missing_id, listing_not_found,
                 # user_not_verified, user_active_listings_limit_reached, etc.) is a genuine
