@@ -1499,6 +1499,24 @@ class Database:
         boundary is never double-counted as its own baseline. A pair with no observation
         earlier than its own latest one (a single ever-recorded data point) has no baseline
         candidate at all (both CTEs empty for it) and is correctly excluded, same as before.
+
+        The chosen baseline's scu_buy and scu_sell are read from the SAME row, not
+        independently COALESCEd column-by-column - an earlier version did
+        `COALESCE(pwb.scu_buy, iwe.scu_buy)` and separately `COALESCE(pwb.scu_sell,
+        iwe.scu_sell)`, which silently mixes two different observations' timestamps
+        whenever the pre-window row exists but has just ONE of its two measurements NULL:
+        confirmed with a 48h-old baseline (supply unknown, demand 500) plus in-window rows
+        at -3h (600, 400) and -1h/latest (200, 300) - the old query reported previous
+        supply 600 from three hours ago (borrowed from the in-window fallback) alongside
+        previous demand 500 from 48 hours ago (correctly from the real baseline), presenting
+        a single "since-baseline" comparison built from two different points in time. The
+        `baseline` CTE below picks the row ONCE (`pwb` if it exists at all, else `iwe`) and
+        takes both measurements from that one row - a genuinely NULL measurement on the
+        chosen row stays NULL (not silently replaced by a different row's value), and its
+        corresponding *_change is NULL rather than a fabricated number computed against an
+        unknown starting point (0-arg `COALESCE`-to-zero previously). A NULL *_change is
+        naturally excluded by intelligence_brief.py's `if r["supply_change"]` ranking
+        filter, since None is falsy - no separate handling needed downstream.
         """
         async with self.connect() as db:
             cursor = await db.execute(
@@ -1521,22 +1539,30 @@ class Database:
                            PARTITION BY id_commodity, id_terminal ORDER BY observed_at ASC
                        ) AS rn
                        FROM windowed
+                   ), baseline AS (
+                       SELECT latest.id_commodity, latest.id_terminal,
+                              CASE WHEN pwb.id_commodity IS NOT NULL THEN pwb.scu_buy ELSE iwe.scu_buy END AS scu_buy,
+                              CASE WHEN pwb.id_commodity IS NOT NULL THEN pwb.scu_sell ELSE iwe.scu_sell END AS scu_sell
+                       FROM latest
+                       LEFT JOIN pre_window_baseline pwb
+                         ON pwb.id_commodity = latest.id_commodity AND pwb.id_terminal = latest.id_terminal
+                        AND pwb.rn = 1
+                       LEFT JOIN in_window_earliest iwe
+                         ON iwe.id_commodity = latest.id_commodity AND iwe.id_terminal = latest.id_terminal
+                        AND iwe.rn = 1 AND iwe.observed_at < latest.observed_at
+                       WHERE latest.rn = 1 AND (pwb.id_commodity IS NOT NULL OR iwe.id_commodity IS NOT NULL)
                    )
                    SELECT latest.commodity_name, latest.terminal_name,
-                          COALESCE(pwb.scu_buy, iwe.scu_buy) AS previous_supply,
-                          latest.scu_buy AS current_supply,
-                          COALESCE(pwb.scu_sell, iwe.scu_sell) AS previous_demand,
-                          latest.scu_sell AS current_demand,
-                          COALESCE(latest.scu_buy, 0) - COALESCE(COALESCE(pwb.scu_buy, iwe.scu_buy), 0) AS supply_change,
-                          COALESCE(latest.scu_sell, 0) - COALESCE(COALESCE(pwb.scu_sell, iwe.scu_sell), 0) AS demand_change
+                          baseline.scu_buy AS previous_supply, latest.scu_buy AS current_supply,
+                          baseline.scu_sell AS previous_demand, latest.scu_sell AS current_demand,
+                          CASE WHEN baseline.scu_buy IS NULL THEN NULL
+                               ELSE COALESCE(latest.scu_buy, 0) - baseline.scu_buy END AS supply_change,
+                          CASE WHEN baseline.scu_sell IS NULL THEN NULL
+                               ELSE COALESCE(latest.scu_sell, 0) - baseline.scu_sell END AS demand_change
                    FROM latest
-                   LEFT JOIN pre_window_baseline pwb
-                     ON pwb.id_commodity = latest.id_commodity AND pwb.id_terminal = latest.id_terminal
-                    AND pwb.rn = 1
-                   LEFT JOIN in_window_earliest iwe
-                     ON iwe.id_commodity = latest.id_commodity AND iwe.id_terminal = latest.id_terminal
-                    AND iwe.rn = 1 AND iwe.observed_at < latest.observed_at
-                   WHERE latest.rn = 1 AND (pwb.id_commodity IS NOT NULL OR iwe.id_commodity IS NOT NULL)""",
+                   JOIN baseline
+                     ON baseline.id_commodity = latest.id_commodity AND baseline.id_terminal = latest.id_terminal
+                   WHERE latest.rn = 1""",
                 (f"-{hours} hours", f"-{hours} hours"),
             )
             return [dict(row) for row in await cursor.fetchall()]

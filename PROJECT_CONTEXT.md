@@ -1143,6 +1143,48 @@ they're in sync).
 
     All 6 of the review's own probes (`data/audit-bd2d50b/test_fix_review.py`) pass against
     the fixes. 264 tests passing (8 new).
+48. **A second follow-up review of `b95390c` (`data/audit-b95390c/REVIEW.md`, 2026-09-05)
+    found 2 more P2 gaps - both regressions from entry 47's own fixes, the same pattern as
+    entry 47 itself.** Both fixed and verified the same session:
+    - **`/multi-stop-route`'s warnings section could vanish with the route embed still
+      "successfully" sent.** Entry 47's atomic `_add_chunked_fields` fix is exactly right
+      for a per-route logical field (never show a route with its warning silently
+      missing) - but `/multi-stop-route` also uses it for ONE call covering the entire
+      accumulated warnings section for a route, and ignored its return value. If the leg
+      fields + route summary already consumed most of the 6000-char budget, the warnings
+      call could return `False` and add NOTHING - the resulting smaller, warning-free
+      embed then sends without raising `discord.HTTPException`, so the existing
+      too-large plain-text fallback (which independently rebuilds the full warning list)
+      never triggers. Every cargo-risk/cross-system/stale-health warning disappears with
+      no visible sign anything was omitted. Fixed by checking the warnings call's return
+      value and manually entering the same fallback path used for a real send failure.
+      New `tests/test_route_send_shape.py::
+      test_multi_stop_route_falls_back_to_plain_text_when_only_the_warnings_section_overflows`
+      (a controlled 3-leg/3-commodity-per-leg route, following the review's own approach
+      of injecting a fixed route via `monkeypatch` rather than trying to craft real market
+      data that happens to land on this exact budget boundary).
+    - **The 3-observation ordering fix (entry 47) still mixed two different baseline
+      rows' measurements.** The `baseline` selection used `COALESCE(pwb.scu_buy,
+      iwe.scu_buy)` and, separately, `COALESCE(pwb.scu_sell, iwe.scu_sell)` - column by
+      column, not row by row. Whenever the real pre-window baseline row (`pwb`) exists
+      but has just ONE of its two measurements NULL, the OTHER measurement silently came
+      from a completely different row (the in-window fallback, `iwe`) - presenting one
+      "since baseline" comparison actually built from two different points in time.
+      Confirmed: a 48h-old baseline (supply unknown, demand 500) plus in-window rows at
+      -3h (600, 400) and -1h/latest (200, 300) reported previous_supply=600 (borrowed
+      from -3h) alongside previous_demand=500 (correctly from the 48h baseline) - a
+      fabricated -400 supply_change describing no real comparison. Fixed with a
+      `baseline` CTE that picks the row ONCE (`pwb` if it exists at all via `CASE WHEN
+      pwb.id_commodity IS NOT NULL`, else `iwe`) and takes both measurements from that
+      one row - a genuinely NULL measurement on the chosen row stays NULL, and its
+      `*_change` becomes NULL too (not a number computed against a substituted value),
+      which `intelligence_brief.py`'s `if r["supply_change"]` ranking filter already
+      excludes naturally since `None` is falsy - no downstream handling needed. New
+      `tests/test_intelligence.py::
+      test_terminal_market_shifts_never_mixes_measurements_from_two_baseline_rows`.
+
+    Both of the review's own probes (`data/audit-b95390c/test_followup.py`) pass against
+    the fixes. 266 tests passing (2 new).
 
 ## Where to look for what
 
@@ -1423,9 +1465,13 @@ guessed at.
   branch. Local (PC) and the Pi's databases have been fully merged at least twice now; the
   established practice is to back up both sides before any such merge and pull the Pi's
   backup down to the PC afterward, so nothing valuable lives only on the Pi's disk. The full
-  suite has 264 passing tests (see entries 45-47 - all 15 original audit findings plus the
-  5 follow-up-review gaps in those fixes are now fixed; check git log on the Pi rather than
-  assume how much of this has actually been deployed there). Re-check live service and branch
+  suite has 266 passing tests (see entries 45-48 - all 15 original audit findings plus 7
+  gaps found across two rounds of follow-up review of those fixes are now fixed; check git
+  log on the Pi rather than assume how much of this has actually been deployed there).
+  Given how many rounds this one review chain has already gone through, a THIRD follow-up
+  review of `b95390c`'s successor commit would not be surprising - don't assume the chain
+  has necessarily terminated just because the two most recent rounds each found "only" 2.
+  Re-check live service and branch
   state rather than assuming this point-in-time operational note is still current.
 - The data collectors in `bot/cogs/intelligence.py` only pay off once they've been running a
   while - most of the `ROADMAP.md` intelligence backlog depends on accumulated history, so

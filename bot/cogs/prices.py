@@ -1100,22 +1100,38 @@ class Prices(commands.Cog):
             ]
             route_embed.add_field(name="Route summary", value="\n".join(summary_lines), inline=False)
             unique_warnings = list(dict.fromkeys(warnings))
-            _add_chunked_fields(route_embed, name="Warnings & practical checks", lines=unique_warnings)
+            # _add_chunked_fields is atomic (see prices.py's own docstring) - for a route
+            # embed's leg fields, that's exactly what's wanted (never show a leg with its
+            # warning silently missing). But here the "logical field" being added is the
+            # WHOLE warnings section, not a single route - if it doesn't fit, atomicity
+            # means it adds NOTHING, silently dropping every cargo-risk/cross-system/stale-
+            # health warning while the smaller, warning-free embed still sends successfully
+            # (no discord.HTTPException, so the existing too-large fallback below never
+            # triggers). Its return value must be checked and treated the same as a real
+            # send failure - entering the same full-fidelity plain-text fallback - rather
+            # than silently accepting an embed that looks complete but isn't.
+            warnings_fit = _add_chunked_fields(
+                route_embed, name="Warnings & practical checks", lines=unique_warnings
+            )
             # Sent one route per message, not batched like /mixed-routes: a multi-leg
             # route's per-leg cargo/warning fields can push a single embed close to
             # Discord's combined 6,000-character-per-message embed limit on their own,
             # and bundling up to 5 of them (as one message with multiple embeds) hit that
             # limit in testing - with nothing catching the send failure, Discord never
             # got a followup at all and the interaction looked permanently "thinking."
-            try:
-                await interaction.followup.send(embed=route_embed)
-            except discord.HTTPException:
-                # Plain-message fallback for an embed too large to send - warnings
-                # (risk flags, stock/demand limits, practical notes) must survive here
-                # too, not just the profit figures, so this goes through the same
-                # chunking helper the embed fields use (with Discord's plain-message cap
-                # of 2000 chars, not the embed field's 1024) and sends as many messages
-                # as it takes rather than silently dropping anything.
+            embed_too_large = not warnings_fit
+            if warnings_fit:
+                try:
+                    await interaction.followup.send(embed=route_embed)
+                except discord.HTTPException:
+                    embed_too_large = True
+            if embed_too_large:
+                # Plain-message fallback for an embed too large to send (or whose warnings
+                # section didn't fit) - warnings (risk flags, stock/demand limits, practical
+                # notes) must survive here too, not just the profit figures, so this goes
+                # through the same chunking helper the embed fields use (with Discord's
+                # plain-message cap of 2000 chars, not the embed field's 1024) and sends as
+                # many messages as it takes rather than silently dropping anything.
                 fallback_lines = [
                     f"**#{index} {path_label}**",
                     *summary_lines,

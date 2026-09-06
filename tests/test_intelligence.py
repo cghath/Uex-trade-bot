@@ -566,6 +566,42 @@ def test_terminal_market_shifts_new_market_uses_earliest_not_most_recent_fallbac
     asyncio.run(run())
 
 
+def test_terminal_market_shifts_never_mixes_measurements_from_two_baseline_rows(tmp_path):
+    """Follow-up review finding: the fix for the 3-observation ordering bug picked
+    previous_supply and previous_demand independently via COALESCE(pwb.scu_buy,
+    iwe.scu_buy) / COALESCE(pwb.scu_sell, iwe.scu_sell) - column by column, not row by
+    row. Whenever the real pre-window baseline row exists but has just ONE of its two
+    measurements NULL, this silently borrowed the OTHER measurement from a completely
+    different row (the in-window fallback), presenting one "since baseline" comparison
+    built from two different points in time. With a 48h-old baseline (supply unknown,
+    demand 500) and in-window rows at -3h (600, 400) and -1h/latest (200, 300), the buggy
+    query reported previous_supply=600 (borrowed from -3h) alongside previous_demand=500
+    (correctly from the real 48h baseline) - a fabricated -400 supply_change that doesn't
+    describe any single real comparison. The fix selects the baseline as one row: a
+    genuinely unknown measurement on the chosen row stays unknown (None), and its
+    corresponding *_change is None rather than a number computed against a substituted
+    value."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        async with db.connect() as sqlite:
+            for hours, supply, demand in [(48, None, 500), (3, 600, 400), (1, 200, 300)]:
+                await sqlite.execute(
+                    """INSERT INTO terminal_market_observations
+                       (id_commodity,id_terminal,observed_at,commodity_name,terminal_name,scu_buy,scu_sell)
+                       VALUES (1,1,datetime('now',?),'Ore','Terminal',?,?)""",
+                    (f"-{hours} hours", supply, demand),
+                )
+            await sqlite.commit()
+        (shift,) = await db.get_terminal_market_shifts()
+        assert shift["previous_supply"] is None, shift
+        assert shift["supply_change"] is None, shift
+        assert shift["previous_demand"] == 500, shift
+        assert shift["demand_change"] == -200, shift
+
+    asyncio.run(run())
+
+
 def test_marketplace_tier_history_seeds_an_existing_current_state(tmp_path):
     async def run():
         db = _make_db(tmp_path)

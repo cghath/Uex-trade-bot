@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from unittest.mock import AsyncMock
 
 from cryptography.fernet import Fernet
 import discord
@@ -20,6 +21,8 @@ from bot.cogs import prices as prices_module
 from bot.cogs.prices import Prices
 from bot.db.database import Database
 from bot.uex.client import UexClient
+from bot.uex.mixed_routes import MixedCargoItem
+from bot.uex.multi_stop_routes import MultiStopLeg, MultiStopRoute
 
 
 class _FakeResponse:
@@ -321,6 +324,75 @@ def test_multi_stop_route_fallback_preserves_approximation_disclosure(tmp_path):
             )
         finally:
             await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_multi_stop_route_falls_back_to_plain_text_when_only_the_warnings_section_overflows(monkeypatch):
+    """Follow-up review finding: _add_chunked_fields' A08 fix (see test_prices_chunked_
+    fields.py) made adding a logical field all-or-nothing, which is exactly right for a
+    per-leg field - but /multi-stop-route also uses it for one call covering the ENTIRE
+    accumulated warnings section, and ignored its return value. If the leg fields + route
+    summary already consume most of the budget, the warnings section can fail to fit
+    entirely - the function then adds NOTHING, the route embed (legs + summary, no
+    warnings) is still small enough to send successfully, and every cargo-risk/cross-
+    system warning silently vanishes with no exception ever raised to trigger the existing
+    too-large fallback. Fixed by checking the warnings call's own return value and
+    manually entering the same plain-text fallback (which independently rebuilds the full
+    warning list) when it comes back False, exactly as if the whole embed had been
+    rejected. Reproduced here with a controlled 3-leg, 3-commodity-per-leg route - not
+    real UEX data - built to force this specific budget interaction, per the review's own
+    approach."""
+    async def run():
+        legs = []
+        for leg in range(3):
+            source = dict(
+                scu_buy=10, status_buy=1, is_illegal=1, is_explosive=1, is_volatile_time=1,
+                is_volatile_qt=1, is_buggy=1, max_container_size=8, has_freight_elevator=0,
+                has_loading_dock=0, is_player_owned=1, is_refuel=1, is_repair=1, is_cargo_center=1,
+                star_system_name="Stanton" if leg % 2 == 0 else "Pyro",
+            )
+            destination = dict(
+                source, scu_sell=10, status_sell=1,
+                star_system_name="Pyro" if leg % 2 == 0 else "Stanton",
+            )
+            cargo = tuple(
+                MixedCargoItem(i, f"Commodity {i}", 10, 100, 200, 10, 1000, 1000, source, destination)
+                for i in range(1, 4)
+            )
+            legs.append(MultiStopLeg(leg + 1, f"Station {leg + 1}", leg + 2, f"Station {leg + 2}", cargo, 3000, 6000, 3000, True))
+        route = MultiStopRoute(tuple(legs), 3000, 12000, 9000)
+        monkeypatch.setattr(prices_module, "build_multi_stop_routes", lambda *a, **k: [route])
+
+        bot = type("FakeBot", (), {})()
+        bot.db = type("FakeDb", (), {})()
+        bot.db.get_default_ship = AsyncMock(return_value="Ship")
+        bot.db.get_mixed_route_market_rows = AsyncMock(return_value=[])
+        bot.db.get_terminal_data_health_by_ids = AsyncMock(return_value={
+            i: dict(
+                terminal_name=f"Station {i}", last_update_days=5, last_update_days_limit=3,
+                last_update_days_percentage=0, prices_updated_percentage=0,
+            )
+            for i in range(1, 5)
+        })
+        bot.uex = type("FakeUex", (), {})()
+        bot.uex.get_vehicles = AsyncMock(return_value=[dict(name="Ship", scu=100)])
+        bot.uex.get_terminal_distance = AsyncMock(return_value=dict(distance=10))
+        cog = Prices.__new__(Prices)
+        cog.bot = bot
+        cog._get_status_lookup = AsyncMock(return_value={
+            "buy": {1: dict(name_short="High Supply")}, "sell": {1: dict(name_short="Low Inventory")},
+        })
+        interaction = _FakeInteraction(1)
+
+        await cog.multi_stop_route.callback(cog, interaction)
+
+        assert interaction.followup.sent, "expected at least one followup"
+        for _, kwargs in interaction.followup.sent:
+            assert "embed" not in kwargs, "an embed missing its warnings must not be sent as if complete"
+        fallback_text = "\n".join(kwargs.get("content", "") for _, kwargs in interaction.followup.sent)
+        assert "Cargo risk:" in fallback_text, fallback_text
+        assert "crosses systems" in fallback_text, fallback_text
 
     asyncio.run(run())
 
