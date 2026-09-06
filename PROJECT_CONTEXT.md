@@ -1599,6 +1599,112 @@ they're in sync).
     command tests to read from `interaction.followup.send` instead of
     `interaction.response.send_message` now that the command defers first). 322 tests
     passing.
+56. **User-initiated investigation, not an audit: "why does /multi-stop-route's ROI go
+    down as budget goes up?" led to a real algorithmic bug in candidate-terminal
+    selection, not just expected diminishing returns.** Two real live-Discord screenshots
+    for the same ship (Ironclad Assault, 1440 SCU) showed a no-budget chain (35.9% ROI)
+    that was WORSE on both profit and ROI than an explicit 2,000,000-budget chain (170.8%
+    ROI) - not the shape "more budget dilutes margin but raises profit" would predict, so
+    it was investigated as a suspected search defect rather than accepted as "just
+    diminishing returns."
+
+    **Confirmed diminishing returns is real, using the local dev market snapshot**: for a
+    fixed ship, `build_multi_stop_routes`'s top result's ROI declines steadily as budget
+    rises, then goes fully flat (byte-for-byte identical route) once real stock/demand/
+    cargo capacity is saturated - 96 SCU ship plateaus above ~2.5M aUEC at 80.5% ROI, 384
+    SCU above ~5M at 55.5%. Explicitly ruled out `max_commodities` (the per-leg 3-slot
+    cap) as a contributing cause by re-running with 6 and 10 - identical results, since
+    the winning routes never used more than 2 commodities per leg anyway.
+
+    **But the two screenshots' specific inversion was a different, real bug**: rank_edges
+    (`bot/uex/multi_stop_routes.py`) only ever ranked candidate terminals at "unlimited
+    budget" + "exactly the caller's requested budget" (or just unlimited, when no budget
+    was given). Confirmed on real data that once a checkpoint budget is large enough that
+    every edge's own allocation is already capped by real stock/demand rather than by
+    that budget, its ranking becomes IDENTICAL to the unlimited one - measured 20/20
+    top-20 overlap between the 10M-budget ranking and the unlimited ranking, vs only 4/20
+    at 5M. This permanently excludes any edge that only ranks well at a MODERATE budget,
+    even when it leads to a strictly better route: budget=5,000,000 found a chain with
+    BOTH higher profit and higher ROI (3.03M profit, 79.8% ROI) than budget=10,000,000 or
+    no budget at all (2.86M profit, 32.6% ROI) against the identical market snapshot -
+    proof this was a search defect, not real economics, since a bigger budget should
+    never make the best ACHIEVABLE profit go down.
+
+    **Fix has two parts, because the first alone wasn't enough**: (1) rank candidate
+    edges at a spread of budget checkpoints (0.1x/0.25x/0.5x/1.0x of a ceiling) instead of
+    just two fixed points - with a real budget, the ceiling is that budget; with none, a
+    data-derived ceiling from the dominant top edges' own unlimited-budget saturation
+    investment. (2) A separate profit-per-aUEC-invested ("efficiency") ranking, always
+    included regardless of budget. Part (2) was necessary because part (1) alone has a
+    self-referential blind spot for the no-budget case: fractions of "however much the
+    CURRENTLY-DOMINANT edges can absorb" still favor those same edges in smaller
+    quantities (their economics scale linearly), so they're never actually excluded by any
+    fraction of their own derived ceiling - confirmed by a regression test that failed
+    against the checkpoint-only fix (a tiny-but-highly-efficient synthetic chain stayed
+    invisible at every checkpoint) and only passed once the scale-invariant efficiency
+    ranking was added. After both fixes, profit at the top result is now correctly
+    monotonically increasing with budget on the real snapshot (2M < 5M < 10M < unlimited),
+    and ROI declines smoothly instead of dipping and recovering - a diminishing-returns
+    chart built on top of this search would now be showing a real economic curve, not a
+    search artifact.
+
+    Verified with 2 new synthetic regression tests (21-decoy-edge constructions mirroring
+    the existing `test_a_real_budget_ranking_keeps_an_affordable_chain_from_being_crowded_
+    out` pattern), both confirmed to fail against the pre-fix code and pass with the fix.
+    Real-data verification, not just synthetic: re-ran the exact budget sweep against the
+    local dev snapshot before and after - top-result profit went from non-monotonic
+    (unlimited budget's 2.86M was WORSE than 5M's 3.03M) to monotonically increasing
+    (2M < 5M < 10M < unlimited), exactly matching the mechanism found. Known tradeoff:
+    `/multi-stop-route` now takes noticeably longer (~4-5.5s measured on real data vs
+    faster before) since candidate ranking now runs up to 5 passes instead of 1-2 - left
+    as-is since the command is already deferred/offloaded to a worker thread and the
+    correctness gain (recommendations that are no longer sometimes strictly worse than
+    achievable) was judged worth it; revisit if this becomes a real user complaint.
+    324 tests passing.
+57. **`/diminishing-returns` (new command, follow-up to entry 56) - charts a ship's
+    multi-stop route ROI against starting budget, and found one more real gap in entry
+    56's own fix while building it.** `bot/uex/multi_stop_routes.py` gained
+    `sweep_budget_curve()` (geometric budget sweep - 3x growth, up to 12 checkpoints,
+    starting at 5,000 aUEC - with early exit once two consecutive checkpoints return the
+    byte-for-byte identical best chain) and `find_diminishing_returns_budget()` (the
+    smallest swept budget whose result already matches the largest one). `bot/uex/
+    charts.py` gained `render_budget_curve_chart()` (ROI-only y-axis, log-scale budget
+    x-axis, matching the house dark-theme dataviz style - profit/investment deliberately
+    left off the chart itself since they're on a wildly different scale than a
+    percentage; shown as embed text fields for the first/last swept points instead). The
+    new `/diminishing-returns` command (`bot/cogs/prices.py`) mirrors `/multi-stop-route`'s
+    own ship/market-row/capital-access resolution, offloads the sweep to a worker thread
+    (it calls `build_multi_stop_routes` up to a dozen times), and sends a status message
+    first since a full sweep can take up to a minute.
+
+    **Found while smoke-testing against real data, before shipping**: entry 56's fix
+    reduces but does not fully eliminate its own failure mode - real collected data
+    showed a 96 SCU ship's swept profit going from 1,036,624 at a 3,645,000 budget DOWN
+    to 961,983 at 10,935,000, because each `sweep_budget_curve` call to
+    `build_multi_stop_routes` ranks candidates independently for its OWN specific budget,
+    and the fraction checkpoints at one budget can still occasionally miss a combination
+    that a smaller budget's own fractions happened to find - entry 56's fix narrowed this
+    gap considerably (confirmed: it no longer reproduces for the specific 2M/5M/10M/
+    unlimited checkpoints from that entry's own investigation) but a sweep spanning many
+    more, closer-together checkpoints found a case it still doesn't fully close. Since a
+    bigger starting budget can never truly make the best ACHIEVABLE profit go down (you
+    can always choose not to spend the extra capital), `sweep_budget_curve` now applies
+    `_enforce_monotonic_profit` as a final pass: whenever a point's raw search result is
+    worse than an earlier, smaller budget's already-found result, it reports that earlier
+    result's profit/investment/ROI/stops for the larger budget instead - not hiding the
+    residual heuristic imperfection, but reflecting the economic fact that whatever a
+    smaller budget already achieves remains achievable at any larger one too. Verified
+    with a regression test using a monkeypatched `build_multi_stop_routes` (deterministic
+    hand-picked profits per budget, including a real dip) rather than trying to
+    synthetically reconstruct the exact real-data conditions that produced one - confirmed
+    to fail without `_enforce_monotonic_profit` and pass with it. Re-ran the real-data
+    smoke test after the fix: both ship sizes now show correctly monotonic profit curves.
+
+    7 new tests (sweep plateau/early-exit/max-points behavior, `find_diminishing_returns_
+    budget` correctness, the monotonic-enforcement regression, and one cog-level test
+    confirming the command sends a chart embed with a plateau note). Command-surface
+    limits checked (name 19/32, all descriptions under 100 chars) and confirmed live:
+    `Synced 60 commands` (was 59) with no errors. 331 tests passing.
 
 ## Where to look for what
 
@@ -1884,17 +1990,24 @@ guessed at.
   branch. Local (PC) and the Pi's databases have been fully merged at least twice now; the
   established practice is to back up both sides before any such merge and pull the Pi's
   backup down to the PC afterward, so nothing valuable lives only on the Pi's disk. The full
-  suite has 322 passing tests (see entries 45-55). Two separate review chains so far:
-  the original audit-fix chain (entries 45-51 - 15 original findings plus 20 more gaps
-  across five follow-up rounds, four external and one self-directed, all fixed) and a
-  newer one specific to the trading-preferences feature work (entries 52-55 - Saved
-  Trading Preferences, default-ship consolidation, load-limiting explanations, and a
-  first review round against all three that found 4 more P2 gaps, also fixed) - don't
-  conflate the two chains' round/gap counts, they're reviewing different bodies of work.
-  The Pi was brought up to `8bc2e8c` (entry 53's commit) via `scripts/deploy_and_backup.sh`
-  on 2026-09-06 - entries 54 and 55 (not yet committed as of this writing) have NOT been
-  deployed, so the Pi is currently two commits behind `origin/TestBranch` once entry 55's
-  fixes are committed. Re-check git log on the Pi before assuming either point is still
+  suite has 331 passing tests (see entries 45-57). Multiple separate threads so far, kept
+  distinct rather than conflated into one round/gap count: the original audit-fix chain
+  (entries 45-51 - 15 original findings plus 20 more gaps across five follow-up rounds,
+  four external and one self-directed, all fixed), the trading-preferences feature chain
+  (entries 52-55 - Saved Trading Preferences, default-ship consolidation, load-limiting
+  explanations, and a first review round against all three that found 4 more P2 gaps,
+  also fixed), a documentation-only addition to `CONTRIBUTING.md` (written in a separate
+  session, not by this one - reviewed for soundness, no code implications), and a
+  user-initiated investigation into `/multi-stop-route`'s budget/ROI relationship
+  (entries 56-57 - a real candidate-selection bug found and fixed, then a follow-up
+  `/diminishing-returns` command whose own development found one more gap in that same
+  fix). The Pi was brought up to `f3fa649` (entry 55's commit) via
+  `scripts/deploy_and_backup.sh` on 2026-09-06 - the `CONTRIBUTING.md` commit
+  (`5082f3e`, docs-only, no deploy needed) and entries 56-57 (not yet committed as of
+  this writing) have NOT been
+  deployed, so the Pi is currently one commit behind `origin/TestBranch` (the docs-only
+  one) plus however many entries 56-57 add once committed. Re-check git log on the Pi
+  before assuming either point is still
   true, since it will drift the moment another round of fixes or features is committed
   without a matching deploy. The audit-fix chain alone has now run FIVE review rounds past
   the original audit, each finding real gaps in the round before it (5, then 2, then 9,

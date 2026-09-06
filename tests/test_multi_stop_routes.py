@@ -1,6 +1,12 @@
 """Tests for multi-stop (2-3 leg) trade chain building."""
 import bot.uex.multi_stop_routes as multi_stop_routes
-from bot.uex.multi_stop_routes import build_multi_stop_routes
+from bot.uex.multi_stop_routes import (
+    MultiStopLeg,
+    MultiStopRoute,
+    build_multi_stop_routes,
+    find_diminishing_returns_budget,
+    sweep_budget_curve,
+)
 
 
 def _row(commodity_id, terminal_id, name, terminal, **values):
@@ -149,6 +155,72 @@ def test_a_real_budget_ranking_keeps_an_affordable_chain_from_being_crowded_out(
     assert any(route.stops == (1, 2, 3) for route in routes)
 
 
+def test_an_intermediate_budget_checkpoint_keeps_a_chain_from_being_crowded_out_everywhere():
+    """Regression: ranking candidate edges at only "unlimited" + "exactly the requested
+    budget" still leaves a real blind spot. Confirmed on a live route recommendation: for
+    one real ship/market snapshot, budget=5,000,000 found a chain with BOTH higher profit
+    and higher ROI than budget=10,000,000 or no budget at all - not because 5M hit a real
+    economic sweet spot, but because by 10M/unlimited, every edge's own allocation was
+    already capped by real stock/demand rather than by budget, so the "requested budget"
+    ranking had collapsed to be IDENTICAL to the unlimited one (confirmed 20/20 overlap),
+    permanently excluding the terminals the better 5M-anchored chain needed.
+
+    Reproduced synthetically here: 21 decoy edges each need 50,000 aUEC/unit - completely
+    unaffordable (0 units) at a tenth of the requested budget, but hugely profitable at
+    BOTH the full requested budget and unlimited budget. A real, valid 2-leg chain scores
+    a tiny profit by comparison, but is the ONLY thing rankable at that smaller
+    checkpoint (decoys score zero there) - it must not be excluded from the candidate
+    window just because it's dominated at every checkpoint the old two-ranking scheme
+    actually checked.
+    """
+    rows = []
+    next_id = 100
+    for i in range(21):
+        origin_id, destination_id = next_id, next_id + 1
+        next_id += 2
+        rows.append(_row(1000 + i, origin_id, f"Decoy{i}", f"T{origin_id}", price_buy=50000, scu_buy=1000))
+        rows.append(_row(1000 + i, destination_id, f"Decoy{i}", f"T{destination_id}", price_sell=100000, scu_sell=1000))
+    rows += [
+        _row(1, 1, "A", "Origin", price_buy=10, scu_buy=10),
+        _row(1, 2, "A", "Midpoint", price_sell=30, scu_sell=10),
+        _row(2, 2, "B", "Midpoint", price_buy=5, scu_buy=10),
+        _row(2, 3, "B", "Final", price_sell=8, scu_sell=10),
+    ]
+    routes = build_multi_stop_routes(rows, ship_capacity_scu=10, budget=100_000)
+    assert any(route.stops == (1, 2, 3) for route in routes)
+
+
+def test_no_budget_specified_still_finds_a_chain_only_visible_via_efficiency_ranking():
+    """Same failure mode as above, but for the 'no budget given at all' path - which used
+    to skip straight to ranking purely at unlimited budget, the single worst case for
+    this blind spot (confirmed live: the no-budget recommendation for a real ship was
+    strictly worse, on both profit and ROI, than the same search run with an explicit
+    moderate budget). This case specifically defeats the budget-checkpoint fix above: with
+    no real budget to anchor fractions to, the derived ceiling comes from the DOMINANT
+    (decoy) edges' own saturation investment, which is self-referential - a fraction of a
+    decoy's own investment still buys a fractional unit of that same decoy (its economics
+    scale linearly), so decoys are never excluded by any fraction of their own ceiling.
+    Both real edges here have a better profit-per-aUEC-invested ratio (2.0) than the
+    decoys (1.0), so the separate efficiency ranking (not tied to any absolute dollar
+    checkpoint) is what actually has to surface them.
+    """
+    rows = []
+    next_id = 100
+    for i in range(21):
+        origin_id, destination_id = next_id, next_id + 1
+        next_id += 2
+        rows.append(_row(1000 + i, origin_id, f"Decoy{i}", f"T{origin_id}", price_buy=50000, scu_buy=1000))
+        rows.append(_row(1000 + i, destination_id, f"Decoy{i}", f"T{destination_id}", price_sell=100000, scu_sell=1000))
+    rows += [
+        _row(1, 1, "A", "Origin", price_buy=10, scu_buy=10),
+        _row(1, 2, "A", "Midpoint", price_sell=30, scu_sell=10),
+        _row(2, 2, "B", "Midpoint", price_buy=5, scu_buy=10),
+        _row(2, 3, "B", "Final", price_sell=15, scu_sell=10),
+    ]
+    routes = build_multi_stop_routes(rows, ship_capacity_scu=10)
+    assert any(route.stops == (1, 2, 3) for route in routes)
+
+
 def test_route_is_exact_reflects_the_least_exact_leg():
     """Regression: the exactness disclosure previously lived only in the cog, and only
     checked ship capacity against EXACT_SEARCH_MAX_CAPACITY - MultiStopRoute now carries
@@ -188,3 +260,109 @@ def test_exploration_visits_the_most_promising_edges_first_not_insertion_order(m
     ]
     routes = build_multi_stop_routes(rows, ship_capacity_scu=10, limit=5)
     assert any(route.stops == (1, 2, 999) for route in routes)
+
+
+# -- budget-curve sweep: where does more capital stop helping? -------------------------
+
+
+def _stock_limited_chain_rows(stock=20):
+    """A 2-leg chain whose stock caps out fast, so a budget sweep should plateau quickly
+    once the swept budget exceeds what real stock/demand can absorb."""
+    return [
+        _row(1, 1, "Stileron", "A", price_buy=10, scu_buy=stock),
+        _row(1, 2, "Stileron", "B", price_sell=50, scu_sell=stock),
+        _row(2, 2, "Cobalt", "B", price_buy=20, scu_buy=stock),
+        _row(2, 3, "Cobalt", "C", price_sell=90, scu_sell=stock),
+    ]
+
+
+def test_sweep_budget_curve_plateaus_once_stock_is_saturated():
+    rows = _stock_limited_chain_rows(stock=20)
+    points = sweep_budget_curve(rows, ship_capacity_scu=20, starting_budget=100, growth_factor=3.0)
+    # The chain needs at most 20*10 = 200 aUEC for leg 1 - well before the sweep reaches
+    # anything enormous, profit/investment must stop changing.
+    assert points[-2].profit == points[-1].profit
+    assert points[-2].investment == points[-1].investment
+    # Must not have swept all the way to max_points (12) - the whole point of early exit.
+    assert len(points) < 12
+
+
+def test_sweep_budget_curve_profit_never_decreases_as_budget_grows():
+    rows = _stock_limited_chain_rows(stock=50)
+    points = sweep_budget_curve(rows, ship_capacity_scu=50, starting_budget=50, growth_factor=2.0)
+    for earlier, later in zip(points, points[1:]):
+        assert later.profit >= earlier.profit - 1e-9, (earlier, later)
+
+
+def test_sweep_budget_curve_reports_best_so_far_when_a_larger_budget_finds_less(monkeypatch):
+    """build_multi_stop_routes' candidate ranking is a bounded heuristic - each sweep
+    point ranks candidates independently for its own specific budget, and confirmed on
+    real collected data, a LARGER budget's own fraction checkpoints can occasionally miss
+    a combination that a SMALLER budget's checkpoints already found (one real ship's
+    sweep found less profit at 10,935,000 than it had already found at 3,645,000). Since
+    a bigger budget can never truly make the best ACHIEVABLE profit go down (you can
+    always choose not to spend the extra capital), the sweep must report the
+    best-so-far result instead of a visibly-impossible dip."""
+    def fake_route(profit, investment):
+        leg = MultiStopLeg(1, "A", 2, "B", (), investment, investment + profit, profit, True)
+        return MultiStopRoute(legs=(leg,), investment=investment, revenue=investment + profit, profit=profit)
+
+    fake_routes_by_budget = {
+        100: [fake_route(500, 100)],
+        300: [fake_route(1000, 300)],
+        900: [fake_route(700, 900)],  # a real dip: less profit at a bigger budget
+    }
+
+    def fake_build(rows, *, budget, **kwargs):
+        return fake_routes_by_budget.get(int(budget), [])
+
+    monkeypatch.setattr(multi_stop_routes, "build_multi_stop_routes", fake_build)
+    points = sweep_budget_curve(
+        [], ship_capacity_scu=10, starting_budget=100, growth_factor=3.0, max_points=3
+    )
+    assert [p.budget for p in points] == [100, 300, 900]
+    assert [p.profit for p in points] == [500, 1000, 1000]
+    # The dipped point reports the SMALLER budget's own better result, not a fabricated
+    # investment/ROI pair invented for the larger budget.
+    assert points[2].investment == 300
+    assert points[2].roi_pct == points[1].roi_pct
+
+
+def test_sweep_budget_curve_respects_max_points_when_never_plateauing():
+    # A single commodity with effectively unlimited stock and no cargo-space cap growing
+    # the ship never saturates within a reasonable sweep - must still stop at max_points,
+    # not run forever.
+    rows = [
+        _row(1, 1, "Endless", "A", price_buy=10, scu_buy=10**9),
+        _row(1, 2, "Endless", "B", price_sell=20, scu_sell=10**9),
+        _row(2, 2, "Endless2", "B", price_buy=10, scu_buy=10**9),
+        _row(2, 3, "Endless2", "C", price_sell=20, scu_sell=10**9),
+    ]
+    points = sweep_budget_curve(
+        rows, ship_capacity_scu=10**9, starting_budget=100, growth_factor=2.0, max_points=5
+    )
+    assert len(points) == 5
+
+
+def test_find_diminishing_returns_budget_identifies_the_plateau_start():
+    rows = _stock_limited_chain_rows(stock=20)
+    points = sweep_budget_curve(rows, ship_capacity_scu=20, starting_budget=50, growth_factor=2.0)
+    plateau_budget = find_diminishing_returns_budget(points)
+    assert plateau_budget is not None
+    # Every point from the plateau budget onward must share the final profit/investment;
+    # every point before it must not (otherwise an earlier, smaller budget would be the
+    # true plateau start instead).
+    final = (round(points[-1].profit, 2), round(points[-1].investment, 2))
+    for point in points:
+        signature = (round(point.profit, 2), round(point.investment, 2))
+        if point.budget >= plateau_budget:
+            assert signature == final
+        else:
+            assert signature != final
+
+
+def test_find_diminishing_returns_budget_is_none_for_a_single_point():
+    assert find_diminishing_returns_budget([]) is None
+    rows = _stock_limited_chain_rows()
+    points = sweep_budget_curve(rows, ship_capacity_scu=20, starting_budget=50, max_points=1)
+    assert find_diminishing_returns_budget(points) is None

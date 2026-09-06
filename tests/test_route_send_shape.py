@@ -124,6 +124,25 @@ def test_multi_stop_route_sends_one_message_per_route_not_batched(tmp_path):
     asyncio.run(run())
 
 
+def test_diminishing_returns_sends_a_chart_embed_with_a_plateau_note(tmp_path):
+    async def run():
+        interaction = await _run_command(
+            tmp_path, "diminishing_returns.sqlite3", _MULTI_STOP_ROWS,
+            lambda cog, interaction: cog.diminishing_returns.callback(cog, interaction, ship="TestShip"),
+        )
+        assert interaction.followup.sent, "expected at least one followup"
+        # First followup is the "running a sweep" status message; the sweep's own real
+        # stock/demand (10 SCU per leg in this fixture) should plateau within a couple of
+        # budget checkpoints, so the final followup carries the actual chart embed.
+        final_args, final_kwargs = interaction.followup.sent[-1]
+        assert "embed" in final_kwargs, interaction.followup.sent
+        assert "file" in final_kwargs
+        embed = final_kwargs["embed"]
+        assert "Diminishing returns begin around" in embed.description
+
+    asyncio.run(run())
+
+
 class _EmbedTooLargeFollowup(_FakeFollowup):
     """Simulates Discord rejecting the embed (too large) so the plain-text fallback path
     in multi_stop_route actually runs, the same way a real oversized route would."""

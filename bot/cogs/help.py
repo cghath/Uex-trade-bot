@@ -19,6 +19,7 @@ HIDDEN_COMMANDS = {"marketplace-index-status"}
 CATEGORIES: list[tuple[str, str, list[str]]] = [
     ("💰 Prices & Routes", "Terminal prices, profitable hauls, and ranked live routes.", [
         "price", "best-route", "mixed-routes", "multi-stop-route", "top-routes", "terminal-history",
+        "diminishing-returns",
     ]),
     ("📊 Commodity Trends", "Trade volume, price movement, and commodity price charts.", [
         "trending", "movers", "commodity-history",

@@ -86,6 +86,11 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
   remaining capacity/budget at pick time, not the final totals - see
   `PROJECT_CONTEXT.md` entry 54 for the real misattribution bug this distinction caught
   before it shipped.
+- [x] **`/diminishing-returns` chart**: Shipped 2026-09-06, user-initiated (not originally
+  on this list). Sweeps a ship's starting budget geometrically against `/multi-stop-route`
+  and charts ROI vs. budget, marking where more capital stops changing the recommendation
+  at all - real stock/demand/cargo capacity, not a code limit. Building it surfaced one
+  more real gap in the candidate-selection fix below (`PROJECT_CONTEXT.md` entries 56-57).
 - [ ] **Evidence-Level Labels** *(complexity: Low)*: Distinguish current reported stock,
   older observations, inferred trends, and approximate calculations on every
   recommendation, and make "no information" look different from "no demand." Builds on

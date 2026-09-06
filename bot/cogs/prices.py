@@ -19,7 +19,8 @@ from bot.uex.ships import estimate_route_cargo, resolve_ship
 from bot.uex.status import build_status_lookup, resolve_status_label
 from bot.uex.trading import best_buy_locations, best_routes, best_sell_locations
 from bot.uex.mixed_routes import build_mixed_routes, format_limiting_factors, requires_capital_cargo_access
-from bot.uex.multi_stop_routes import build_multi_stop_routes
+from bot.uex.multi_stop_routes import build_multi_stop_routes, find_diminishing_returns_budget, sweep_budget_curve
+from bot.uex.charts import render_budget_curve_chart
 from bot.uex.trading_preferences import describe_active_preferences
 
 logger = logging.getLogger("uexbot.prices")
@@ -1209,6 +1210,149 @@ class Prices(commands.Cog):
                 ]
                 for chunk in _chunk_lines(fallback_lines, max_length=1900):
                     await interaction.followup.send(content=chunk)
+
+    @app_commands.command(
+        name="diminishing-returns",
+        description="Chart how a multi-stop chain's ROI changes as your starting budget grows.",
+    )
+    @app_commands.describe(
+        ship="Optional: use a specific ship instead of your saved default",
+        space_only="Exclude surface terminals; require every stop to be a confirmed space station",
+        auto_load_only="Only consider chains where every stop offers UEX's auto-load",
+        system="Optional: require every stop in the chain to be in this star system",
+    )
+    @app_commands.rename(space_only="space-only", auto_load_only="auto-load-only")
+    @app_commands.choices(system=SYSTEM_CHOICES)
+    @app_commands.autocomplete(ship=ship_name_autocomplete)
+    async def diminishing_returns(
+        self,
+        interaction: discord.Interaction,
+        ship: str | None = None,
+        space_only: bool | None = None,
+        auto_load_only: bool | None = None,
+        system: app_commands.Choice[str] | None = None,
+    ) -> None:
+        await interaction.response.defer()
+        prefs = await self.bot.db.get_trading_preferences(interaction.user.id)
+        if space_only is None:
+            space_only = prefs["space_only"]
+        if auto_load_only is None:
+            auto_load_only = prefs["auto_load_only"]
+        system_value = system.value if system else prefs["preferred_system"]
+
+        ship_query = ship or await self.bot.db.get_default_ship(interaction.user.id)
+        if not ship_query:
+            await interaction.followup.send(
+                "Set a default ship with `/set-default-ship`, or provide the `ship` option, "
+                "so this can be measured against a real cargo limit."
+            )
+            return
+        try:
+            vehicles = await self.bot.uex.get_vehicles()
+        except UexApiError as exc:
+            await interaction.followup.send(describe_uex_api_error(exc))
+            return
+        ship_vehicle = resolve_ship(vehicles, ship_query)
+        if not ship_vehicle or not ship_vehicle.get("scu"):
+            await interaction.followup.send(
+                f"I couldn't resolve a cargo capacity for **{ship_query}**. "
+                "Choose a ship from autocomplete or update `/set-default-ship`."
+            )
+            return
+
+        market_rows = await self.bot.db.get_mixed_route_market_rows()
+        capital_access_only = requires_capital_cargo_access(ship_vehicle) or prefs["capital_ship_access"]
+        if capital_access_only:
+            try:
+                stations = await self.bot.uex.get_space_stations()
+            except UexApiError as exc:
+                await interaction.followup.send(
+                    "I couldn't verify XL-hangar/loading-dock access for this capital ship, "
+                    f"so I won't measure against potentially unusable routes: {exc}"
+                )
+                return
+            stations_by_id = {
+                int(station["id"]): station
+                for station in stations
+                if station.get("id") is not None and int(station["id"]) > 0
+            }
+            for row in market_rows:
+                station_id = int(row.get("id_space_station") or 0)
+                station = stations_by_id.get(station_id, {})
+                row["station_pad_types"] = station.get("pad_types")
+                row["station_has_loading_dock"] = station.get("has_loading_dock")
+
+        await interaction.followup.send(
+            "Running a budget sweep against the current market snapshot - this runs the "
+            "full route search several times over, so it can take up to a minute..."
+        )
+        # Same CPU-bound-offload reasoning as /mixed-routes and /multi-stop-route, but more
+        # pronounced here: this calls build_multi_stop_routes up to a dozen times in a row.
+        points = await asyncio.to_thread(
+            sweep_budget_curve,
+            market_rows,
+            ship_capacity_scu=float(ship_vehicle["scu"]),
+            space_only=space_only,
+            capital_access_only=capital_access_only,
+            auto_load_only=auto_load_only,
+            system=system_value,
+        )
+        plottable = [p for p in points if p.investment > 0]
+        if len(plottable) < 2:
+            await interaction.followup.send(
+                f"Couldn't find enough profitable multi-stop chains for "
+                f"**{ship_vehicle.get('name', ship_query)}** to chart a budget curve right now."
+            )
+            return
+
+        diminishing_returns_budget = find_diminishing_returns_budget(plottable)
+        chart_buffer = render_budget_curve_chart(
+            ship_name=ship_vehicle.get("name", ship_query),
+            points=plottable,
+            diminishing_returns_budget=diminishing_returns_budget,
+        )
+        if chart_buffer is None:
+            await interaction.followup.send("Couldn't render a chart from this ship's budget sweep.")
+            return
+
+        file = discord.File(chart_buffer, filename="budget_curve.png")
+        embed = discord.Embed(
+            title=f"{ship_vehicle.get('name', ship_query)} — Diminishing returns",
+            color=discord.Color.blurple(),
+        )
+        embed.set_image(url="attachment://budget_curve.png")
+        first, last = plottable[0], plottable[-1]
+        embed.add_field(
+            name=f"At {first.budget:,.0f} aUEC",
+            value=f"Profit: **{first.profit:,.0f}** · ROI: **{first.roi_pct:.1f}%**",
+            inline=True,
+        )
+        embed.add_field(
+            name=f"At {last.budget:,.0f} aUEC",
+            value=f"Profit: **{last.profit:,.0f}** · ROI: **{last.roi_pct:.1f}%**",
+            inline=True,
+        )
+        if diminishing_returns_budget is not None:
+            note = (
+                f"Diminishing returns begin around **{diminishing_returns_budget:,.0f} aUEC** - "
+                "beyond that, real stock, demand, or cargo space limits the same chain "
+                "regardless of how much more you bring."
+            )
+        else:
+            note = (
+                "Still improving at the largest budget swept - real market limits may sit "
+                "beyond this range, or this ship/route combination has unusually deep opportunities."
+            )
+        embed.description = note
+        footer = "Collected UEX data · one route search per budget checkpoint, stops early once it plateaus"
+        preferences_note = describe_active_preferences(
+            space_only=space_only, capital_ship_access=capital_access_only,
+            auto_load_only=auto_load_only, system=system_value,
+        )
+        if preferences_note:
+            footer += " · " + preferences_note
+        embed.set_footer(text=footer)
+        await interaction.followup.send(embed=embed, file=file)
 
 
 async def setup(bot: commands.Bot) -> None:

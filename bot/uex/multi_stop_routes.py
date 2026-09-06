@@ -115,43 +115,91 @@ def build_multi_stop_routes(
         for key, pairs in opportunities.items()
     }
 
-    # Rank candidate edges TWICE and take the union - neither ranking alone is safe:
-    # - At unlimited capital, so an edge that's unaffordable at the start but would
-    #   become affordable once an earlier leg's profit compounds the running budget is
-    #   still *reachable* by the DFS below (it's excluded later, correctly, only if the
-    #   real path-dependent budget never actually gets there).
-    # - At the caller's real starting budget, so edges that are immediately affordable
-    #   right now can't be crowded out of the bounded top-MAX_CANDIDATE_EDGES window by
-    #   edges that only look enormous assuming infinite capital nobody actually has -
-    #   reproduced with 20+ such "expensive-at-infinite-budget" decoys pushing a
-    #   genuinely affordable chain out of the candidate set entirely.
+    # Rank candidate edges at a SPREAD of budget checkpoints and take the union, not just
+    # "unlimited" + "exactly what the caller asked for" - two checkpoints alone still
+    # leaves a real blind spot: once a checkpoint budget is large enough that every edge's
+    # own allocation is already capped by real stock/demand/cargo space rather than by
+    # that budget, its ranking becomes IDENTICAL to the unlimited one (confirmed on real
+    # collected data: the requested-budget ranking at 10M had 20/20 overlap with the
+    # unlimited ranking, vs only 4/20 at 5M) - permanently excluding any edge that only
+    # ranks well at a MODERATE budget, even when it leads to a strictly better route.
+    # Reproduced concretely: for one real ship/market snapshot, budget=5,000,000 found a
+    # route with BOTH higher profit and higher ROI (3.03M profit, 79.8% ROI) than either
+    # budget=10,000,000 or no budget at all (2.86M profit, 32.6% ROI) - not because 5M was
+    # "diminishing returns done right" and the others weren't, but because the 10M/
+    # unlimited candidate window had already collapsed and never considered the terminals
+    # the better 5M-anchored route needed.
+    #
     # The DFS itself is unaffected either way - it always uses the real, path-dependent
     # remaining_budget for every allocation; this only changes which terminals are
     # *eligible* to be searched.
-    def rank_edges(budget: float) -> list[tuple[float, tuple[int, int]]]:
-        ranked: list[tuple[float, tuple[int, int]]] = []
+    def rank_edges(budget: float) -> list[tuple[float, float, tuple[int, int]]]:
+        """Returns (profit, investment, key) tuples, profit-descending."""
+        ranked: list[tuple[float, float, tuple[int, int]]] = []
         for key, pairs in opportunities.items():
             cargo = allocate_pair_cargo(pairs, capacity=capacity, budget=budget, max_commodities=max_commodities)
             if cargo:
-                ranked.append((sum(item.profit for item in cargo), key))
+                ranked.append((
+                    sum(item.profit for item in cargo),
+                    sum(item.investment for item in cargo),
+                    key,
+                ))
         ranked.sort(key=lambda entry: entry[0], reverse=True)
         return ranked
 
-    # No budget given means capital is already math.inf - the second ranking would be
-    # an identical, wasted recomputation, so only do it when there's a real budget to
-    # rank against.
     unlimited_ranking = rank_edges(math.inf)
-    rankings = (unlimited_ranking,) if math.isinf(capital) else (unlimited_ranking, rank_edges(capital))
+
+    # With a real budget, anchor checkpoints to fractions of it - matches the caller's
+    # actual situation. With no budget at all (capital is math.inf), there's no real
+    # number to take fractions of, so use the most capital-hungry top edge's OWN
+    # saturation investment (from the unlimited ranking, already computed above) as a
+    # data-derived stand-in ceiling instead of skipping straight to "only ever check
+    # unlimited" - which is exactly the failure mode this fixes. Adapts to whatever the
+    # current game economy actually supports rather than a hardcoded aUEC constant that
+    # could go stale as prices change.
+    if math.isinf(capital):
+        ranking_ceiling = max(
+            (investment for _, investment, _ in unlimited_ranking[:MAX_CANDIDATE_EDGES]),
+            default=0.0,
+        )
+    else:
+        ranking_ceiling = capital
+
+    rankings = [unlimited_ranking]
+    if ranking_ceiling > 0:
+        for fraction in (0.1, 0.25, 0.5, 1.0):
+            rankings.append(rank_edges(ranking_ceiling * fraction))
+
+    # A ceiling derived from the dominant top edges' own saturation investment (the
+    # math.isinf(capital) branch above) is self-referential: fractions of "however much
+    # the CURRENTLY-DOMINANT edges can absorb" still favor those same edges, just in
+    # smaller quantities - it can never fully exclude them the way a genuinely
+    # independent budget figure can, so a tiny-but-highly-efficient edge can stay
+    # invisible at every one of those fractions too (confirmed by a regression test).
+    # Profit-per-aUEC-invested sidesteps this: it's a scale-invariant efficiency signal,
+    # not tied to any absolute dollar checkpoint, so a small-scale-but-highly-efficient
+    # edge ranks well regardless of how much capital the dominant edges can absorb. Reuses
+    # unlimited_ranking's own (profit, investment) pairs - no extra allocate_pair_cargo
+    # calls needed.
+    efficiency_ranking = sorted(
+        ((profit / investment, key) for profit, investment, key in unlimited_ranking if investment > 0),
+        key=lambda entry: entry[0],
+        reverse=True,
+    )
+
     candidate_terminals: set[int] = set()
     for ranked_edges in rankings:
-        for _, (origin_id, destination_id) in ranked_edges[:MAX_CANDIDATE_EDGES]:
+        for _, _, (origin_id, destination_id) in ranked_edges[:MAX_CANDIDATE_EDGES]:
             candidate_terminals.add(origin_id)
             candidate_terminals.add(destination_id)
+    for _, (origin_id, destination_id) in efficiency_ranking[:MAX_CANDIDATE_EDGES]:
+        candidate_terminals.add(origin_id)
+        candidate_terminals.add(destination_id)
 
     # Used only to *order* exploration below, not to filter it - an edge's real
     # per-leg profit is still recomputed against the real, path-dependent budget inside
     # extend() every time.
-    edge_profit_potential = {key: profit for profit, key in unlimited_ranking}
+    edge_profit_potential = {key: profit for profit, _, key in unlimited_ranking}
 
     graph: dict[int, list[int]] = {}
     for origin_id, destination_id in opportunities:
@@ -242,3 +290,120 @@ def build_multi_stop_routes(
 
     routes.sort(key=lambda route: (route.profit, route.roi_pct), reverse=True)
     return routes[:limit]
+
+
+@dataclass(frozen=True)
+class BudgetCurvePoint:
+    budget: float
+    profit: float
+    investment: float
+    roi_pct: float
+    stops: tuple[int, ...]
+
+
+def sweep_budget_curve(
+    market_rows: list[dict[str, Any]],
+    *,
+    ship_capacity_scu: float,
+    space_only: bool = False,
+    capital_access_only: bool = False,
+    auto_load_only: bool = False,
+    system: str | None = None,
+    starting_budget: float = 5_000,
+    growth_factor: float = 3.0,
+    max_points: int = 12,
+) -> list[BudgetCurvePoint]:
+    """Sweep starting budget from small to large, tracking the best multi-stop chain's
+    profit/investment/ROI at each step - answers "where does more capital stop helping?"
+    for a specific ship against the current market snapshot.
+
+    Stops early once a swept budget produces the byte-for-byte identical best chain
+    (same profit and investment, rounded) as the previous one - real stock/demand/cargo
+    capacity has been saturated at that point, so every larger budget would just repeat
+    the same result. Geometric growth (3x by default) covers a wide range of ship sizes
+    in a bounded number of build_multi_stop_routes calls, each of which can itself take
+    real wall-clock time (candidate-ranking runs multiple passes - see that function's
+    own docstring) - this is deliberately capped at max_points rather than run
+    unbounded, and is meant to be called from a worker thread, not the event loop.
+    """
+    points: list[BudgetCurvePoint] = []
+    budget = starting_budget
+    previous_signature: tuple[float, float] | None = None
+    for _ in range(max_points):
+        routes = build_multi_stop_routes(
+            market_rows,
+            ship_capacity_scu=ship_capacity_scu,
+            budget=budget,
+            limit=1,
+            space_only=space_only,
+            capital_access_only=capital_access_only,
+            auto_load_only=auto_load_only,
+            system=system,
+        )
+        best = routes[0] if routes else None
+        if best is None:
+            points.append(BudgetCurvePoint(budget=budget, profit=0.0, investment=0.0, roi_pct=0.0, stops=()))
+            previous_signature = None
+        else:
+            signature = (round(best.profit, 2), round(best.investment, 2))
+            points.append(
+                BudgetCurvePoint(
+                    budget=budget,
+                    profit=best.profit,
+                    investment=best.investment,
+                    roi_pct=best.roi_pct,
+                    stops=best.stops,
+                )
+            )
+            if signature == previous_signature:
+                break
+            previous_signature = signature
+        budget *= growth_factor
+    return _enforce_monotonic_profit(points)
+
+
+def _enforce_monotonic_profit(points: list[BudgetCurvePoint]) -> list[BudgetCurvePoint]:
+    """A larger starting budget can never make the true best achievable profit go down -
+    you can always choose not to spend the extra capital, so whatever a smaller budget
+    already achieved remains achievable at any larger one too. build_multi_stop_routes'
+    candidate-terminal ranking is a bounded heuristic, though (see its own docstring on
+    the budget-checkpoint/efficiency rankings) - each sweep point ranks candidates
+    independently for its own specific budget, and occasionally the fractions checked at
+    one budget miss a combination that a smaller budget's own fractions happened to find
+    (confirmed on real collected data: one ship's sweep found LOWER profit at 10,935,000
+    than it had already found at 3,645,000). When that happens, this reports the
+    best-so-far result instead of a visibly-impossible dip - not hiding a bug, but
+    reflecting the economic fact that the smaller budget's own already-found result is
+    still valid at the larger budget too.
+    """
+    best_so_far: BudgetCurvePoint | None = None
+    adjusted: list[BudgetCurvePoint] = []
+    for point in points:
+        if best_so_far is None or point.profit > best_so_far.profit:
+            best_so_far = point
+            adjusted.append(point)
+        else:
+            adjusted.append(
+                BudgetCurvePoint(
+                    budget=point.budget,
+                    profit=best_so_far.profit,
+                    investment=best_so_far.investment,
+                    roi_pct=best_so_far.roi_pct,
+                    stops=best_so_far.stops,
+                )
+            )
+    return adjusted
+
+
+def find_diminishing_returns_budget(points: list[BudgetCurvePoint]) -> float | None:
+    """The smallest swept budget whose result already matches the LARGEST swept budget's
+    result - i.e. the point beyond which more capital stopped changing the recommendation
+    at all. None if the curve never plateaus within the sweep (every point still differs
+    from the final one - real market depth may extend further than what was swept)."""
+    if len(points) < 2:
+        return None
+    final_signature = (round(points[-1].profit, 2), round(points[-1].investment, 2))
+    for point in points:
+        if (round(point.profit, 2), round(point.investment, 2)) == final_signature:
+            return point.budget
+    return None

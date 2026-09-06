@@ -147,6 +147,67 @@ def render_price_history_chart(
     return buffer
 
 
+def render_budget_curve_chart(
+    *,
+    ship_name: str,
+    points: list,
+    diminishing_returns_budget: float | None,
+) -> io.BytesIO | None:
+    """ROI-vs-starting-budget chart for /diminishing-returns, marking where more capital
+    stops changing the recommendation at all (real stock/demand/cargo capacity
+    saturated). Only ROI is charted (profit/investment scale wildly differently and
+    belong in the embed's text fields, not fighting ROI for a second y-axis on the same
+    plot). `points` are BudgetCurvePoint-like objects (budget, roi_pct, investment)."""
+    plottable = [p for p in points if p.investment > 0]
+    if len(plottable) < 2:
+        return None
+
+    budgets = [p.budget for p in plottable]
+    rois = [p.roi_pct for p in plottable]
+
+    fig, ax = plt.subplots(figsize=(9, 5), dpi=100)
+    fig.patch.set_facecolor(_SURFACE)
+    ax.set_facecolor(_SURFACE)
+    ax.grid(True, color=_GRIDLINE, linewidth=1, linestyle="-", zorder=0)
+    ax.set_axisbelow(True)
+    ax.set_xscale("log")
+
+    ax.plot(
+        budgets, rois, color=_SELL_COLOR, linewidth=2, marker="o", markersize=5,
+        solid_joinstyle="round", solid_capstyle="round", zorder=3,
+    )
+    ax.scatter([budgets[-1]], [rois[-1]], s=64, color=_SELL_COLOR, edgecolors=_SURFACE,
+               linewidths=2, zorder=4)
+    ax.annotate(f"{rois[-1]:,.0f}%", (budgets[-1], rois[-1]), color=_INK_PRIMARY,
+                fontsize=9, xytext=(8, 0), textcoords="offset points", va="center")
+
+    if diminishing_returns_budget is not None and budgets[0] < diminishing_returns_budget < budgets[-1]:
+        ax.axvline(diminishing_returns_budget, color=_INK_MUTED, linewidth=1, linestyle="--", zorder=2)
+        ax.annotate(
+            "diminishing returns begin here", (diminishing_returns_budget, max(rois)),
+            color=_INK_SECONDARY, fontsize=9, xytext=(6, 4), textcoords="offset points",
+        )
+
+    ax.set_title(f"{ship_name} — ROI vs. starting budget", color=_INK_PRIMARY, fontsize=13, loc="left", pad=12)
+    ax.set_ylabel("Best route ROI (%)", color=_INK_SECONDARY, fontsize=10)
+    ax.set_xlabel("Starting budget (aUEC, log scale)", color=_INK_SECONDARY, fontsize=10)
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"{x:,.0f}%"))
+    ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"{x:,.0f}"))
+
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+    ax.spines["bottom"].set_visible(True)
+    ax.spines["bottom"].set_color(_BASELINE)
+    ax.tick_params(colors=_INK_MUTED, labelsize=9)
+    fig.tight_layout()
+
+    buffer = io.BytesIO()
+    fig.savefig(buffer, format="png", facecolor=_SURFACE)
+    plt.close(fig)
+    buffer.seek(0)
+    return buffer
+
+
 def render_liquidity_history_chart(*, item_name: str, history_rows: list[dict]) -> io.BytesIO | None:
     """Build a score-over-time chart from the bot's own hourly liquidity snapshots."""
     points = []
