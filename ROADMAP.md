@@ -91,11 +91,13 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
   and charts ROI vs. budget, marking where more capital stops changing the recommendation
   at all - real stock/demand/cargo capacity, not a code limit. Building it surfaced one
   more real gap in the candidate-selection fix below (`PROJECT_CONTEXT.md` entries 56-57).
-- [ ] **Evidence-Level Labels** *(complexity: Low)*: Distinguish current reported stock,
-  older observations, inferred trends, and approximate calculations on every
-  recommendation, and make "no information" look different from "no demand." Builds on
-  data already tracked by Terminal Data Health and Route Confidence Rating rather than
-  new computation - mostly a consistency pass across display surfaces.
+- [ ] **Evidence-Level Labels** *(complexity: Low - Centralized Route Presentation above
+  now gives this a single place to land)*: Distinguish current reported stock, older
+  observations, inferred trends, and approximate calculations on every recommendation,
+  and make "no information" look different from "no demand." Builds on data already
+  tracked by Terminal Data Health and Route Confidence Rating rather than new
+  computation - mostly a consistency pass across display surfaces, and now a pass through
+  `bot/uex/route_presentation.py`'s shared helpers instead of four separate cogs.
 - [ ] **Recommendation Outcome Tracking** *(complexity: High)*: Let a user select a
   route, then report what they actually bought/sold or where stock/access didn't match
   the recommendation. Comparing predicted vs. actual profit surfaces which
@@ -120,12 +122,18 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
   transient database failures with a bounded delay; notify when failures persist.
   Mechanical instrumentation across the existing `tasks.loop` collectors rather than new
   design.
-- [ ] **Centralized Route Presentation** *(complexity: Medium)*: Share the code that
-  assembles warnings, confidence, approximation notices, and Discord-size-safe messages
-  across `/best-route`, `/top-routes`, `/mixed-routes`, `/multi-stop-route`, and
-  `/intelligence-brief` instead of each maintaining its own copy. This is *why* repeated
-  audits kept finding a fix applied to one command and not another - do this before
-  Load-Limiting Explanations and Evidence-Level Labels so those land once, not four times.
+- [x] **Centralized Route Presentation**: Shipped 2026-09-07. New `bot/uex/
+  route_presentation.py` is now the single home for the warning/confidence/chunking
+  logic `/best-route`, `/top-routes`, `/mixed-routes`, `/multi-stop-route`, and
+  `/intelligence-brief` each used to maintain their own copy of. Closed real gaps found
+  by auditing all five side by side: `/top-routes` and `/best-route`'s primary branch had
+  no cross-system warning at all; `/intelligence-brief` had no terminal-health warnings,
+  no limiting-factor explanation, no confidence rating, and zero Discord embed-size
+  protection. See `PROJECT_CONTEXT.md` entry 58 for the full design (in particular how
+  `travel_warning`'s `has_real_distance` parameter unifies three previously-divergent
+  cross-system wordings) and verification detail. Landed just ahead of Evidence-Level
+  Labels below, specifically so that lands once through this shared module instead of
+  four times.
 - [ ] **Codebase Consolidation** *(complexity: High, ongoing)*: Beyond route rendering,
   organize `bot/db/database.py`'s ~30 tables by feature and keep one authoritative
   description of current behavior. Broader than a single ticket - Centralized Route

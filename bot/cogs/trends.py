@@ -33,6 +33,7 @@ from bot.uex.data_health import classify_terminal_health, format_health_note
 from bot.uex.route_confidence import compute_route_confidence
 from bot.uex.practical_routes import route_in_system, route_practical_notes, route_supports_auto_load
 from bot.uex.commodity_risk import format_commodity_risk
+from bot.uex.route_presentation import travel_warning
 from bot.uex.ships import estimate_route_cargo, resolve_ship
 from bot.uex.status import build_status_lookup, resolve_status_label
 from bot.uex.supply_demand import has_sell_side_demand
@@ -457,6 +458,10 @@ class Trends(commands.Cog):
             )
             if practical_notes:
                 value += "\n" + "\n".join(practical_notes)
+            origin_system = (terminal_references.get(r.origin_terminal_id) or {}).get("star_system_name")
+            destination_system = (terminal_references.get(r.destination_terminal_id) or {}).get("star_system_name")
+            if travel_note := travel_warning(origin_system, destination_system, has_real_distance=True):
+                value += f"\n{travel_note}"
             risk_note = format_commodity_risk(commodity_references.get(r.id_commodity))
             if risk_note:
                 value += f"\n{risk_note}"

@@ -18,10 +18,22 @@ from bot.uex.supply_demand import analyze_terminal_market_history, has_sell_side
 from bot.uex.ships import estimate_route_cargo, resolve_ship
 from bot.uex.status import build_status_lookup, resolve_status_label
 from bot.uex.trading import best_buy_locations, best_routes, best_sell_locations
-from bot.uex.mixed_routes import build_mixed_routes, format_limiting_factors, requires_capital_cargo_access
+from bot.uex.mixed_routes import build_mixed_routes, requires_capital_cargo_access
 from bot.uex.multi_stop_routes import build_multi_stop_routes, find_diminishing_returns_budget, sweep_budget_curve
 from bot.uex.charts import render_budget_curve_chart
 from bot.uex.trading_preferences import describe_active_preferences
+from bot.uex.route_presentation import (
+    add_chunked_fields,
+    approximation_note,
+    capital_access_note,
+    cargo_confidences,
+    cargo_item_line,
+    cargo_item_warnings,
+    chunk_lines,
+    side_health_warnings,
+    travel_warning,
+    worst_confidence,
+)
 
 logger = logging.getLogger("uexbot.prices")
 
@@ -34,6 +46,13 @@ SYSTEM_CHOICES = [
     app_commands.Choice(name="Nyx", value="Nyx"),
 ]
 
+# Re-exported under their historical names: bot/cogs/trends.py imports these from here,
+# and several tests monkeypatch bot.cogs.prices._add_chunked_fields/_chunk_lines directly -
+# the real implementation now lives in bot/uex/route_presentation.py (shared with
+# trends.py and intelligence_brief.py) so it isn't copy-pasted per command surface.
+_chunk_lines = chunk_lines
+_add_chunked_fields = add_chunked_fields
+
 
 def _positive_int(value: object) -> int | None:
     try:
@@ -41,68 +60,6 @@ def _positive_int(value: object) -> int | None:
     except (TypeError, ValueError):
         return None
     return parsed if parsed > 0 else None
-
-
-def _chunk_lines(lines: list[str], max_length: int = 1024) -> list[str]:
-    """Pack text into Discord-safe field values without dropping oversized lines."""
-    if max_length <= 0:
-        raise ValueError("max_length must be positive")
-    chunks: list[str] = []
-    current = ""
-    for original_line in lines:
-        line = str(original_line)
-        while len(line) > max_length:
-            if current:
-                chunks.append(current)
-                current = ""
-            chunks.append(line[:max_length])
-            line = line[max_length:]
-        candidate = f"{current}\n{line}" if current else line
-        if len(candidate) > max_length:
-            if current:
-                chunks.append(current)
-            current = line
-        else:
-            current = candidate
-    if current:
-        chunks.append(current)
-    return chunks
-
-
-# Discord's real limit on one embed's TOTAL text (title + description + every field's
-# name and value + footer, matching discord.py's own Embed.__len__) - not the same thing
-# as any individual field's 1024-char limit. A handful of individually-legal fields can
-# still sum well past this, and Discord rejects the ENTIRE send in that case, silently
-# losing every field, not just the overflow ones.
-DISCORD_EMBED_TOTAL_CHAR_LIMIT = 6000
-# Reserve room for a final "N more omitted" notice a caller may still add after this
-# function stops, so that notice itself never pushes the embed over the real limit.
-_TRUNCATION_NOTICE_RESERVE = 100
-
-
-def _add_chunked_fields(embed: discord.Embed, *, name: str, lines: list[str]) -> bool:
-    """Add one logical field as many Discord-safe continuation fields as needed - but only
-    if the WHOLE set fits within Discord's combined 6000-char embed limit, never just part
-    of it. All-or-nothing, not a per-chunk check: a route's cargo-risk warning often lands
-    in a trailing continuation chunk (built after the price/summary lines fill the first
-    1024-char chunk), so a per-chunk budget check that added the first chunk and only then
-    discovered the second didn't fit left that route visible on screen with its warning
-    silently missing - worse than omitting the whole route, since a visible route with no
-    warning reads as "checked and safe." Returns False (adding nothing at all) the moment
-    the full set would overflow, so a caller adding several logical fields in a loop (e.g.
-    one per route) can treat this one as entirely omitted and stop early."""
-    chunks = []
-    projected_total = len(embed)
-    for index, chunk in enumerate(_chunk_lines(lines), 1):
-        suffix = f" (continued {index})" if index > 1 else ""
-        safe_name = f"{name[:256 - len(suffix)]}{suffix}"
-        projected_total += len(safe_name) + len(chunk)
-        chunks.append((safe_name, chunk))
-    if projected_total > DISCORD_EMBED_TOTAL_CHAR_LIMIT - _TRUNCATION_NOTICE_RESERVE:
-        return False
-    for safe_name, chunk in chunks:
-        embed.add_field(name=safe_name, value=chunk, inline=False)
-    return True
 
 
 async def commodity_name_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
@@ -491,6 +448,10 @@ class Prices(commands.Cog):
                     terminal_references.get(destination_id),
                 )
                 value_lines.extend(practical_notes)
+                origin_system = (terminal_references.get(origin_id) or {}).get("star_system_name")
+                destination_system = (terminal_references.get(destination_id) or {}).get("star_system_name")
+                if note := travel_warning(origin_system, destination_system, has_real_distance=True):
+                    value_lines.append(note)
                 # Per-field/name truncation alone doesn't protect Discord's combined
                 # 6000-char embed limit - stop and disclose instead of silently dropping
                 # the tail (see /top-routes' identical pattern in trends.py).
@@ -659,12 +620,7 @@ class Prices(commands.Cog):
             # for the same reason.
             origin_system = (fallback_references.get(route.buy_terminal_id) or {}).get("star_system_name")
             destination_system = (fallback_references.get(route.sell_terminal_id) or {}).get("star_system_name")
-            if origin_system and destination_system and origin_system != destination_system:
-                value_lines.append(
-                    f"⚠️ Cross-system route: {origin_system} → {destination_system}; compare profit against travel time"
-                )
-            else:
-                value_lines.append("⚠️ Travel time/distance is not included in this ranking")
+            value_lines.append(travel_warning(origin_system, destination_system, has_real_distance=False))
 
             if not _add_chunked_fields(
                 embed,
@@ -806,56 +762,22 @@ class Prices(commands.Cog):
                 classify_terminal_health(health_rows[route.destination_id])
                 if route.destination_id in health_rows else None
             )
-            cargo_lines = [
-                f"• **{item.commodity_name}:** {item.quantity_scu:,.0f} SCU · "
-                f"+{item.profit_per_scu:,.0f}/SCU · **{item.profit:,.0f} profit**"
-                for item in route.cargo
-            ]
-            warnings: list[str] = []
-            for side, health in (("Origin", origin_health), ("Destination", destination_health)):
-                if note := format_health_note(health):
-                    warnings.append(f"{side}: {note}")
+            cargo_lines = [cargo_item_line(item) for item in route.cargo]
+            warnings: list[str] = side_health_warnings(
+                origin_health=origin_health, destination_health=destination_health
+            )
             for item in route.cargo:
-                if risk := format_commodity_risk(item.source):
-                    warnings.append(f"{item.commodity_name}: {risk}")
-                warnings.append(f"{item.commodity_name}: {format_limiting_factors(item.limiting_factors)}")
-                buy_status = resolve_status_label(status_lookup, "buy", item.source.get("status_buy"))
-                sell_status = resolve_status_label(status_lookup, "sell", item.destination.get("status_sell"))
-                if buy_status or sell_status:
-                    status_bits = []
-                    if buy_status:
-                        status_bits.append(f"origin {buy_status}")
-                    if sell_status:
-                        status_bits.append(f"destination {sell_status}")
-                    warnings.append(f"{item.commodity_name} market status: {' · '.join(status_bits)}")
+                warnings.extend(cargo_item_warnings(item, status_lookup=status_lookup))
             warnings.extend(route_practical_notes(route.cargo[0].source, route.cargo[0].destination))
             if capital_access_only:
-                warnings.append("Capital-ship access confirmed: XL hangar or external cargo loading dock at both ends")
+                warnings.append(capital_access_note("both ends"))
             origin_system = route.cargo[0].source.get("star_system_name")
             destination_system = route.cargo[0].destination.get("star_system_name")
-            if origin_system and destination_system and origin_system != destination_system:
-                warnings.append(
-                    f"⚠️ Cross-system route: {origin_system} → {destination_system}; compare profit against travel time"
-                )
-            else:
-                warnings.append("⚠️ Travel time/distance is not included in this ranking")
+            warnings.append(travel_warning(origin_system, destination_system, has_real_distance=False))
 
-            item_confidences = [
-                compute_route_confidence(
-                    origin_health=origin_health,
-                    destination_health=destination_health,
-                    origin_report_count=item.source.get("buy_report_count"),
-                    destination_report_count=item.destination.get("sell_report_count"),
-                    volatility_origin=item.source.get("volatility_buy"),
-                    volatility_destination=item.destination.get("volatility_sell"),
-                    origin_available=item.source.get("scu_buy", 0) > 0,
-                    destination_available=has_sell_side_demand(
-                        item.destination.get("scu_sell"), item.destination.get("status_sell")
-                    ),
-                )
-                for item in route.cargo
-            ]
-            confidence = min(item_confidences, key=lambda value: value.score)
+            confidence = worst_confidence(
+                cargo_confidences(route.cargo, origin_health=origin_health, destination_health=destination_health)
+            )
             value_lines = [
                 *cargo_lines,
                 f"Cargo: **{route.cargo_scu:,.0f}/{float(ship_vehicle['scu']):,.0f} SCU**",
@@ -870,8 +792,8 @@ class Prices(commands.Cog):
                 footer += " · surface terminals excluded"
             if capital_access_only:
                 footer += " · capital access confirmed at both ends"
-            if not route.is_exact:
-                footer += " · cargo allocation for this route is approximate, not proven-optimal"
+            if note := approximation_note(route.is_exact):
+                footer += f" · {note}"
 
             route_embed = discord.Embed(
                 title=f"#{index} {route.origin_name} → {route.destination_name}",
@@ -896,10 +818,6 @@ class Prices(commands.Cog):
             if not _add_chunked_fields(route_embed, name="Warnings & practical checks", lines=unique_warnings):
                 all_embeds_fit = False
             embeds.append(route_embed)
-            # Includes footer last - it carries the route.is_exact approximation
-            # disclosure plus the budget/space-only/capital-access notes, none of which
-            # the embed path would ever drop (they're in route_embed's own footer above),
-            # so the fallback must not silently lose them either.
             # Includes footer last - it carries the route.is_exact approximation
             # disclosure plus the budget/space-only/capital-access notes, none of which
             # the embed path would ever drop (they're in route_embed's own footer above),
@@ -1055,8 +973,8 @@ class Prices(commands.Cog):
                 route_footer += " · surface terminals excluded"
             if capital_access_only:
                 route_footer += " · capital access confirmed at every stop"
-            if not route.is_exact:
-                route_footer += " · per-leg cargo allocation for this route is approximate, not proven-optimal"
+            if note := approximation_note(route.is_exact, per_leg=True):
+                route_footer += f" · {note}"
             route_embed.set_footer(text=route_footer)
             warnings: list[str] = []
             leg_confidences = []
@@ -1082,11 +1000,7 @@ class Prices(commands.Cog):
                 else:
                     distance_partial = True
                     distance_note = "distance unavailable"
-                cargo_lines = [
-                    f"• **{item.commodity_name}:** {item.quantity_scu:,.0f} SCU · "
-                    f"+{item.profit_per_scu:,.0f}/SCU · **{item.profit:,.0f} profit**"
-                    for item in leg.cargo
-                ]
+                cargo_lines = [cargo_item_line(item) for item in leg.cargo]
                 leg_lines = [
                     *cargo_lines,
                     f"Investment: **{leg.investment:,.0f}** · Revenue: **{leg.revenue:,.0f} aUEC** · "
@@ -1106,54 +1020,29 @@ class Prices(commands.Cog):
                     lines=leg_lines,
                 ):
                     all_legs_fit = False
-                for side, health in (("Origin", origin_health), ("Destination", destination_health)):
-                    if note := format_health_note(health):
-                        warnings.append(f"Leg {leg_index} {side}: {note}")
+                leg_prefix = f"Leg {leg_index} "
+                warnings.extend(side_health_warnings(
+                    origin_health=origin_health, destination_health=destination_health,
+                    origin_label=f"{leg_prefix}Origin", destination_label=f"{leg_prefix}Destination",
+                ))
                 for item in leg.cargo:
-                    if risk := format_commodity_risk(item.source):
-                        warnings.append(f"Leg {leg_index} {item.commodity_name}: {risk}")
-                    warnings.append(
-                        f"Leg {leg_index} {item.commodity_name}: {format_limiting_factors(item.limiting_factors)}"
-                    )
-                    buy_status = resolve_status_label(status_lookup, "buy", item.source.get("status_buy"))
-                    sell_status = resolve_status_label(status_lookup, "sell", item.destination.get("status_sell"))
-                    if buy_status or sell_status:
-                        status_bits = []
-                        if buy_status:
-                            status_bits.append(f"origin {buy_status}")
-                        if sell_status:
-                            status_bits.append(f"destination {sell_status}")
-                        warnings.append(
-                            f"Leg {leg_index} {item.commodity_name} market status: {' · '.join(status_bits)}"
-                        )
+                    warnings.extend(cargo_item_warnings(item, status_lookup=status_lookup, prefix=leg_prefix))
                 warnings.extend(
-                    f"Leg {leg_index} {note}"
+                    f"{leg_prefix}{note}"
                     for note in route_practical_notes(leg.cargo[0].source, leg.cargo[0].destination)
                 )
                 origin_system = leg.cargo[0].source.get("star_system_name")
                 destination_system = leg.cargo[0].destination.get("star_system_name")
-                if origin_system and destination_system and origin_system != destination_system:
-                    warnings.append(f"⚠️ Leg {leg_index} crosses systems: {origin_system} → {destination_system}")
+                if note := travel_warning(
+                    origin_system, destination_system, has_real_distance=True, prefix=leg_prefix
+                ):
+                    warnings.append(note)
                 leg_confidences.extend(
-                    compute_route_confidence(
-                        origin_health=origin_health,
-                        destination_health=destination_health,
-                        origin_report_count=item.source.get("buy_report_count"),
-                        destination_report_count=item.destination.get("sell_report_count"),
-                        volatility_origin=item.source.get("volatility_buy"),
-                        volatility_destination=item.destination.get("volatility_sell"),
-                        origin_available=item.source.get("scu_buy", 0) > 0,
-                        destination_available=has_sell_side_demand(
-                            item.destination.get("scu_sell"), item.destination.get("status_sell")
-                        ),
-                    )
-                    for item in leg.cargo
+                    cargo_confidences(leg.cargo, origin_health=origin_health, destination_health=destination_health)
                 )
             if capital_access_only:
-                warnings.append(
-                    "Capital-ship access confirmed: XL hangar or external cargo loading dock at every stop"
-                )
-            confidence = min(leg_confidences, key=lambda value: value.score)
+                warnings.append(capital_access_note("every stop"))
+            confidence = worst_confidence(leg_confidences)
             distance_summary = (
                 f"~{total_distance_gm:,.1f} Gm (partial - one or more legs' distance unavailable)"
                 if distance_partial
@@ -1199,13 +1088,12 @@ class Prices(commands.Cog):
                 # through the same chunking helper the embed fields use (with Discord's
                 # plain-message cap of 2000 chars, not the embed field's 1024) and sends as
                 # many messages as it takes rather than silently dropping anything.
+                per_leg_note = approximation_note(route.is_exact, per_leg=True)
                 fallback_lines = [
                     f"**#{index} {path_label}**",
                     *summary_lines,
                     "⚠️ Full leg-by-leg cargo/distance details omitted - too large for one Discord message.",
-                    *([] if route.is_exact else [
-                        "⚠️ Per-leg cargo allocation for this route is approximate, not proven-optimal"
-                    ]),
+                    *([] if per_leg_note is None else [f"⚠️ {per_leg_note[0].upper()}{per_leg_note[1:]}"]),
                     *unique_warnings,
                 ]
                 for chunk in _chunk_lines(fallback_lines, max_length=1900):

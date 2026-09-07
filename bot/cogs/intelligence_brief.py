@@ -9,11 +9,22 @@ from discord.ext import commands
 
 from bot.cogs.digest import _format_data_freshness, _format_rating_movers
 from bot.cogs.ships import ship_name_autocomplete
-from bot.uex.commodity_risk import commodity_risk_labels, has_commodity_risk_metadata
+from bot.uex.data_health import classify_terminal_health
 from bot.uex.exceptions import UexApiError
 from bot.uex.marketplace import marketplace_item_link
 from bot.uex.mixed_routes import build_mixed_routes, requires_capital_cargo_access
+from bot.uex.route_presentation import (
+    add_chunked_fields,
+    approximation_note,
+    capital_access_note,
+    cargo_confidences,
+    cargo_item_warnings,
+    side_health_warnings,
+    travel_warning,
+    worst_confidence,
+)
 from bot.uex.ships import resolve_ship
+from bot.uex.status import build_status_lookup
 
 
 class IntelligenceBrief(commands.Cog):
@@ -74,6 +85,16 @@ class IntelligenceBrief(commands.Cog):
         embed.add_field(name="Sellability shifts — Down", value="\n".join(_format_rating_movers(losers, direction="down")), inline=False)
         return embed
 
+    async def _get_status_lookup(self) -> dict:
+        """Best-effort readable-label lookup for status_buy/status_sell codes, matching
+        Prices._get_status_lookup (bot/cogs/prices.py) - cached 24h client-side, so this
+        is cheap; a failure here just means labels are omitted, never a hard error."""
+        try:
+            status_data = await self.bot.uex.get_commodities_status()
+        except UexApiError:
+            return {"buy": {}, "sell": {}}
+        return build_status_lookup(status_data)
+
     async def _routes_embed(self, ship_query: str, budget: float | None, space_only: bool) -> discord.Embed:
         embed = discord.Embed(title="Personalized Mixed Routes", color=discord.Color.green())
         try:
@@ -104,34 +125,57 @@ class IntelligenceBrief(commands.Cog):
             embed.description = f"Route intelligence unavailable: {exc}"
             return embed
 
+        if not routes:
+            embed.description = "No verified mixed routes fit the selected ship, budget, and safety filters."
+            return embed
+
         embed.description = f"Top opportunities for **{vehicle.get('name', ship_query)}**"
+        terminal_ids = [terminal_id for route in routes for terminal_id in (route.origin_id, route.destination_id)]
+        health_rows = await self.bot.db.get_terminal_data_health_by_ids(terminal_ids)
+        status_lookup = await self._get_status_lookup()
+
+        routes_shown = 0
         for index, route in enumerate(routes, 1):
+            origin_health = (
+                classify_terminal_health(health_rows[route.origin_id]) if route.origin_id in health_rows else None
+            )
+            destination_health = (
+                classify_terminal_health(health_rows[route.destination_id])
+                if route.destination_id in health_rows else None
+            )
+            confidence = worst_confidence(
+                cargo_confidences(route.cargo, origin_health=origin_health, destination_health=destination_health)
+            )
             manifest = ", ".join(f"{item.commodity_name} {item.quantity_scu:,.0f} SCU" for item in route.cargo)
-            risks = sorted({label for item in route.cargo for label in commodity_risk_labels(item.source)})
-            unknown_risks = sorted({
-                item.commodity_name
-                for item in route.cargo
-                if not has_commodity_risk_metadata(item.source)
-            })
             notes = [
                 manifest,
                 f"Profit **{route.profit:,.0f} aUEC** · investment {route.investment:,.0f} · ROI {route.roi_pct:.1f}%",
+                f"Confidence: **{confidence.label} ({confidence.score}/100)**",
             ]
-            if risks:
-                notes.append("⚠️ " + " · ".join(risks))
-            if unknown_risks:
-                notes.append(f"⚠️ Cargo risk metadata unavailable: {', '.join(unknown_risks)}")
-            if not route.is_exact:
-                notes.append("⚠️ Cargo allocation is approximate, not proven-optimal")
+            notes.extend(side_health_warnings(origin_health=origin_health, destination_health=destination_health))
+            for item in route.cargo:
+                notes.extend(cargo_item_warnings(item, status_lookup=status_lookup))
+            if note := approximation_note(route.is_exact):
+                notes.append(f"⚠️ {note[0].upper()}{note[1:]}")
             if capital_gate:
-                notes.append("Capital access confirmed at both ends")
+                notes.append(capital_access_note("both ends"))
             origin_system = route.cargo[0].source.get("star_system_name")
             destination_system = route.cargo[0].destination.get("star_system_name")
-            if cross_system_note := _format_cross_system_note(origin_system, destination_system):
-                notes.append(cross_system_note)
-            embed.add_field(name=f"#{index} {route.origin_name} → {route.destination_name}", value="\n".join(notes), inline=False)
-        if not routes:
-            embed.description = "No verified mixed routes fit the selected ship, budget, and safety filters."
+            if travel_note := travel_warning(origin_system, destination_system, has_real_distance=False):
+                notes.append(travel_note)
+            # Discord's combined 6000-char embed-text limit applies here too - see
+            # add_chunked_fields' own docstring (bot/uex/route_presentation.py). This
+            # command had no protection against it at all before, unlike every sibling
+            # route command.
+            if not add_chunked_fields(
+                embed, name=f"#{index} {route.origin_name} → {route.destination_name}", lines=notes
+            ):
+                break
+            routes_shown += 1
+
+        omitted = len(routes) - routes_shown
+        if omitted > 0:
+            embed.set_footer(text=f"{omitted} more route(s) omitted - message size limit")
         return embed
 
     def _market_shifts_embed(self, shifts: list[dict]) -> discord.Embed:
@@ -149,16 +193,6 @@ def _format_market_shifts(rows: list[dict], key: str) -> str:
         f"{'📈' if row[key] > 0 else '📉'} **{row['commodity_name']}** at {row['terminal_name']}: {row[key]:+,.0f} SCU"
         for row in rows
     )
-
-
-def _format_cross_system_note(origin_system: object, destination_system: object) -> str | None:
-    origin = str(origin_system).strip() if origin_system is not None else ""
-    destination = str(destination_system).strip() if destination_system is not None else ""
-    if not origin or not destination:
-        return "⚠️ Star-system data incomplete; verify travel distance before departure"
-    if origin != destination:
-        return f"⚠️ Cross-system: {origin} → {destination}"
-    return None
 
 
 async def setup(bot: commands.Bot) -> None:

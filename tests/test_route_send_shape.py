@@ -488,6 +488,62 @@ def test_best_route_discloses_when_routes_are_truncated_for_size(tmp_path, monke
     asyncio.run(run())
 
 
+def test_best_route_primary_branch_now_warns_on_a_cross_system_route(tmp_path):
+    """Centralized Route Presentation: /best-route's primary branch (UEX's own
+    /commodities_routes data, with a real distance figure) never had a cross-system
+    warning at all - only its OWN fallback branch (no real distance data) did, and
+    /top-routes had neither. Now both get one via the shared
+    bot.uex.route_presentation.travel_warning."""
+    async def run():
+        db = Database(tmp_path / "best_route_cross_system.sqlite3", Fernet(Fernet.generate_key()))
+        await db.init()
+        await db.upsert_terminal_reference([
+            {"id": 1, "name": "Origin 1", "star_system_name": "Stanton"},
+            {"id": 101, "name": "Destination 1", "star_system_name": "Pyro"},
+        ])
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            path = request.url.path
+            if "commodities_prices" in path:
+                return httpx.Response(200, json={"status": "ok", "data": [
+                    {"id_commodity": 1, "commodity_name": "Gold"}
+                ]})
+            if "commodities_routes" in path:
+                return httpx.Response(200, json={"status": "ok", "data": [
+                    {
+                        "id_terminal_origin": 1, "id_terminal_destination": 101,
+                        "origin_terminal_name": "Origin 1", "destination_terminal_name": "Destination 1",
+                        "price_origin": 100, "price_destination": 200, "price_margin": 50, "price_roi": 100,
+                        "distance": 5, "score": 100, "scu_origin": 10, "scu_destination": 10,
+                        "status_origin": 1, "status_destination": 1, "profit": 100,
+                    }
+                ]})
+            return httpx.Response(200, json={"status": "ok", "data": []})
+
+        client = UexClient(app_token="test", base_url="https://uex.test")
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+        bot = type("FakeBot", (), {})()
+        bot.db = db
+        bot.uex = client
+        cog = Prices.__new__(Prices)
+        cog.bot = bot
+        interaction = _FakeInteraction(1)
+
+        try:
+            await cog.best_route.callback(cog, interaction, commodity="Gold")
+        finally:
+            await client.aclose()
+
+        assert interaction.followup.sent, "expected at least one followup"
+        _, kwargs = interaction.followup.sent[0]
+        embed = kwargs["embed"]
+        assert any("crosses systems" in (f.value or "") for f in embed.fields), embed.fields
+
+    asyncio.run(run())
+
+
 def test_best_route_fallback_branch_discloses_when_routes_are_truncated_for_size(tmp_path, monkeypatch):
     """Same finding as the primary-branch test above, for /best-route's OTHER branch -
     the one used when UEX has no /commodities_routes data for this commodity and the bot

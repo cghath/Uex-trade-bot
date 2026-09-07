@@ -15,12 +15,13 @@ from bot.uex.practical_routes import (
     terminal_in_system,
     terminal_supports_auto_load,
 )
-from bot.cogs.intelligence_brief import _format_cross_system_note, _format_market_shifts
+from bot.cogs.intelligence_brief import _format_market_shifts
 from bot.uex.commodity_risk import (
     commodity_risk_labels,
     format_commodity_risk,
     has_commodity_risk_metadata,
 )
+from bot.uex.route_presentation import travel_warning
 
 
 def _make_db(tmp_path) -> Database:
@@ -373,13 +374,24 @@ def test_local_staleness_does_not_override_an_already_stale_or_limited_status():
     assert stale.status == "stale"
 
 
-def test_cross_system_note_never_prints_none_as_a_system_name():
-    incomplete = _format_cross_system_note(None, "Stanton")
-    assert incomplete is not None
-    assert "None" not in incomplete
-    assert "incomplete" in incomplete
-    assert _format_cross_system_note("Stanton", "Stanton") is None
-    assert "Pyro → Stanton" in (_format_cross_system_note("Pyro", "Stanton") or "")
+def test_travel_warning_never_prints_none_as_a_system_name():
+    """/intelligence-brief used to have its own _format_cross_system_note with this same
+    guard - now folded into the shared bot.uex.route_presentation.travel_warning (used by
+    /best-route, /top-routes, /mixed-routes, /multi-stop-route, and /intelligence-brief
+    alike), so the regression is pinned there instead."""
+    for has_real_distance in (True, False):
+        incomplete = travel_warning(None, "Stanton", has_real_distance=has_real_distance)
+        assert incomplete is None or "None" not in incomplete
+
+
+def test_travel_warning_same_system_depends_on_whether_distance_is_already_shown():
+    assert travel_warning("Stanton", "Stanton", has_real_distance=True) is None
+    assert travel_warning("Stanton", "Stanton", has_real_distance=False) is not None
+
+
+def test_travel_warning_cross_system_always_speaks_up():
+    assert "Pyro → Stanton" in (travel_warning("Pyro", "Stanton", has_real_distance=False) or "")
+    assert "Pyro → Stanton" in (travel_warning("Pyro", "Stanton", has_real_distance=True) or "")
 
 
 def test_supply_demand_history_is_time_weighted_for_change_only_rows():

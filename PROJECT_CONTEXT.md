@@ -1705,6 +1705,69 @@ they're in sync).
     confirming the command sends a chart embed with a plateau note). Command-surface
     limits checked (name 19/32, all descriptions under 100 chars) and confirmed live:
     `Synced 60 commands` (was 59) with no errors. 331 tests passing.
+58. **Centralized Route Presentation (roadmap item) - new `bot/uex/route_presentation.py`,
+    the single home for the warning/confidence/chunking logic that had been independently
+    copy-pasted (with small, silently drifting differences) across `/best-route`,
+    `/top-routes`, `/mixed-routes`, `/multi-stop-route`, and `/intelligence-brief`.** The
+    roadmap entry named this exact failure mode: "this is why repeated audits kept
+    finding a fix applied to one command and not another." Auditing all five commands
+    side by side (not prompted by an external review this time) confirmed it: `/top-routes`
+    and `/best-route`'s own UEX-routes branch had NO cross-system warning at all, despite
+    `/best-route`'s fallback branch and `/multi-stop-route`'s per-leg lines both having
+    one; `/intelligence-brief`'s route recommendations had no terminal-health warnings, no
+    limiting-factor explanation (Load-Limiting Explanations, entry 54, never reached this
+    caller), no confidence rating, and - the most serious gap - ZERO Discord embed-size
+    protection at all, the exact "silently drops everything, sends nothing, interaction
+    looks stuck" class of bug every other route command had already been bitten by and
+    fixed (A08 and its many follow-ups).
+
+    New shared functions, each replacing 2-4 near-duplicate call sites: `chunk_lines`/
+    `add_chunked_fields` (moved from `bot/cogs/prices.py`, which now just re-exports them
+    under their historical `_chunk_lines`/`_add_chunked_fields` names so existing
+    monkeypatch-based tests keep working unchanged), `side_health_warnings`,
+    `cargo_item_warnings` (risk + limiting-factors + buy/sell market status, per cargo
+    item), `cargo_item_line`, `cargo_confidences`/`worst_confidence`, `capital_access_note`,
+    `approximation_note`, and `travel_warning` - the trickiest one, since the three
+    existing call sites genuinely differed by whether a real UEX distance/GM figure was
+    already shown elsewhere for that route, not by which command it was: unified into one
+    `has_real_distance: bool` parameter (True for `/best-route`'s UEX-routes branch,
+    `/top-routes`, and `/multi-stop-route`'s per-leg lines, which all pull real distance
+    data; False for `/best-route`'s self-derived fallback, `/mixed-routes`, and
+    `/intelligence-brief`, none of which have any distance figure at all) rather than
+    forcing every caller into identical wording. `/multi-stop-route`'s existing wording
+    ("crosses systems") was kept as the `has_real_distance=True` canonical text per
+    explicit user direction to treat its presentation as the reference, since the user
+    called out being satisfied with how it looks; the other four commands' behavior moved
+    to match its logic, not just its words.
+
+    Deliberate behavior changes, not just deduplication: `/best-route`'s primary branch
+    and `/top-routes` now show a cross-system warning where they previously showed
+    nothing; `/intelligence-brief` now shows terminal-health warnings, per-item limiting-
+    factor and market-status lines, a confidence rating, and (via `add_chunked_fields`) a
+    "N more omitted" disclosure instead of an unprotected field loop; `/intelligence-
+    brief`'s old three-way `_format_cross_system_note` (with a distinct "star-system data
+    incomplete" message) was folded into the shared two-way `travel_warning`, losing that
+    specific wording in exchange for one tested code path instead of a fourth bespoke one.
+
+    Verification: full test suite (333 -> 353 passing) plus new coverage specifically for
+    what changed - `tests/test_route_presentation.py` (16 tests directly against the new
+    module: cargo-item warnings, prefix handling, confidence reduction, every
+    `travel_warning` branch including the "never print None as a system name" guard,
+    capital-access/approximation wording); `tests/test_intelligence.py`'s old
+    `_format_cross_system_note` tests moved onto `travel_warning` directly;
+    `tests/test_trends_embed_budget.py` gained a cross-system regression test for
+    `/top-routes`; `tests/test_route_send_shape.py` gained one for `/best-route`'s
+    primary branch (seeded via `db.upsert_terminal_reference`, since that branch reads
+    real terminal references, not a mock); `tests/test_intelligence_brief_routes.py`
+    gained two - one confirming limiting-factor/confidence text now appears, one forcing
+    `add_chunked_fields` to reject a route deterministically and confirming the command
+    discloses the omission instead of crashing or silently dropping it. All three
+    modified cogs (`prices.py`, `trends.py`, `intelligence_brief.py`) confirmed to load
+    cleanly via a local dry-run (`bot.load_extension` without a gateway connection) with
+    no command-surface limit violations across all 11 of their commands - a full stop-Pi/
+    local-run/restart-Pi cycle was deliberately skipped this round since no command name,
+    option, or description actually changed (only internal logic), unlike every schema-
+    or interaction-shape-changing round before it.
 
 ## Where to look for what
 

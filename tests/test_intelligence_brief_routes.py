@@ -98,6 +98,57 @@ def test_routes_embed_offloads_cargo_allocation_to_a_worker_thread(tmp_path, mon
     asyncio.run(run())
 
 
+def test_routes_embed_now_shows_limiting_factors_health_and_confidence(tmp_path):
+    """Centralized Route Presentation: /intelligence-brief's route recommendations used to
+    show only a bare risk-label summary - no limiting-factor explanation (Load-Limiting
+    Explanations shipped for /mixed-routes and /multi-stop-route but was never applied
+    here), no terminal-health warnings, and no confidence rating at all, unlike every
+    sibling route command. Now built from the same shared bot.uex.route_presentation
+    helpers those commands use."""
+    async def run():
+        cog, client = await _make_cog(tmp_path, "brief_limiting_factors.sqlite3", _MIXED_ROUTES_ROWS, ship_scu=10)
+        try:
+            embed = await cog._routes_embed("TestShip", None, False)
+        finally:
+            await client.aclose()
+
+        assert embed.fields, "expected at least one route field"
+        combined = "\n".join(field.value or "" for field in embed.fields)
+        assert "limited by" in combined, combined
+        assert "Confidence:" in combined, combined
+
+    asyncio.run(run())
+
+
+def test_routes_embed_discloses_truncation_instead_of_silently_dropping_routes(tmp_path, monkeypatch):
+    """Centralized Route Presentation: /intelligence-brief had NO Discord-size protection
+    at all before - every sibling route command already learned this lesson the hard way
+    (see PROJECT_CONTEXT.md's embed-budget entries) but it was never applied here. This
+    forces the shared add_chunked_fields call to reject one route deterministically and
+    confirms the command discloses the omission rather than raising or silently vanishing
+    a route."""
+    async def run():
+        cog, client = await _make_cog(tmp_path, "brief_truncation.sqlite3", _MIXED_ROUTES_ROWS, ship_scu=10)
+        call_count = {"n": 0}
+        real_add_chunked_fields = intelligence_brief_module.add_chunked_fields
+
+        def flaky_add_chunked_fields(embed, *, name, lines):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                return False
+            return real_add_chunked_fields(embed, name=name, lines=lines)
+
+        monkeypatch.setattr(intelligence_brief_module, "add_chunked_fields", flaky_add_chunked_fields)
+        try:
+            embed = await cog._routes_embed("TestShip", None, False)
+        finally:
+            await client.aclose()
+
+        assert "omitted" in (embed.footer.text or "").lower(), embed.footer.text
+
+    asyncio.run(run())
+
+
 def test_routes_embed_discloses_when_cargo_allocation_is_approximate(tmp_path):
     """Regression: /intelligence-brief never checked route.is_exact, so a route
     recommendation could be an unproven approximation (see allocate_pair_cargo) with no

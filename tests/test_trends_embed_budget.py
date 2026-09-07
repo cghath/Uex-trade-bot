@@ -118,6 +118,31 @@ def test_a_small_number_of_routes_is_never_truncated():
     asyncio.run(run())
 
 
+def test_top_routes_now_warns_on_a_cross_system_route():
+    """Centralized Route Presentation: /top-routes never had a cross-system warning at
+    all (unlike /best-route's fallback branch and /mixed-routes, which always had one,
+    and /multi-stop-route's per-leg lines) - a real gap only noticed once the shared
+    bot.uex.route_presentation.travel_warning was written and the missing call site
+    audited for. /top-routes has real UEX distance data for every route (r.distance),
+    so it uses the has_real_distance=True style: silent when systems match, a warning
+    only when they're known and differ."""
+    async def run():
+        cog, _ = _make_cog(1)
+        cog.bot.db.get_terminal_references_by_ids = AsyncMock(return_value={
+            1: dict(terminal_name="Terminal 1", star_system_name="Stanton"),
+            2: dict(terminal_name="Terminal 2", star_system_name="Pyro"),
+        })
+        inter = _interaction()
+        await cog._send_ranked_routes(
+            inter, entries=_routes(1), updated_at=None, ship=None,
+            title="Top routes", footer_note="Collected data", log_label="test", display_limit=10,
+        )
+        embed = inter.followup.send.call_args.kwargs["embed"]
+        assert any("crosses systems" in (f.value or "") for f in embed.fields), embed.fields
+
+    asyncio.run(run())
+
+
 def test_route_budget_accounts_for_the_final_footer():
     """Follow-up review finding: _add_chunked_fields reserved only 100 characters while
     packing fields, but the real footer (explanation + refresh timestamp + ship note) is
