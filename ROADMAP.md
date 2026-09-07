@@ -91,13 +91,23 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
   and charts ROI vs. budget, marking where more capital stops changing the recommendation
   at all - real stock/demand/cargo capacity, not a code limit. Building it surfaced one
   more real gap in the candidate-selection fix below (`PROJECT_CONTEXT.md` entries 56-57).
-- [ ] **Evidence-Level Labels** *(complexity: Low - Centralized Route Presentation above
-  now gives this a single place to land)*: Distinguish current reported stock, older
-  observations, inferred trends, and approximate calculations on every recommendation,
-  and make "no information" look different from "no demand." Builds on data already
-  tracked by Terminal Data Health and Route Confidence Rating rather than new
-  computation - mostly a consistency pass across display surfaces, and now a pass through
-  `bot/uex/route_presentation.py`'s shared helpers instead of four separate cogs.
+- [x] **Evidence-Level Labels**: Shipped 2026-09-07. `/best-route` and `/top-routes` now
+  show an explicit Stock/Demand evidence line for every route instead of silently
+  omitting a missing figure - four tiers (`bot/uex/supply_demand.py`'s
+  `classify_supply_evidence`/`EvidenceLevel`): "current" (live, fresh-reported),
+  "aging" (live, but the terminal's data health is degraded), "inferred" (no live figure,
+  but ≥24h of collected observation history to estimate historical availability from -
+  a new integration of `/terminal-history`'s existing time-weighted analysis into every
+  route recommendation, not just its own standalone command), and "unknown" (genuinely no
+  information - never rendered as if it meant a confirmed zero). User picked the fullest
+  of three offered scopes, including the inferred-trend fallback specifically. See
+  `PROJECT_CONTEXT.md` entry 59 for the full design, the real bug the smoke-test caught
+  (a naive/aware datetime mismatch), and verification detail. `/mixed-routes`,
+  `/multi-stop-route`, and `/intelligence-brief` weren't extended with the same tiering -
+  their cargo items always carry a live stock/demand figure by construction (the
+  allocator requires one to build a route at all), so "inferred"/"unknown" don't apply
+  there; their existing health-warning/limiting-factor display already covers what those
+  commands need.
 - [ ] **Recommendation Outcome Tracking** *(complexity: High)*: Let a user select a
   route, then report what they actually bought/sold or where stock/access didn't match
   the recommendation. Comparing predicted vs. actual profit surfaces which

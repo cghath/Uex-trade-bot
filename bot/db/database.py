@@ -980,6 +980,45 @@ class Database:
                 if (int(row["id_commodity"]), int(row["id_terminal"])) in keys
             }
 
+    async def get_terminal_market_observations_by_ids(
+        self, commodity_terminal_ids: list[tuple[int, int]]
+    ) -> dict[tuple[int, int], list[dict[str, Any]]]:
+        """Bulk counterpart to get_terminal_market_history's single-pair, name-based
+        observation lookup - for route commands that already have stable ids and need
+        change-only history for many (commodity, terminal) pairs at once (the inferred-
+        trend evidence-level fallback used when a route has no live stock/demand figure).
+        Same id-validation/bulk-then-filter shape as get_route_market_signals_by_ids."""
+        keys: set[tuple[int, int]] = set()
+        for commodity_id, terminal_id in commodity_terminal_ids:
+            parsed_commodity = self._integer(commodity_id)
+            parsed_terminal = self._integer(terminal_id)
+            if (
+                parsed_commodity is not None and parsed_commodity > 0
+                and parsed_terminal is not None and parsed_terminal > 0
+            ):
+                keys.add((parsed_commodity, parsed_terminal))
+        if not keys:
+            return {}
+        commodity_ids = sorted({key[0] for key in keys})
+        terminal_ids = sorted({key[1] for key in keys})
+        commodity_marks = ",".join("?" for _ in commodity_ids)
+        terminal_marks = ",".join("?" for _ in terminal_ids)
+        async with self.connect() as db:
+            cursor = await db.execute(
+                f"""SELECT * FROM terminal_market_observations
+                    WHERE id_commodity IN ({commodity_marks})
+                      AND id_terminal IN ({terminal_marks})
+                    ORDER BY observed_at""",
+                [*commodity_ids, *terminal_ids],
+            )
+            rows = await cursor.fetchall()
+            grouped: dict[tuple[int, int], list[dict[str, Any]]] = {}
+            for row in rows:
+                key = (int(row["id_commodity"]), int(row["id_terminal"]))
+                if key in keys:
+                    grouped.setdefault(key, []).append(dict(row))
+            return grouped
+
     async def get_mixed_route_market_rows(self) -> list[dict[str, Any]]:
         """Current market snapshot enriched with terminal and commodity warning metadata."""
         async with self.connect() as db:

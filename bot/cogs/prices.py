@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 
 import discord
 from discord import app_commands
@@ -14,7 +15,7 @@ from bot.uex.data_health import classify_terminal_health, format_health_note
 from bot.uex.route_confidence import coalesce_report_count, compute_route_confidence
 from bot.uex.practical_routes import route_in_system, route_practical_notes, route_supports_auto_load
 from bot.uex.commodity_risk import format_commodity_risk
-from bot.uex.supply_demand import analyze_terminal_market_history, has_sell_side_demand
+from bot.uex.supply_demand import analyze_terminal_market_history, classify_supply_evidence, has_sell_side_demand
 from bot.uex.ships import estimate_route_cargo, resolve_ship
 from bot.uex.status import build_status_lookup, resolve_status_label
 from bot.uex.trading import best_buy_locations, best_routes, best_sell_locations
@@ -30,6 +31,7 @@ from bot.uex.route_presentation import (
     cargo_item_line,
     cargo_item_warnings,
     chunk_lines,
+    format_evidence_note,
     side_health_warnings,
     travel_warning,
     worst_confidence,
@@ -103,6 +105,30 @@ class Prices(commands.Cog):
             logger.info("Status labels unavailable: %s", exc)
             return {"buy": {}, "sell": {}}
         return build_status_lookup(status_data)
+
+    async def _history_by_pair(
+        self, id_commodity: object, terminal_ids: list[int]
+    ) -> dict[tuple[int, int], object]:
+        """Evidence-Level Labels' 'inferred trend' fallback: bulk change-only observation
+        history for one commodity across many terminals, reduced to a TerminalMarketHistory
+        per (commodity, terminal) pair - used when a route has no live stock/demand figure
+        to fall back to how often that pair has historically had supply/demand. Both
+        /best-route branches need this for the same single commodity, hence the shared
+        helper rather than repeating the fetch-then-reduce in each branch."""
+        if id_commodity is None:
+            return {}
+        observations_by_pair = await self.bot.db.get_terminal_market_observations_by_ids(
+            [(id_commodity, terminal_id) for terminal_id in terminal_ids]
+        )
+        # Naive UTC string, matching SQLite's own datetime('now') format that
+        # terminal_market_observations.observed_at is stored with - an aware isoformat()
+        # string here would raise comparing offset-naive vs offset-aware datetimes inside
+        # analyze_terminal_market_history's own timestamp parsing.
+        observed_until = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        return {
+            key: analyze_terminal_market_history(observations, observed_until=observed_until)
+            for key, observations in observations_by_pair.items()
+        }
 
     @app_commands.command(name="price", description="Show current buy/sell prices for a commodity across terminals.")
     @app_commands.describe(commodity="Commodity name, e.g. 'Gold' or 'Laranite'")
@@ -339,6 +365,7 @@ class Prices(commands.Cog):
                 for row in rows
                 if (terminal_id := _positive_int(row.get("id_terminal"))) is not None
             }
+            history_by_pair = await self._history_by_pair(id_commodity, ranked_terminal_ids)
             embed = discord.Embed(title=f"{commodity_display} — Best Trade Routes", color=discord.Color.green())
             if risk_warning:
                 embed.description = risk_warning
@@ -386,6 +413,23 @@ class Prices(commands.Cog):
                         status_bits.append(f"sell side: {sell_status}")
                     value_lines.append(" · ".join(status_bits))
 
+                origin_health_obj = classify_terminal_health(health_rows[origin_id]) if origin_id in health_rows else None
+                destination_health_obj = (
+                    classify_terminal_health(health_rows[destination_id]) if destination_id in health_rows else None
+                )
+                value_lines.append(format_evidence_note(
+                    classify_supply_evidence(
+                        scu=r.get("scu_origin"), health=origin_health_obj,
+                        history=history_by_pair.get((id_commodity, origin_id)), side="supply",
+                    ), label="Stock",
+                ))
+                value_lines.append(format_evidence_note(
+                    classify_supply_evidence(
+                        scu=r.get("scu_destination"), health=destination_health_obj,
+                        history=history_by_pair.get((id_commodity, destination_id)), side="demand",
+                    ), label="Demand",
+                ))
+
                 cargo = estimate_route_cargo(
                     per_unit_profit=per_unit_diff,
                     origin_scu_available=r.get("scu_origin"),
@@ -423,10 +467,8 @@ class Prices(commands.Cog):
                 origin_signal = live_signals.get(origin_id, {})
                 destination_signal = live_signals.get(destination_id, {})
                 confidence = compute_route_confidence(
-                    origin_health=(classify_terminal_health(health_rows[origin_id])
-                                   if origin_id in health_rows else None),
-                    destination_health=(classify_terminal_health(health_rows[destination_id])
-                                        if destination_id in health_rows else None),
+                    origin_health=origin_health_obj,
+                    destination_health=destination_health_obj,
                     origin_report_count=coalesce_report_count(
                         origin_signal.get("price_buy_users_rows"),
                         origin_signal.get("scu_buy_users_rows"),
@@ -529,6 +571,7 @@ class Prices(commands.Cog):
             for row in rows
             if (terminal_id := _positive_int(row.get("id_terminal"))) is not None
         }
+        history_by_pair = await self._history_by_pair(id_commodity, ranked_terminal_ids)
 
         embed = discord.Embed(
             title=f"{routes[0].commodity_name} — Best Trade Routes",
@@ -564,6 +607,27 @@ class Prices(commands.Cog):
                     status_bits.append(f"sell side: {sell_status}")
                 value_lines.append(" · ".join(status_bits))
 
+            origin_health_obj = (
+                classify_terminal_health(route_health_rows[route.buy_terminal_id])
+                if route.buy_terminal_id in route_health_rows else None
+            )
+            destination_health_obj = (
+                classify_terminal_health(route_health_rows[route.sell_terminal_id])
+                if route.sell_terminal_id in route_health_rows else None
+            )
+            value_lines.append(format_evidence_note(
+                classify_supply_evidence(
+                    scu=route.scu_buy_available, health=origin_health_obj,
+                    history=history_by_pair.get((id_commodity, route.buy_terminal_id)), side="supply",
+                ), label="Stock",
+            ))
+            value_lines.append(format_evidence_note(
+                classify_supply_evidence(
+                    scu=route.scu_sell_wanted, health=destination_health_obj,
+                    history=history_by_pair.get((id_commodity, route.sell_terminal_id)), side="demand",
+                ), label="Demand",
+            ))
+
             cargo = estimate_route_cargo(
                 per_unit_profit=route.profit_per_unit,
                 origin_scu_available=route.scu_buy_available,
@@ -587,10 +651,8 @@ class Prices(commands.Cog):
             origin_signal = live_signals.get(route.buy_terminal_id, {})
             destination_signal = live_signals.get(route.sell_terminal_id, {})
             confidence = compute_route_confidence(
-                origin_health=(classify_terminal_health(route_health_rows[route.buy_terminal_id])
-                               if route.buy_terminal_id in route_health_rows else None),
-                destination_health=(classify_terminal_health(route_health_rows[route.sell_terminal_id])
-                                    if route.sell_terminal_id in route_health_rows else None),
+                origin_health=origin_health_obj,
+                destination_health=destination_health_obj,
                 origin_report_count=coalesce_report_count(
                     origin_signal.get("price_buy_users_rows"),
                     origin_signal.get("scu_buy_users_rows"),

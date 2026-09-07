@@ -1768,6 +1768,91 @@ they're in sync).
     local-run/restart-Pi cycle was deliberately skipped this round since no command name,
     option, or description actually changed (only internal logic), unlike every schema-
     or interaction-shape-changing round before it.
+59. **Evidence-Level Labels (roadmap item) - /best-route and /top-routes now always show
+    an explicit Stock/Demand evidence line, instead of silently rendering nothing for a
+    missing figure.** Before this: a route with a live `scu_origin`/`scu_destination`
+    figure of `0` (confirmed empty) and one with `None` (never reported) looked visually
+    IDENTICAL - both just showed nothing, since the display code only ever added a stock
+    line `if scu is not None`. User picked the broadest of three offered scopes for this
+    roadmap item, explicitly including a real "inferred trend" fallback (wiring
+    `/terminal-history`'s existing time-weighted historical-availability analysis into
+    every route recommendation, not just its own standalone command) rather than just the
+    narrower "fix the conflation" bug alone.
+
+    **Four evidence tiers** (`bot/uex/supply_demand.py`'s new `EvidenceLevel`/
+    `classify_supply_evidence`, `bot/uex/route_presentation.py`'s new
+    `format_evidence_note`): "current" (a live figure, terminal health fresh/recent),
+    "aging" (a live figure, but health limited/stale/unknown - a REAL number, just not a
+    fresh one), "inferred" (no live figure, but ≥`MIN_HISTORY_HOURS` of collected
+    observation history to estimate historical supply/demand availability from, via the
+    same `analyze_terminal_market_history` `/terminal-history` already uses for one pair
+    at a time), "unknown" (no live figure and no usable history - genuinely nothing,
+    which must never render as if it meant a confirmed zero). Deliberately distinct from
+    `RouteConfidence`'s existing blended 0-100 score (`bot/uex/route_confidence.py`) -
+    that answers "how much should I trust this route overall," this answers "where did
+    THIS specific number come from."
+
+    **New bulk DB method** `get_terminal_market_observations_by_ids` (`bot/db/
+    database.py`) - the many-pairs-at-once counterpart to `get_terminal_market_history`'s
+    single-pair, name-based lookup, mirroring `get_route_market_signals_by_ids`'s
+    existing bulk-then-filter shape (validate ids, one query across all requested
+    commodity/terminal id sets, filter back down to only the exact pairs asked for -
+    fixed the DB layer's job, not a scan-everything-then-discard approach). `Prices.
+    _history_by_pair` (`bot/cogs/prices.py`) is the shared bulk-fetch-then-reduce helper
+    both `/best-route` branches use for their single commodity; `/top-routes`
+    (`trends.py`) does the equivalent inline in `_send_ranked_routes` since it spans
+    multiple commodities across its ranked routes.
+
+    **Real bug caught by the end-to-end smoke test, not a synthetic one**: the first
+    version passed `observed_until=datetime.now(timezone.utc).isoformat()` (an
+    offset-AWARE ISO string) into `analyze_terminal_market_history`, which parses
+    `terminal_market_observations.observed_at` - always a naive UTC string, since it's
+    written via SQLite's own `datetime('now')` - and raised `TypeError: can't compare
+    offset-naive and offset-aware datetimes` the instant a route with real observation
+    history was exercised end-to-end. Every purely-synthetic unit test for
+    `classify_supply_evidence` itself passed regardless, since they call
+    `analyze_terminal_market_history` directly with matched-format fixtures - only the
+    cog-level test (real command callback, real bulk-fetched observation rows, real
+    "now") reached the actual mismatch. Fixed by using
+    `datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")` (a naive-looking string in
+    SQLite's own format) instead of `.isoformat()`. Generalizes past this one fix: a
+    pure-function test with matched-format fixtures cannot catch a caller supplying the
+    WRONG format in the first place - only a test exercising the real caller path proves
+    the two sides of an interface actually agree on their string shape.
+
+    **Deliberately scoped to `/best-route` and `/top-routes` only** - `/mixed-routes`,
+    `/multi-stop-route`, and `/intelligence-brief`'s cargo items always carry a live
+    `scu_buy`/`scu_sell` figure by construction (`allocate_pair_cargo` requires one to
+    build a route at all), so the "inferred"/"unknown" tiers can't structurally occur
+    there; their existing `side_health_warnings`/`format_limiting_factors` display
+    already covers what a live-but-degraded number needs. Extending the SAME tiering
+    there anyway was considered and rejected as redundant signal stacking (health
+    warning + limiting factor + market status + a fourth evidence tag, all describing
+    overlapping territory) rather than a genuine gap, unlike the two commands that
+    actually got it.
+
+    **Verification**: 353 -> 367 tests passing. New coverage: `tests/test_intelligence.py`
+    gained 8 pure `classify_supply_evidence` tests (including the confirmed-zero-vs-
+    unknown distinction, the demand-vs-supply percentage split, and the too-short-history
+    edge case) plus 2 for the new bulk DB method (grouping, pair-filtering, and the
+    empty/invalid-id-list case); `tests/test_route_presentation.py` gained 3
+    `format_evidence_note` tests; `tests/test_trends_embed_budget.py` and
+    `tests/test_route_send_shape.py` each gained one full end-to-end test proving a
+    confirmed-zero, a genuinely-unknown, and (for the DB-backed `/best-route` test) a
+    real inferred-from-history figure all render as visibly different text in the actual
+    sent embed - not just that the pure classifier returns different tiers in isolation.
+    Existing fake-DB fixtures across three other test files needed the new
+    `get_terminal_market_observations_by_ids` mock added (an `AttributeError` on the
+    fake DB object, not a real behavior break) - the same "every fake DB stub needs the
+    new method too" mechanical update `get_route_market_signals_by_ids` and
+    `get_terminal_data_health_by_ids` each needed when they were added. Cross-checked
+    against real collected data (`data/uexbot.sqlite3`) via a throwaway smoke script
+    (not committed, per the `diagnose.py` convention) - confirmed the DB queries run
+    correctly at realistic row volumes and (this is what caught the naive/aware bug
+    above) that the code path actually used by a real command, not just its
+    unit-tested pieces, produces sensible output. All modified cogs confirmed to load
+    cleanly with no command-surface violations (no command name/option/description
+    changed, only internal logic).
 
 ## Where to look for what
 

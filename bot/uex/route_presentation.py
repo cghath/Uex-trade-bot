@@ -19,7 +19,7 @@ from bot.uex.data_health import TerminalDataHealth, format_health_note
 from bot.uex.mixed_routes import format_limiting_factors
 from bot.uex.route_confidence import RouteConfidence, compute_route_confidence
 from bot.uex.status import StatusLookup, resolve_status_label
-from bot.uex.supply_demand import has_sell_side_demand
+from bot.uex.supply_demand import EvidenceLevel, has_sell_side_demand
 
 # Discord's real limit on one embed's TOTAL text (title + description + every field's name
 # and value + footer, matching discord.py's own Embed.__len__) - not the same thing as any
@@ -203,6 +203,24 @@ def travel_warning(
 def capital_access_note(scope: str) -> str:
     """scope describes how many stops the check covers, e.g. 'both ends', 'every stop'."""
     return f"Capital-ship access confirmed: XL hangar or external cargo loading dock at {scope}"
+
+
+def format_evidence_note(level: EvidenceLevel, *, label: str) -> str:
+    """Turn an EvidenceLevel (bot.uex.supply_demand.classify_supply_evidence) into one
+    display line - always returns something, deliberately never omits the line the way
+    the pre-Evidence-Level-Labels code paths silently did for a None SCU figure. A "0 SCU"
+    confirmed-empty report and a genuinely unknown one must never read the same; only the
+    "current"/"aging" branches print a quantity at all."""
+    if level.tier == "current":
+        return f"{label}: **{level.quantity_scu:,.0f} SCU** (current report)"
+    if level.tier == "aging":
+        return f"{label}: **{level.quantity_scu:,.0f} SCU** (older report - verify before departure)"
+    if level.tier == "inferred":
+        return (
+            f"{label}: no current report - historically available ~{level.historical_availability_pct:.0f}% "
+            f"of the time ({level.observed_hours:.0f}h observed)"
+        )
+    return f"{label}: no information reported - not the same as confirmed zero"
 
 
 def approximation_note(is_exact: bool, *, per_leg: bool = False) -> str | None:

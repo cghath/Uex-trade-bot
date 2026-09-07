@@ -669,6 +669,7 @@ def test_top_routes_send_ranked_routes_shows_active_preferences_in_footer(monkey
             get_terminal_references_by_ids=AsyncMock(return_value=terminal_refs),
             get_terminal_data_health_by_ids=AsyncMock(return_value={}),
             get_route_market_signals_by_ids=AsyncMock(return_value={}),
+            get_terminal_market_observations_by_ids=AsyncMock(return_value={}),
             get_commodity_references=AsyncMock(return_value={}),
         )
         cog = trends_module.Trends.__new__(trends_module.Trends)

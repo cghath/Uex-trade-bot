@@ -33,10 +33,10 @@ from bot.uex.data_health import classify_terminal_health, format_health_note
 from bot.uex.route_confidence import compute_route_confidence
 from bot.uex.practical_routes import route_in_system, route_practical_notes, route_supports_auto_load
 from bot.uex.commodity_risk import format_commodity_risk
-from bot.uex.route_presentation import travel_warning
+from bot.uex.route_presentation import format_evidence_note, travel_warning
 from bot.uex.ships import estimate_route_cargo, resolve_ship
 from bot.uex.status import build_status_lookup, resolve_status_label
-from bot.uex.supply_demand import has_sell_side_demand
+from bot.uex.supply_demand import EvidenceLevel, analyze_terminal_market_history, classify_supply_evidence, has_sell_side_demand
 from bot.uex.trading_preferences import describe_active_preferences
 from bot.uex.trends import (
     ScoredRouteEntry,
@@ -58,6 +58,8 @@ def _build_route_field(
     ship_vehicle: dict | None,
     ship_cargo_scu: float | None,
     status_lookup: dict,
+    origin_evidence: EvidenceLevel,
+    destination_evidence: EvidenceLevel,
 ) -> tuple[str, str]:
     """Build one route field for /top-routes."""
     per_unit_profit = r.price_destination - r.price_origin
@@ -73,13 +75,12 @@ def _build_route_field(
             status_bits.append(f"sell side: {sell_status}")
         value_lines.append(" · ".join(status_bits))
 
-    stock_bits = []
-    if r.scu_origin is not None:
-        stock_bits.append(f"{r.scu_origin:,.0f} SCU available (buy)")
-    if r.scu_destination is not None:
-        stock_bits.append(f"{r.scu_destination:,.0f} SCU wanted (sell)")
-    if stock_bits:
-        value_lines.append(" · ".join(stock_bits))
+    # Evidence-Level Labels: a missing SCU figure (None) used to render nothing at all,
+    # visually identical to a confirmed-zero figure that just didn't get shown - this
+    # always shows something, and a genuinely unknown figure now reads differently from
+    # both a fresh report and a confirmed zero (see format_evidence_note's docstring).
+    value_lines.append(format_evidence_note(origin_evidence, label="Stock"))
+    value_lines.append(format_evidence_note(destination_evidence, label="Demand"))
 
     cargo = estimate_route_cargo(
         per_unit_profit=per_unit_profit,
@@ -400,6 +401,23 @@ class Trends(commands.Cog):
         commodity_references = await self.bot.db.get_commodity_references(
             [route.id_commodity for route in entries]
         )
+        # Evidence-Level Labels' "inferred trend" fallback: when a route has no live
+        # scu_origin/scu_destination figure, fall back to how often this (commodity,
+        # terminal) pair has historically had supply/demand, from the same change-only
+        # observation history /terminal-history already analyzes for one pair at a time.
+        observations_by_pair = await self.bot.db.get_terminal_market_observations_by_ids([
+            (route.id_commodity, terminal_id)
+            for route in entries
+            for terminal_id in (route.origin_terminal_id, route.destination_terminal_id)
+            if terminal_id is not None
+        ])
+        # Naive UTC string, matching SQLite's own datetime('now') format - see the
+        # matching comment in Prices._history_by_pair (bot/cogs/prices.py).
+        observed_until = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        history_by_pair = {
+            key: analyze_terminal_market_history(observations, observed_until=observed_until)
+            for key, observations in observations_by_pair.items()
+        }
 
         # Built and attached BEFORE the field loop below, not after: _add_chunked_fields'
         # budget check measures the embed's real total via len(embed), which only includes
@@ -424,7 +442,22 @@ class Trends(commands.Cog):
         embed.set_footer(text=footer)
         routes_shown = 0
         for i, r in enumerate(entries, start=1):
-            name, value = _build_route_field(i, r, ship_vehicle, ship_cargo_scu, status_lookup)
+            origin_health = classify_terminal_health(health_rows[r.origin_terminal_id]) if r.origin_terminal_id in health_rows else None
+            destination_health = (
+                classify_terminal_health(health_rows[r.destination_terminal_id])
+                if r.destination_terminal_id in health_rows else None
+            )
+            origin_evidence = classify_supply_evidence(
+                scu=r.scu_origin, health=origin_health,
+                history=history_by_pair.get((r.id_commodity, r.origin_terminal_id)), side="supply",
+            )
+            destination_evidence = classify_supply_evidence(
+                scu=r.scu_destination, health=destination_health,
+                history=history_by_pair.get((r.id_commodity, r.destination_terminal_id)), side="demand",
+            )
+            name, value = _build_route_field(
+                i, r, ship_vehicle, ship_cargo_scu, status_lookup, origin_evidence, destination_evidence
+            )
             warnings = []
             for side, terminal_id in (
                 ("Origin", r.origin_terminal_id),

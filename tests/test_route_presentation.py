@@ -21,10 +21,12 @@ from bot.uex.route_presentation import (
     cargo_confidences,
     cargo_item_line,
     cargo_item_warnings,
+    format_evidence_note,
     side_health_warnings,
     travel_warning,
     worst_confidence,
 )
+from bot.uex.supply_demand import EvidenceLevel
 
 
 def _stale_health():
@@ -163,6 +165,35 @@ def test_approximation_note_distinguishes_per_leg_from_whole_route():
     whole_route = approximation_note(False, per_leg=False)
     assert "cargo allocation" in whole_route
     assert "per-leg" not in whole_route
+
+
+def test_format_evidence_note_shows_confirmed_zero_distinctly_from_no_information():
+    """The exact bug Evidence-Level Labels exists to fix: a confirmed-empty report and a
+    genuinely unknown one must read as visibly different text, not both as nothing."""
+    zero = format_evidence_note(EvidenceLevel(tier="current", quantity_scu=0), label="Stock")
+    unknown = format_evidence_note(EvidenceLevel(tier="unknown"), label="Stock")
+    assert zero != unknown
+    assert "0 SCU" in zero
+    assert "no information" in unknown.lower()
+    assert "0" not in unknown
+
+
+def test_format_evidence_note_aging_tier_recommends_verifying():
+    note = format_evidence_note(
+        EvidenceLevel(tier="aging", quantity_scu=250), label="Demand"
+    )
+    assert "250 SCU" in note
+    assert "verify" in note.lower()
+
+
+def test_format_evidence_note_inferred_tier_cites_the_historical_basis():
+    note = format_evidence_note(
+        EvidenceLevel(tier="inferred", historical_availability_pct=62.5, observed_hours=48.0),
+        label="Stock",
+    )
+    assert "62" in note
+    assert "48" in note
+    assert "historically" in note.lower()
 
 
 def test_add_chunked_fields_is_the_canonical_home_for_the_atomic_budget_check():

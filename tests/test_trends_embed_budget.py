@@ -46,6 +46,7 @@ def _make_cog(num_routes: int) -> tuple[Trends, object]:
         get_terminal_references_by_ids=AsyncMock(return_value=references),
         get_terminal_data_health_by_ids=AsyncMock(return_value=health),
         get_route_market_signals_by_ids=AsyncMock(return_value={}),
+        get_terminal_market_observations_by_ids=AsyncMock(return_value={}),
         get_commodity_references=AsyncMock(return_value={i: risk for i in range(1, num_routes + 1)}),
     )
     uex = NS(
@@ -114,6 +115,72 @@ def test_a_small_number_of_routes_is_never_truncated():
         embed = inter.followup.send.call_args.kwargs["embed"]
         assert len(embed.fields) == 2
         assert "omitted" not in (embed.footer.text or "").lower()
+
+    asyncio.run(run())
+
+
+def test_top_routes_evidence_levels_distinguish_zero_unknown_and_inferred():
+    """Evidence-Level Labels: /top-routes used to render nothing at all for a missing
+    scu_origin/scu_destination figure, visually identical to omitting a confirmed-zero
+    figure for space. Three routes for the same commodity, one per tier: a live 0 (must
+    read as a real report, not silence), a genuinely unknown figure with no history at
+    all, and a missing figure backed by enough collected history to infer from."""
+    async def run():
+        cog, db = _make_cog(3)
+        db.get_terminal_market_observations_by_ids = AsyncMock(return_value={
+            (3, 6): [
+                dict(observed_at="2020-01-01 00:00:00", price_buy=10, scu_buy=50,
+                     price_sell=0, scu_sell=0, status_sell=None),
+                dict(observed_at="2020-01-02 00:00:00", price_buy=10, scu_buy=0,
+                     price_sell=0, scu_sell=0, status_sell=None),
+            ],
+        })
+        entries = [
+            ScoredRouteEntry(
+                commodity_name="Zero Co", id_commodity=1,
+                origin_terminal_name="Origin 1", destination_terminal_name="Destination 1",
+                price_origin=100, price_destination=200, price_margin=50, price_roi=100,
+                distance=10, score=100, scu_origin=0, scu_destination=100,
+                status_origin=1, status_destination=1, origin_terminal_id=1, destination_terminal_id=2,
+            ),
+            ScoredRouteEntry(
+                commodity_name="Unknown Co", id_commodity=2,
+                origin_terminal_name="Origin 2", destination_terminal_name="Destination 2",
+                price_origin=100, price_destination=200, price_margin=50, price_roi=100,
+                distance=10, score=90, scu_origin=None, scu_destination=100,
+                status_origin=1, status_destination=1, origin_terminal_id=3, destination_terminal_id=4,
+            ),
+            ScoredRouteEntry(
+                commodity_name="Inferred Co", id_commodity=3,
+                origin_terminal_name="Origin 3", destination_terminal_name="Destination 3",
+                price_origin=100, price_destination=200, price_margin=50, price_roi=100,
+                distance=10, score=80, scu_origin=None, scu_destination=100,
+                status_origin=1, status_destination=1, origin_terminal_id=6, destination_terminal_id=7,
+            ),
+        ]
+        inter = _interaction()
+        await cog._send_ranked_routes(
+            inter, entries=entries, updated_at=None, ship=None,
+            title="Top routes", footer_note="Collected data", log_label="test", display_limit=10,
+        )
+        embed = inter.followup.send.call_args.kwargs["embed"]
+        by_route: dict[str, str] = {}
+        for field in embed.fields:
+            key = field.name.split(":")[0]
+            by_route[key] = by_route.get(key, "") + field.value
+        zero_text = next(v for k, v in by_route.items() if "Zero Co" in k)
+        unknown_text = next(v for k, v in by_route.items() if "Unknown Co" in k)
+        inferred_text = next(v for k, v in by_route.items() if "Inferred Co" in k)
+
+        # _make_cog's shared health fixture reports every terminal as "stale" (see this
+        # file's own docstring) - so the live 0 SCU value lands in the "aging" tier here,
+        # not "current". The point being pinned is that it's shown as a real quantity at
+        # all, distinct from the unknown route's total absence of one.
+        assert "**0 SCU**" in zero_text
+        assert "no information reported" in unknown_text
+        assert "**0 SCU**" not in unknown_text, "an unknown figure must never render as a literal zero"
+        assert "historically available" in inferred_text
+        assert "no information reported" not in inferred_text
 
     asyncio.run(run())
 

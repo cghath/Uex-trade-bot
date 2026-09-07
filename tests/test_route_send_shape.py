@@ -544,6 +544,66 @@ def test_best_route_primary_branch_now_warns_on_a_cross_system_route(tmp_path):
     asyncio.run(run())
 
 
+def test_best_route_fallback_branch_shows_evidence_levels_for_missing_stock_and_demand(tmp_path):
+    """Evidence-Level Labels: /best-route's fallback branch (no UEX /commodities_routes
+    data for this commodity) never showed a raw stock/demand figure at all before - a
+    missing scu_buy/scu_sell was invisible, indistinguishable from a route that simply
+    doesn't mention it. The buy side here has collected observation history to infer
+    from (long-running stock reports); the sell side has none at all."""
+    async def run():
+        db = Database(tmp_path / "best_route_evidence.sqlite3", Fernet(Fernet.generate_key()))
+        await db.init()
+        # A backdated observation, well past MIN_HISTORY_HOURS (24h) from "now" - inserted
+        # directly rather than via record_terminal_market_snapshot, which always stamps
+        # observed_at as datetime('now') and can't backdate it.
+        async with db.connect() as sqlite:
+            await sqlite.execute(
+                """INSERT INTO terminal_market_observations
+                   (id_commodity, id_terminal, observed_at, commodity_name, terminal_name,
+                    price_buy, scu_buy, status_buy)
+                   VALUES (1, 1, datetime('now', '-48 hours'), 'Gold', 'Buy A', 10, 50, 1)"""
+            )
+            await sqlite.commit()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            path = request.url.path
+            if "commodities_prices" in path:
+                return httpx.Response(200, json={"status": "ok", "data": [
+                    {"id_commodity": 1, "commodity_name": "Gold", "id_terminal": 1, "terminal_name": "Buy A",
+                     "price_buy": 10, "price_sell": 0},
+                    {"id_commodity": 1, "commodity_name": "Gold", "id_terminal": 3, "terminal_name": "Sell A",
+                     "price_buy": 0, "price_sell": 100},
+                ]})
+            if "commodities_routes" in path:
+                return httpx.Response(200, json={"status": "ok", "data": []})
+            return httpx.Response(200, json={"status": "ok", "data": []})
+
+        client = UexClient(app_token="test", base_url="https://uex.test")
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+        bot = type("FakeBot", (), {})()
+        bot.db = db
+        bot.uex = client
+        cog = Prices.__new__(Prices)
+        cog.bot = bot
+        interaction = _FakeInteraction(1)
+
+        try:
+            await cog.best_route.callback(cog, interaction, commodity="Gold")
+        finally:
+            await client.aclose()
+
+        assert interaction.followup.sent, "expected at least one followup"
+        _, kwargs = interaction.followup.sent[0]
+        embed = kwargs["embed"]
+        combined = "\n".join(field.value or "" for field in embed.fields)
+        assert "historically available" in combined, combined
+        assert "no information reported" in combined, combined
+
+    asyncio.run(run())
+
+
 def test_best_route_fallback_branch_discloses_when_routes_are_truncated_for_size(tmp_path, monkeypatch):
     """Same finding as the primary-branch test above, for /best-route's OTHER branch -
     the one used when UEX has no /commodities_routes data for this commodity and the bot

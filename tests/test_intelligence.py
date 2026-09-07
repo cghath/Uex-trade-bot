@@ -8,7 +8,7 @@ from cryptography.fernet import Fernet
 
 from bot.db.database import Database
 from bot.uex.data_health import classify_terminal_health, format_health_note
-from bot.uex.supply_demand import analyze_terminal_market_history
+from bot.uex.supply_demand import analyze_terminal_market_history, classify_supply_evidence
 from bot.uex.practical_routes import (
     route_in_system,
     route_practical_notes,
@@ -46,6 +46,51 @@ def test_terminal_market_history_only_records_initial_and_changed_states(tmp_pat
         async with db.connect() as sqlite:
             cursor = await sqlite.execute("SELECT COUNT(*) AS count FROM terminal_market_observations")
             assert (await cursor.fetchone())["count"] == 2
+
+    asyncio.run(run())
+
+
+def test_get_terminal_market_observations_by_ids_groups_and_filters_by_requested_pairs(tmp_path):
+    """Bulk counterpart to get_terminal_market_history's single-pair lookup - used by the
+    Evidence-Level Labels inferred-trend fallback across many routes at once. Confirms
+    grouping by (id_commodity, id_terminal), that only the requested pairs come back (not
+    every row in the table), and that invalid/zero ids are silently skipped rather than
+    raising, matching get_route_market_signals_by_ids' own established shape."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        row_a = {
+            "id_commodity": 1, "id_terminal": 10, "commodity_name": "Gold", "terminal_name": "A",
+            "price_buy": 100, "scu_buy": 50, "status_buy": 1,
+        }
+        row_b = {
+            "id_commodity": 1, "id_terminal": 20, "commodity_name": "Gold", "terminal_name": "B",
+            "price_sell": 150, "scu_sell": 30, "status_sell": 1,
+        }
+        row_c = {
+            "id_commodity": 2, "id_terminal": 10, "commodity_name": "Cobalt", "terminal_name": "A",
+            "price_buy": 20, "scu_buy": 5, "status_buy": 1,
+        }
+        await db.record_terminal_market_snapshot([row_a, row_b, row_c])
+        row_a["scu_buy"] = 60  # change-only: a second, different observation for (1, 10)
+        await db.record_terminal_market_snapshot([row_a, row_b, row_c])
+
+        result = await db.get_terminal_market_observations_by_ids([(1, 10), (1, 20), (0, 999), (1, None)])
+
+        assert set(result.keys()) == {(1, 10), (1, 20)}
+        assert len(result[(1, 10)]) == 2, "expected both observations for the changed pair"
+        assert len(result[(1, 20)]) == 1
+        assert (2, 10) not in result, "a real pair not passed in the query must not leak into the result"
+
+    asyncio.run(run())
+
+
+def test_get_terminal_market_observations_by_ids_returns_empty_for_no_valid_ids(tmp_path):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        assert await db.get_terminal_market_observations_by_ids([]) == {}
+        assert await db.get_terminal_market_observations_by_ids([(0, 0), (None, None)]) == {}
 
     asyncio.run(run())
 
@@ -421,6 +466,78 @@ def test_supply_demand_history_marks_short_windows_preliminary():
     )
     assert history is not None
     assert not history.enough_history
+
+
+def _fresh_health():
+    return classify_terminal_health(dict(last_update_days_percentage=80, prices_updated_percentage=100))
+
+
+def _stale_health():
+    return classify_terminal_health(dict(last_update_days_percentage=0, prices_updated_percentage=100))
+
+
+def _long_history():
+    return analyze_terminal_market_history(
+        [
+            {"observed_at": "2026-08-01 00:00:00", "price_buy": 10, "scu_buy": 50,
+             "price_sell": 12, "scu_sell": 0, "status_sell": 7},
+            {"observed_at": "2026-08-01 06:00:00", "price_buy": 10, "scu_buy": 0,
+             "price_sell": 12, "scu_sell": 100, "status_sell": 1},
+        ],
+        observed_until="2026-08-02 00:00:00",
+    )
+
+
+def test_evidence_level_is_current_when_scu_is_live_and_health_is_fresh():
+    level = classify_supply_evidence(scu=500, health=_fresh_health(), history=None, side="supply")
+    assert level.tier == "current"
+    assert level.quantity_scu == 500
+
+
+def test_evidence_level_is_aging_when_scu_is_live_but_health_is_degraded():
+    level = classify_supply_evidence(scu=500, health=_stale_health(), history=None, side="supply")
+    assert level.tier == "aging"
+    assert level.quantity_scu == 500
+
+
+def test_evidence_level_confirmed_zero_stays_current_not_unknown():
+    """The whole point of Evidence-Level Labels: a REAL reported zero must never look the
+    same as having no information at all."""
+    level = classify_supply_evidence(scu=0, health=_fresh_health(), history=None, side="supply")
+    assert level.tier == "current"
+    assert level.quantity_scu == 0
+
+
+def test_evidence_level_falls_back_to_inferred_when_no_live_scu_but_enough_history():
+    level = classify_supply_evidence(scu=None, health=None, history=_long_history(), side="supply")
+    assert level.tier == "inferred"
+    assert level.historical_availability_pct is not None
+    assert level.observed_hours == 24
+
+
+def test_evidence_level_demand_side_reads_the_demand_percentage_not_supply():
+    history = _long_history()
+    supply = classify_supply_evidence(scu=None, health=None, history=history, side="supply")
+    demand = classify_supply_evidence(scu=None, health=None, history=history, side="demand")
+    assert supply.historical_availability_pct == history.supply_available_pct
+    assert demand.historical_availability_pct == history.demand_available_pct
+    assert supply.historical_availability_pct != demand.historical_availability_pct
+
+
+def test_evidence_level_is_unknown_when_no_live_scu_and_no_history():
+    level = classify_supply_evidence(scu=None, health=None, history=None, side="supply")
+    assert level.tier == "unknown"
+    assert level.quantity_scu is None
+
+
+def test_evidence_level_is_unknown_when_history_is_too_short_to_infer_from():
+    short_history = analyze_terminal_market_history(
+        [{"observed_at": "2026-08-01 00:00:00", "price_buy": 1, "scu_buy": 1}],
+        observed_until="2026-08-01 12:00:00",
+    )
+    assert not short_history.enough_history
+    level = classify_supply_evidence(scu=None, health=None, history=short_history, side="supply")
+    assert level.tier == "unknown"
 
 
 def test_terminal_market_name_search_is_scoped_to_commodity(tmp_path):

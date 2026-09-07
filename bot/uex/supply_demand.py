@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from bot.uex.data_health import TerminalDataHealth
+
 
 MIN_HISTORY_HOURS = 24
 SELL_SIDE_NO_DEMAND_CODE = 7
@@ -78,3 +80,44 @@ def analyze_terminal_market_history(
         state_changes=max(0, len(rows) - 1),
         last_change_at=_timestamp(str(rows[-1]["observed_at"])),
     )
+
+
+# Evidence-Level Labels: what a route's stock/demand figure actually rests on, distinct
+# from the blended 0-100 RouteConfidence score (bot/uex/route_confidence.py) - that score
+# answers "how much should I trust this route overall," this answers "where did THIS
+# specific number come from." Four tiers, in descending order of directness:
+#   "current"  - a live reported figure, and the terminal's data is fresh/recent
+#   "aging"    - a live reported figure, but the terminal's data is limited/stale/unknown
+#                (a real number, just not a fresh one - not the same as having none)
+#   "inferred" - no live figure at all, but enough collected history (>= MIN_HISTORY_HOURS)
+#                to estimate how often this terminal has had supply/demand historically
+#   "unknown"  - no live figure AND no usable history - genuinely no information, which
+#                must never be displayed as if it meant "confirmed zero"
+EVIDENCE_TIERS = ("current", "aging", "inferred", "unknown")
+
+
+@dataclass(frozen=True)
+class EvidenceLevel:
+    tier: str
+    quantity_scu: float | None = None
+    historical_availability_pct: float | None = None
+    observed_hours: float | None = None
+
+
+def classify_supply_evidence(
+    *,
+    scu: float | None,
+    health: TerminalDataHealth | None,
+    history: TerminalMarketHistory | None,
+    side: str,
+) -> EvidenceLevel:
+    """side is 'supply' (origin/buy) or 'demand' (destination/sell) - selects which of
+    history's two percentages describes this side."""
+    if scu is not None:
+        status = health.status if health is not None else "unknown"
+        tier = "current" if status in ("fresh", "recent") else "aging"
+        return EvidenceLevel(tier=tier, quantity_scu=float(scu))
+    if history is not None and history.enough_history:
+        pct = history.demand_available_pct if side == "demand" else history.supply_available_pct
+        return EvidenceLevel(tier="inferred", historical_availability_pct=pct, observed_hours=history.observed_hours)
+    return EvidenceLevel(tier="unknown")
