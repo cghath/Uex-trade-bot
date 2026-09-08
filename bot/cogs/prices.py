@@ -1068,6 +1068,10 @@ class Prices(commands.Cog):
         terminal_ids = [terminal_id for route in routes for terminal_id in route.stops]
         health_rows = await self.bot.db.get_terminal_data_health_by_ids(terminal_ids)
         status_lookup = await self._get_status_lookup()
+        # RouteProgression may not be loaded (a cog load failure elsewhere shouldn't break
+        # /multi-stop-route) - tracking buttons are additive, never required for the
+        # command's own result.
+        tracking_cog = self.bot.get_cog("RouteProgression")
         for index, route in enumerate(routes, 1):
             path_label = " → ".join(
                 [route.legs[0].origin_name, *(leg.destination_name for leg in route.legs)]
@@ -1197,8 +1201,39 @@ class Prices(commands.Cog):
             # got a followup at all and the interaction looked permanently "thinking."
             embed_too_large = not warnings_fit or not all_legs_fit
             if not embed_too_large:
+                # A multi-stop leg carries several commodities at once (allocate_pair_cargo's
+                # mixed load), not one - flattened here into one buy + one sell progression-
+                # leg per commodity per hop, in order, so the existing leg-by-leg cog can walk
+                # a chain exactly the same way it already walks /best-route's simple 2-leg case.
+                view = None
+                if tracking_cog:
+                    progression_legs: list[RouteLegInput] = []
+                    for chain_leg in route.legs:
+                        for item in chain_leg.cargo:
+                            progression_legs.append(RouteLegInput(
+                                side="buy", id_terminal=chain_leg.origin_id, id_commodity=item.id_commodity,
+                                terminal_name=chain_leg.origin_name, commodity_name=item.commodity_name,
+                                display_label=f"Buy {item.commodity_name} at {chain_leg.origin_name}",
+                                quoted_price=item.buy_price, quoted_scu=item.quantity_scu,
+                                quoted_status=item.source.get("status_buy"),
+                            ))
+                        for item in chain_leg.cargo:
+                            progression_legs.append(RouteLegInput(
+                                side="sell", id_terminal=chain_leg.destination_id, id_commodity=item.id_commodity,
+                                terminal_name=chain_leg.destination_name, commodity_name=item.commodity_name,
+                                display_label=f"Sell {item.commodity_name} at {chain_leg.destination_name}",
+                                quoted_price=item.sell_price, quoted_scu=item.quantity_scu,
+                                quoted_status=item.destination.get("status_sell"),
+                            ))
+                    if progression_legs:
+                        view = RouteTrackingView(tracking_cog, [TrackableRoute(
+                            route_kind="multi_stop_route", title=f"#{index} {path_label}", legs=progression_legs,
+                        )])
                 try:
-                    await interaction.followup.send(embed=route_embed)
+                    if view is not None:
+                        await interaction.followup.send(embed=route_embed, view=view)
+                    else:
+                        await interaction.followup.send(embed=route_embed)
                 except discord.HTTPException:
                     embed_too_large = True
             if embed_too_large:

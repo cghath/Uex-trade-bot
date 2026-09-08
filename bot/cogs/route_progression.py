@@ -222,6 +222,7 @@ class RouteTrackingView(discord.ui.View):
         super().__init__(timeout=900)
         self.cog = cog
         routes = routes[:MAX_TRACKABLE_ROUTES]
+        self.routes = routes
         for index, route in enumerate(routes):
             label = "Track this route" if len(routes) == 1 else f"Track route #{index + 1}"
             button: discord.ui.Button = discord.ui.Button(

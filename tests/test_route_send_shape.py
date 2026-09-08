@@ -408,6 +408,7 @@ def test_multi_stop_route_falls_back_to_plain_text_when_only_the_warnings_sectio
         bot.uex = type("FakeUex", (), {})()
         bot.uex.get_vehicles = AsyncMock(return_value=[dict(name="Ship", scu=100)])
         bot.uex.get_terminal_distance = AsyncMock(return_value=dict(distance=10))
+        bot.get_cog = lambda name: None
         cog = Prices.__new__(Prices)
         cog.bot = bot
         cog._get_status_lookup = AsyncMock(return_value={
@@ -423,6 +424,59 @@ def test_multi_stop_route_falls_back_to_plain_text_when_only_the_warnings_sectio
         fallback_text = "\n".join(kwargs.get("content", "") for _, kwargs in interaction.followup.sent)
         assert "Cargo risk:" in fallback_text, fallback_text
         assert "crosses systems" in fallback_text, fallback_text
+
+    asyncio.run(run())
+
+
+def test_multi_stop_route_attaches_a_track_button_with_flattened_legs(monkeypatch):
+    """/multi-stop-route wiring: a chain leg carries several commodities at once
+    (allocate_pair_cargo's mixed load), unlike /best-route's single-commodity leg - each
+    is flattened into one buy + one sell progression-leg per commodity per hop, in order,
+    so the existing leg-by-leg cog can walk a chain exactly the same way it already walks
+    /best-route's simpler 2-leg case."""
+    async def run():
+        source = dict(scu_buy=10, status_buy=1, star_system_name="Stanton")
+        destination = dict(scu_sell=10, status_sell=1, star_system_name="Stanton")
+        cargo = (
+            MixedCargoItem(1, "Gold", 5, 100, 200, 10, 500, 500, source, destination, limiting_factors=("stock",)),
+            MixedCargoItem(2, "Cobalt", 3, 50, 90, 10, 150, 120, source, destination, limiting_factors=("stock",)),
+        )
+        leg = MultiStopLeg(10, "Station A", 20, "Station B", cargo, 650, 1270, 620, True)
+        route = MultiStopRoute((leg,), 650, 1270, 620)
+        monkeypatch.setattr(prices_module, "build_multi_stop_routes", lambda *a, **k: [route])
+
+        bot = type("FakeBot", (), {})()
+        bot.db = type("FakeDb", (), {})()
+        bot.db.get_default_ship = AsyncMock(return_value="Ship")
+        bot.db.get_trading_preferences = AsyncMock(return_value=dict(DEFAULT_TRADING_PREFERENCES))
+        bot.db.get_mixed_route_market_rows = AsyncMock(return_value=[])
+        bot.db.get_terminal_data_health_by_ids = AsyncMock(return_value={})
+        bot.uex = type("FakeUex", (), {})()
+        bot.uex.get_vehicles = AsyncMock(return_value=[dict(name="Ship", scu=100)])
+        bot.uex.get_terminal_distance = AsyncMock(return_value=dict(distance=10))
+        tracking_cog = RouteProgression.__new__(RouteProgression)
+        bot.get_cog = lambda name: tracking_cog if name == "RouteProgression" else None
+        cog = Prices.__new__(Prices)
+        cog.bot = bot
+        cog._get_status_lookup = AsyncMock(return_value={"buy": {}, "sell": {}})
+        interaction = _FakeInteraction(1)
+
+        await cog.multi_stop_route.callback(cog, interaction)
+
+        assert interaction.followup.sent, "expected at least one followup"
+        _, kwargs = interaction.followup.sent[0]
+        view = kwargs.get("view")
+        assert isinstance(view, RouteTrackingView)
+        assert len(view.children) == 1, "one route -> one tracking button"
+
+        legs = view.routes[0].legs
+        assert [progression_leg.display_label for progression_leg in legs] == [
+            "Buy Gold at Station A", "Buy Cobalt at Station A",
+            "Sell Gold at Station B", "Sell Cobalt at Station B",
+        ], legs
+        assert legs[0].id_terminal == 10 and legs[0].side == "buy"
+        assert legs[2].id_terminal == 20 and legs[2].side == "sell"
+        assert legs[0].quoted_scu == 5 and legs[0].quoted_price == 100
 
     asyncio.run(run())
 
