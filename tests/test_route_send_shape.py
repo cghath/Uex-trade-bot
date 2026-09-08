@@ -799,6 +799,102 @@ def test_best_route_fallback_branch_shows_evidence_levels_for_missing_stock_and_
     asyncio.run(run())
 
 
+def test_best_route_fallback_branch_shows_investment(tmp_path):
+    """CargoEstimate now carries an investment figure alongside Run profit (bot/uex/
+    ships.py) - the fallback branch (no UEX /commodities_routes data) must show it too,
+    not just the primary branch below."""
+    async def run():
+        db = Database(tmp_path / "best_route_fallback_investment.sqlite3", Fernet(Fernet.generate_key()))
+        await db.init()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            path = request.url.path
+            if "commodities_prices" in path:
+                return httpx.Response(200, json={"status": "ok", "data": [
+                    {"id_commodity": 1, "commodity_name": "Gold", "id_terminal": 1, "terminal_name": "Buy A",
+                     "price_buy": 100, "price_sell": 0, "scu_buy": 50, "scu_sell": 0},
+                    {"id_commodity": 1, "commodity_name": "Gold", "id_terminal": 3, "terminal_name": "Sell A",
+                     "price_buy": 0, "price_sell": 200, "scu_buy": 0, "scu_sell": 50},
+                ]})
+            if "commodities_routes" in path:
+                return httpx.Response(200, json={"status": "ok", "data": []})
+            return httpx.Response(200, json={"status": "ok", "data": []})
+
+        client = UexClient(app_token="test", base_url="https://uex.test")
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+        bot = type("FakeBot", (), {})()
+        bot.db = db
+        bot.uex = client
+        bot.get_cog = lambda name: None
+        cog = Prices.__new__(Prices)
+        cog.bot = bot
+        interaction = _FakeInteraction(1)
+
+        try:
+            await cog.best_route.callback(cog, interaction, commodity="Gold")
+        finally:
+            await client.aclose()
+
+        assert interaction.followup.sent, "expected at least one followup"
+        _, kwargs = interaction.followup.sent[0]
+        embed = kwargs["embed"]
+        combined = "\n".join(field.value or "" for field in embed.fields)
+        assert "Investment:" in combined, combined
+
+    asyncio.run(run())
+
+
+def test_best_route_primary_branch_shows_investment(tmp_path):
+    async def run():
+        db = Database(tmp_path / "best_route_primary_investment.sqlite3", Fernet(Fernet.generate_key()))
+        await db.init()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            path = request.url.path
+            if "commodities_prices" in path:
+                return httpx.Response(200, json={"status": "ok", "data": [
+                    {"id_commodity": 1, "commodity_name": "Gold"}
+                ]})
+            if "commodities_routes" in path:
+                return httpx.Response(200, json={"status": "ok", "data": [
+                    {
+                        "id_terminal_origin": 1, "id_terminal_destination": 101,
+                        "origin_terminal_name": "Origin 1", "destination_terminal_name": "Destination 1",
+                        "price_origin": 100, "price_destination": 200, "price_margin": 50, "price_roi": 100,
+                        "distance": 5, "score": 100, "scu_origin": 10, "scu_destination": 10,
+                        "status_origin": 1, "status_destination": 1, "profit": 100,
+                    }
+                ]})
+            return httpx.Response(200, json={"status": "ok", "data": []})
+
+        client = UexClient(app_token="test", base_url="https://uex.test")
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+        bot = type("FakeBot", (), {})()
+        bot.db = db
+        bot.uex = client
+        bot.get_cog = lambda name: None
+        cog = Prices.__new__(Prices)
+        cog.bot = bot
+        interaction = _FakeInteraction(1)
+
+        try:
+            await cog.best_route.callback(cog, interaction, commodity="Gold")
+        finally:
+            await client.aclose()
+
+        assert len(interaction.followup.sent) >= 2, "expected the intro plus the route message"
+        _, kwargs = interaction.followup.sent[1]
+        embed = kwargs["embed"]
+        combined = "\n".join(f.value or "" for f in embed.fields)
+        assert "Investment:" in combined, combined
+
+    asyncio.run(run())
+
+
 def test_best_route_fallback_branch_anchors_history_to_last_seen_not_wall_clock(tmp_path):
     """Audit fix: the 'inferred' tier used to anchor observation coverage to wall-clock
     now() instead of the collector's own terminal_market_state.last_seen - a pair with

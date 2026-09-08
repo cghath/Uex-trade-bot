@@ -462,6 +462,7 @@ class Prices(commands.Cog):
                     origin_scu_available=r.get("scu_origin"),
                     destination_scu_wanted=r.get("scu_destination"),
                     ship_cargo_scu=ship_cargo_scu,
+                    price_origin=price_origin,
                 )
                 if cargo is not None:
                     limit_note = {
@@ -471,8 +472,10 @@ class Prices(commands.Cog):
                     cargo_line = f"Cargo: **{cargo.max_scu:,.0f} SCU**"
                     if limit_note:
                         cargo_line += f" ({limit_note})"
+                    if cargo.investment is not None:
+                        cargo_line += f"\nInvestment: **{cargo.investment:,.0f} aUEC**"
                     if cargo.run_profit is not None:
-                        cargo_line += f"\nRun profit: **{cargo.run_profit:,.0f} aUEC** for this haul"
+                        cargo_line += f" · Run profit: **{cargo.run_profit:,.0f} aUEC** for this haul"
                     value_lines.append(cargo_line)
                 elif not ship_vehicle:
                     value_lines.append("Cargo: unknown (set a ship with /set-default-ship to see haulable SCU)")
@@ -711,6 +714,7 @@ class Prices(commands.Cog):
                 origin_scu_available=route.scu_buy_available,
                 destination_scu_wanted=route.scu_sell_wanted,
                 ship_cargo_scu=ship_cargo_scu,
+                price_origin=route.buy_price,
             )
             if cargo is not None:
                 limit_note = {
@@ -720,8 +724,10 @@ class Prices(commands.Cog):
                 cargo_line = f"Cargo: **{cargo.max_scu:,.0f} SCU**"
                 if limit_note:
                     cargo_line += f" ({limit_note})"
+                if cargo.investment is not None:
+                    cargo_line += f"\nInvestment: **{cargo.investment:,.0f} aUEC**"
                 if cargo.run_profit is not None:
-                    cargo_line += f"\nRun profit: **{cargo.run_profit:,.0f} aUEC** for this haul"
+                    cargo_line += f" · Run profit: **{cargo.run_profit:,.0f} aUEC** for this haul"
                 value_lines.append(cargo_line)
             elif not ship_vehicle:
                 value_lines.append("Cargo: unknown (set a ship with /set-default-ship to see haulable SCU)")

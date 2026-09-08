@@ -35,6 +35,7 @@ class CargoEstimate:
     max_scu: float
     limited_by: str  # "ship" | "stock" | "unknown"
     run_profit: float | None
+    investment: float | None
 
 
 def estimate_route_cargo(
@@ -43,6 +44,7 @@ def estimate_route_cargo(
     origin_scu_available: float | None,
     destination_scu_wanted: float | None,
     ship_cargo_scu: float | None,
+    price_origin: float | None = None,
 ) -> CargoEstimate | None:
     """How much of this commodity a run can actually haul, and the resulting total profit.
 
@@ -70,4 +72,5 @@ def estimate_route_cargo(
         limited_by = "ship"
 
     run_profit = round(per_unit_profit * max_scu, 2)
-    return CargoEstimate(max_scu=max_scu, limited_by=limited_by, run_profit=run_profit)
+    investment = round(price_origin * max_scu, 2) if price_origin is not None else None
+    return CargoEstimate(max_scu=max_scu, limited_by=limited_by, run_profit=run_profit, investment=investment)

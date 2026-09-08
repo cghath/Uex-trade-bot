@@ -318,3 +318,21 @@ def test_top_routes_never_shows_a_route_without_its_risk_warning():
             )
 
     asyncio.run(run())
+
+
+def test_top_routes_shows_investment():
+    """CargoEstimate now carries an investment figure alongside Run profit (bot/uex/
+    ships.py) - /top-routes' shared _build_route_field must show it too."""
+    async def run():
+        cog, _ = _make_cog(1)
+        inter = _interaction()
+        await cog._send_ranked_routes(
+            inter, entries=_routes(1), updated_at=None, ship=None,
+            title="Top routes", footer_note="Collected data", log_label="test", display_limit=10,
+        )
+        route_call = _route_embed_calls(inter.followup.send)[0]
+        embed = route_call.kwargs["embed"]
+        combined = "\n".join(f.value or "" for f in embed.fields)
+        assert "Investment:" in combined, combined
+
+    asyncio.run(run())

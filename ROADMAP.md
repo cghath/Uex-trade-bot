@@ -181,6 +181,30 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
     rows/call max, 1000 reports/30 min, and a 5-minute block on resubmitting the same
     item+location.
 
+- [x] **Show Investment consistently across all route commands**: Shipped 2026-09-08.
+  `/mixed-routes` and `/multi-stop-route` already showed `Investment: **X** · Revenue:
+  **Y aUEC**` per route/leg; `/best-route` and `/top-routes` only ever showed total `Run
+  profit`, never the aUEC actually needed to buy the cargo for that profit - a real gap
+  for anyone weighing whether they can afford a haul at all, not just how profitable it
+  is once they can. `CargoEstimate` (`bot/uex/ships.py`) now carries an `investment`
+  field (`price_origin * max_scu`, via a new optional `price_origin` parameter on
+  `estimate_route_cargo` - `None` when omitted, so any caller that predates this change
+  keeps working unchanged) surfaced in both commands' cargo line, matching the other
+  two's existing wording. Noticed while designing `/routes-from` below.
+- [x] **`/routes-from`**: Shipped 2026-09-08. Best trade routes starting from wherever
+  the player currently is - a `location` option (terminal name, with autocomplete off
+  the local `terminal_reference` cache, no live UEX call) rather than `/best-route`'s
+  commodity anchor or `/top-routes`' unanchored global ranking. Deliberately not its own
+  ranking engine: filters the SAME background-refreshed candidate pool `/top-routes`
+  already maintains (comprehensive across every commodity UEX has route data for, not
+  truncated) down to routes whose origin matches the resolved terminal, then hands that
+  filtered list to the exact same shared `_send_ranked_routes` `/top-routes` uses - so it
+  gets evidence-level labels, health warnings, `track_record_modifier` confidence
+  calibration, and tracking buttons for free, no new presentation logic. Location
+  resolution (`Database.resolve_terminal_id_by_name`) uses the same tiered exact-then-
+  unique-substring match as `find_item_id_by_name` - never guesses between two candidate
+  terminals.
+
 ### Route Economics Depth
 
 - [ ] **Fuel-Aware Profit**: Estimate fuel costs and show route profit after fuel for the

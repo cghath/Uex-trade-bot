@@ -1299,6 +1299,47 @@ class Database:
             observations = await cursor.fetchall()
             return dict(state_row), [dict(row) for row in observations]
 
+    async def search_terminals_by_name(self, query: str, limit: int = 25) -> list[dict[str, Any]]:
+        """Suggest terminals by name substring for autocomplete - the local 24h-cached
+        terminal_reference table, not a live UEX call."""
+        stripped = query.strip()
+        if not stripped:
+            return []
+        async with self.connect() as db:
+            cursor = await db.execute(
+                """SELECT id_terminal, terminal_name FROM terminal_reference
+                   WHERE lower(terminal_name) LIKE lower(?)
+                   ORDER BY terminal_name LIMIT ?""",
+                (f"%{stripped}%", limit),
+            )
+            return [dict(row) for row in await cursor.fetchall()]
+
+    async def resolve_terminal_id_by_name(self, name: str) -> tuple[int, str] | None:
+        """Exact (case-insensitive) match first; falls back to a substring match only if
+        it resolves to exactly one terminal - same tiered/gated pattern as
+        find_item_id_by_name (bot/uex/marketplace.py), never guessing between candidates."""
+        stripped = name.strip()
+        if not stripped:
+            return None
+        async with self.connect() as db:
+            cursor = await db.execute(
+                "SELECT id_terminal, terminal_name FROM terminal_reference WHERE lower(terminal_name) = lower(?)",
+                (stripped,),
+            )
+            exact = await cursor.fetchall()
+            if len(exact) == 1:
+                return exact[0]["id_terminal"], exact[0]["terminal_name"]
+            if len(exact) > 1:
+                return None
+            cursor = await db.execute(
+                "SELECT id_terminal, terminal_name FROM terminal_reference WHERE lower(terminal_name) LIKE lower(?)",
+                (f"%{stripped}%",),
+            )
+            candidates = await cursor.fetchall()
+            if len(candidates) == 1:
+                return candidates[0]["id_terminal"], candidates[0]["terminal_name"]
+        return None
+
     async def find_terminal_market_names(self, commodity_name: str, query: str, limit: int = 10) -> list[str]:
         """Suggest known terminal names when an exact /terminal-history lookup misses."""
         async with self.connect() as db:

@@ -88,6 +88,7 @@ def _build_route_field(
         origin_scu_available=r.scu_origin,
         destination_scu_wanted=r.scu_destination,
         ship_cargo_scu=ship_cargo_scu,
+        price_origin=r.price_origin,
     )
     if cargo is not None:
         limit_note = {
@@ -97,8 +98,10 @@ def _build_route_field(
         cargo_line = f"Cargo: **{cargo.max_scu:,.0f} SCU**"
         if limit_note:
             cargo_line += f" ({limit_note})"
+        if cargo.investment is not None:
+            cargo_line += f"\nInvestment: **{cargo.investment:,.0f} aUEC**"
         if cargo.run_profit is not None:
-            cargo_line += f"\nRun profit: **{cargo.run_profit:,.0f} aUEC** for this haul"
+            cargo_line += f" · Run profit: **{cargo.run_profit:,.0f} aUEC** for this haul"
         value_lines.append(cargo_line)
     elif not ship_vehicle:
         value_lines.append("Cargo: unknown (set a ship with /set-default-ship to see haulable SCU)")
@@ -119,6 +122,17 @@ def _build_route_field(
 
     name = f"{i}. {r.commodity_name}: {r.origin_terminal_name} → {r.destination_terminal_name}"
     return name, "\n".join(value_lines)
+
+
+async def terminal_name_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
+    """Suggest terminals for /routes-from's location option - reads the local, 24h-cached
+    terminal_reference table (same pattern as ship_name_autocomplete/commodity_name_
+    autocomplete), no live UEX call."""
+    if not current:
+        return []
+    rows = await interaction.client.db.search_terminals_by_name(current, limit=25)
+    return [app_commands.Choice(name=row["terminal_name"][:100], value=row["terminal_name"][:100]) for row in rows]
+
 
 TRENDING_REFRESH_MINUTES = 45
 TRENDING_KEEP_TOP = 25
@@ -634,6 +648,82 @@ class Trends(commands.Cog):
             title=title,
             footer_note=footer_note,
             log_label="/top-routes",
+            display_limit=TOP_IN_STOCK_ROUTES_KEEP if strict else TOP_SCORED_ROUTES_KEEP,
+            auto_load_only=auto_load_only,
+            system=system_value,
+            risk_tolerance=prefs["risk_tolerance"],
+        )
+
+    @app_commands.command(name="routes-from", description="Best trade routes starting from wherever you currently are.")
+    @app_commands.describe(
+        location="Terminal you're currently at, e.g. 'Area18' or 'Port Tressler'",
+        ship="Optional: check cargo/profit for a specific ship instead of your default (/set-default-ship)",
+        strict="Require live stock at the origin and live demand at the destination (safer).",
+        auto_load_only="Only show routes where both the origin and destination terminal offer UEX's auto-load",
+        system="Optional: require the destination to be in this star system too",
+    )
+    @app_commands.rename(auto_load_only="auto-load-only")
+    @app_commands.choices(system=SYSTEM_CHOICES)
+    @app_commands.autocomplete(ship=ship_name_autocomplete, location=terminal_name_autocomplete)
+    async def routes_from(
+        self,
+        interaction: discord.Interaction,
+        location: str,
+        strict: bool = False,
+        ship: str | None = None,
+        auto_load_only: bool | None = None,
+        system: app_commands.Choice[str] | None = None,
+    ) -> None:
+        resolved = await self.bot.db.resolve_terminal_id_by_name(location)
+        if resolved is None:
+            await interaction.response.send_message(
+                f"Couldn't find a single terminal matching '{location}' - pick one from the "
+                "autocomplete list to make sure it's unambiguous."
+            )
+            return
+        origin_id, origin_name = resolved
+
+        prefs = await self.bot.db.get_trading_preferences(interaction.user.id)
+        if auto_load_only is None:
+            auto_load_only = prefs["auto_load_only"]
+        system_value = system.value if system else prefs["preferred_system"]
+
+        # Reuses the SAME background-refreshed candidate pool /top-routes reads from
+        # (comprehensive across every commodity UEX has route data for, not truncated),
+        # just filtered down to routes departing from the resolved origin - no separate
+        # ranking logic, no extra UEX calls.
+        if strict:
+            async with self._top_in_stock_routes_lock:
+                pool = list(self._top_in_stock_routes)
+                updated_at = self._top_in_stock_routes_updated_at
+        else:
+            async with self._top_scored_routes_lock:
+                pool = list(self._top_scored_routes)
+                updated_at = self._top_scored_routes_updated_at
+
+        entries = [r for r in pool if r.origin_terminal_id == origin_id]
+        if not entries:
+            still_gathering = " (still gathering route data - try again in a few minutes)" if not pool else ""
+            await interaction.response.send_message(
+                f"No profitable routes found starting from **{origin_name}** right now{still_gathering}."
+            )
+            return
+
+        title = f"Best Routes from {origin_name}"
+        footer_note = (
+            "Ranked by UEX's route score · requires real stock at the origin and real demand "
+            "at the destination right now" if strict else
+            "Ranked by UEX's route score · filtered to real buy-side stock at the origin right "
+            "now · use strict:True for live demand too"
+        )
+        await self._send_ranked_routes(
+            interaction,
+            entries=entries,
+            updated_at=updated_at,
+            ship=ship,
+            title=title,
+            footer_note=footer_note,
+            log_label="/routes-from",
             display_limit=TOP_IN_STOCK_ROUTES_KEEP if strict else TOP_SCORED_ROUTES_KEEP,
             auto_load_only=auto_load_only,
             system=system_value,
