@@ -122,6 +122,20 @@ retry bypassed the poller's checkpoint, a cleared preference returned after rest
 fallback output lost safety warnings, and failed recovery still restarted the service.
 Passing tests are necessary, but their count does not establish that these cases work.
 
+### Required evidence for state-changing features
+
+Before declaring a state-changing feature complete:
+
+- **Test one complete workflow.** Exercise the real command or callback, internal handler, temporary database write, and subsequent read through the relevant consumer. Mock external services—not the internal transition being tested. Verify both the intended changes and preservation of unrelated fields.
+
+- **Keep a failure-and-retry checklist.** For each important awaited external operation or database write, identify what happens if it fails before or after state is committed. Test applicable failures and retries, proving that work is neither permanently locked nor duplicated. An in-progress UI flag must not be treated as proof of durable completion.
+
+- **Verify the meaning of data crossing boundaries.** Explicitly distinguish planned quantities, completed transactions, observed availability, and remaining stock. Distinguish omitted fields, unknown values, and confirmed zero. Reject non-finite or out-of-domain numeric input before changing state.
+
+- **Require behavioral regression evidence.** A regression test must fail against the old behavior because the intended guarantee is violated. Missing imports, new parameters, or incompatible test fixtures do not count as reproducing the bug.
+
+The implementation handoff must name the workflow and failure-path tests, report their results, and disclose any applicable scenarios left untested. Additional helper tests or a larger passing-test count do not substitute for this evidence.
+
 ### 1. Define guarantees before changing production code
 
 Write a short test plan in the task or PR: normally 3–5 user-visible guarantees, the
