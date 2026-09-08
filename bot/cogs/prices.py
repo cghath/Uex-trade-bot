@@ -882,17 +882,10 @@ class Prices(commands.Cog):
         terminal_ids = [terminal_id for route in routes for terminal_id in (route.origin_id, route.destination_id)]
         health_rows = await self.bot.db.get_terminal_data_health_by_ids(terminal_ids)
         status_lookup = await self._get_status_lookup()
-        embeds: list[discord.Embed] = []
-        fallback_route_texts: list[str] = []
-        # Discord enforces its 6,000-char embed-text limit as a SUM across every embed in
-        # one message, not per individual embed - confirmed by this same command's sibling,
-        # /multi-stop-route (see its own comment further down), which switched to one embed
-        # per message after bundling up to 5 hit exactly that limit in testing. This command
-        # still bundles up to 5 embeds into one message, so it needs the same fallback
-        # /multi-stop-route already has: build a plain-text equivalent for every route
-        # alongside its embed, and use it if either a single route's own content doesn't
-        # fit its embed, or the final batched send is rejected as too large overall.
-        all_embeds_fit = True
+        # RouteProgression may not be loaded (a cog load failure elsewhere shouldn't break
+        # /mixed-routes) - tracking buttons are additive, never required for the command's
+        # own result.
+        tracking_cog = self.bot.get_cog("RouteProgression")
         for index, route in enumerate(routes, 1):
             origin_health = (
                 classify_terminal_health(health_rows[route.origin_id])
@@ -955,32 +948,62 @@ class Prices(commands.Cog):
             # Atomic, budget-checked - never leaves this route's embed with its first
             # warning chunk shown and a later one silently missing (the exact class of bug
             # already fixed for /multi-stop-route's own warnings section).
-            if not _add_chunked_fields(route_embed, name="Warnings & practical checks", lines=unique_warnings):
-                all_embeds_fit = False
-            embeds.append(route_embed)
-            # Includes footer last - it carries the route.is_exact approximation
-            # disclosure plus the budget/space-only/capital-access notes, none of which
-            # the embed path would ever drop (they're in route_embed's own footer above),
-            # so the fallback must not silently lose them either.
-            fallback_route_texts.append(
-                "\n".join([
+            warnings_fit = _add_chunked_fields(route_embed, name="Warnings & practical checks", lines=unique_warnings)
+
+            view = None
+            if tracking_cog:
+                # All buys first, then all sells - matches how a player actually executes
+                # this (buy everything at the one origin stop, travel, sell everything at
+                # the destination), same order /multi-stop-route's per-hop flattening uses.
+                trackable_route = TrackableRoute(
+                    route_kind="mixed_routes",
+                    title=f"#{index} {route.origin_name} → {route.destination_name}",
+                    legs=[
+                        RouteLegInput(
+                            side="buy", id_terminal=route.origin_id, id_commodity=item.id_commodity,
+                            terminal_name=route.origin_name, commodity_name=item.commodity_name,
+                            display_label=f"Buy {item.commodity_name} at {route.origin_name}",
+                            quoted_price=item.buy_price, quoted_scu=item.quantity_scu,
+                            quoted_status=item.source.get("status_buy"),
+                        )
+                        for item in route.cargo
+                    ] + [
+                        RouteLegInput(
+                            side="sell", id_terminal=route.destination_id, id_commodity=item.id_commodity,
+                            terminal_name=route.destination_name, commodity_name=item.commodity_name,
+                            display_label=f"Sell {item.commodity_name} at {route.destination_name}",
+                            quoted_price=item.sell_price, quoted_scu=item.quantity_scu,
+                            quoted_status=item.destination.get("status_sell"),
+                        )
+                        for item in route.cargo
+                    ],
+                )
+                view = RouteTrackingView(tracking_cog, [trackable_route])
+
+            # Sent one route per message (matching /best-route, /top-routes, and
+            # /multi-stop-route) - each embed is independently budget-checked now, not
+            # bundled with up to 4 others into Discord's shared combined-embed-text limit,
+            # so a send failure here means only THIS route's own content is too large.
+            embed_too_large = not warnings_fit
+            if not embed_too_large:
+                try:
+                    if view is not None:
+                        await interaction.followup.send(embed=route_embed, view=view)
+                    else:
+                        await interaction.followup.send(embed=route_embed)
+                except discord.HTTPException:
+                    embed_too_large = True
+            if embed_too_large:
+                # Includes footer last - it carries the route.is_exact approximation
+                # disclosure plus the budget/space-only/capital-access notes, none of
+                # which the embed path would ever drop, so the fallback must not
+                # silently lose them either.
+                fallback_text = "\n".join([
                     f"**#{index} {route.origin_name} → {route.destination_name}**",
                     *value_lines, *unique_warnings, footer,
                 ])
-            )
-
-        if all_embeds_fit:
-            try:
-                await interaction.followup.send(embeds=embeds)
-                return
-            except discord.HTTPException:
-                pass
-        # Plain-message fallback, mirroring /multi-stop-route's: either a single route's
-        # warnings didn't fit its own embed, or the batched send was rejected as too large
-        # overall (the combined-across-embeds limit) - either way, resend everything as
-        # chunked plain text rather than silently losing routes or warnings.
-        for chunk in _chunk_lines(fallback_route_texts, max_length=1900):
-            await interaction.followup.send(content=chunk)
+                for chunk in _chunk_lines([fallback_text], max_length=1900):
+                    await interaction.followup.send(content=chunk)
 
     @app_commands.command(
         name="multi-stop-route",

@@ -238,9 +238,9 @@ def test_mixed_routes_discloses_when_cargo_allocation_is_approximate(tmp_path):
 
             assert interaction.followup.sent, "expected at least one followup"
             _, kwargs = interaction.followup.sent[0]
-            embeds = kwargs.get("embeds") or []
-            assert embeds, f"expected at least one embed, got: {interaction.followup.sent}"
-            footer_text = embeds[0].footer.text or ""
+            embed = kwargs.get("embed")
+            assert embed is not None, f"expected an embed response, got: {interaction.followup.sent}"
+            footer_text = embed.footer.text or ""
             assert "approximate" in footer_text.lower(), f"expected an approximation disclosure, got footer: {footer_text!r}"
         finally:
             await client.aclose()
@@ -976,39 +976,83 @@ def test_multi_stop_route_falls_back_to_plain_text_when_a_leg_field_does_not_fit
     asyncio.run(run())
 
 
-def test_mixed_routes_still_sends_one_batched_message(tmp_path):
-    """/mixed-routes batches its (normally small) embeds into one message when they fit -
-    this pins that down so a future fix doesn't accidentally swap the two commands' send
-    shape again. This is no longer an unconditional assumption, though (see the follow-up
-    review finding below): the command now has its own fallback for when they don't fit,
-    matching /multi-stop-route's."""
+def test_mixed_routes_sends_one_message_per_route(tmp_path):
+    """Each route gets its own message with its own embed and its own "Track this route"
+    button directly beneath it (matching /best-route, /top-routes, and /multi-stop-route),
+    not bundled together into one multi-embed message the way /mixed-routes used to."""
     async def run():
         interaction = await _run_command(
             tmp_path, "mixed_routes.sqlite3", _MIXED_ROUTES_ROWS,
             lambda cog, interaction: cog.mixed_routes.callback(cog, interaction, ship="TestShip"),
         )
-        assert len(interaction.followup.sent) == 1, "expected exactly one batched followup"
-        _, kwargs = interaction.followup.sent[0]
-        assert "embeds" in kwargs and isinstance(kwargs["embeds"], list)
+        assert interaction.followup.sent, "expected at least one followup"
+        for _, kwargs in interaction.followup.sent:
+            assert "embeds" not in kwargs, "must no longer batch multiple embeds into one message"
+            assert isinstance(kwargs.get("embed"), discord.Embed)
 
     asyncio.run(run())
 
 
-def test_mixed_routes_falls_back_to_plain_text_when_the_combined_batch_is_too_large(monkeypatch):
-    """Second follow-up review finding: Discord enforces its 6,000-char embed-text limit
-    as a SUM across every embed in one message, not per individual embed - confirmed by
-    this command's own sibling /multi-stop-route's history (see its comment further up:
-    bundling up to 5 embeds hit exactly this limit in testing, which is why it sends one
-    embed per message instead). /mixed-routes still batches up to 5 embeds into one
-    message and had no protection against this at all - reproduced separately (outside
-    this test) with 5 realistic routes (3 commodities each, all illegal/volatile/stale-
-    health-flagged): each INDIVIDUAL embed measured ~2,092 chars (comfortably under
-    6,000), but the summed total across the 5-embed batch was ~10,460 - an unhandled
-    discord.HTTPException with no followup ever sent (the "stuck thinking" bug this
-    codebase already fixed once for /multi-stop-route, never checked for /mixed-routes).
-    This test forces the same failure mode deterministically (via the shared
-    _add_chunked_fields helper, same as test_prices_chunked_fields.py) rather than
-    depending on exact byte counts from a hand-built fixture."""
+def test_mixed_routes_attaches_a_track_button_with_flattened_legs(monkeypatch):
+    """/mixed-routes wiring: like /multi-stop-route, one route carries several commodities
+    at once (allocate_pair_cargo's mixed load) at a single origin/destination pair, not a
+    chain of hops - flattened into one buy + one sell progression-leg per commodity, in
+    order, so the existing leg-by-leg cog can walk it unchanged."""
+    async def run():
+        source = dict(scu_buy=10, status_buy=1, star_system_name="Stanton")
+        destination = dict(scu_sell=10, status_sell=1, star_system_name="Stanton")
+        cargo = (
+            MixedCargoItem(1, "Gold", 5, 100, 200, 10, 500, 500, source, destination),
+            MixedCargoItem(2, "Cobalt", 3, 50, 90, 10, 150, 120, source, destination),
+        )
+        route = NS(
+            origin_name="Station A", destination_name="Station B", origin_id=10, destination_id=20,
+            cargo=cargo, cargo_scu=8, investment=650, revenue=1270, profit=620, roi_pct=95.4, is_exact=True,
+        )
+        monkeypatch.setattr(prices_module, "build_mixed_routes", lambda *a, **k: [route])
+
+        db = NS(
+            get_default_ship=AsyncMock(return_value="Ship"),
+            get_trading_preferences=AsyncMock(return_value=dict(DEFAULT_TRADING_PREFERENCES)),
+            get_mixed_route_market_rows=AsyncMock(return_value=[]),
+            get_terminal_data_health_by_ids=AsyncMock(return_value={}),
+        )
+        uex = NS(get_vehicles=AsyncMock(return_value=[dict(name="Ship", scu=100)]))
+        tracking_cog = RouteProgression.__new__(RouteProgression)
+        cog = Prices.__new__(Prices)
+        cog.bot = NS(db=db, uex=uex, get_cog=lambda name: tracking_cog if name == "RouteProgression" else None)
+        cog._get_status_lookup = AsyncMock(return_value={"buy": {}, "sell": {}})
+        interaction = _FakeInteraction(1)
+
+        await cog.mixed_routes.callback(cog, interaction)
+
+        assert interaction.followup.sent, "expected at least one followup"
+        _, kwargs = interaction.followup.sent[0]
+        view = kwargs.get("view")
+        assert isinstance(view, RouteTrackingView)
+        assert len(view.children) == 1, "one route -> one tracking button"
+
+        legs = view.routes[0].legs
+        assert [leg.display_label for leg in legs] == [
+            "Buy Gold at Station A", "Buy Cobalt at Station A",
+            "Sell Gold at Station B", "Sell Cobalt at Station B",
+        ], legs
+        assert legs[0].id_terminal == 10 and legs[0].side == "buy"
+        assert legs[2].id_terminal == 20 and legs[2].side == "sell"
+        assert legs[0].quoted_scu == 5 and legs[0].quoted_price == 100
+
+    asyncio.run(run())
+
+
+def test_mixed_routes_a_route_that_does_not_fit_falls_back_on_its_own(monkeypatch):
+    """Second follow-up review finding (original): Discord enforces its 6,000-char
+    embed-text limit as a SUM across every embed in one message, not per individual embed -
+    /mixed-routes used to batch up to 5 embeds into one message with no protection against
+    this. Now that each route is its own message (matching /multi-stop-route's shape),
+    that failure mode is structurally gone - the remaining, narrower case is ONE route's
+    own content not fitting ITS OWN embed, which must fall back to plain text for just
+    that route, without dragging the other routes' real embeds down with it (the old
+    shared-batch behavior's real cost)."""
     async def run():
         source = dict(
             scu_buy=10, status_buy=1, max_container_size=8, has_freight_elevator=0,
@@ -1033,13 +1077,11 @@ def test_mixed_routes_falls_back_to_plain_text_when_the_combined_batch_is_too_la
         )
         uex = NS(get_vehicles=AsyncMock(return_value=[dict(name="Ship", scu=100)]))
         cog = Prices.__new__(Prices)
-        cog.bot = NS(db=db, uex=uex)
+        cog.bot = NS(db=db, uex=uex, get_cog=lambda name: None)
         cog._get_status_lookup = AsyncMock(return_value={"buy": {}, "sell": {}})
         interaction = _FakeInteraction(1)
 
-        # Force the SECOND route's warnings section to fail to fit, simulating the
-        # combined-batch-too-large case deterministically instead of depending on exact
-        # byte counts.
+        # Force the SECOND route's warnings section to fail to fit, deterministically.
         real_add_chunked_fields = prices_module._add_chunked_fields
         call_count = {"n": 0}
 
@@ -1054,11 +1096,16 @@ def test_mixed_routes_falls_back_to_plain_text_when_the_combined_batch_is_too_la
         await cog.mixed_routes.callback(cog, interaction)
 
         assert interaction.followup.sent, "expected at least one followup"
-        for _, kwargs in interaction.followup.sent:
-            assert "embeds" not in kwargs, "a batch that doesn't fully fit must not be sent as if it did"
-        fallback_text = "\n".join(kwargs.get("content", "") for _, kwargs in interaction.followup.sent)
-        for r in range(1, 4):
-            assert f"Origin {r}" in fallback_text, fallback_text
+        embed_titles = [kwargs["embed"].title for _, kwargs in interaction.followup.sent if kwargs.get("embed")]
+        plain_texts = [kwargs["content"] for _, kwargs in interaction.followup.sent if kwargs.get("content")]
+        assert any("Origin 1" in title for title in embed_titles), embed_titles
+        assert any("Origin 3" in title for title in embed_titles), embed_titles
+        assert not any("Origin 2" in title for title in embed_titles), (
+            "route 2's own embed should have been skipped, not sent incomplete", embed_titles
+        )
+        assert any("Origin 2" in text for text in plain_texts), (
+            "route 2 must still appear via its own plain-text fallback", plain_texts
+        )
 
     asyncio.run(run())
 
@@ -1089,13 +1136,13 @@ def test_mixed_routes_fallback_preserves_the_approximation_disclosure(monkeypatc
         )
         uex = NS(get_vehicles=AsyncMock(return_value=[dict(name="Ship", scu=100)]))
         cog = Prices.__new__(Prices)
-        cog.bot = NS(db=db, uex=uex)
+        cog.bot = NS(db=db, uex=uex, get_cog=lambda name: None)
         cog._get_status_lookup = AsyncMock(return_value={})
 
         delivered = []
 
         async def send(**kwargs):
-            if "embeds" in kwargs:
+            if "embed" in kwargs:
                 raise discord.HTTPException(NS(status=400, reason="Bad Request", headers={}), "Embed too large")
             delivered.append(kwargs.get("content", ""))
 
