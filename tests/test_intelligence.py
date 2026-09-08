@@ -540,6 +540,57 @@ def test_evidence_level_is_unknown_when_history_is_too_short_to_infer_from():
     assert level.tier == "unknown"
 
 
+def test_evidence_level_single_observation_is_not_enough_history_even_with_elapsed_time():
+    """Audit fix: a single recorded observation (state_changes == 0) extrapolated forward
+    to observed_until is one point in time with zero corroboration that the state
+    actually persisted - MIN_STATE_CHANGES requires at least one real recorded transition
+    before "inferred" is allowed, not just enough elapsed hours since a single snapshot."""
+    history = analyze_terminal_market_history(
+        [{"observed_at": "2026-08-01 00:00:00", "price_buy": 10, "scu_buy": 50}],
+        observed_until="2026-09-01 00:00:00",  # 31 days later - comfortably >= MIN_HISTORY_HOURS
+    )
+    assert history is not None
+    assert history.state_changes == 0
+    assert history.observed_hours >= 24
+    assert not history.enough_history
+    level = classify_supply_evidence(scu=None, health=None, history=history, side="supply")
+    assert level.tier == "unknown"
+
+
+def test_evidence_level_demand_side_ignores_a_live_figure_when_status_confirms_no_demand():
+    """Audit fix: UEX status code 7 ('Maximum Inventory, No Demand') means the terminal is
+    CONFIRMED to have zero real demand even when scu_sell reports a real positive number -
+    the same inversion has_sell_side_demand already exists for. Without this,
+    classify_supply_evidence could report 'Demand: 500 SCU' in the same embed that
+    separately shows 'sell side: Maximum Inventory (No Demand)', contradicting itself."""
+    level = classify_supply_evidence(
+        scu=500, health=_fresh_health(), history=None, side="demand", status_sell=7,
+    )
+    assert level.tier == "current"
+    assert level.quantity_scu == 0
+
+
+def test_evidence_level_demand_side_trusts_a_live_figure_when_status_does_not_say_no_demand():
+    """Only status code 7 is an authoritative zero-demand signal - any other status
+    (including unknown/None) must never override a genuinely reported live figure."""
+    for status_sell in (None, 0, 1, 3):
+        level = classify_supply_evidence(
+            scu=500, health=_fresh_health(), history=None, side="demand", status_sell=status_sell,
+        )
+        assert level.tier == "current", status_sell
+        assert level.quantity_scu == 500, status_sell
+
+
+def test_evidence_level_supply_side_never_consults_status_sell():
+    """status_sell is a sell-side-only concept - the supply/buy side has no equivalent
+    inversion, so it must never be affected even if a caller passes a status_sell value."""
+    level = classify_supply_evidence(
+        scu=500, health=_fresh_health(), history=None, side="supply", status_sell=7,
+    )
+    assert level.tier == "current"
+    assert level.quantity_scu == 500
+
+
 def test_terminal_market_name_search_is_scoped_to_commodity(tmp_path):
     async def run():
         db = _make_db(tmp_path)

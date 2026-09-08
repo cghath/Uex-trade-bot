@@ -544,24 +544,98 @@ def test_best_route_primary_branch_now_warns_on_a_cross_system_route(tmp_path):
     asyncio.run(run())
 
 
+def test_best_route_primary_branch_discloses_missing_distance_instead_of_silence(tmp_path):
+    """Audit fix: travel_warning's has_real_distance was hardcoded True for every route in
+    this branch regardless of whether THAT route's own UEX row actually had a distance
+    figure - a same-system route with distance=None got neither a real distance line nor
+    any travel-time disclaimer, silently indistinguishable from a route where distance
+    genuinely doesn't matter."""
+    async def run():
+        db = Database(tmp_path / "best_route_no_distance.sqlite3", Fernet(Fernet.generate_key()))
+        await db.init()
+        await db.upsert_terminal_reference([
+            {"id": 1, "name": "Origin 1", "star_system_name": "Stanton"},
+            {"id": 101, "name": "Destination 1", "star_system_name": "Stanton"},
+        ])
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            path = request.url.path
+            if "commodities_prices" in path:
+                return httpx.Response(200, json={"status": "ok", "data": [
+                    {"id_commodity": 1, "commodity_name": "Gold"}
+                ]})
+            if "commodities_routes" in path:
+                return httpx.Response(200, json={"status": "ok", "data": [
+                    {
+                        "id_terminal_origin": 1, "id_terminal_destination": 101,
+                        "origin_terminal_name": "Origin 1", "destination_terminal_name": "Destination 1",
+                        "price_origin": 100, "price_destination": 200, "price_margin": 50, "price_roi": 100,
+                        "distance": None, "score": 100, "scu_origin": 10, "scu_destination": 10,
+                        "status_origin": 1, "status_destination": 1, "profit": 100,
+                    }
+                ]})
+            return httpx.Response(200, json={"status": "ok", "data": []})
+
+        client = UexClient(app_token="test", base_url="https://uex.test")
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+        bot = type("FakeBot", (), {})()
+        bot.db = db
+        bot.uex = client
+        cog = Prices.__new__(Prices)
+        cog.bot = bot
+        interaction = _FakeInteraction(1)
+
+        try:
+            await cog.best_route.callback(cog, interaction, commodity="Gold")
+        finally:
+            await client.aclose()
+
+        assert interaction.followup.sent, "expected at least one followup"
+        _, kwargs = interaction.followup.sent[0]
+        embed = kwargs["embed"]
+        combined = "\n".join(f.value or "" for f in embed.fields)
+        assert "GM" not in combined, combined
+        assert "not included in this ranking" in combined, combined
+
+    asyncio.run(run())
+
+
 def test_best_route_fallback_branch_shows_evidence_levels_for_missing_stock_and_demand(tmp_path):
     """Evidence-Level Labels: /best-route's fallback branch (no UEX /commodities_routes
     data for this commodity) never showed a raw stock/demand figure at all before - a
     missing scu_buy/scu_sell was invisible, indistinguishable from a route that simply
     doesn't mention it. The buy side here has collected observation history to infer
-    from (long-running stock reports); the sell side has none at all."""
+    from (a real recorded state change, well past MIN_HISTORY_HOURS, anchored to a
+    terminal_market_state.last_seen row like real collected data always has - not a
+    single stale point extrapolated to wall-clock now, which no longer qualifies as
+    "inferred" after this audit's fix); the sell side has no observations at all."""
     async def run():
         db = Database(tmp_path / "best_route_evidence.sqlite3", Fernet(Fernet.generate_key()))
         await db.init()
-        # A backdated observation, well past MIN_HISTORY_HOURS (24h) from "now" - inserted
-        # directly rather than via record_terminal_market_snapshot, which always stamps
-        # observed_at as datetime('now') and can't backdate it.
+        # Two backdated observations bridging a real state change, plus the matching
+        # terminal_market_state row real collected data always has (last_seen anchors
+        # coverage, not wall-clock now) - inserted directly rather than via
+        # record_terminal_market_snapshot, which always stamps timestamps as
+        # datetime('now') and can't backdate them.
         async with db.connect() as sqlite:
             await sqlite.execute(
                 """INSERT INTO terminal_market_observations
                    (id_commodity, id_terminal, observed_at, commodity_name, terminal_name,
                     price_buy, scu_buy, status_buy)
-                   VALUES (1, 1, datetime('now', '-48 hours'), 'Gold', 'Buy A', 10, 50, 1)"""
+                   VALUES (1, 1, datetime('now', '-72 hours'), 'Gold', 'Buy A', 10, 50, 1)"""
+            )
+            await sqlite.execute(
+                """INSERT INTO terminal_market_observations
+                   (id_commodity, id_terminal, observed_at, commodity_name, terminal_name,
+                    price_buy, scu_buy, status_buy)
+                   VALUES (1, 1, datetime('now', '-48 hours'), 'Gold', 'Buy A', 10, 0, 1)"""
+            )
+            await sqlite.execute(
+                """INSERT INTO terminal_market_state
+                   (id_commodity, id_terminal, commodity_name, terminal_name, last_seen)
+                   VALUES (1, 1, 'Gold', 'Buy A', datetime('now', '-2 hours'))"""
             )
             await sqlite.commit()
 
@@ -599,6 +673,81 @@ def test_best_route_fallback_branch_shows_evidence_levels_for_missing_stock_and_
         embed = kwargs["embed"]
         combined = "\n".join(field.value or "" for field in embed.fields)
         assert "historically available" in combined, combined
+        assert "no information reported" in combined, combined
+
+    asyncio.run(run())
+
+
+def test_best_route_fallback_branch_anchors_history_to_last_seen_not_wall_clock(tmp_path):
+    """Audit fix: the 'inferred' tier used to anchor observation coverage to wall-clock
+    now() instead of the collector's own terminal_market_state.last_seen - a pair with
+    only 2 REAL hours of confirmed collector coverage (last_seen frozen shortly after the
+    second observation, meaning the collector hasn't rechecked this pair since) would
+    still render as "historically available" with a large observed-hours figure, because
+    extending to wall-clock now() (years later, in this fixture) silently counted the
+    entire unconfirmed gap as continued observation. With the fix anchoring to last_seen,
+    this same pair correctly has only ~2 real observed hours - not enough to infer from."""
+    async def run():
+        db = Database(tmp_path / "best_route_stale_anchor.sqlite3", Fernet(Fernet.generate_key()))
+        await db.init()
+        # Two real observations 2 hours apart, from years before "now" - if the anchor
+        # were wall-clock now(), this would extend to several years of "observed" time.
+        # last_seen is frozen at the same moment as the second observation: the collector
+        # confirmed this state once more and then never rechecked it again.
+        async with db.connect() as sqlite:
+            await sqlite.execute(
+                """INSERT INTO terminal_market_observations
+                   (id_commodity, id_terminal, observed_at, commodity_name, terminal_name,
+                    price_buy, scu_buy, status_buy)
+                   VALUES (1, 1, '2020-01-01 00:00:00', 'Gold', 'Buy A', 10, 50, 1)"""
+            )
+            await sqlite.execute(
+                """INSERT INTO terminal_market_observations
+                   (id_commodity, id_terminal, observed_at, commodity_name, terminal_name,
+                    price_buy, scu_buy, status_buy)
+                   VALUES (1, 1, '2020-01-01 02:00:00', 'Gold', 'Buy A', 10, 0, 1)"""
+            )
+            await sqlite.execute(
+                """INSERT INTO terminal_market_state
+                   (id_commodity, id_terminal, commodity_name, terminal_name, last_seen)
+                   VALUES (1, 1, 'Gold', 'Buy A', '2020-01-01 02:00:00')"""
+            )
+            await sqlite.commit()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            path = request.url.path
+            if "commodities_prices" in path:
+                return httpx.Response(200, json={"status": "ok", "data": [
+                    {"id_commodity": 1, "commodity_name": "Gold", "id_terminal": 1, "terminal_name": "Buy A",
+                     "price_buy": 10, "price_sell": 0},
+                    {"id_commodity": 1, "commodity_name": "Gold", "id_terminal": 3, "terminal_name": "Sell A",
+                     "price_buy": 0, "price_sell": 100},
+                ]})
+            if "commodities_routes" in path:
+                return httpx.Response(200, json={"status": "ok", "data": []})
+            return httpx.Response(200, json={"status": "ok", "data": []})
+
+        client = UexClient(app_token="test", base_url="https://uex.test")
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+        bot = type("FakeBot", (), {})()
+        bot.db = db
+        bot.uex = client
+        cog = Prices.__new__(Prices)
+        cog.bot = bot
+        interaction = _FakeInteraction(1)
+
+        try:
+            await cog.best_route.callback(cog, interaction, commodity="Gold")
+        finally:
+            await client.aclose()
+
+        assert interaction.followup.sent, "expected at least one followup"
+        _, kwargs = interaction.followup.sent[0]
+        embed = kwargs["embed"]
+        combined = "\n".join(field.value or "" for field in embed.fields)
+        assert "historically available" not in combined, combined
         assert "no information reported" in combined, combined
 
     asyncio.run(run())

@@ -411,11 +411,20 @@ class Trends(commands.Cog):
             for terminal_id in (route.origin_terminal_id, route.destination_terminal_id)
             if terminal_id is not None
         ])
-        # Naive UTC string, matching SQLite's own datetime('now') format - see the
-        # matching comment in Prices._history_by_pair (bot/cogs/prices.py).
-        observed_until = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        # Anchor each pair's coverage to the COLLECTOR's own last confirmed check
+        # (terminal_market_state.last_seen, already fetched above as market_signals),
+        # matching /terminal-history's existing, correct anchor - not wall-clock now(),
+        # which would silently count any gap since the collector actually last saw this
+        # pair as continued, confirmed observation. See the matching comment in
+        # Prices._history_by_pair (bot/cogs/prices.py) for the full rationale.
         history_by_pair = {
-            key: analyze_terminal_market_history(observations, observed_until=observed_until)
+            key: analyze_terminal_market_history(
+                observations,
+                observed_until=(
+                    market_signals.get(key, {}).get("last_seen")
+                    or max(str(row["observed_at"]) for row in observations)
+                ),
+            )
             for key, observations in observations_by_pair.items()
         }
 
@@ -454,6 +463,7 @@ class Trends(commands.Cog):
             destination_evidence = classify_supply_evidence(
                 scu=r.scu_destination, health=destination_health,
                 history=history_by_pair.get((r.id_commodity, r.destination_terminal_id)), side="demand",
+                status_sell=r.status_destination,
             )
             name, value = _build_route_field(
                 i, r, ship_vehicle, ship_cargo_scu, status_lookup, origin_evidence, destination_evidence
@@ -493,7 +503,10 @@ class Trends(commands.Cog):
                 value += "\n" + "\n".join(practical_notes)
             origin_system = (terminal_references.get(r.origin_terminal_id) or {}).get("star_system_name")
             destination_system = (terminal_references.get(r.destination_terminal_id) or {}).get("star_system_name")
-            if travel_note := travel_warning(origin_system, destination_system, has_real_distance=True):
+            # has_real_distance reflects THIS route's own distance field, not the branch
+            # as a whole - see the matching comment in Prices.best_route's primary branch
+            # (bot/cogs/prices.py) for why a per-route check is needed here.
+            if travel_note := travel_warning(origin_system, destination_system, has_real_distance=r.distance is not None):
                 value += f"\n{travel_note}"
             risk_note = format_commodity_risk(commodity_references.get(r.id_commodity))
             if risk_note:

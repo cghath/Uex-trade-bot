@@ -19,6 +19,7 @@ from bot.uex.route_presentation import (
     capital_access_note,
     cargo_confidences,
     cargo_item_warnings,
+    chunk_lines,
     side_health_warnings,
     travel_warning,
     worst_confidence,
@@ -68,7 +69,16 @@ class IntelligenceBrief(commands.Cog):
                 value="Set a ship with `/set-default-ship` or pass `ship` to include mixed-route opportunities.",
                 inline=False,
             )
-        await interaction.followup.send(embeds=embeds)
+        # Discord enforces its 6,000-char embed-text limit as a SUM across every embed in
+        # one message, not per individual embed (see add_chunked_fields' own docstring) -
+        # _routes_embed's own internal chunking only protects ITS length, not the combined
+        # total of all embeds sent together here. Mirrors /mixed-routes' established
+        # try/except + plain-text fallback for exactly this batched-send failure mode.
+        try:
+            await interaction.followup.send(embeds=embeds)
+        except discord.HTTPException:
+            for chunk in chunk_lines([_embed_to_plain_text(embed) for embed in embeds], max_length=1900):
+                await interaction.followup.send(content=chunk)
 
     def _overview_embed(self, freshness: dict, gainers: list[dict], losers: list[dict]) -> discord.Embed:
         embed = discord.Embed(title="Intelligence Brief", color=discord.Color.blurple())
@@ -186,6 +196,23 @@ class IntelligenceBrief(commands.Cog):
         embed.add_field(name="Largest demand changes", value=_format_market_shifts(demand, "demand_change") or "No demand changes recorded.", inline=False)
         embed.set_footer(text="Change-only local history · verify current stock before departure")
         return embed
+
+
+def _embed_to_plain_text(embed: discord.Embed) -> str:
+    """Flatten one embed's title/description/fields/footer into plain text, for the
+    combined-send-too-large fallback - generic rather than per-embed-type, since all
+    three embeds this command builds (overview, routes, market shifts) are plain
+    title+fields+footer with no embed-only formatting worth preserving."""
+    lines: list[str] = []
+    if embed.title:
+        lines.append(f"**{embed.title}**")
+    if embed.description:
+        lines.append(str(embed.description))
+    for field in embed.fields:
+        lines.append(f"**{field.name}**\n{field.value}")
+    if embed.footer and embed.footer.text:
+        lines.append(str(embed.footer.text))
+    return "\n\n".join(lines)
 
 
 def _format_market_shifts(rows: list[dict], key: str) -> str:

@@ -185,6 +185,35 @@ def test_top_routes_evidence_levels_distinguish_zero_unknown_and_inferred():
     asyncio.run(run())
 
 
+def test_top_routes_discloses_missing_distance_instead_of_silence():
+    """Audit fix: travel_warning's has_real_distance was hardcoded True for every route in
+    this loop regardless of whether that SPECIFIC route's distance field was actually
+    populated - a route with distance=None got neither a real distance line nor any
+    travel-time disclaimer, silently indistinguishable from a route where distance
+    genuinely doesn't matter."""
+    async def run():
+        cog, _ = _make_cog(1)
+        inter = _interaction()
+        entries = [
+            ScoredRouteEntry(
+                commodity_name="No Distance Co", id_commodity=1,
+                origin_terminal_name="Origin 1", destination_terminal_name="Destination 1",
+                price_origin=100, price_destination=200, price_margin=50, price_roi=100,
+                distance=None, score=100, scu_origin=100, scu_destination=100,
+                status_origin=1, status_destination=1, origin_terminal_id=1, destination_terminal_id=2,
+            ),
+        ]
+        await cog._send_ranked_routes(
+            inter, entries=entries, updated_at=None, ship=None,
+            title="Top routes", footer_note="Collected data", log_label="test", display_limit=10,
+        )
+        embed = inter.followup.send.call_args.kwargs["embed"]
+        combined = "\n".join(field.value or "" for field in embed.fields)
+        assert "not included in this ranking" in combined, combined
+
+    asyncio.run(run())
+
+
 def test_top_routes_now_warns_on_a_cross_system_route():
     """Centralized Route Presentation: /top-routes never had a cross-system warning at
     all (unlike /best-route's fallback branch and /mixed-routes, which always had one,

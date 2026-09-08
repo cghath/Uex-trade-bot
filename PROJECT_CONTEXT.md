@@ -1854,6 +1854,124 @@ they're in sync).
     cleanly with no command-surface violations (no command name/option/description
     changed, only internal logic).
 
+60. **Fix 5 defects found by a 3-auditor, cross-reviewed audit of Centralized Route
+    Presentation and Evidence-Level Labels (entries 58-59).** Unlike every prior audit
+    round in this project's history, this one ran BEFORE any implementation was
+    authorized: three independently-scoped auditors (state/persistence, external
+    operations/delivery, route correctness/presentation) each investigated the exact
+    `d2c28d6..5b347aa` commit range, wrote their own reproductions against real code and
+    a real temp/production-copy SQLite database, then a second adversarial reviewer
+    independently tried to disprove each confirmed finding before anything was accepted.
+    All 5 unique defects (one root cause found independently by two auditors, deduped)
+    survived that challenge. Only then was a fix pass authorized. Full findings and
+    reproduction detail live in the audit report already delivered to the user; this
+    entry documents what was actually implemented.
+
+    **Wall-clock anchor instead of the collector's own `last_seen` (the most serious
+    finding)** - `Prices._history_by_pair` (`bot/cogs/prices.py`) and
+    `Trends._send_ranked_routes` (`bot/cogs/trends.py`) both fed
+    `datetime.now(timezone.utc)` into `analyze_terminal_market_history` as
+    `observed_until`, instead of `terminal_market_state.last_seen` the way the
+    pre-existing, unmodified `/terminal-history` command already correctly does. Any gap
+    since the collector actually last confirmed a pair (bot downtime, a stalled
+    collector loop, a pair briefly missing from a UEX response) was silently counted as
+    continued, confirmed observation - reproduced as a pair with 2 real hours of
+    coverage rendering "historically available ~100% of the time (960h observed)," and
+    on real collected data, an audit cross-reviewer found 2 real pairs where this
+    currently flips a route from correctly "unknown" to falsely "inferred." Fixed by
+    anchoring per-pair to `get_route_market_signals_by_ids`' `last_seen` column (already
+    fetched in `trends.py` for confidence scoring - now reused rather than re-fetched;
+    newly fetched in `prices.py`'s `_history_by_pair`, which previously had no need for
+    `terminal_market_state` at all), falling back to the last recorded observation's own
+    timestamp (zero fabricated extension) on the rare case the state row is missing.
+    `bot/cogs/prices.py` no longer imports `datetime`/`timezone` at all as a result -
+    that import existed solely for this wall-clock line.
+
+    **A single observation was sufficient for "inferred," with no corroboration
+    required** - `TerminalMarketHistory.enough_history` (`bot/uex/supply_demand.py`)
+    checked only elapsed hours, never `state_changes`, so one recorded reading
+    extrapolated across the entire elapsed window (even the corrected last_seen-anchored
+    window) rendered a confident-looking percentage from a single point in time. On real
+    collected data, ~15% of tracked pairs (independently measured at 361 and 388 of
+    2,595 by the original auditor and the cross-reviewer) would show ≥90% "historical
+    availability" built mostly from extrapolation with zero real corroboration. Fixed
+    with a new `MIN_STATE_CHANGES = 1` constant, required alongside `MIN_HISTORY_HOURS`
+    in `enough_history` - at least one real recorded transition, not just time having
+    passed since a single snapshot. This also affects (correctly) `/terminal-history`
+    itself, which shares the same `enough_history` property and had the identical latent
+    gap, just never audited directly since that command wasn't in the audited commit
+    range.
+
+    **Evidence-Level "Demand" line ignored the sell-side no-demand status inversion** -
+    `classify_supply_evidence` (`bot/uex/supply_demand.py`) checked only `scu is not
+    None` for the demand side, never consulting UEX's status code 7 ("Maximum Inventory,
+    No Demand" - the same inversion `has_sell_side_demand` already exists for elsewhere
+    in this codebase). A route with `scu_sell=500, status_sell=7` rendered `Demand: **500
+    SCU** (verify before departure)` in the same embed that separately, correctly showed
+    `sell side: Maximum Inventory (No Demand)` - a direct self-contradiction. Fixed by
+    adding a `status_sell` parameter, consulted ONLY for `side="demand"`: when status
+    confirms code 7, the effective quantity used for tiering becomes a real confirmed
+    `0`, not the raw (misleading) reported figure. Any other status, including
+    unknown/`None`, never overrides a live figure - code 7 is the only authoritative
+    zero-demand signal UEX documents, not merely a missing one. All 4 call sites (both
+    `/best-route` branches, `/top-routes`) already had the relevant status value on hand
+    for other purposes (`resolve_status_label`/`has_sell_side_demand` calls nearby), so
+    no new data fetch was needed.
+
+    **`/intelligence-brief`'s combined 3-embed send had no aggregate size guard** - found
+    independently by two of the three auditors, both cross-review-confirmed. The
+    command's `await interaction.followup.send(embeds=embeds)` (unguarded since before
+    this audit's range) predates `b991fac`, but that commit grew `_routes_embed`'s
+    content enough (measured ~1320 chars/3 fields pre-range to ~4300-4900+ chars/6
+    fields post-range in equivalent fixtures) to make the combined-across-all-3-embeds
+    6000-char total - which `add_chunked_fields` has no visibility into, since it only
+    budgets the ONE embed it's called on - newly, easily reachable. Worse: this
+    project's own `PROJECT_CONTEXT.md` entry 58 and `ROADMAP.md` explicitly (and
+    incorrectly) claimed this command went from "zero Discord embed-size protection" to
+    fully fixed; it only closed the per-embed half of that gap. Fixed by wrapping the
+    final send in the same try/except `discord.HTTPException` + plain-text fallback
+    pattern `/mixed-routes` already established, via a new local
+    `_embed_to_plain_text(embed)` helper (title + description + fields + footer,
+    generic across all 3 embed shapes this command builds - not shared into
+    `route_presentation.py`, since no other command currently needs it and this
+    codebase's own convention is not to add abstractions beyond what's needed).
+
+    **`travel_warning(has_real_distance=True)` was a hardcoded per-branch constant, not a
+    per-route check** - `/best-route`'s primary (UEX-routes) branch and `/top-routes`
+    both passed `has_real_distance=True` unconditionally for every route in the branch,
+    even though each route's own `distance` field can independently be `None`. A route
+    with `distance=None` got neither a real distance figure (already correctly gated on
+    `is not None` for display) NOR a travel-time disclaimer - silently indistinguishable
+    from a route where distance genuinely doesn't matter. Fixed by computing
+    `has_real_distance` from that route's own `distance`/`r.distance` value at the point
+    of the call, in both files. Real-world trigger frequency stays unconfirmed - UEX
+    documents `commodities_routes.distance` as non-nullable, and no live UEX credentials
+    were available to check whether that holds in practice (this codebase has
+    precedent of similar "documented non-null" fields, `scu_origin`/`scu_destination`,
+    being null in real data) - the fix is defensive/correct regardless of how often it
+    fires live.
+
+    **Verification**: 367 -> 375 tests passing. New coverage: `tests/test_intelligence.py`
+    gained 4 pure tests (single-observation-insufficient, demand-side status-override,
+    demand-side trusts non-7 status, supply-side never consults status_sell);
+    `tests/test_route_send_shape.py` gained 2 real-DB end-to-end tests (last_seen-vs-
+    wall-clock anchor divergence, missing-distance disclosure) and had 1 existing
+    fixture (`test_best_route_fallback_branch_shows_evidence_levels_for_missing_stock_
+    and_demand`) updated to add a matching `terminal_market_state` row and a second
+    observation - its original single-observation-no-state-row fixture only produced
+    "inferred" via the wall-clock bug this round fixed, so it needed a genuinely
+    realistic setup to keep testing what it was meant to; `tests/test_trends_embed_
+    budget.py` gained 1 missing-distance test; `tests/test_intelligence_brief_routes.py`
+    gained 1 end-to-end fallback test using the same `_EmbedTooLargeFollowup`-style
+    pattern `test_route_send_shape.py` already established for `/multi-stop-route`'s
+    fallback. Every new/changed test was run against the pre-fix source first (via a
+    scoped `git stash` of only the 4 production files, tests left in place) and
+    confirmed to fail for the claimed reason - not a broken fixture or unrelated error -
+    including one striking real number: the wall-clock anchor test's pre-fix failure
+    showed "58610h observed" (6.7 years) for a pair with 2 real confirmed hours. No
+    command name/option/description changed; all four modified modules re-verified to
+    parse cleanly.
+
 ## Where to look for what
 
 Five docs, deliberately scoped so they don't duplicate each other:

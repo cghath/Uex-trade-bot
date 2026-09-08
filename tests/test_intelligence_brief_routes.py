@@ -9,6 +9,7 @@ import asyncio
 import threading
 
 from cryptography.fernet import Fernet
+import discord
 import httpx
 
 from bot.cogs import intelligence_brief as intelligence_brief_module
@@ -64,6 +65,70 @@ async def _make_cog(tmp_path, db_name: str, market_rows: list[dict], ship_scu: f
     cog = IntelligenceBrief.__new__(IntelligenceBrief)
     cog.bot = bot
     return cog, client
+
+
+class _FakeResponse:
+    async def defer(self, **kwargs):
+        pass
+
+
+class _FakeFollowup:
+    def __init__(self):
+        self.sent = []
+
+    async def send(self, *args, **kwargs):
+        self.sent.append((args, kwargs))
+
+
+class _EmbedBatchTooLargeFollowup(_FakeFollowup):
+    """Simulates Discord rejecting the combined embeds=[...] send as too large, the same
+    way a real /intelligence-brief with rich risk/health data would - see the audit
+    finding this pins down."""
+
+    async def send(self, *args, **kwargs):
+        if "embeds" in kwargs:
+            response = type("R", (), {"status": 400, "reason": "Bad Request", "headers": {}})()
+            raise discord.HTTPException(response, {"message": "Embed size exceeds maximum size of 6000"})
+        await super().send(*args, **kwargs)
+
+
+class _FakeInteraction:
+    def __init__(self, user_id):
+        self.user = type("U", (), {"id": user_id})()
+        self.response = _FakeResponse()
+        self.followup = _EmbedBatchTooLargeFollowup()
+
+
+def test_intelligence_brief_falls_back_to_plain_text_when_the_combined_batch_is_too_large(tmp_path):
+    """Audit fix: _routes_embed's own internal chunking only protects ITS own length, not
+    the combined total across all embeds sent together in this command's one message -
+    the exact "stuck thinking forever" bug class every sibling route command already
+    learned to guard against (see /mixed-routes' and /multi-stop-route's own fallback
+    tests), confirmed missing here by two independent audit findings. The command must
+    catch the rejected batched send and fall back to plain text preserving the essential
+    content, not raise an uncaught discord.HTTPException or silently drop the reply."""
+    async def run():
+        db = Database(tmp_path / "brief_fallback.sqlite3", Fernet(Fernet.generate_key()))
+        await db.init()
+
+        bot = type("FakeBot", (), {})()
+        bot.db = db
+        cog = IntelligenceBrief.__new__(IntelligenceBrief)
+        cog.bot = bot
+        interaction = _FakeInteraction(1)
+
+        # No ship supplied and no saved default - skips _routes_embed/bot.uex entirely,
+        # isolating this test to the combined-send guard itself rather than route data.
+        await cog.intelligence_brief.callback(cog, interaction, ship=None, budget=None, space_only=False)
+
+        assert interaction.followup.sent, "expected at least one followup"
+        for _, kwargs in interaction.followup.sent:
+            assert "embeds" not in kwargs, "the batched embed send should have been rejected, not succeeded"
+        fallback_text = "\n".join(kwargs["content"] for _, kwargs in interaction.followup.sent)
+        assert "Intelligence Brief" in fallback_text, fallback_text
+        assert "24-Hour Supply" in fallback_text, fallback_text
+
+    asyncio.run(run())
 
 
 def test_routes_embed_offloads_cargo_allocation_to_a_worker_thread(tmp_path, monkeypatch):

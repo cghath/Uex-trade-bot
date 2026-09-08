@@ -9,6 +9,11 @@ from bot.uex.data_health import TerminalDataHealth
 
 
 MIN_HISTORY_HOURS = 24
+# A single recorded observation (state_changes == 0) is one point in time extrapolated
+# forward to observed_until, with zero corroboration that the state actually persisted -
+# requiring at least one real recorded change is the minimum bar for "this has genuinely
+# been watched," not just "time has passed since the collector wrote one row."
+MIN_STATE_CHANGES = 1
 SELL_SIDE_NO_DEMAND_CODE = 7
 
 
@@ -36,7 +41,7 @@ class TerminalMarketHistory:
 
     @property
     def enough_history(self) -> bool:
-        return self.observed_hours >= MIN_HISTORY_HOURS
+        return self.observed_hours >= MIN_HISTORY_HOURS and self.state_changes >= MIN_STATE_CHANGES
 
 
 def _timestamp(value: str) -> datetime:
@@ -89,8 +94,10 @@ def analyze_terminal_market_history(
 #   "current"  - a live reported figure, and the terminal's data is fresh/recent
 #   "aging"    - a live reported figure, but the terminal's data is limited/stale/unknown
 #                (a real number, just not a fresh one - not the same as having none)
-#   "inferred" - no live figure at all, but enough collected history (>= MIN_HISTORY_HOURS)
-#                to estimate how often this terminal has had supply/demand historically
+#   "inferred" - no live figure at all, but enough collected history (>= MIN_HISTORY_HOURS
+#                AND >= MIN_STATE_CHANGES real recorded transitions, not just one stale
+#                point extrapolated forward) to estimate how often this terminal has had
+#                supply/demand historically
 #   "unknown"  - no live figure AND no usable history - genuinely no information, which
 #                must never be displayed as if it meant "confirmed zero"
 EVIDENCE_TIERS = ("current", "aging", "inferred", "unknown")
@@ -110,13 +117,33 @@ def classify_supply_evidence(
     health: TerminalDataHealth | None,
     history: TerminalMarketHistory | None,
     side: str,
+    status_sell: Any = None,
 ) -> EvidenceLevel:
     """side is 'supply' (origin/buy) or 'demand' (destination/sell) - selects which of
-    history's two percentages describes this side."""
-    if scu is not None:
+    history's two percentages describes this side.
+
+    status_sell is only consulted when side == 'demand'. UEX status code 7 ("Maximum
+    Inventory, No Demand") means the terminal is CONFIRMED to have zero real demand even
+    when scu itself reports a real positive number (the same buy/sell status inversion
+    has_sell_side_demand already exists for) - without this, a route could show e.g.
+    "Demand: 500 SCU (verify before departure)" in the same embed that separately shows
+    "sell side: Maximum Inventory (No Demand)", directly contradicting itself. Any other
+    status (including unknown/None) never overrides a live scu figure - only code 7 is an
+    authoritative zero-demand signal, not merely a missing one, so a genuine live report
+    with no status information is still trusted as reported.
+    """
+    effective_scu = scu
+    if side == "demand" and scu is not None:
+        try:
+            status_code = int(float(status_sell)) if status_sell is not None else None
+        except (TypeError, ValueError):
+            status_code = None
+        if status_code == SELL_SIDE_NO_DEMAND_CODE:
+            effective_scu = 0.0
+    if effective_scu is not None:
         status = health.status if health is not None else "unknown"
         tier = "current" if status in ("fresh", "recent") else "aging"
-        return EvidenceLevel(tier=tier, quantity_scu=float(scu))
+        return EvidenceLevel(tier=tier, quantity_scu=float(effective_scu))
     if history is not None and history.enough_history:
         pct = history.demand_available_pct if side == "demand" else history.supply_available_pct
         return EvidenceLevel(tier="inferred", historical_availability_pct=pct, observed_hours=history.observed_hours)

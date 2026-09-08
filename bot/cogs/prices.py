@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
 
 import discord
 from discord import app_commands
@@ -117,16 +116,28 @@ class Prices(commands.Cog):
         helper rather than repeating the fetch-then-reduce in each branch."""
         if id_commodity is None:
             return {}
-        observations_by_pair = await self.bot.db.get_terminal_market_observations_by_ids(
-            [(id_commodity, terminal_id) for terminal_id in terminal_ids]
-        )
-        # Naive UTC string, matching SQLite's own datetime('now') format that
-        # terminal_market_observations.observed_at is stored with - an aware isoformat()
-        # string here would raise comparing offset-naive vs offset-aware datetimes inside
-        # analyze_terminal_market_history's own timestamp parsing.
-        observed_until = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        pairs = [(id_commodity, terminal_id) for terminal_id in terminal_ids]
+        observations_by_pair = await self.bot.db.get_terminal_market_observations_by_ids(pairs)
+        if not observations_by_pair:
+            return {}
+        # Anchor each pair's coverage to the COLLECTOR's own last confirmed check
+        # (terminal_market_state.last_seen), matching /terminal-history's existing,
+        # correct anchor - not wall-clock now(), which would silently count any gap since
+        # the collector actually last saw this pair (bot downtime, a stalled collector
+        # loop, a pair briefly missing from a UEX response) as continued, confirmed
+        # observation. Falls back to the last recorded observation's own timestamp (zero
+        # fabricated extension) on the pair's current-state row being missing, which
+        # shouldn't happen in practice - record_terminal_market_snapshot always upserts
+        # terminal_market_state in the same call that can insert an observation row.
+        market_signals = await self.bot.db.get_route_market_signals_by_ids(pairs)
         return {
-            key: analyze_terminal_market_history(observations, observed_until=observed_until)
+            key: analyze_terminal_market_history(
+                observations,
+                observed_until=(
+                    market_signals.get(key, {}).get("last_seen")
+                    or max(str(row["observed_at"]) for row in observations)
+                ),
+            )
             for key, observations in observations_by_pair.items()
         }
 
@@ -427,6 +438,7 @@ class Prices(commands.Cog):
                     classify_supply_evidence(
                         scu=r.get("scu_destination"), health=destination_health_obj,
                         history=history_by_pair.get((id_commodity, destination_id)), side="demand",
+                        status_sell=r.get("status_destination"),
                     ), label="Demand",
                 ))
 
@@ -492,7 +504,13 @@ class Prices(commands.Cog):
                 value_lines.extend(practical_notes)
                 origin_system = (terminal_references.get(origin_id) or {}).get("star_system_name")
                 destination_system = (terminal_references.get(destination_id) or {}).get("star_system_name")
-                if note := travel_warning(origin_system, destination_system, has_real_distance=True):
+                # has_real_distance reflects THIS route's own row, not the branch as a
+                # whole - UEX documents commodities_routes.distance as non-nullable, but
+                # this codebase has precedent of similar "documented non-null" fields
+                # (scu_origin/scu_destination) being null in real data, so a missing
+                # distance here must still get a travel-time disclaimer, not silent
+                # omission of both the figure and the warning.
+                if note := travel_warning(origin_system, destination_system, has_real_distance=distance is not None):
                     value_lines.append(note)
                 # Per-field/name truncation alone doesn't protect Discord's combined
                 # 6000-char embed limit - stop and disclose instead of silently dropping
@@ -625,6 +643,7 @@ class Prices(commands.Cog):
                 classify_supply_evidence(
                     scu=route.scu_sell_wanted, health=destination_health_obj,
                     history=history_by_pair.get((id_commodity, route.sell_terminal_id)), side="demand",
+                    status_sell=route.status_sell_code,
                 ), label="Demand",
             ))
 
