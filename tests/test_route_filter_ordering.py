@@ -200,6 +200,7 @@ def test_top_routes_falls_back_to_a_second_best_route_for_the_same_commodity(tmp
         bot = type("FakeBot", (), {})()
         bot.db = db
         bot.uex = client
+        bot.get_cog = lambda name: None
         cog = Trends.__new__(Trends)
         cog.bot = bot
         cog._top_scored_routes_lock = asyncio.Lock()
@@ -211,12 +212,15 @@ def test_top_routes_falls_back_to_a_second_best_route_for_the_same_commodity(tmp
             await cog.top_routes.callback(cog, interaction, auto_load_only=True)
 
             assert interaction.followup.sent, "expected at least one followup"
-            _, kwargs = interaction.followup.sent[0]
-            embed = kwargs.get("embed")
-            assert embed is not None, f"expected an embed response, got: {interaction.followup.sent}"
-            field_names = " ".join(f.name for f in embed.fields)
-            assert "AutoOrigin2" in field_names and "AutoDest2" in field_names, (
-                f"expected the second-best auto-load-capable route for 'Multi', got: {field_names}"
+            # Each route is now its own message with its own embed titled by terminal
+            # names (see /best-route's identical per-route-message restructuring), not a
+            # shared embed with one field per route.
+            titles = " ".join(
+                kwargs["embed"].title for _, kwargs in interaction.followup.sent
+                if kwargs.get("embed") and kwargs["embed"].title
+            )
+            assert "AutoOrigin2" in titles and "AutoDest2" in titles, (
+                f"expected the second-best auto-load-capable route for 'Multi', got: {titles}"
             )
         finally:
             await client.aclose()
@@ -263,6 +267,7 @@ def test_top_routes_dedupes_to_one_route_per_commodity_after_filtering(tmp_path)
         bot = type("FakeBot", (), {})()
         bot.db = db
         bot.uex = client
+        bot.get_cog = lambda name: None
         cog = Trends.__new__(Trends)
         cog.bot = bot
         cog._top_scored_routes_lock = asyncio.Lock()
@@ -274,13 +279,13 @@ def test_top_routes_dedupes_to_one_route_per_commodity_after_filtering(tmp_path)
             await cog.top_routes.callback(cog, interaction, auto_load_only=True)
 
             assert interaction.followup.sent, "expected at least one followup"
-            _, kwargs = interaction.followup.sent[0]
-            embed = kwargs.get("embed")
-            assert embed is not None, f"expected an embed response, got: {interaction.followup.sent}"
-            field_names = " ".join(f.name for f in embed.fields)
-            assert "HighOrigin" in field_names, f"expected the higher-scored route, got: {field_names}"
-            assert "LowOrigin" not in field_names, (
-                f"same commodity shown twice instead of deduped to the higher-scored route: {field_names}"
+            titles = " ".join(
+                kwargs["embed"].title for _, kwargs in interaction.followup.sent
+                if kwargs.get("embed") and kwargs["embed"].title
+            )
+            assert "HighOrigin" in titles, f"expected the higher-scored route, got: {titles}"
+            assert "LowOrigin" not in titles, (
+                f"same commodity shown twice instead of deduped to the higher-scored route: {titles}"
             )
         finally:
             await client.aclose()
@@ -338,6 +343,7 @@ def test_top_routes_auto_load_filter_finds_a_lower_scored_route(tmp_path):
         bot = type("FakeBot", (), {})()
         bot.db = db
         bot.uex = client
+        bot.get_cog = lambda name: None
         cog = Trends.__new__(Trends)
         cog.bot = bot
         cog._top_scored_routes_lock = asyncio.Lock()
@@ -349,12 +355,12 @@ def test_top_routes_auto_load_filter_finds_a_lower_scored_route(tmp_path):
             await cog.top_routes.callback(cog, interaction, auto_load_only=True)
 
             assert interaction.followup.sent, "expected at least one followup"
-            _, kwargs = interaction.followup.sent[0]
-            embed = kwargs.get("embed")
-            assert embed is not None, f"expected an embed response, got: {interaction.followup.sent}"
-            field_names = " ".join(f.name for f in embed.fields)
-            assert "AutoOrigin" in field_names and "AutoDest" in field_names, (
-                f"expected the auto-load-capable route in the response, got fields: {field_names}"
+            titles = " ".join(
+                kwargs["embed"].title for _, kwargs in interaction.followup.sent
+                if kwargs.get("embed") and kwargs["embed"].title
+            )
+            assert "AutoOrigin" in titles and "AutoDest" in titles, (
+                f"expected the auto-load-capable route in the response, got: {titles}"
             )
         finally:
             await client.aclose()

@@ -270,6 +270,51 @@ def test_route_progression_thread_row_source_defaults_and_overwrites_on_conflict
     asyncio.run(run())
 
 
+def test_get_route_progression_track_record_counts_matched_vs_total_per_pair(tmp_path):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await db.create_route_progression_thread(
+            thread_id=1, user_id=100, guild_id=200, route_kind="best_route", route_snapshot={},
+            legs=[
+                {"side": "buy", "id_terminal": 10, "id_commodity": 1},
+                {"side": "buy", "id_terminal": 10, "id_commodity": 1},
+                {"side": "buy", "id_terminal": 10, "id_commodity": 1},
+                {"side": "sell", "id_terminal": 20, "id_commodity": 1},
+            ],
+        )
+        await db.record_route_progression_leg_outcome(thread_id=1, leg_index=0, outcome="matched")
+        await db.record_route_progression_leg_outcome(thread_id=1, leg_index=1, outcome="matched")
+        await db.record_route_progression_leg_outcome(thread_id=1, leg_index=2, outcome="less", actual_scu=10)
+        # leg_index 3 (sell) is left unreported - must not count toward either total.
+
+        result = await db.get_route_progression_track_record([(1, 10, "buy"), (1, 20, "sell")])
+        assert result[(1, 10, "buy")] == (2, 3)
+        assert (1, 20, "sell") not in result
+
+    asyncio.run(run())
+
+
+def test_get_route_progression_track_record_only_returns_requested_pairs(tmp_path):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await db.create_route_progression_thread(
+            thread_id=1, user_id=100, guild_id=200, route_kind="best_route", route_snapshot={},
+            legs=[
+                {"side": "buy", "id_terminal": 10, "id_commodity": 1},
+                {"side": "buy", "id_terminal": 10, "id_commodity": 2},
+            ],
+        )
+        await db.record_route_progression_leg_outcome(thread_id=1, leg_index=0, outcome="matched")
+        await db.record_route_progression_leg_outcome(thread_id=1, leg_index=1, outcome="missing")
+
+        result = await db.get_route_progression_track_record([(1, 10, "buy")])
+        assert result == {(1, 10, "buy"): (1, 1)}, "commodity 2 at the same terminal must not leak in"
+
+    asyncio.run(run())
+
+
 # -- LegOutcomeView / ActualAmountModal / MoreOutcomeFollowupView claim logic -------------
 
 class _FakeResponse:

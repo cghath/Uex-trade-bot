@@ -26,11 +26,12 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from bot.cogs.prices import SYSTEM_CHOICES, _add_chunked_fields, commodity_name_autocomplete
+from bot.cogs.route_progression import RouteLegInput, RouteTrackingView, TrackableRoute
 from bot.cogs.ships import ship_name_autocomplete
 from bot.uex.charts import render_price_history_chart
 from bot.uex.exceptions import UexApiError, describe_uex_api_error
 from bot.uex.data_health import classify_terminal_health, format_health_note
-from bot.uex.route_confidence import compute_route_confidence
+from bot.uex.route_confidence import compute_route_confidence, track_record_modifier
 from bot.uex.practical_routes import route_in_system, route_practical_notes, route_supports_auto_load
 from bot.uex.commodity_risk import format_commodity_risk
 from bot.uex.route_presentation import format_evidence_note, travel_warning
@@ -447,8 +448,25 @@ class Trends(commands.Cog):
         if preferences_note:
             footer += " · " + preferences_note
 
-        embed = discord.Embed(title=title, color=discord.Color.green())
-        embed.set_footer(text=footer)
+        intro_embed = discord.Embed(title=title, color=discord.Color.green())
+        intro_embed.set_footer(text=footer)
+        await interaction.followup.send(embed=intro_embed)
+
+        track_record_pairs = [
+            pair
+            for route in entries
+            for pair in (
+                (route.id_commodity, route.origin_terminal_id, "buy"),
+                (route.id_commodity, route.destination_terminal_id, "sell"),
+            )
+            if pair[1] is not None
+        ]
+        track_record = await self.bot.db.get_route_progression_track_record(track_record_pairs)
+        # RouteProgression may not be loaded (a cog load failure elsewhere shouldn't break
+        # /top-routes) - tracking buttons are additive, never required for the command's
+        # own result.
+        tracking_cog = self.bot.get_cog("RouteProgression")
+
         routes_shown = 0
         for i, r in enumerate(entries, start=1):
             origin_health = classify_terminal_health(health_rows[r.origin_terminal_id]) if r.origin_terminal_id in health_rows else None
@@ -482,6 +500,10 @@ class Trends(commands.Cog):
             destination_health_row = health_rows.get(r.destination_terminal_id)
             origin_signal = market_signals.get((r.id_commodity, r.origin_terminal_id), {})
             destination_signal = market_signals.get((r.id_commodity, r.destination_terminal_id), {})
+            origin_matched, origin_total = track_record.get((r.id_commodity, r.origin_terminal_id, "buy"), (0, 0))
+            destination_matched, destination_total = track_record.get(
+                (r.id_commodity, r.destination_terminal_id, "sell"), (0, 0)
+            )
             confidence = compute_route_confidence(
                 origin_health=classify_terminal_health(origin_health_row) if origin_health_row else None,
                 destination_health=classify_terminal_health(destination_health_row) if destination_health_row else None,
@@ -492,6 +514,9 @@ class Trends(commands.Cog):
                 origin_available=bool(r.scu_origin and r.scu_origin > 0),
                 destination_available=has_sell_side_demand(
                     r.scu_destination, r.status_destination
+                ),
+                track_record_modifier=track_record_modifier(
+                    origin_matched + destination_matched, origin_total + destination_total
                 ),
             )
             value += f"\nConfidence: **{confidence.label} ({confidence.score}/100)**"
@@ -511,20 +536,48 @@ class Trends(commands.Cog):
             risk_note = format_commodity_risk(commodity_references.get(r.id_commodity))
             if risk_note:
                 value += f"\n{risk_note}"
-            # Per-field/name truncation alone doesn't protect Discord's combined 6000-char
-            # embed limit - many individually-legal route fields can still sum past it, and
-            # Discord rejects the whole send in that case (losing every route, not just the
-            # overflow ones). Routes are already score-sorted, so stopping here keeps the
-            # best-ranked ones and drops only the tail, with an explicit note below rather
-            # than a silent gap or a failed command.
-            if not _add_chunked_fields(embed, name=name, lines=value.splitlines()):
-                break
+            route_embed = discord.Embed(title=name, color=discord.Color.green())
+            route_embed.set_footer(text=f"Route {i} of {len(entries)}")
+            # Per-route embed, budget-checked on its own - a route's own detail lines
+            # overflowing a single Discord embed is unlikely but not impossible, and this
+            # stops and discloses instead of silently dropping it (see /best-route's
+            # identical pattern in prices.py).
+            if not _add_chunked_fields(route_embed, name="Details", lines=value.splitlines()):
+                continue
             routes_shown += 1
+
+            view = None
+            if tracking_cog and r.origin_terminal_id is not None and r.destination_terminal_id is not None:
+                trackable_route = TrackableRoute(
+                    route_kind="top_routes",
+                    title=f"{r.commodity_name}: {r.origin_terminal_name} → {r.destination_terminal_name}",
+                    legs=[
+                        RouteLegInput(
+                            side="buy", id_terminal=r.origin_terminal_id, id_commodity=r.id_commodity,
+                            terminal_name=r.origin_terminal_name, commodity_name=r.commodity_name,
+                            display_label=f"Buy {r.commodity_name} at {r.origin_terminal_name}",
+                            quoted_price=r.price_origin, quoted_scu=r.scu_origin,
+                            quoted_status=r.status_origin,
+                        ),
+                        RouteLegInput(
+                            side="sell", id_terminal=r.destination_terminal_id, id_commodity=r.id_commodity,
+                            terminal_name=r.destination_terminal_name, commodity_name=r.commodity_name,
+                            display_label=f"Sell {r.commodity_name} at {r.destination_terminal_name}",
+                            quoted_price=r.price_destination, quoted_scu=r.scu_destination,
+                            quoted_status=r.status_destination,
+                        ),
+                    ],
+                )
+                view = RouteTrackingView(tracking_cog, [trackable_route])
+
+            if view is not None:
+                await interaction.followup.send(embed=route_embed, view=view)
+            else:
+                await interaction.followup.send(embed=route_embed)
 
         omitted = len(entries) - routes_shown
         if omitted > 0:
-            embed.set_footer(text=footer + f" · {omitted} more route(s) omitted - message size limit")
-        await interaction.followup.send(embed=embed)
+            await interaction.followup.send(f"{omitted} more route(s) omitted - too large to display.")
 
     @app_commands.command(name="top-routes", description="Top trade routes by UEX score, with live-stock filtering.")
     @app_commands.describe(

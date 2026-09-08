@@ -1044,6 +1044,39 @@ class Database:
             rows = await cursor.fetchall()
         return [dict(row) for row in rows]
 
+    async def get_route_progression_track_record(
+        self, pairs: list[tuple[int, int, str]]
+    ) -> dict[tuple[int, int, str], tuple[int, int]]:
+        """(matched_count, total_reported_count) per (id_commodity, id_terminal, side) -
+        the real-world track record behind route_confidence.py's track_record_modifier.
+        Bulk-fetches by the id sets involved, then filters to the exact requested pairs in
+        Python, matching get_terminal_market_observations_by_ids' established shape."""
+        id_commodities = {pair[0] for pair in pairs}
+        id_terminals = {pair[1] for pair in pairs}
+        if not id_commodities or not id_terminals:
+            return {}
+        wanted = set(pairs)
+        placeholders_c = ",".join("?" for _ in id_commodities)
+        placeholders_t = ",".join("?" for _ in id_terminals)
+        async with self.connect() as db:
+            cursor = await db.execute(
+                f"""SELECT id_commodity, id_terminal, side, outcome FROM route_progression_legs
+                    WHERE outcome IS NOT NULL
+                      AND id_commodity IN ({placeholders_c}) AND id_terminal IN ({placeholders_t})""",
+                (*id_commodities, *id_terminals),
+            )
+            rows = await cursor.fetchall()
+        counts: dict[tuple[int, int, str], list[int]] = {}
+        for row in rows:
+            key = (row["id_commodity"], row["id_terminal"], row["side"])
+            if key not in wanted:
+                continue
+            bucket = counts.setdefault(key, [0, 0])
+            bucket[1] += 1
+            if row["outcome"] == "matched":
+                bucket[0] += 1
+        return {key: (matched, total) for key, (matched, total) in counts.items()}
+
     async def record_terminal_data_health_snapshot(self, rows: list[dict[str, Any]]) -> tuple[int, int]:
         normalized = []
         for row in rows:

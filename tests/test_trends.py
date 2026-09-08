@@ -13,7 +13,7 @@ from bot.uex.trends import (
     select_in_stock_routes,
 )
 from bot.uex.data_health import classify_terminal_health
-from bot.uex.route_confidence import coalesce_report_count, compute_route_confidence
+from bot.uex.route_confidence import coalesce_report_count, compute_route_confidence, track_record_modifier
 
 
 def _price_row(**overrides) -> dict:
@@ -273,3 +273,41 @@ def test_route_confidence_is_not_a_profit_score():
 def test_report_count_coalescing_preserves_valid_zero():
     assert coalesce_report_count(0, 9) == 0
     assert coalesce_report_count(None, 9) == 9
+
+
+def test_track_record_modifier_is_neutral_below_the_minimum_sample_size():
+    """A single report saying 'matched' would otherwise look like 100% confidence from
+    one data point - no adjustment below MIN_REPORTS_FOR_TRACK_RECORD."""
+    assert track_record_modifier(1, 1) == 0
+    assert track_record_modifier(0, 2) == 0
+
+
+def test_track_record_modifier_rewards_a_strong_match_rate():
+    assert track_record_modifier(10, 10) == 10
+
+
+def test_track_record_modifier_penalizes_a_poor_match_rate():
+    assert track_record_modifier(0, 10) == -10
+
+
+def test_track_record_modifier_is_neutral_at_a_fifty_percent_rate():
+    assert track_record_modifier(5, 10) == 0
+
+
+def test_compute_route_confidence_applies_the_track_record_modifier_and_stays_clamped():
+    fresh = classify_terminal_health(
+        {"terminal_name": "A", "has_recent_reports": 1, "last_update_days": 0,
+         "last_update_days_limit": 1, "last_update_days_percentage": 100,
+         "prices_updated_percentage": 100}
+    )
+    kwargs = dict(
+        origin_health=fresh, destination_health=fresh,
+        origin_report_count=5, destination_report_count=5,
+        volatility_origin=0.1, volatility_destination=0.1,
+        origin_available=True, destination_available=True,
+    )
+    base = compute_route_confidence(**kwargs)
+    boosted = compute_route_confidence(**kwargs, track_record_modifier=10)
+    penalized = compute_route_confidence(**kwargs, track_record_modifier=-10)
+    assert boosted.score == min(100, base.score + 10)
+    assert penalized.score == max(0, base.score - 10)

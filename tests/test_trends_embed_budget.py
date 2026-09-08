@@ -48,13 +48,14 @@ def _make_cog(num_routes: int) -> tuple[Trends, object]:
         get_route_market_signals_by_ids=AsyncMock(return_value={}),
         get_terminal_market_observations_by_ids=AsyncMock(return_value={}),
         get_commodity_references=AsyncMock(return_value={i: risk for i in range(1, num_routes + 1)}),
+        get_route_progression_track_record=AsyncMock(return_value={}),
     )
     uex = NS(
         get_vehicles=AsyncMock(return_value=[dict(name="Ship", scu=100)]),
         get_commodities_status=AsyncMock(return_value={}),
     )
     cog = Trends.__new__(Trends)
-    cog.bot = NS(db=db, uex=uex)
+    cog.bot = NS(db=db, uex=uex, get_cog=lambda name: None)
     return cog, db
 
 
@@ -71,6 +72,18 @@ def _routes(num_routes: int) -> list[ScoredRouteEntry]:
     ]
 
 
+def _route_embed_calls(mock) -> list:
+    """Every route now sends as its own message (see /best-route's identical per-route-
+    message restructuring in prices.py) - the first embed-bearing call is always the intro
+    (no fields, just title/footer), so route embeds are every embed call AFTER that one."""
+    embed_calls = [call for call in mock.call_args_list if call.kwargs.get("embed") is not None]
+    return embed_calls[1:]
+
+
+def _plain_messages(mock) -> list[str]:
+    return [call.args[0] for call in mock.call_args_list if call.args]
+
+
 def test_warning_heavy_routes_fit_the_total_embed_limit(tmp_path):
     async def run():
         cog, _ = _make_cog(10)
@@ -79,15 +92,19 @@ def test_warning_heavy_routes_fit_the_total_embed_limit(tmp_path):
             inter, entries=_routes(10), updated_at=None, ship=None,
             title="Top routes", footer_note="Collected data", log_label="test", display_limit=10,
         )
-        embed = inter.followup.send.call_args.kwargs["embed"]
-        assert len(embed) <= 6000, (len(embed), len(embed.fields))
+        for call in inter.followup.send.call_args_list:
+            embed = call.kwargs.get("embed")
+            if embed is not None:
+                assert len(embed) <= 6000, (len(embed), len(embed.fields))
 
     asyncio.run(run())
 
 
 def test_truncated_routes_are_disclosed_not_silently_dropped(tmp_path):
     """Whatever routes don't fit must be visibly noted, not just quietly absent - a user
-    comparing "/top-routes said 10" against "the embed only shows 6" needs to know why."""
+    comparing "/top-routes said 10" against "only 6 route messages arrived" needs to know
+    why. Each route embed that fails to fit its own message is skipped (not sent at all),
+    and a trailing plain-text message discloses the count."""
     async def run():
         cog, _ = _make_cog(10)
         inter = _interaction()
@@ -95,10 +112,9 @@ def test_truncated_routes_are_disclosed_not_silently_dropped(tmp_path):
             inter, entries=_routes(10), updated_at=None, ship=None,
             title="Top routes", footer_note="Collected data", log_label="test", display_limit=10,
         )
-        embed = inter.followup.send.call_args.kwargs["embed"]
-        route_fields = len(embed.fields)
-        if route_fields < 10:
-            assert "omitted" in (embed.footer.text or "").lower()
+        route_count = len(_route_embed_calls(inter.followup.send))
+        if route_count < 10:
+            assert any("omitted" in msg.lower() for msg in _plain_messages(inter.followup.send))
 
     asyncio.run(run())
 
@@ -112,9 +128,8 @@ def test_a_small_number_of_routes_is_never_truncated():
             inter, entries=_routes(2), updated_at=None, ship=None,
             title="Top routes", footer_note="Collected data", log_label="test", display_limit=10,
         )
-        embed = inter.followup.send.call_args.kwargs["embed"]
-        assert len(embed.fields) == 2
-        assert "omitted" not in (embed.footer.text or "").lower()
+        assert len(_route_embed_calls(inter.followup.send)) == 2
+        assert not any("omitted" in msg.lower() for msg in _plain_messages(inter.followup.send))
 
     asyncio.run(run())
 
@@ -163,11 +178,10 @@ def test_top_routes_evidence_levels_distinguish_zero_unknown_and_inferred():
             inter, entries=entries, updated_at=None, ship=None,
             title="Top routes", footer_note="Collected data", log_label="test", display_limit=10,
         )
-        embed = inter.followup.send.call_args.kwargs["embed"]
         by_route: dict[str, str] = {}
-        for field in embed.fields:
-            key = field.name.split(":")[0]
-            by_route[key] = by_route.get(key, "") + field.value
+        for call in _route_embed_calls(inter.followup.send):
+            embed = call.kwargs["embed"]
+            by_route[embed.title] = "".join(f.value or "" for f in embed.fields)
         zero_text = next(v for k, v in by_route.items() if "Zero Co" in k)
         unknown_text = next(v for k, v in by_route.items() if "Unknown Co" in k)
         inferred_text = next(v for k, v in by_route.items() if "Inferred Co" in k)
@@ -260,8 +274,10 @@ def test_route_budget_accounts_for_the_final_footer():
                 ship=None, title="Top routes", footer_note="Collected data",
                 log_label="test", display_limit=10,
             )
-            embed = inter.followup.send.call_args.kwargs["embed"]
-            assert len(embed) <= 6000, (padding, len(embed), len(embed.footer.text), len(embed.fields))
+            for call in inter.followup.send.call_args_list:
+                embed = call.kwargs.get("embed")
+                if embed is not None:
+                    assert len(embed) <= 6000, (padding, len(embed), len(embed.footer.text), len(embed.fields))
 
     asyncio.run(run())
 
@@ -293,13 +309,12 @@ def test_top_routes_never_shows_a_route_without_its_risk_warning():
                 inter, entries=entries, updated_at=None, ship=None,
                 title="Top routes", footer_note="Collected data", log_label="test", display_limit=10,
             )
-            embed = inter.followup.send.call_args.kwargs["embed"]
             groups: dict[str, str] = {}
-            for field in embed.fields:
-                route_number = field.name.split(".")[0]
-                groups[route_number] = groups.get(route_number, "") + field.value
+            for call in _route_embed_calls(inter.followup.send):
+                embed = call.kwargs["embed"]
+                groups[embed.title] = "".join(f.value or "" for f in embed.fields)
             assert all("Cargo risk:" in text for text in groups.values()), (
-                padding, [(number, "Cargo risk:" in text) for number, text in groups.items()],
+                padding, [(title, "Cargo risk:" in text) for title, text in groups.items()],
             )
 
     asyncio.run(run())

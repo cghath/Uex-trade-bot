@@ -671,9 +671,10 @@ def test_top_routes_send_ranked_routes_shows_active_preferences_in_footer(monkey
             get_route_market_signals_by_ids=AsyncMock(return_value={}),
             get_terminal_market_observations_by_ids=AsyncMock(return_value={}),
             get_commodity_references=AsyncMock(return_value={}),
+            get_route_progression_track_record=AsyncMock(return_value={}),
         )
         cog = trends_module.Trends.__new__(trends_module.Trends)
-        cog.bot = NS(db=db)
+        cog.bot = NS(db=db, get_cog=lambda name: None)
         cog._get_status_lookup = AsyncMock(return_value={})
         interaction = _FakeInteraction(1)
         interaction.response.defer = AsyncMock()

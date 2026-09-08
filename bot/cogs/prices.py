@@ -11,7 +11,7 @@ from discord.ext import commands
 from bot.cogs.ships import ship_name_autocomplete
 from bot.uex.exceptions import UexApiError, describe_uex_api_error
 from bot.uex.data_health import classify_terminal_health, format_health_note
-from bot.uex.route_confidence import coalesce_report_count, compute_route_confidence
+from bot.uex.route_confidence import coalesce_report_count, compute_route_confidence, track_record_modifier
 from bot.uex.practical_routes import route_in_system, route_practical_notes, route_supports_auto_load
 from bot.uex.commodity_risk import format_commodity_risk
 from bot.uex.supply_demand import analyze_terminal_market_history, classify_supply_evidence, has_sell_side_demand
@@ -378,6 +378,16 @@ class Prices(commands.Cog):
                 if (terminal_id := _positive_int(row.get("id_terminal"))) is not None
             }
             history_by_pair = await self._history_by_pair(id_commodity, ranked_terminal_ids)
+            track_record_pairs = [
+                pair
+                for route in ranked
+                for pair in (
+                    (id_commodity, _positive_int(route.get("id_terminal_origin")), "buy"),
+                    (id_commodity, _positive_int(route.get("id_terminal_destination")), "sell"),
+                )
+                if pair[1] is not None
+            ]
+            track_record = await self.bot.db.get_route_progression_track_record(track_record_pairs)
             intro_embed = discord.Embed(title=f"{commodity_display} — Best Trade Routes", color=discord.Color.green())
             if risk_warning:
                 intro_embed.description = risk_warning
@@ -483,6 +493,13 @@ class Prices(commands.Cog):
                     value_lines.append(" · ".join(loc_bits))
                 origin_signal = live_signals.get(origin_id, {})
                 destination_signal = live_signals.get(destination_id, {})
+                # Real player-reported outcomes (Recommendation Outcome Tracking), on top
+                # of - not instead of - the evidence-quality scoring below. 0 when there's
+                # no/too-little tracking history for this pair yet, which is nearly always.
+                origin_matched, origin_total = track_record.get((id_commodity, origin_id, "buy"), (0, 0))
+                destination_matched, destination_total = track_record.get(
+                    (id_commodity, destination_id, "sell"), (0, 0)
+                )
                 confidence = compute_route_confidence(
                     origin_health=origin_health_obj,
                     destination_health=destination_health_obj,
@@ -499,6 +516,9 @@ class Prices(commands.Cog):
                     origin_available=bool(r.get("scu_origin") and r.get("scu_origin") > 0),
                     destination_available=has_sell_side_demand(
                         r.get("scu_destination"), r.get("status_destination")
+                    ),
+                    track_record_modifier=track_record_modifier(
+                        origin_matched + destination_matched, origin_total + destination_total
                     ),
                 )
                 value_lines.append(f"Confidence: **{confidence.label} ({confidence.score}/100)**")
