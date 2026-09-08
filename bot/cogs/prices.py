@@ -378,21 +378,24 @@ class Prices(commands.Cog):
                 if (terminal_id := _positive_int(row.get("id_terminal"))) is not None
             }
             history_by_pair = await self._history_by_pair(id_commodity, ranked_terminal_ids)
-            embed = discord.Embed(title=f"{commodity_display} — Best Trade Routes", color=discord.Color.green())
+            intro_embed = discord.Embed(title=f"{commodity_display} — Best Trade Routes", color=discord.Color.green())
             if risk_warning:
-                embed.description = risk_warning
-            # Set before the field loop, not after - _add_chunked_fields' budget check
-            # measures the embed's real total via len(embed), which only reflects the
-            # footer once it's actually attached.
+                intro_embed.description = risk_warning
             footer = "Data from UEX Corp /commodities_routes"
             if not ship_vehicle:
                 footer += " · set a default ship with /set-default-ship for cargo/run-profit numbers"
             if preferences_note:
                 footer += " · " + preferences_note
-            embed.set_footer(text=footer)
+            intro_embed.set_footer(text=footer)
+            await interaction.followup.send(embed=intro_embed)
+
+            # Each route gets its OWN message with its OWN "Track this route" button
+            # directly beneath it, rather than one combined embed with every route's
+            # button bundled at the end - Discord has no way to place a component between
+            # two fields of a single embed, only below the whole message.
+            tracking_cog = self.bot.get_cog("RouteProgression")
             routes_shown = 0
-            trackable_routes: list[TrackableRoute] = []
-            for r in ranked:
+            for index, r in enumerate(ranked):
                 origin = r.get("origin_terminal_name", "Unknown")
                 dest = r.get("destination_terminal_name", "Unknown")
                 origin_id = _positive_int(r.get("id_terminal_origin"))
@@ -514,14 +517,21 @@ class Prices(commands.Cog):
                 # omission of both the figure and the warning.
                 if note := travel_warning(origin_system, destination_system, has_real_distance=distance is not None):
                     value_lines.append(note)
-                # Per-field/name truncation alone doesn't protect Discord's combined
-                # 6000-char embed limit - stop and disclose instead of silently dropping
-                # the tail (see /top-routes' identical pattern in trends.py).
-                if not _add_chunked_fields(embed, name=f"{origin} → {dest}", lines=value_lines):
-                    break
+                route_embed = discord.Embed(title=f"{origin} → {dest}", color=discord.Color.green())
+                route_embed.set_footer(text=f"Route {index + 1} of {len(ranked)}")
+                # Per-route embed, budget-checked on its own now rather than shared across
+                # all 5 - stop and disclose instead of silently dropping a route that can't
+                # fit (see /top-routes' identical pattern in trends.py).
+                if not _add_chunked_fields(route_embed, name="Details", lines=value_lines):
+                    continue
                 routes_shown += 1
-                if origin_id is not None and destination_id is not None:
-                    trackable_routes.append(TrackableRoute(
+
+                view = None
+                # RouteProgression may not be loaded (a cog load failure elsewhere shouldn't
+                # break /best-route) - tracking buttons are additive, never required for the
+                # command's own result.
+                if tracking_cog and origin_id is not None and destination_id is not None:
+                    trackable_route = TrackableRoute(
                         route_kind="best_route",
                         title=f"{commodity_display}: {origin} → {dest}",
                         legs=[
@@ -540,18 +550,17 @@ class Prices(commands.Cog):
                                 quoted_status=r.get("status_destination"),
                             ),
                         ],
-                    ))
+                    )
+                    view = RouteTrackingView(tracking_cog, [trackable_route])
+
+                if view is not None:
+                    await interaction.followup.send(embed=route_embed, view=view)
+                else:
+                    await interaction.followup.send(embed=route_embed)
+
             omitted = len(ranked) - routes_shown
             if omitted > 0:
-                embed.set_footer(text=footer + f" · {omitted} more route(s) omitted - message size limit")
-            # RouteProgression may not be loaded (a cog load failure elsewhere shouldn't
-            # break /best-route) - tracking buttons are additive, never required for the
-            # command's own result.
-            tracking_cog = self.bot.get_cog("RouteProgression")
-            if tracking_cog and trackable_routes:
-                await interaction.followup.send(embed=embed, view=RouteTrackingView(tracking_cog, trackable_routes))
-            else:
-                await interaction.followup.send(embed=embed)
+                await interaction.followup.send(f"{omitted} more route(s) omitted - too large to display.")
             return
 
         # Fallback: derive routes ourselves from raw price rows (no distance data available).

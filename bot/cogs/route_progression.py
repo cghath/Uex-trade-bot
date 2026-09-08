@@ -221,9 +221,11 @@ class RouteTrackingView(discord.ui.View):
     def __init__(self, cog: "RouteProgression", routes: list[TrackableRoute]) -> None:
         super().__init__(timeout=900)
         self.cog = cog
-        for index, route in enumerate(routes[:MAX_TRACKABLE_ROUTES]):
+        routes = routes[:MAX_TRACKABLE_ROUTES]
+        for index, route in enumerate(routes):
+            label = "Track this route" if len(routes) == 1 else f"Track route #{index + 1}"
             button: discord.ui.Button = discord.ui.Button(
-                label=f"Track route #{index + 1}", style=discord.ButtonStyle.blurple, row=0,
+                label=label, style=discord.ButtonStyle.blurple, row=0,
             )
             button.callback = self._make_callback(route)
             self.add_item(button)
@@ -295,6 +297,12 @@ class RouteProgression(commands.Cog):
         )
         self._active_legs[thread.id] = route.legs
 
+        # Post the full route breakdown the user actually picked - interaction.message is
+        # the message the "Track this route" button was attached to, carrying the same
+        # embed /best-route just sent (price, cargo, confidence, warnings, everything) -
+        # before the leg-by-leg flow starts, not just a bare title.
+        if interaction.message is not None and interaction.message.embeds:
+            await thread.send(embed=interaction.message.embeds[0])
         await thread.send(
             f"Tracking **{route.title}** - report each leg as you complete it. This thread "
             "closes automatically once every leg is reported (or after "

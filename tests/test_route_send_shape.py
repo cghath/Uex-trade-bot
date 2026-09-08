@@ -485,11 +485,15 @@ def test_best_route_discloses_when_routes_are_truncated_for_size(tmp_path, monke
         finally:
             await client.aclose()
 
-        assert interaction.followup.sent, "expected at least one followup"
-        _, kwargs = interaction.followup.sent[0]
-        embed = kwargs["embed"]
-        assert len(embed.fields) == 1, "the second route's field should have been skipped, not the third's"
-        assert "omitted" in (embed.footer.text or "").lower(), (embed.footer.text,)
+        # Each route is now its own message: intro (no fields), route 1, route 3 (route 2
+        # skipped - continue, no send at all), then a trailing "omitted" note.
+        assert len(interaction.followup.sent) == 4, interaction.followup.sent
+        _, route1_kwargs = interaction.followup.sent[1]
+        assert route1_kwargs["embed"].title == "Origin 1 → Destination 1"
+        _, route3_kwargs = interaction.followup.sent[2]
+        assert route3_kwargs["embed"].title == "Origin 3 → Destination 3"
+        omitted_args, _ = interaction.followup.sent[3]
+        assert "omitted" in omitted_args[0].lower(), omitted_args
 
     asyncio.run(run())
 
@@ -543,8 +547,8 @@ def test_best_route_primary_branch_now_warns_on_a_cross_system_route(tmp_path):
         finally:
             await client.aclose()
 
-        assert interaction.followup.sent, "expected at least one followup"
-        _, kwargs = interaction.followup.sent[0]
+        assert len(interaction.followup.sent) >= 2, "expected the intro plus at least one route message"
+        _, kwargs = interaction.followup.sent[1]
         embed = kwargs["embed"]
         assert any("crosses systems" in (f.value or "") for f in embed.fields), embed.fields
 
@@ -596,8 +600,8 @@ def test_best_route_attaches_a_route_tracking_view_when_the_cog_is_loaded(tmp_pa
         finally:
             await client.aclose()
 
-        assert interaction.followup.sent, "expected at least one followup"
-        _, kwargs = interaction.followup.sent[0]
+        assert len(interaction.followup.sent) >= 2, "expected the intro plus the route message"
+        _, kwargs = interaction.followup.sent[1]
         view = kwargs.get("view")
         assert isinstance(view, RouteTrackingView)
         assert len(view.children) == 1, "one route shown -> one tracking button"
@@ -654,8 +658,8 @@ def test_best_route_primary_branch_discloses_missing_distance_instead_of_silence
         finally:
             await client.aclose()
 
-        assert interaction.followup.sent, "expected at least one followup"
-        _, kwargs = interaction.followup.sent[0]
+        assert len(interaction.followup.sent) >= 2, "expected the intro plus the route message"
+        _, kwargs = interaction.followup.sent[1]
         embed = kwargs["embed"]
         combined = "\n".join(f.value or "" for f in embed.fields)
         assert "GM" not in combined, combined
