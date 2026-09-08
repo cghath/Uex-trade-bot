@@ -249,6 +249,50 @@ class LegOutcomeView(discord.ui.View):
             )
         )
 
+    @discord.ui.button(label="Abandon route", style=discord.ButtonStyle.gray, row=1)
+    async def abandon(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        # Same pattern as opening a Less/More modal: this only asks for confirmation, it
+        # doesn't claim the leg - AbandonConfirmView's own confirm button is the real
+        # commit point, via the same parent_view.claim() every other commit path uses.
+        if self.resolved:
+            await interaction.response.send_message("This leg was already reported.", ephemeral=True)
+            return
+        await interaction.response.send_message(
+            "Abandon tracking this route? This closes the thread and can't be undone.",
+            view=AbandonConfirmView(cog=self.cog, thread_id=self.thread_id, parent_view=self),
+            ephemeral=True,
+        )
+
+
+class AbandonConfirmView(discord.ui.View):
+    """Confirm/cancel gate in front of a real, irreversible action - same pattern as
+    ConfirmDeleteListingView in bot/cogs/marketplace.py."""
+
+    def __init__(self, *, cog: "RouteProgression", thread_id: int, parent_view: "LegOutcomeView") -> None:
+        super().__init__(timeout=60)
+        self.cog = cog
+        self.thread_id = thread_id
+        self.parent_view = parent_view
+
+    @discord.ui.button(label="Yes, abandon this route", style=discord.ButtonStyle.red)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if not self.parent_view.claim():
+            await interaction.response.send_message(
+                "This leg was already reported - the route can't be abandoned anymore.", ephemeral=True
+            )
+            return
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(view=self)
+        await self.parent_view.disable_in_background()
+        await self.cog.abandon_thread(interaction.channel, self.thread_id, reason="you asked to stop tracking it")
+
+    @discord.ui.button(label="No, keep going", style=discord.ButtonStyle.gray)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(content="Continuing to track this route.", view=self)
+
 
 class RouteTrackingView(discord.ui.View):
     """Attach to a route-recommendation embed - one 'Track' button per route (up to
@@ -409,28 +453,34 @@ class RouteProgression(commands.Cog):
         if isinstance(channel, discord.Thread):
             await self._post_leg_prompt(channel, thread_id, next_index, legs[next_index])
 
+    async def abandon_thread(
+        self, channel: discord.abc.MessageableChannel | None, thread_id: int, *, reason: str
+    ) -> None:
+        """Single close-and-archive path for both a user-initiated 'Abandon route' and the
+        48h inactivity poller - the DB status is set first either way, so a channel this
+        bot can no longer reach (kicked, thread deleted) still stops being tracked."""
+        await self.bot.db.set_route_progression_thread_status(thread_id, "abandoned")
+        self._active_legs.pop(thread_id, None)
+        if not isinstance(channel, discord.Thread):
+            return
+        try:
+            await channel.send(f"This route-tracking thread was abandoned ({reason}).")
+            await channel.edit(archived=True, locked=False)
+        except discord.HTTPException as exc:
+            logger.warning("Failed to close abandoned thread %s: %s", thread_id, exc)
+
     @tasks.loop(hours=ABANDONMENT_POLL_HOURS)
     async def poll_abandoned_threads(self) -> None:
         stale = await self.bot.db.get_stale_route_progression_threads(older_than_hours=ABANDONMENT_HOURS)
         for row in stale:
             thread_id = row["thread_id"]
-            await self.bot.db.set_route_progression_thread_status(thread_id, "abandoned")
-            self._active_legs.pop(thread_id, None)
+            channel: discord.abc.MessageableChannel | None
             try:
                 channel = self.bot.get_channel(thread_id) or await self.bot.fetch_channel(thread_id)
             except discord.HTTPException as exc:
-                logger.info("Couldn't reach abandoned thread %s to close it: %s", thread_id, exc)
-                continue
-            if not isinstance(channel, discord.Thread):
-                continue
-            try:
-                await channel.send(
-                    f"This route-tracking thread was inactive for over {ABANDONMENT_HOURS:g}h "
-                    "and has been marked abandoned."
-                )
-                await channel.edit(archived=True, locked=False)
-            except discord.HTTPException as exc:
-                logger.warning("Failed to close abandoned thread %s: %s", thread_id, exc)
+                logger.info("Couldn't reach thread %s to close it: %s", thread_id, exc)
+                channel = None
+            await self.abandon_thread(channel, thread_id, reason=f"inactive for over {ABANDONMENT_HOURS:g}h")
 
 
 async def setup(bot: commands.Bot) -> None:

@@ -10,6 +10,7 @@ from cryptography.fernet import Fernet
 import pytest
 
 from bot.cogs.route_progression import (
+    AbandonConfirmView,
     ActualAmountModal,
     LegOutcomeView,
     MoreOutcomeFollowupView,
@@ -342,9 +343,13 @@ class _FakeInteraction:
 class _FakeCog:
     def __init__(self):
         self.calls = []
+        self.abandon_calls = []
 
     async def handle_leg_outcome(self, channel, thread_id, leg_index, leg, **kwargs):
         self.calls.append((thread_id, leg_index, leg, kwargs))
+
+    async def abandon_thread(self, channel, thread_id, **kwargs):
+        self.abandon_calls.append((thread_id, kwargs))
 
 
 def _leg_input(**overrides):
@@ -511,5 +516,99 @@ def test_more_outcome_followup_capacity_limited_sets_floor_precision_and_is_sing
         second = _FakeInteraction()
         await followup.drained.callback(second)
         assert len(cog.calls) == 1, "the parent leg is already resolved - a second button must not commit again"
+
+    asyncio.run(run())
+
+
+# -- Abandon route -------------------------------------------------------------------------
+
+def test_opening_the_abandon_confirmation_does_not_claim_the_leg():
+    async def run():
+        cog = _FakeCog()
+        view = LegOutcomeView(cog=cog, thread_id=1, leg_index=0, leg=_leg_input())
+        interaction = _FakeInteraction()
+        await view.abandon.callback(interaction)
+        assert view.resolved is False
+        assert len(interaction.response.messages) == 1
+        confirm_view = interaction.response.messages[0][1]["view"]
+        assert isinstance(confirm_view, AbandonConfirmView)
+
+    asyncio.run(run())
+
+
+def test_confirming_abandonment_claims_the_leg_and_closes_the_thread():
+    async def run():
+        cog = _FakeCog()
+        view = LegOutcomeView(cog=cog, thread_id=1, leg_index=0, leg=_leg_input())
+        confirm_view = AbandonConfirmView(cog=cog, thread_id=1, parent_view=view)
+        await confirm_view.confirm.callback(_FakeInteraction())
+
+        assert view.resolved is True
+        assert len(cog.abandon_calls) == 1
+        assert cog.abandon_calls[0][0] == 1
+        assert not cog.calls, "abandoning must not also report a leg outcome"
+
+    asyncio.run(run())
+
+
+def test_cancelling_abandonment_leaves_the_leg_reportable():
+    async def run():
+        cog = _FakeCog()
+        view = LegOutcomeView(cog=cog, thread_id=1, leg_index=0, leg=_leg_input())
+        confirm_view = AbandonConfirmView(cog=cog, thread_id=1, parent_view=view)
+        await confirm_view.cancel.callback(_FakeInteraction())
+
+        assert view.resolved is False
+        assert not cog.abandon_calls
+        # The leg is still open - a real outcome button still works.
+        interaction = _FakeInteraction()
+        await view.matched.callback(interaction)
+        assert view.resolved is True
+        assert len(cog.calls) == 1
+
+    asyncio.run(run())
+
+
+def test_a_second_abandon_confirmation_after_the_leg_resolved_is_refused():
+    """Race guard: if the leg was reported through another path (or a first Abandon
+    confirmation already went through) while this confirmation view was still open,
+    confirming again must not also close the thread."""
+    async def run():
+        cog = _FakeCog()
+        view = LegOutcomeView(cog=cog, thread_id=1, leg_index=0, leg=_leg_input())
+        view.claim()  # simulate the leg already having resolved via another path
+        confirm_view = AbandonConfirmView(cog=cog, thread_id=1, parent_view=view)
+        interaction = _FakeInteraction()
+        await confirm_view.confirm.callback(interaction)
+
+        assert not cog.abandon_calls
+        assert "already reported" in interaction.response.messages[0][0][0]
+
+    asyncio.run(run())
+
+
+def test_abandon_thread_sets_status_before_touching_the_channel(tmp_path):
+    """abandon_thread (the real cog method, not the fake used above) must mark the thread
+    abandoned even when the channel can't be reached/messaged - matching the same
+    "DB status set before the risky I/O" discipline as the rest of this codebase's
+    recovery paths."""
+    from bot.cogs.route_progression import RouteProgression
+
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await db.create_route_progression_thread(
+            thread_id=1, user_id=100, guild_id=200, route_kind="best_route", route_snapshot={},
+            legs=[{"side": "buy", "id_terminal": 10, "id_commodity": 1}],
+        )
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db})()
+        cog._active_legs = {1: ["placeholder"]}
+
+        await cog.abandon_thread(None, 1, reason="test")
+
+        thread = await db.get_route_progression_thread(1)
+        assert thread["status"] == "abandoned"
+        assert 1 not in cog._active_legs
 
     asyncio.run(run())
