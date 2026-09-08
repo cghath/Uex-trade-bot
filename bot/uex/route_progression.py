@@ -4,6 +4,7 @@ No Discord, no I/O - see bot/cogs/route_progression.py for the thread/button/mod
 """
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from bot.uex.supply_demand import SELL_SIDE_NO_DEMAND_CODE
@@ -20,6 +21,16 @@ OUTCOMES = ("matched", "less", "more", "missing")
 PRECISIONS = ("exact", "floor")
 
 
+def is_reportable_amount(value: float | None, *, allow_negative: bool = False) -> bool:
+    """True if a player-typed numeric report is safe to write into shared market state:
+    finite (rejects inf/nan, both valid float() parses) and, unless allow_negative,
+    non-negative. None (not provided) is always considered valid here - whether an
+    omitted value is acceptable is the caller's concern, not this range check's."""
+    if value is None:
+        return True
+    return math.isfinite(value) and (allow_negative or value >= 0)
+
+
 def terminal_state_update_for_outcome(
     *,
     id_commodity: int,
@@ -34,6 +45,7 @@ def terminal_state_update_for_outcome(
     actual_price: float | None = None,
     actual_scu: float | None = None,
     precision: str | None = None,
+    market_scu: float | None = None,
 ) -> dict[str, Any] | None:
     """Return a row for Database.record_terminal_market_snapshot(rows, source='player_report'),
     or None when the outcome carries nothing safe to write back as current terminal state.
@@ -53,11 +65,30 @@ def terminal_state_update_for_outcome(
     A 'more' outcome with precision='exact' means the player took everything there was, so
     the confirmed post-leg state is drained (scu=0), not "equal to how much they took" -
     actual_scu describes the transaction, not what's left afterward.
+
+    market_scu is the terminal's real quoted stock/demand at recommendation time (e.g.
+    MixedCargoItem.available_scu for /mixed-routes and /multi-stop-route), kept separate
+    from quoted_scu, which for those two commands is the PLANNED cargo allocation for this
+    ship/budget - capped by capacity, not by what the terminal actually has. A 'matched'
+    report only confirms the planned transaction went through as quoted; it is not a
+    player-confirmed count of the terminal's total remaining stock, so this function
+    prefers market_scu (real observed availability) over quoted_scu (allocation) whenever
+    both were given. Callers whose quoted_scu already IS the real market figure directly
+    (/best-route, /top-routes) simply never pass market_scu, and behavior is unchanged.
+
+    actual_price/actual_scu are defense-in-depth validated here (finite, non-negative) even
+    though the Discord-facing modal should already have rejected anything else before
+    calling this - a second boundary check at the point a row is actually built for
+    shared storage, not just at the outermost UI input.
     """
     if side not in SIDES:
         raise ValueError(f"side must be one of {SIDES}, got {side!r}")
     if outcome not in OUTCOMES:
         raise ValueError(f"outcome must be one of {OUTCOMES}, got {outcome!r}")
+    if not is_reportable_amount(actual_price):
+        raise ValueError(f"actual_price must be finite and non-negative, got {actual_price!r}")
+    if not is_reportable_amount(actual_scu):
+        raise ValueError(f"actual_scu must be finite and non-negative, got {actual_scu!r}")
 
     price_key = "price_buy" if side == "buy" else "price_sell"
     scu_key = "scu_buy" if side == "buy" else "scu_sell"
@@ -67,7 +98,9 @@ def terminal_state_update_for_outcome(
     if outcome == "matched":
         if quoted_price is None and quoted_scu is None:
             return None
-        price, scu, status = quoted_price, quoted_scu, quoted_status
+        price = quoted_price
+        scu = market_scu if market_scu is not None else quoted_scu
+        status = quoted_status
     elif outcome == "missing":
         price, scu, status = None, 0.0, empty_code
     elif outcome == "less":

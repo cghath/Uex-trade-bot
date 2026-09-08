@@ -939,6 +939,103 @@ class Database:
             await db.commit()
         return (len(changed), len(normalized))
 
+    # A player-reported leg outcome only ever carries ONE side's fields (see
+    # bot.uex.route_progression.terminal_state_update_for_outcome) - these are the only
+    # columns record_player_report_market_update ever touches; commodity_name/terminal_name
+    # are handled separately (always written) and quality/volatility_*/*_report_count are
+    # never touched by a player report at all, since it was never given a value for them.
+    _PLAYER_REPORT_OPTIONAL_COLUMNS = (
+        "price_buy", "price_sell", "scu_buy", "scu_sell", "status_buy", "status_sell",
+    )
+
+    async def record_player_report_market_update(self, row: dict[str, Any]) -> None:
+        """Merge ONE confirmed player-reported leg outcome into terminal_market_state,
+        touching only the side's fields the outcome actually carries - unlike
+        record_terminal_market_snapshot's full-row UEX-collector semantics (a complete
+        snapshot that legitimately replaces every field), a partial player report must
+        never blank out the other side's price/stock/status, or quality/volatility/report
+        counts, which it was never given in the first place. A buy-side 'matched' report
+        must not erase the sell side's price/demand/status just because this row's dict
+        doesn't mention them.
+
+        A column's mere PRESENCE as a key in ``row`` - even mapped to None (e.g. a
+        'missing' outcome's confirmed-unknown price) - marks it as an intentional value to
+        write; an ABSENT key is left completely untouched. This is what distinguishes "the
+        player confirmed this is now unknown" from "the player's report never covered this
+        at all."
+
+        Appends a terminal_market_observations row (tagged source='player_report') only
+        when the merge actually changes on-disk state, matching
+        record_terminal_market_snapshot's own change-only history semantics - a 'matched'
+        re-confirmation that happens to match what's already stored doesn't create a
+        spurious observation.
+        """
+        id_commodity = self._integer(row.get("id_commodity"))
+        id_terminal = self._integer(row.get("id_terminal"))
+        commodity_name = row.get("commodity_name")
+        terminal_name = row.get("terminal_name")
+        if id_commodity is None or id_terminal is None or not commodity_name or not terminal_name:
+            return
+
+        present_columns = [c for c in self._PLAYER_REPORT_OPTIONAL_COLUMNS if c in row]
+        if not present_columns:
+            return
+
+        def _normalize(column: str, value: Any) -> Any:
+            return self._integer(value) if column in ("status_buy", "status_sell") else self._number(value)
+
+        async with self.connect() as db:
+            cursor = await db.execute(
+                "SELECT * FROM terminal_market_state WHERE id_commodity = ? AND id_terminal = ?",
+                (id_commodity, id_terminal),
+            )
+            existing_row = await cursor.fetchone()
+            existing = dict(existing_row) if existing_row is not None else None
+
+            merged = {column: (existing.get(column) if existing else None) for column in self._PLAYER_REPORT_OPTIONAL_COLUMNS}
+            for column in present_columns:
+                merged[column] = _normalize(column, row[column])
+
+            changed = existing is None or any(
+                merged[column] != existing.get(column) for column in self._PLAYER_REPORT_OPTIONAL_COLUMNS
+            )
+
+            set_clause = ", ".join(f"{column}=excluded.{column}" for column in present_columns)
+            await db.execute(
+                f"""INSERT INTO terminal_market_state
+                    (id_commodity, id_terminal, commodity_name, terminal_name,
+                     price_buy, price_sell, scu_buy, scu_sell, status_buy, status_sell,
+                     last_seen, source)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), 'player_report')
+                    ON CONFLICT(id_commodity, id_terminal) DO UPDATE SET
+                        commodity_name=excluded.commodity_name, terminal_name=excluded.terminal_name,
+                        {set_clause}, last_seen=datetime('now'), source='player_report'""",
+                (
+                    id_commodity, id_terminal, str(commodity_name), str(terminal_name),
+                    merged["price_buy"], merged["price_sell"], merged["scu_buy"], merged["scu_sell"],
+                    merged["status_buy"], merged["status_sell"],
+                ),
+            )
+            if changed:
+                await db.execute(
+                    """INSERT INTO terminal_market_observations
+                       (id_commodity, id_terminal, commodity_name, terminal_name, price_buy, price_sell,
+                        scu_buy, scu_sell, status_buy, status_sell, quality, volatility_buy,
+                        volatility_sell, buy_report_count, sell_report_count, source)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'player_report')""",
+                    (
+                        id_commodity, id_terminal, str(commodity_name), str(terminal_name),
+                        merged["price_buy"], merged["price_sell"], merged["scu_buy"], merged["scu_sell"],
+                        merged["status_buy"], merged["status_sell"],
+                        existing.get("quality") if existing else None,
+                        existing.get("volatility_buy") if existing else None,
+                        existing.get("volatility_sell") if existing else None,
+                        existing.get("buy_report_count") if existing else None,
+                        existing.get("sell_report_count") if existing else None,
+                    ),
+                )
+            await db.commit()
+
     # -- Recommendation Outcome Tracking (Phase 1) ---------------------------------------
 
     async def create_route_progression_thread(

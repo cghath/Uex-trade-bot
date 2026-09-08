@@ -4,9 +4,11 @@ leg-outcome View/Modal claim logic in bot/cogs/route_progression.py."""
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace as NS
 
 import aiosqlite
 from cryptography.fernet import Fernet
+import discord
 import pytest
 
 from bot.cogs.route_progression import (
@@ -15,9 +17,10 @@ from bot.cogs.route_progression import (
     LegOutcomeView,
     MoreOutcomeFollowupView,
     RouteLegInput,
+    RouteProgression,
 )
 from bot.db.database import Database
-from bot.uex.route_progression import terminal_state_update_for_outcome
+from bot.uex.route_progression import is_reportable_amount, terminal_state_update_for_outcome
 
 
 def _make_db(tmp_path) -> Database:
@@ -47,6 +50,53 @@ def test_matched_outcome_with_no_quoted_figures_writes_nothing():
         outcome="matched", **_leg(quoted_price=None, quoted_scu=None, quoted_status=None)
     )
     assert row is None
+
+
+def test_matched_outcome_prefers_market_scu_over_the_allocated_quoted_scu():
+    """Real defect: /mixed-routes and /multi-stop-route's quoted_scu is the cargo
+    ALLOCATED to one ship/budget (capped by capacity), not the terminal's real stock. A
+    'matched' report only confirms that planned transaction went through - it must write
+    back the real quoted market figure (market_scu), not silently shrink the terminal to
+    the size of this one purchase."""
+    row = terminal_state_update_for_outcome(
+        outcome="matched", market_scu=500.0, **_leg(quoted_scu=6.0)
+    )
+    assert row["scu_buy"] == 500.0
+
+
+def test_matched_outcome_falls_back_to_quoted_scu_when_market_scu_is_not_given():
+    """/best-route and /top-routes never pass market_scu, because their quoted_scu
+    already IS the real market figure directly - unchanged behavior for those callers."""
+    row = terminal_state_update_for_outcome(outcome="matched", **_leg(quoted_scu=50.0))
+    assert row["scu_buy"] == 50.0
+
+
+def test_terminal_state_update_rejects_non_finite_actual_scu():
+    """Defense-in-depth: even though the Discord modal should already reject inf/nan
+    before this is ever called, the row-building boundary refuses it too rather than
+    trusting every caller got validation right."""
+    with pytest.raises(ValueError):
+        terminal_state_update_for_outcome(outcome="less", actual_scu=float("inf"), **_leg())
+    with pytest.raises(ValueError):
+        terminal_state_update_for_outcome(outcome="less", actual_scu=float("nan"), **_leg())
+
+
+def test_terminal_state_update_rejects_negative_actual_price_and_scu():
+    with pytest.raises(ValueError):
+        terminal_state_update_for_outcome(outcome="less", actual_scu=-5.0, **_leg())
+    with pytest.raises(ValueError):
+        terminal_state_update_for_outcome(
+            outcome="less", actual_scu=10.0, actual_price=-1.0, **_leg()
+        )
+
+
+def test_is_reportable_amount_boundary_cases():
+    assert is_reportable_amount(None) is True, "not provided is always valid here"
+    assert is_reportable_amount(0.0) is True, "zero is a legitimate empty-stock report"
+    assert is_reportable_amount(float("inf")) is False
+    assert is_reportable_amount(float("nan")) is False
+    assert is_reportable_amount(-1.0) is False
+    assert is_reportable_amount(-1.0, allow_negative=True) is True
 
 
 def test_missing_outcome_confirms_a_hard_zero_on_the_buy_side():
@@ -271,6 +321,118 @@ def test_route_progression_thread_row_source_defaults_and_overwrites_on_conflict
     asyncio.run(run())
 
 
+def test_record_player_report_market_update_preserves_the_unreported_side_and_metadata(tmp_path):
+    """Real defect: a buy-side player report was erasing the sell side's price/demand/
+    status and quality/volatility/report-count metadata, because it went through
+    record_terminal_market_snapshot's full-row-replace semantics with those fields simply
+    absent (defaulting to NULL) from the partial row. record_player_report_market_update
+    must touch ONLY the columns the report actually carries."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await db.record_terminal_market_snapshot([dict(
+            id_commodity=1, id_terminal=10, commodity_name="Gold", terminal_name="Area18 TDD",
+            price_buy=100, price_sell=90, scu_buy=50, scu_sell=80, status_buy=3, status_sell=2,
+            quality=4, volatility_price_buy=2, price_sell_users_rows=7,
+        )])
+        await db.record_player_report_market_update({
+            "id_commodity": 1, "id_terminal": 10, "commodity_name": "Gold",
+            "terminal_name": "Area18 TDD", "price_buy": 100, "scu_buy": 50, "status_buy": 3,
+        })
+        async with db.connect() as conn:
+            cursor = await conn.execute(
+                "SELECT * FROM terminal_market_state WHERE id_commodity = 1 AND id_terminal = 10"
+            )
+            row = dict(await cursor.fetchone())
+        assert row["price_sell"] == 90
+        assert row["scu_sell"] == 80
+        assert row["status_sell"] == 2
+        assert row["quality"] == 4
+        assert row["volatility_buy"] == 2
+        assert row["sell_report_count"] == 7
+        assert row["source"] == "player_report"
+
+    asyncio.run(run())
+
+
+def test_record_player_report_market_update_preserves_the_buy_side_on_a_sell_report(tmp_path):
+    """Neighboring case of the same defect: the reverse direction (a sell-side report
+    must not erase the buy side) needs the identical guarantee."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await db.record_terminal_market_snapshot([dict(
+            id_commodity=1, id_terminal=10, commodity_name="Gold", terminal_name="Area18 TDD",
+            price_buy=100, price_sell=90, scu_buy=50, scu_sell=80, status_buy=3, status_sell=2,
+        )])
+        await db.record_player_report_market_update({
+            "id_commodity": 1, "id_terminal": 10, "commodity_name": "Gold",
+            "terminal_name": "Area18 TDD", "price_sell": 95, "scu_sell": 20, "status_sell": None,
+        })
+        async with db.connect() as conn:
+            cursor = await conn.execute(
+                "SELECT * FROM terminal_market_state WHERE id_commodity = 1 AND id_terminal = 10"
+            )
+            row = dict(await cursor.fetchone())
+        assert row["price_buy"] == 100
+        assert row["scu_buy"] == 50
+        assert row["status_buy"] == 3
+        assert row["price_sell"] == 95
+        assert row["scu_sell"] == 20
+
+    asyncio.run(run())
+
+
+def test_record_player_report_market_update_a_present_none_writes_a_real_null(tmp_path):
+    """A column PRESENT in the row (even as None - e.g. a 'missing' outcome's confirmed-
+    unknown price) must actually be written as NULL, not treated the same as an absent
+    key. This is what distinguishes 'confirmed unknown now' from 'never reported'."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await db.record_terminal_market_snapshot([dict(
+            id_commodity=1, id_terminal=10, commodity_name="Gold", terminal_name="Area18 TDD",
+            price_buy=100, scu_buy=50, status_buy=3,
+        )])
+        await db.record_player_report_market_update({
+            "id_commodity": 1, "id_terminal": 10, "commodity_name": "Gold",
+            "terminal_name": "Area18 TDD", "price_buy": None, "scu_buy": 0.0, "status_buy": 1,
+        })
+        async with db.connect() as conn:
+            cursor = await conn.execute(
+                "SELECT * FROM terminal_market_state WHERE id_commodity = 1 AND id_terminal = 10"
+            )
+            row = dict(await cursor.fetchone())
+        assert row["price_buy"] is None
+        assert row["scu_buy"] == 0.0
+        assert row["status_buy"] == 1
+
+    asyncio.run(run())
+
+
+def test_record_player_report_market_update_creates_a_new_row_when_none_existed(tmp_path):
+    """A player report can be the FIRST thing ever recorded for a pair (no prior UEX
+    collector data) - the untouched columns simply stay NULL, not an error."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await db.record_player_report_market_update({
+            "id_commodity": 1, "id_terminal": 10, "commodity_name": "Gold",
+            "terminal_name": "Area18 TDD", "price_buy": 100.0, "scu_buy": 50.0, "status_buy": 3,
+        })
+        async with db.connect() as conn:
+            cursor = await conn.execute(
+                "SELECT * FROM terminal_market_state WHERE id_commodity = 1 AND id_terminal = 10"
+            )
+            row = dict(await cursor.fetchone())
+        assert row["price_buy"] == 100.0
+        assert row["price_sell"] is None
+        assert row["quality"] is None
+        assert row["source"] == "player_report"
+
+    asyncio.run(run())
+
+
 def test_get_route_progression_track_record_counts_matched_vs_total_per_pair(tmp_path):
     async def run():
         db = _make_db(tmp_path)
@@ -319,24 +481,30 @@ def test_get_route_progression_track_record_only_returns_requested_pairs(tmp_pat
 # -- LegOutcomeView / ActualAmountModal / MoreOutcomeFollowupView claim logic -------------
 
 class _FakeResponse:
-    def __init__(self):
+    def __init__(self, *, fail_edit: bool = False, fail_send_message: bool = False):
         self.messages = []
         self.modals = []
         self.edited_views = []
+        self._fail_edit = fail_edit
+        self._fail_send_message = fail_send_message
 
     async def send_modal(self, modal):
         self.modals.append(modal)
 
     async def send_message(self, *args, **kwargs):
+        if self._fail_send_message:
+            raise discord.HTTPException(NS(status=500, reason="test"), "test")
         self.messages.append((args, kwargs))
 
     async def edit_message(self, **kwargs):
+        if self._fail_edit:
+            raise discord.HTTPException(NS(status=500, reason="test"), "test")
         self.edited_views.append(kwargs)
 
 
 class _FakeInteraction:
-    def __init__(self):
-        self.response = _FakeResponse()
+    def __init__(self, *, fail_edit: bool = False, fail_send_message: bool = False):
+        self.response = _FakeResponse(fail_edit=fail_edit, fail_send_message=fail_send_message)
         self.channel = None
 
 
@@ -422,6 +590,99 @@ def test_matched_button_claims_the_leg_and_reports_immediately():
     asyncio.run(run())
 
 
+def test_a_failed_acknowledgement_releases_the_claim_so_a_retry_can_record_the_outcome():
+    """Real defect: matched() claimed the leg BEFORE acking the interaction. If that ack
+    failed (a real Discord 500, a rate limit, a network blip), nothing was ever persisted
+    (handle_leg_outcome never ran) but the leg was already marked resolved forever - a
+    retry click was rejected as 'already reported' with no outcome ever recorded."""
+    async def run():
+        cog = _FakeCog()
+        view = LegOutcomeView(cog=cog, thread_id=1, leg_index=0, leg=_leg_input())
+        failing = _FakeInteraction(fail_edit=True)
+        with pytest.raises(discord.HTTPException):
+            await view.matched.callback(failing)
+        assert view.resolved is False, "must be released - nothing was persisted"
+        assert not cog.calls
+
+        retry = _FakeInteraction()
+        await view.matched.callback(retry)
+        assert view.resolved is True
+        assert len(cog.calls) == 1, "the retry must actually record the outcome"
+
+    asyncio.run(run())
+
+
+def test_a_failed_less_modal_acknowledgement_releases_the_claim():
+    """Same defect class as the button case above, for the 'less' modal's own commit
+    point (ActualAmountModal.on_submit)."""
+    async def run():
+        cog = _FakeCog()
+        view = LegOutcomeView(cog=cog, thread_id=1, leg_index=0, leg=_leg_input())
+        modal = ActualAmountModal(
+            cog=cog, thread_id=1, leg_index=0, leg=view.leg, flow="less", parent_view=view
+        )
+        modal.scu_input._value = "20"
+        modal.price_input._value = ""
+        failing = _FakeInteraction(fail_send_message=True)
+        with pytest.raises(discord.HTTPException):
+            await modal.on_submit(failing)
+        assert view.resolved is False
+        assert not cog.calls
+
+        retry_modal = ActualAmountModal(
+            cog=cog, thread_id=1, leg_index=0, leg=view.leg, flow="less", parent_view=view
+        )
+        retry_modal.scu_input._value = "20"
+        retry_modal.price_input._value = ""
+        await retry_modal.on_submit(_FakeInteraction())
+        assert view.resolved is True
+        assert len(cog.calls) == 1
+
+    asyncio.run(run())
+
+
+def test_a_failed_more_outcome_followup_acknowledgement_releases_the_claim():
+    """Same defect class for MoreOutcomeFollowupView's own commit points."""
+    async def run():
+        cog = _FakeCog()
+        view = LegOutcomeView(cog=cog, thread_id=1, leg_index=0, leg=_leg_input())
+        followup = MoreOutcomeFollowupView(
+            cog=cog, thread_id=1, leg_index=0, leg=view.leg, actual_price=None, actual_scu=80.0,
+            parent_view=view,
+        )
+        failing = _FakeInteraction(fail_edit=True)
+        with pytest.raises(discord.HTTPException):
+            await followup.drained.callback(failing)
+        assert view.resolved is False
+        assert not cog.calls
+        assert all(not item.disabled for item in followup.children), "buttons must be re-enabled too"
+
+        await followup.drained.callback(_FakeInteraction())
+        assert view.resolved is True
+        assert len(cog.calls) == 1
+
+    asyncio.run(run())
+
+
+def test_a_failed_abandon_confirmation_acknowledgement_releases_the_claim():
+    """Same defect class for AbandonConfirmView's confirm button."""
+    async def run():
+        cog = _FakeCog()
+        view = LegOutcomeView(cog=cog, thread_id=1, leg_index=0, leg=_leg_input())
+        confirm_view = AbandonConfirmView(cog=cog, thread_id=1, parent_view=view)
+        failing = _FakeInteraction(fail_edit=True)
+        with pytest.raises(discord.HTTPException):
+            await confirm_view.confirm.callback(failing)
+        assert view.resolved is False
+        assert not cog.abandon_calls
+
+        await confirm_view.confirm.callback(_FakeInteraction())
+        assert view.resolved is True
+        assert len(cog.abandon_calls) == 1
+
+    asyncio.run(run())
+
+
 def test_less_modal_submission_claims_the_leg_and_reports_the_actual_amount():
     async def run():
         cog = _FakeCog()
@@ -453,6 +714,81 @@ def test_less_modal_with_zero_scu_reports_missing_instead():
         modal.price_input._value = ""
         await modal.on_submit(_FakeInteraction())
 
+        assert cog.calls[0][3]["outcome"] == "missing"
+
+    asyncio.run(run())
+
+
+def test_less_modal_rejects_infinite_scu_before_claiming_or_reporting():
+    """Real defect: float() happily parses 'inf'/'nan' (not a ValueError), so a malformed
+    SCU report could reach terminal_market_state as positive infinity. Must be rejected
+    before the leg is even claimed - not just before the DB write."""
+    async def run():
+        cog = _FakeCog()
+        view = LegOutcomeView(cog=cog, thread_id=1, leg_index=0, leg=_leg_input())
+        modal = ActualAmountModal(
+            cog=cog, thread_id=1, leg_index=0, leg=view.leg, flow="less", parent_view=view
+        )
+        modal.scu_input._value = "inf"
+        modal.price_input._value = ""
+        interaction = _FakeInteraction()
+        await modal.on_submit(interaction)
+
+        assert view.resolved is False, "must not claim the leg on a rejected report"
+        assert not cog.calls
+        assert "non-negative" in interaction.response.messages[0][0][0]
+
+    asyncio.run(run())
+
+
+def test_less_modal_rejects_negative_scu():
+    async def run():
+        cog = _FakeCog()
+        view = LegOutcomeView(cog=cog, thread_id=1, leg_index=0, leg=_leg_input())
+        modal = ActualAmountModal(
+            cog=cog, thread_id=1, leg_index=0, leg=view.leg, flow="less", parent_view=view
+        )
+        modal.scu_input._value = "-5"
+        modal.price_input._value = ""
+        await modal.on_submit(_FakeInteraction())
+
+        assert view.resolved is False
+        assert not cog.calls
+
+    asyncio.run(run())
+
+
+def test_less_modal_rejects_a_negative_price():
+    async def run():
+        cog = _FakeCog()
+        view = LegOutcomeView(cog=cog, thread_id=1, leg_index=0, leg=_leg_input())
+        modal = ActualAmountModal(
+            cog=cog, thread_id=1, leg_index=0, leg=view.leg, flow="less", parent_view=view
+        )
+        modal.scu_input._value = "20"
+        modal.price_input._value = "-10"
+        await modal.on_submit(_FakeInteraction())
+
+        assert view.resolved is False
+        assert not cog.calls
+
+    asyncio.run(run())
+
+
+def test_less_modal_accepts_zero_scu_as_a_valid_boundary_value():
+    """Neighboring boundary case: zero must stay valid (a legitimate 'nothing was there'
+    report), not get caught by the same non-negative check that rejects -5."""
+    async def run():
+        cog = _FakeCog()
+        view = LegOutcomeView(cog=cog, thread_id=1, leg_index=0, leg=_leg_input())
+        modal = ActualAmountModal(
+            cog=cog, thread_id=1, leg_index=0, leg=view.leg, flow="less", parent_view=view
+        )
+        modal.scu_input._value = "0"
+        modal.price_input._value = "0"
+        await modal.on_submit(_FakeInteraction())
+
+        assert view.resolved is True
         assert cog.calls[0][3]["outcome"] == "missing"
 
     asyncio.run(run())

@@ -318,14 +318,25 @@ def sweep_budget_curve(
     for a specific ship against the current market snapshot.
 
     Stops early once a swept budget produces the byte-for-byte identical best chain
-    (same profit and investment, rounded) as the previous one - real stock/demand/cargo
-    capacity has been saturated at that point, so every larger budget would just repeat
-    the same result. Geometric growth (3x by default) covers a wide range of ship sizes
-    in a bounded number of build_multi_stop_routes calls, each of which can itself take
-    real wall-clock time (candidate-ranking runs multiple passes - see that function's
-    own docstring) - this is deliberately capped at max_points rather than run
-    unbounded, and is meant to be called from a worker thread, not the event loop.
+    (same profit and investment, rounded) as the previous one AND that budget already
+    covers the most expensive single buy opportunity anywhere in the data. Adjacent
+    equality alone is not proof of saturation: two consecutive budgets can both be too
+    poor to reach a pricier chain that only unlocks further out, and would otherwise
+    look identical purely because neither could afford it yet (confirmed: a sweep that
+    stopped at two matching-but-still-poor points missed a chain worth 100x more,
+    reachable only a couple of geometric steps further). Once the swept budget can
+    afford at least one unit of every known buy opportunity, a repeated signature is a
+    real plateau - real stock/demand/cargo capacity has been saturated, and every larger
+    budget would just repeat the same result. Geometric growth (3x by default) covers a
+    wide range of ship sizes in a bounded number of build_multi_stop_routes calls, each
+    of which can itself take real wall-clock time (candidate-ranking runs multiple
+    passes - see that function's own docstring) - this is deliberately capped at
+    max_points rather than run unbounded, and is meant to be called from a worker
+    thread, not the event loop.
     """
+    known_buy_prices = [float(row["price_buy"]) for row in market_rows if (row.get("price_buy") or 0) > 0]
+    affordability_floor = max(known_buy_prices, default=0.0)
+
     points: list[BudgetCurvePoint] = []
     budget = starting_budget
     previous_signature: tuple[float, float] | None = None
@@ -355,7 +366,7 @@ def sweep_budget_curve(
                     stops=best.stops,
                 )
             )
-            if signature == previous_signature:
+            if signature == previous_signature and budget >= affordability_floor:
                 break
             previous_signature = signature
         budget *= growth_factor
@@ -397,13 +408,18 @@ def _enforce_monotonic_profit(points: list[BudgetCurvePoint]) -> list[BudgetCurv
 
 def find_diminishing_returns_budget(points: list[BudgetCurvePoint]) -> float | None:
     """The smallest swept budget whose result already matches the LARGEST swept budget's
-    result - i.e. the point beyond which more capital stopped changing the recommendation
-    at all. None if the curve never plateaus within the sweep (every point still differs
-    from the final one - real market depth may extend further than what was swept)."""
+    result - i.e. the point beyond which more capital stopped changing the recommendation,
+    within the range that was actually swept. The final point always matches itself, which
+    is not evidence of a plateau by itself - a strictly-still-rising curve would trivially
+    "match" only its own last point and report that budget as the supposed plateau start,
+    a false saturation claim for a curve that was still improving right up to the edge of
+    what was swept. Requires the final signature to repeat at least once BEFORE the last
+    point too; otherwise this is "still improving, not established in this range," which
+    is None here, same as a curve that never plateaus at all."""
     if len(points) < 2:
         return None
     final_signature = (round(points[-1].profit, 2), round(points[-1].investment, 2))
-    for point in points:
-        if (round(point.profit, 2), round(point.investment, 2)) == final_signature:
-            return point.budget
-    return None
+    matches = [point for point in points if (round(point.profit, 2), round(point.investment, 2)) == final_signature]
+    if len(matches) < 2:
+        return None
+    return matches[0].budget

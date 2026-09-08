@@ -19,7 +19,7 @@ import logging
 import discord
 from discord.ext import commands, tasks
 
-from bot.uex.route_progression import terminal_state_update_for_outcome
+from bot.uex.route_progression import is_reportable_amount, terminal_state_update_for_outcome
 
 logger = logging.getLogger("uexbot.route_progression")
 
@@ -45,6 +45,12 @@ class RouteLegInput:
     quoted_price: float | None
     quoted_scu: float | None
     quoted_status: int | None
+    # The terminal's real quoted stock/demand at recommendation time, when it differs from
+    # quoted_scu - only set by callers whose quoted_scu is a PLANNED cargo allocation
+    # rather than genuine market data (/mixed-routes, /multi-stop-route; see
+    # terminal_state_update_for_outcome's own docstring). None for callers where
+    # quoted_scu already IS the real market figure directly (/best-route, /top-routes).
+    market_scu: float | None = None
 
 
 @dataclass
@@ -85,6 +91,15 @@ class ActualAmountModal(discord.ui.Modal):
         except ValueError:
             await interaction.response.send_message("That SCU value isn't a number - try again.", ephemeral=True)
             return
+        # float() happily parses "inf"/"nan" (not a ValueError) - reject those and any
+        # negative SCU here, before the leg is ever claimed, rather than letting a
+        # malformed report reach shared terminal_market_state. Zero stays valid (a
+        # legitimate "nothing was there" report).
+        if not is_reportable_amount(actual_scu):
+            await interaction.response.send_message(
+                "That SCU value has to be a real, non-negative number - try again.", ephemeral=True
+            )
+            return
         actual_price: float | None = None
         price_text = str(self.price_input.value).strip()
         if price_text:
@@ -92,6 +107,11 @@ class ActualAmountModal(discord.ui.Modal):
                 actual_price = float(price_text)
             except ValueError:
                 await interaction.response.send_message("That price isn't a number - try again.", ephemeral=True)
+                return
+            if not is_reportable_amount(actual_price):
+                await interaction.response.send_message(
+                    "That price has to be a real, non-negative number - try again.", ephemeral=True
+                )
                 return
 
         if self.flow == "less":
@@ -101,7 +121,14 @@ class ActualAmountModal(discord.ui.Modal):
                 await interaction.response.send_message("This leg was already reported.", ephemeral=True)
                 return
             outcome = "missing" if actual_scu <= 0 else "less"
-            await interaction.response.send_message("Got it, thanks for reporting.", ephemeral=True)
+            try:
+                await interaction.response.send_message("Got it, thanks for reporting.", ephemeral=True)
+            except discord.HTTPException:
+                # Failed BEFORE handle_leg_outcome ever ran - nothing was persisted, so the
+                # claim this modal just took must be released, not left stranding the leg
+                # as "already reported" forever. See LegOutcomeView.release_claim.
+                self.parent_view.release_claim()
+                raise
             await self.parent_view.disable_in_background()
             await self.cog.handle_leg_outcome(
                 interaction.channel, self.thread_id, self.leg_index, self.leg,
@@ -150,11 +177,22 @@ class MoreOutcomeFollowupView(discord.ui.View):
             item.disabled = True
         return True
 
+    def _release(self) -> None:
+        # Mirror of LegOutcomeView.release_claim for this follow-up view's OWN buttons -
+        # the parent's claim also needs releasing, since _claim() delegated to it above.
+        self.parent_view.release_claim()
+        for item in self.children:
+            item.disabled = False
+
     @discord.ui.button(label="Terminal was drained", style=discord.ButtonStyle.red)
     async def drained(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         if not await self._claim(interaction):
             return
-        await interaction.response.edit_message(view=self)
+        try:
+            await interaction.response.edit_message(view=self)
+        except discord.HTTPException:
+            self._release()
+            raise
         await self.parent_view.disable_in_background()
         await self.cog.handle_leg_outcome(
             interaction.channel, self.thread_id, self.leg_index, self.leg,
@@ -165,7 +203,11 @@ class MoreOutcomeFollowupView(discord.ui.View):
     async def capacity_limited(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         if not await self._claim(interaction):
             return
-        await interaction.response.edit_message(view=self)
+        try:
+            await interaction.response.edit_message(view=self)
+        except discord.HTTPException:
+            self._release()
+            raise
         await self.parent_view.disable_in_background()
         await self.cog.handle_leg_outcome(
             interaction.channel, self.thread_id, self.leg_index, self.leg,
@@ -206,6 +248,17 @@ class LegOutcomeView(discord.ui.View):
             item.disabled = True
         return True
 
+    def release_claim(self) -> None:
+        # Undo an in-flight claim() when the acknowledgement meant to make it durable
+        # failed BEFORE persistence (handle_leg_outcome/abandon_thread never ran) - the
+        # leg must stay reportable, not permanently "already reported" with nothing ever
+        # recorded. Never call this once persistence has actually happened; there is no
+        # DB-side undo, and releasing a claim after the fact would let a retry duplicate
+        # an outcome that's already saved.
+        self.resolved = False
+        for item in self.children:
+            item.disabled = False
+
     async def disable_in_background(self) -> None:
         if self.message is not None:
             try:
@@ -218,7 +271,14 @@ class LegOutcomeView(discord.ui.View):
         if not self.claim():
             await interaction.response.send_message("This leg was already reported.", ephemeral=True)
             return
-        await interaction.response.edit_message(view=self)
+        try:
+            await interaction.response.edit_message(view=self)
+        except discord.HTTPException:
+            # The ack failed BEFORE handle_leg_outcome ran, so nothing was persisted -
+            # release the claim so a retry can still record the outcome. See
+            # release_claim's own docstring for why this is only safe pre-persistence.
+            self.release_claim()
+            raise
         await self.cog.handle_leg_outcome(
             interaction.channel, self.thread_id, self.leg_index, self.leg, outcome="matched"
         )
@@ -283,7 +343,16 @@ class AbandonConfirmView(discord.ui.View):
             return
         for item in self.children:
             item.disabled = True
-        await interaction.response.edit_message(view=self)
+        try:
+            await interaction.response.edit_message(view=self)
+        except discord.HTTPException:
+            # Failed BEFORE abandon_thread's own DB write ever ran - release the claim
+            # (and re-enable this confirmation view's own buttons) so a retry can still
+            # go through, rather than stranding the leg as claimed with nothing recorded.
+            self.parent_view.release_claim()
+            for item in self.children:
+                item.disabled = False
+            raise
         await self.parent_view.disable_in_background()
         await self.cog.abandon_thread(interaction.channel, self.thread_id, reason="you asked to stop tracking it")
 
@@ -431,9 +500,10 @@ class RouteProgression(commands.Cog):
             side=leg.side, outcome=outcome,
             quoted_price=leg.quoted_price, quoted_scu=leg.quoted_scu, quoted_status=leg.quoted_status,
             actual_price=actual_price, actual_scu=actual_scu, precision=precision,
+            market_scu=leg.market_scu,
         )
         if update_row is not None:
-            await self.bot.db.record_terminal_market_snapshot([update_row], source="player_report")
+            await self.bot.db.record_player_report_market_update(update_row)
 
         thread_row = await self.bot.db.get_route_progression_thread(thread_id)
         if thread_row is None:

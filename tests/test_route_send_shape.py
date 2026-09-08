@@ -477,6 +477,9 @@ def test_multi_stop_route_attaches_a_track_button_with_flattened_legs(monkeypatc
         assert legs[0].id_terminal == 10 and legs[0].side == "buy"
         assert legs[2].id_terminal == 20 and legs[2].side == "sell"
         assert legs[0].quoted_scu == 5 and legs[0].quoted_price == 100
+        # market_scu (the real quoted market availability) travels separately from
+        # quoted_scu (this hop's cargo allocation) - see terminal_state_update_for_outcome.
+        assert legs[0].market_scu == 10 and legs[1].market_scu == 10
 
     asyncio.run(run())
 
@@ -1136,6 +1139,70 @@ def test_mixed_routes_attaches_a_track_button_with_flattened_legs(monkeypatch):
         assert legs[0].id_terminal == 10 and legs[0].side == "buy"
         assert legs[2].id_terminal == 20 and legs[2].side == "sell"
         assert legs[0].quoted_scu == 5 and legs[0].quoted_price == 100
+        # market_scu carries the real quoted market availability (available_scu)
+        # separately from quoted_scu (the ship/budget-capped cargo allocation) - a
+        # "matched" report must confirm the former, not silently shrink the terminal
+        # to the size of this one cargo run. See terminal_state_update_for_outcome.
+        assert legs[0].market_scu == 10 and legs[1].market_scu == 10
+
+    asyncio.run(run())
+
+
+def test_mixed_routes_matched_report_writes_real_market_stock_not_the_allocated_cargo_amount(tmp_path):
+    """End-to-end regression for a real defect: /mixed-routes allocates a SHARE of a
+    ship's cargo per commodity, capped by capacity/budget - far less than the terminal's
+    real stock. A player confirming that allocation "matched the quote" must not shrink
+    terminal_market_state down to the size of their own purchase."""
+    async def run():
+        db = Database(tmp_path / "mixed_matched.sqlite3", Fernet(Fernet.generate_key()))
+        await db.init()
+        await db.record_terminal_market_snapshot(_MIXED_ROUTES_ROWS)
+        # Cobalt's real market_available = min(scu_buy origin=95, scu_sell destination=80)
+        # = 80, from _MIXED_ROUTES_ROWS - the figure a "matched" report must confirm.
+        real_available_scu = 80
+
+        client = UexClient(app_token="test", base_url="https://uex.test")
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(transport=_transport())
+
+        tracker = RouteProgression.__new__(RouteProgression)
+        bot = type("FakeBot", (), {})()
+        bot.db = db
+        bot.uex = client
+        bot.get_cog = lambda name: tracker if name == "RouteProgression" else None
+        tracker.bot = bot
+        tracker._active_legs = {}
+        cog = Prices.__new__(Prices)
+        cog.bot = bot
+        interaction = _FakeInteraction(111)
+
+        try:
+            await cog.mixed_routes.callback(cog, interaction, ship="TestShip")
+            views = [kwargs["view"] for _, kwargs in interaction.followup.sent if kwargs.get("view")]
+            assert views, "expected a tracking view on the real command output"
+            route = views[0].routes[0]
+            cobalt_buy_leg = next(leg for leg in route.legs if leg.side == "buy" and leg.id_commodity == 2)
+            # The ship's small cargo pool means the allocation is nowhere near the real stock.
+            assert cobalt_buy_leg.quoted_scu < real_available_scu
+            assert cobalt_buy_leg.market_scu == real_available_scu
+
+            await db.create_route_progression_thread(
+                thread_id=555, user_id=111, guild_id=1, route_kind="mixed_routes",
+                route_snapshot={}, legs=[vars(cobalt_buy_leg)],
+            )
+            tracker._active_legs[555] = [cobalt_buy_leg]
+            await tracker.handle_leg_outcome(None, 555, 0, cobalt_buy_leg, outcome="matched")
+
+            async with db.connect() as conn:
+                cursor = await conn.execute(
+                    "SELECT scu_buy FROM terminal_market_state WHERE id_commodity = 2 AND id_terminal = 1"
+                )
+                row = await cursor.fetchone()
+            assert row["scu_buy"] == real_available_scu, (
+                cobalt_buy_leg.quoted_scu, cobalt_buy_leg.market_scu, row["scu_buy"]
+            )
+        finally:
+            await client.aclose()
 
     asyncio.run(run())
 

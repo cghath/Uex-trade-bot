@@ -366,3 +366,36 @@ def test_find_diminishing_returns_budget_is_none_for_a_single_point():
     rows = _stock_limited_chain_rows()
     points = sweep_budget_curve(rows, ship_capacity_scu=20, starting_budget=50, max_points=1)
     assert find_diminishing_returns_budget(points) is None
+
+
+def test_budget_sweep_does_not_stop_before_a_pricier_chain_unlocks():
+    """Real defect: two adjacent budgets that both happen to be too poor to afford a
+    pricier chain look byte-for-byte identical, which the old early-stop treated as proof
+    of saturation - stopping the sweep before a later, much more profitable chain ever had
+    a chance to unlock. A repeated signature only proves saturation once the swept budget
+    can afford at least one unit of every known buy opportunity in the data."""
+    def pair(commodity, origin, destination, buy, sell, stock=1):
+        common = dict(id_commodity=commodity, commodity_name=f"Item{commodity}", status_sell=1)
+        return [
+            _row(commodity, origin, common["commodity_name"], f"T{origin}", price_buy=buy, scu_buy=stock),
+            _row(commodity, destination, common["commodity_name"], f"T{destination}", price_sell=sell, scu_sell=stock),
+        ]
+
+    rows = (
+        pair(1, 1, 2, 1, 2) + pair(2, 2, 3, 1, 2)
+        + pair(3, 4, 5, 100, 200) + pair(4, 5, 6, 100, 200)
+    )
+    points = sweep_budget_curve(rows, ship_capacity_scu=1, starting_budget=5, growth_factor=3, max_points=4)
+    reachable = build_multi_stop_routes(rows, ship_capacity_scu=1, budget=135, limit=1)[0]
+    assert points[-1].profit == reachable.profit, [(p.budget, p.profit) for p in points]
+
+
+def test_find_diminishing_returns_budget_is_none_for_a_still_rising_curve():
+    """Real defect: the final point in a sweep always trivially matches itself, so a
+    strictly-still-improving curve (no plateau anywhere) reported its last swept budget as
+    a false 'diminishing returns' point. A genuine plateau needs the final signature to
+    repeat at least once BEFORE the last point, not just match itself."""
+    from bot.uex.multi_stop_routes import BudgetCurvePoint
+
+    points = [BudgetCurvePoint(budget=b, profit=b, investment=b, roi_pct=100, stops=(1, 2, 3)) for b in (5, 15, 45)]
+    assert find_diminishing_returns_budget(points) is None
