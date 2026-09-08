@@ -938,7 +938,8 @@ class Prices(commands.Cog):
                 title=f"#{index} {route.origin_name} → {route.destination_name}",
                 description=(
                     f"Mixed load for **{ship_vehicle.get('name', ship_query)}** · "
-                    f"ranked by estimated haul profit{' · space stations only' if space_only else ''}"
+                    f"ranked by profit (ROI% as a tie-breaker)"
+                    f"{' · space stations only' if space_only else ''}"
                 ),
                 color=discord.Color.green(),
             )
@@ -1135,7 +1136,8 @@ class Prices(commands.Cog):
                 title=f"#{index} {path_label}",
                 description=(
                     f"{len(route.legs)}-leg chain for **{ship_vehicle.get('name', ship_query)}** · "
-                    f"ranked by total profit{' · space stations only' if space_only else ''}"
+                    f"ranked by profit (ROI% as a tie-breaker)"
+                    f"{' · space stations only' if space_only else ''}"
                 ),
                 color=discord.Color.green(),
             )
