@@ -1,5 +1,6 @@
 """Tests for Recommendation Outcome Tracking (Phase 1): the pure outcome-to-terminal-state
-mapping in bot/uex/route_progression.py, and the Database CRUD methods it's built on."""
+mapping in bot/uex/route_progression.py, the Database CRUD methods it's built on, and the
+leg-outcome View/Modal claim logic in bot/cogs/route_progression.py."""
 from __future__ import annotations
 
 import asyncio
@@ -8,6 +9,12 @@ import aiosqlite
 from cryptography.fernet import Fernet
 import pytest
 
+from bot.cogs.route_progression import (
+    ActualAmountModal,
+    LegOutcomeView,
+    MoreOutcomeFollowupView,
+    RouteLegInput,
+)
 from bot.db.database import Database
 from bot.uex.route_progression import terminal_state_update_for_outcome
 
@@ -259,5 +266,205 @@ def test_route_progression_thread_row_source_defaults_and_overwrites_on_conflict
                 "SELECT source FROM terminal_market_state WHERE id_commodity = 1 AND id_terminal = 10"
             )
             assert (await cursor.fetchone())["source"] == "uex"
+
+    asyncio.run(run())
+
+
+# -- LegOutcomeView / ActualAmountModal / MoreOutcomeFollowupView claim logic -------------
+
+class _FakeResponse:
+    def __init__(self):
+        self.messages = []
+        self.modals = []
+        self.edited_views = []
+
+    async def send_modal(self, modal):
+        self.modals.append(modal)
+
+    async def send_message(self, *args, **kwargs):
+        self.messages.append((args, kwargs))
+
+    async def edit_message(self, **kwargs):
+        self.edited_views.append(kwargs)
+
+
+class _FakeInteraction:
+    def __init__(self):
+        self.response = _FakeResponse()
+        self.channel = None
+
+
+class _FakeCog:
+    def __init__(self):
+        self.calls = []
+
+    async def handle_leg_outcome(self, channel, thread_id, leg_index, leg, **kwargs):
+        self.calls.append((thread_id, leg_index, leg, kwargs))
+
+
+def _leg_input(**overrides):
+    base = dict(
+        side="buy", id_terminal=1, id_commodity=1, terminal_name="Area18 TDD",
+        commodity_name="Gold", display_label="Buy Gold at Area18 TDD",
+        quoted_price=100.0, quoted_scu=50.0, quoted_status=3,
+    )
+    base.update(overrides)
+    return RouteLegInput(**base)
+
+
+def test_opening_a_less_modal_does_not_claim_the_leg():
+    """The exact bug a live user hit: clicking 'Less / not there' then cancelling the
+    modal without submitting anything must leave the leg reportable, not permanently
+    stuck showing 'This leg was already reported.' forever."""
+    async def run():
+        cog = _FakeCog()
+        view = LegOutcomeView(cog=cog, thread_id=1, leg_index=0, leg=_leg_input())
+        interaction = _FakeInteraction()
+        await view.less.callback(interaction)
+        assert view.resolved is False
+        assert len(interaction.response.modals) == 1
+
+    asyncio.run(run())
+
+
+def test_opening_a_more_modal_does_not_claim_the_leg():
+    async def run():
+        cog = _FakeCog()
+        view = LegOutcomeView(cog=cog, thread_id=1, leg_index=0, leg=_leg_input())
+        interaction = _FakeInteraction()
+        await view.more.callback(interaction)
+        assert view.resolved is False
+        assert len(interaction.response.modals) == 1
+
+    asyncio.run(run())
+
+
+def test_a_cancelled_modal_can_be_retried_with_a_different_button():
+    """After clicking 'Less' and abandoning it (never submitting), clicking 'More'
+    instead still succeeds - neither button locks the leg just by being clicked."""
+    async def run():
+        cog = _FakeCog()
+        view = LegOutcomeView(cog=cog, thread_id=1, leg_index=0, leg=_leg_input())
+        await view.less.callback(_FakeInteraction())
+        second = _FakeInteraction()
+        await view.more.callback(second)
+        assert view.resolved is False
+        assert len(second.response.modals) == 1
+
+    asyncio.run(run())
+
+
+def test_matched_button_claims_the_leg_and_reports_immediately():
+    async def run():
+        cog = _FakeCog()
+        view = LegOutcomeView(cog=cog, thread_id=1, leg_index=0, leg=_leg_input())
+        interaction = _FakeInteraction()
+        await view.matched.callback(interaction)
+        assert view.resolved is True
+        assert len(cog.calls) == 1
+        assert cog.calls[0][3]["outcome"] == "matched"
+
+        second = _FakeInteraction()
+        await view.matched.callback(second)
+        assert len(cog.calls) == 1, "a second click must not double-report"
+        assert "already reported" in second.response.messages[0][0][0]
+
+    asyncio.run(run())
+
+
+def test_less_modal_submission_claims_the_leg_and_reports_the_actual_amount():
+    async def run():
+        cog = _FakeCog()
+        view = LegOutcomeView(cog=cog, thread_id=1, leg_index=0, leg=_leg_input())
+        modal = ActualAmountModal(
+            cog=cog, thread_id=1, leg_index=0, leg=view.leg, flow="less", parent_view=view
+        )
+        modal.scu_input._value = "20"
+        modal.price_input._value = ""
+        await modal.on_submit(_FakeInteraction())
+
+        assert view.resolved is True
+        assert len(cog.calls) == 1
+        kwargs = cog.calls[0][3]
+        assert kwargs["outcome"] == "less"
+        assert kwargs["actual_scu"] == 20.0
+
+    asyncio.run(run())
+
+
+def test_less_modal_with_zero_scu_reports_missing_instead():
+    async def run():
+        cog = _FakeCog()
+        view = LegOutcomeView(cog=cog, thread_id=1, leg_index=0, leg=_leg_input())
+        modal = ActualAmountModal(
+            cog=cog, thread_id=1, leg_index=0, leg=view.leg, flow="less", parent_view=view
+        )
+        modal.scu_input._value = "0"
+        modal.price_input._value = ""
+        await modal.on_submit(_FakeInteraction())
+
+        assert cog.calls[0][3]["outcome"] == "missing"
+
+    asyncio.run(run())
+
+
+def test_less_modal_submission_after_the_leg_was_already_resolved_is_refused():
+    async def run():
+        cog = _FakeCog()
+        view = LegOutcomeView(cog=cog, thread_id=1, leg_index=0, leg=_leg_input())
+        view.resolved = True  # e.g. resolved via a race with another path
+        modal = ActualAmountModal(
+            cog=cog, thread_id=1, leg_index=0, leg=view.leg, flow="less", parent_view=view
+        )
+        modal.scu_input._value = "20"
+        modal.price_input._value = ""
+        interaction = _FakeInteraction()
+        await modal.on_submit(interaction)
+
+        assert not cog.calls, "a modal submitted after the leg resolved must not report again"
+        assert "already reported" in interaction.response.messages[0][0][0]
+
+    asyncio.run(run())
+
+
+def test_more_modal_submission_does_not_claim_until_the_followup_view_resolves():
+    async def run():
+        cog = _FakeCog()
+        view = LegOutcomeView(cog=cog, thread_id=1, leg_index=0, leg=_leg_input())
+        modal = ActualAmountModal(
+            cog=cog, thread_id=1, leg_index=0, leg=view.leg, flow="more", parent_view=view
+        )
+        modal.scu_input._value = "80"
+        modal.price_input._value = ""
+        interaction = _FakeInteraction()
+        await modal.on_submit(interaction)
+
+        assert view.resolved is False, "the modal only collects the amount, it doesn't commit"
+        followup_view = interaction.response.messages[0][1]["view"]
+        assert isinstance(followup_view, MoreOutcomeFollowupView)
+
+        await followup_view.drained.callback(_FakeInteraction())
+        assert view.resolved is True
+        assert cog.calls[0][3]["outcome"] == "more"
+        assert cog.calls[0][3]["precision"] == "exact"
+
+    asyncio.run(run())
+
+
+def test_more_outcome_followup_capacity_limited_sets_floor_precision_and_is_single_shot():
+    async def run():
+        cog = _FakeCog()
+        view = LegOutcomeView(cog=cog, thread_id=1, leg_index=0, leg=_leg_input())
+        followup = MoreOutcomeFollowupView(
+            cog=cog, thread_id=1, leg_index=0, leg=view.leg, actual_price=None, actual_scu=80.0,
+            parent_view=view,
+        )
+        await followup.capacity_limited.callback(_FakeInteraction())
+        assert view.resolved is True
+        assert cog.calls[0][3]["precision"] == "floor"
+
+        second = _FakeInteraction()
+        await followup.drained.callback(second)
+        assert len(cog.calls) == 1, "the parent leg is already resolved - a second button must not commit again"
 
     asyncio.run(run())

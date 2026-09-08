@@ -61,7 +61,8 @@ class ActualAmountModal(discord.ui.Modal):
     )
 
     def __init__(
-        self, *, cog: "RouteProgression", thread_id: int, leg_index: int, leg: RouteLegInput, flow: str
+        self, *, cog: "RouteProgression", thread_id: int, leg_index: int, leg: RouteLegInput, flow: str,
+        parent_view: "LegOutcomeView",
     ) -> None:
         title = "How much was actually there?" if flow == "less" else "How much did you take?"
         super().__init__(title=title)
@@ -70,8 +71,15 @@ class ActualAmountModal(discord.ui.Modal):
         self.leg_index = leg_index
         self.leg = leg
         self.flow = flow
+        self.parent_view = parent_view
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
+        # The button that opened this modal never locked the leg (see LegOutcomeView) -
+        # cancelling out of a modal with no submission must leave the leg reportable, not
+        # stuck. This is the first real check of whether the leg is still open.
+        if self.parent_view.resolved:
+            await interaction.response.send_message("This leg was already reported.", ephemeral=True)
+            return
         try:
             actual_scu = float(str(self.scu_input.value).strip())
         except ValueError:
@@ -87,19 +95,27 @@ class ActualAmountModal(discord.ui.Modal):
                 return
 
         if self.flow == "less":
+            # The true commit point for this flow - claim the leg now, not when the button
+            # that opened this modal was clicked.
+            if not self.parent_view.claim():
+                await interaction.response.send_message("This leg was already reported.", ephemeral=True)
+                return
             outcome = "missing" if actual_scu <= 0 else "less"
             await interaction.response.send_message("Got it, thanks for reporting.", ephemeral=True)
+            await self.parent_view.disable_in_background()
             await self.cog.handle_leg_outcome(
                 interaction.channel, self.thread_id, self.leg_index, self.leg,
                 outcome=outcome, actual_price=actual_price, actual_scu=actual_scu,
             )
         else:
+            # "more" still doesn't commit here - MoreOutcomeFollowupView's own buttons are
+            # the real commit point for this flow, same reasoning as this modal itself.
             await interaction.response.send_message(
                 "One more thing - did you take everything there was, or did something else "
                 "stop you first (your cargo hold, or the terminal itself)?",
                 view=MoreOutcomeFollowupView(
                     cog=self.cog, thread_id=self.thread_id, leg_index=self.leg_index, leg=self.leg,
-                    actual_price=actual_price, actual_scu=actual_scu,
+                    actual_price=actual_price, actual_scu=actual_scu, parent_view=self.parent_view,
                 ),
                 ephemeral=True,
             )
@@ -113,7 +129,7 @@ class MoreOutcomeFollowupView(discord.ui.View):
 
     def __init__(
         self, *, cog: "RouteProgression", thread_id: int, leg_index: int, leg: RouteLegInput,
-        actual_price: float | None, actual_scu: float,
+        actual_price: float | None, actual_scu: float, parent_view: "LegOutcomeView",
     ) -> None:
         super().__init__(timeout=300)
         self.cog = cog
@@ -122,22 +138,24 @@ class MoreOutcomeFollowupView(discord.ui.View):
         self.leg = leg
         self.actual_price = actual_price
         self.actual_scu = actual_scu
-        self.resolved = False
+        self.parent_view = parent_view
 
-    async def _lock(self, interaction: discord.Interaction) -> bool:
-        if self.resolved:
+    async def _claim(self, interaction: discord.Interaction) -> bool:
+        # Delegates to the ORIGINAL LegOutcomeView's claim - that's the one true "is this
+        # leg resolved yet" flag, not a second independent one on this follow-up view.
+        if not self.parent_view.claim():
             await interaction.response.send_message("This leg was already reported.", ephemeral=True)
             return False
-        self.resolved = True
         for item in self.children:
             item.disabled = True
         return True
 
     @discord.ui.button(label="Terminal was drained", style=discord.ButtonStyle.red)
     async def drained(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        if not await self._lock(interaction):
+        if not await self._claim(interaction):
             return
         await interaction.response.edit_message(view=self)
+        await self.parent_view.disable_in_background()
         await self.cog.handle_leg_outcome(
             interaction.channel, self.thread_id, self.leg_index, self.leg,
             outcome="more", actual_price=self.actual_price, actual_scu=self.actual_scu, precision="exact",
@@ -145,9 +163,10 @@ class MoreOutcomeFollowupView(discord.ui.View):
 
     @discord.ui.button(label="I was capped, more was there", style=discord.ButtonStyle.gray)
     async def capacity_limited(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        if not await self._lock(interaction):
+        if not await self._claim(interaction):
             return
         await interaction.response.edit_message(view=self)
+        await self.parent_view.disable_in_background()
         await self.cog.handle_leg_outcome(
             interaction.channel, self.thread_id, self.leg_index, self.leg,
             outcome="more", actual_price=self.actual_price, actual_scu=self.actual_scu, precision="floor",
@@ -166,26 +185,39 @@ class LegOutcomeView(discord.ui.View):
         self.leg_index = leg_index
         self.leg = leg
         self.resolved = False
+        # Set by RouteProgression._post_leg_prompt right after sending, so a commit that
+        # happens via a DIFFERENT interaction (a modal submit, or the More-outcome
+        # follow-up view's own buttons) can still push the disabled-button state here -
+        # those interactions are tied to their own ephemeral message, not this one.
+        self.message: discord.Message | None = None
 
-    async def _lock(self, interaction: discord.Interaction) -> bool:
-        # Same check-then-set double-click guard as ConfirmListingView/ConfirmDeleteListingView
-        # in bot/cogs/marketplace.py - asyncio is single-threaded and nothing awaits between
-        # the check and the set, so the second of two racing callbacks always sees the first's
-        # write. Only guards against double-PROCESSING, not the visual button state for the
-        # 'less'/'more' modal paths - opening a modal consumes the interaction's one allowed
-        # response, so those buttons can't also be disabled-and-edited in the same round trip.
+    def claim(self) -> bool:
+        # Check-then-set, matching ConfirmListingView/ConfirmDeleteListingView in
+        # bot/cogs/marketplace.py - asyncio is single-threaded with no await between the
+        # check and the set, so a second racing commit always observes the first one's
+        # write. Only ever called at a TRUE commit point (this button directly writes the
+        # outcome, or a later modal/follow-up interaction does) - never when merely
+        # opening a modal, which is what caused a cancelled-without-submitting modal to
+        # permanently lock the leg with no outcome ever recorded.
         if self.resolved:
-            await interaction.response.send_message("This leg was already reported.", ephemeral=True)
             return False
         self.resolved = True
+        for item in self.children:
+            item.disabled = True
         return True
+
+    async def disable_in_background(self) -> None:
+        if self.message is not None:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
 
     @discord.ui.button(label="Matched quote", style=discord.ButtonStyle.green)
     async def matched(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        if not await self._lock(interaction):
+        if not self.claim():
+            await interaction.response.send_message("This leg was already reported.", ephemeral=True)
             return
-        for item in self.children:
-            item.disabled = True
         await interaction.response.edit_message(view=self)
         await self.cog.handle_leg_outcome(
             interaction.channel, self.thread_id, self.leg_index, self.leg, outcome="matched"
@@ -193,21 +225,27 @@ class LegOutcomeView(discord.ui.View):
 
     @discord.ui.button(label="Less / not there", style=discord.ButtonStyle.red)
     async def less(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        if not await self._lock(interaction):
+        # Deliberately does NOT claim the leg - opening the modal isn't a commitment, and
+        # claiming here is exactly what left a cancelled-without-submitting modal stuck.
+        if self.resolved:
+            await interaction.response.send_message("This leg was already reported.", ephemeral=True)
             return
         await interaction.response.send_modal(
             ActualAmountModal(
-                cog=self.cog, thread_id=self.thread_id, leg_index=self.leg_index, leg=self.leg, flow="less"
+                cog=self.cog, thread_id=self.thread_id, leg_index=self.leg_index, leg=self.leg,
+                flow="less", parent_view=self,
             )
         )
 
     @discord.ui.button(label="More than quoted", style=discord.ButtonStyle.blurple)
     async def more(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        if not await self._lock(interaction):
+        if self.resolved:
+            await interaction.response.send_message("This leg was already reported.", ephemeral=True)
             return
         await interaction.response.send_modal(
             ActualAmountModal(
-                cog=self.cog, thread_id=self.thread_id, leg_index=self.leg_index, leg=self.leg, flow="more"
+                cog=self.cog, thread_id=self.thread_id, leg_index=self.leg_index, leg=self.leg,
+                flow="more", parent_view=self,
             )
         )
 
@@ -324,9 +362,8 @@ class RouteProgression(commands.Cog):
             description=quoted_line,
             color=discord.Color.blurple(),
         )
-        await thread.send(
-            embed=embed, view=LegOutcomeView(cog=self, thread_id=thread_id, leg_index=leg_index, leg=leg)
-        )
+        view = LegOutcomeView(cog=self, thread_id=thread_id, leg_index=leg_index, leg=leg)
+        view.message = await thread.send(embed=embed, view=view)
 
     async def handle_leg_outcome(
         self,
