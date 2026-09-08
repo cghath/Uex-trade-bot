@@ -44,6 +44,8 @@ def _route_row(**overrides) -> dict:
         "price_roi": 100.0,
         "distance": 42.0,
         "score": 50,
+        "profit": 1000.0,
+        "investment": 10000.0,
         "scu_origin": 500,
         "scu_destination": 800,
         "status_origin": 2,
@@ -63,7 +65,7 @@ def _trending(name: str, trips: int, volatility: float | None = None) -> Trendin
     )
 
 
-def _scored(name: str, score: float) -> ScoredRouteEntry:
+def _scored(name: str, profit: float, price_roi: float = 100.0) -> ScoredRouteEntry:
     return ScoredRouteEntry(
         commodity_name=name,
         id_commodity=1,
@@ -72,13 +74,14 @@ def _scored(name: str, score: float) -> ScoredRouteEntry:
         price_origin=100,
         price_destination=200,
         price_margin=100,
-        price_roi=100.0,
+        price_roi=price_roi,
         distance=42.0,
-        score=score,
+        score=None,
         scu_origin=500,
         scu_destination=800,
         status_origin=2,
         status_destination=1,
+        profit=profit,
     )
 
 
@@ -174,25 +177,36 @@ def test_movers_skip_rows_without_usable_prices():
 # --- select_available_routes ---
 
 
-def test_select_available_routes_returns_every_qualifying_route_sorted_by_score():
-    """Not just the single best - a later auto-load-only/system filter needs a
-    same-commodity alternative to fall back to if the top-scored one gets excluded."""
+def test_select_available_routes_returns_every_qualifying_route_sorted_by_profit():
+    """Not just the single most-profitable one - a later auto-load-only/system filter
+    needs a same-commodity alternative to fall back to if the top route gets excluded.
+    Ranked by profit (not UEX's own `score`, which turned out to be an undocumented
+    "higher is better" black box with no published formula)."""
     rows = [
-        _route_row(score=90, scu_origin=0),  # best score, but nothing to buy
-        _route_row(score=80, price_origin=0),  # origin doesn't sell it
-        _route_row(score=70),
-        _route_row(score=60, origin_terminal_name="Backup"),
+        _route_row(profit=9000, scu_origin=0),  # most profitable, but nothing to buy
+        _route_row(profit=8000, price_origin=0),  # origin doesn't sell it
+        _route_row(profit=700),
+        _route_row(profit=600, origin_terminal_name="Backup"),
     ]
     routes = select_available_routes("Laranite", 1, rows)
-    assert [r.score for r in routes] == [70, 60]
+    assert [r.profit for r in routes] == [700, 600]
     assert (routes[0].origin_terminal_id, routes[0].destination_terminal_id) == (10, 20)
 
 
-def test_select_available_routes_excludes_unscored_rows():
-    rows = [_route_row(score=None), _route_row(score=10, origin_terminal_name="Scored")]
+def test_select_available_routes_uses_roi_as_a_tie_breaker():
+    rows = [
+        _route_row(profit=700, price_roi=10.0, origin_terminal_name="LowROI"),
+        _route_row(profit=700, price_roi=50.0, origin_terminal_name="HighROI"),
+    ]
+    routes = select_available_routes("Laranite", 1, rows)
+    assert [r.origin_terminal_name for r in routes] == ["HighROI", "LowROI"]
+
+
+def test_select_available_routes_excludes_rows_with_no_profit_figure():
+    rows = [_route_row(profit=None), _route_row(profit=10, origin_terminal_name="HasProfit")]
     routes = select_available_routes("Laranite", 1, rows)
     assert len(routes) == 1
-    assert routes[0].origin_terminal_name == "Scored"
+    assert routes[0].origin_terminal_name == "HasProfit"
 
 
 def test_select_available_routes_returns_empty_when_nothing_qualifies():
@@ -205,17 +219,17 @@ def test_select_available_routes_returns_empty_when_nothing_qualifies():
 
 def test_select_in_stock_routes_requires_live_destination_demand():
     rows = [
-        _route_row(score=90, status_destination=SELL_SIDE_NO_DEMAND_CODE),  # full, no demand
-        _route_row(score=80, status_destination=0),  # destination doesn't buy it
-        _route_row(score=70, status_destination=None),
-        _route_row(score=60, price_destination=0),
-        _route_row(score=50, scu_destination=0),
-        _route_row(score=40, destination_terminal_name="LiveDemand"),
+        _route_row(profit=900, status_destination=SELL_SIDE_NO_DEMAND_CODE),  # full, no demand
+        _route_row(profit=800, status_destination=0),  # destination doesn't buy it
+        _route_row(profit=700, status_destination=None),
+        _route_row(profit=600, price_destination=0),
+        _route_row(profit=500, scu_destination=0),
+        _route_row(profit=400, destination_terminal_name="LiveDemand"),
     ]
     routes = select_in_stock_routes("Laranite", 1, rows)
     assert len(routes) == 1
     assert routes[0].destination_terminal_name == "LiveDemand"
-    assert routes[0].score == 40
+    assert routes[0].profit == 400
 
 
 def test_select_in_stock_routes_still_requires_origin_stock():
@@ -225,11 +239,20 @@ def test_select_in_stock_routes_still_requires_origin_stock():
 # --- rank_top_scored_routes ---
 
 
-def test_rank_top_scored_routes_orders_by_score_and_caps():
-    entries = [_scored(f"C{i}", score=i) for i in range(15)]
+def test_rank_top_scored_routes_orders_by_profit_and_caps():
+    entries = [_scored(f"C{i}", profit=i) for i in range(15)]
     ranked = rank_top_scored_routes(entries, limit=10)
     assert len(ranked) == 10
-    assert [e.score for e in ranked] == list(range(14, 4, -1))
+    assert [e.profit for e in ranked] == list(range(14, 4, -1))
+
+
+def test_rank_top_scored_routes_uses_roi_as_a_tie_breaker():
+    entries = [
+        _scored("LowROI", profit=500, price_roi=10.0),
+        _scored("HighROI", profit=500, price_roi=50.0),
+    ]
+    ranked = rank_top_scored_routes(entries, limit=10)
+    assert [e.commodity_name for e in ranked] == ["HighROI", "LowROI"]
 
 
 def test_route_confidence_rewards_fresh_reports_availability_and_stable_prices():

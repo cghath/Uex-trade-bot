@@ -39,7 +39,7 @@ class ScoredRouteEntry:
     price_margin: float | None
     price_roi: float | None
     distance: float | None
-    score: float
+    score: float | None
     scu_origin: float | None
     scu_destination: float | None
     status_origin: int | None
@@ -48,6 +48,12 @@ class ScoredRouteEntry:
     volatility_destination: float | None = None
     origin_terminal_id: int | None = None
     destination_terminal_id: int | None = None
+    # UEX's own "maximum profit/investment expected" for this route (raw /commodities_routes
+    # fields) - the ranking basis (profit desc, price_roi as tie-breaker) since UEX's own
+    # `score` turned out to be an undocumented black box ("higher is better," no published
+    # formula) with no way to explain to a player why one route outranked another.
+    profit: float | None = None
+    investment: float | None = None
 
 
 def _positive_id(value: object) -> int | None:
@@ -148,7 +154,7 @@ def _build_scored_route_entry(commodity_name: str, id_commodity: int, r: dict) -
         price_margin=r.get("price_margin"),
         price_roi=r.get("price_roi"),
         distance=r.get("distance"),
-        score=r["score"],
+        score=r.get("score"),
         scu_origin=r.get("scu_origin"),
         scu_destination=r.get("scu_destination"),
         status_origin=r.get("status_origin"),
@@ -157,39 +163,53 @@ def _build_scored_route_entry(commodity_name: str, id_commodity: int, r: dict) -
         volatility_destination=r.get("volatility_destination"),
         origin_terminal_id=_positive_id(r.get("id_terminal_origin")),
         destination_terminal_id=_positive_id(r.get("id_terminal_destination")),
+        profit=r.get("profit"),
+        investment=r.get("investment"),
     )
+
+
+def _profit_rank_key(entry: ScoredRouteEntry) -> tuple[float, float]:
+    """Primary: total profit (aUEC), UEX's own 'maximum profit expected' for the route.
+    Tie-breaker: ROI% (capital efficiency) - matches /best-route's own primary-branch
+    ranking (sorted by profit), which this project's route commands otherwise agreed on
+    before /top-routes ever adopted UEX's separate, undocumented score field."""
+    return (entry.profit or 0.0, entry.price_roi or 0.0)
 
 
 def select_available_routes(
     commodity_name: str, id_commodity: int, route_rows: list[dict]
 ) -> list[ScoredRouteEntry]:
     """From one commodity's /commodities_routes rows, return every qualifying route (not
-    just the single highest-scored one), sorted by `score` descending - so that if the
-    top-scored route later fails a user filter (auto-load-only, system), the next-best
-    route for this SAME commodity is still available to fall back to, rather than the
-    whole commodity dropping out silently. Qualifying means the origin terminal has real
-    buy-side stock right now: price_origin > 0 (the terminal actually sells it at all)
-    AND scu_origin > 0 (real stock, not just a price with nothing to sell) - the same
-    "available to buy" bar bot/uex/stock_alerts.py uses. A route with no `score` at all
-    can't be ranked by this feature's whole premise (UEX's own route-quality metric), so
-    it's excluded rather than sorted arbitrarily. Returns [] if nothing qualifies.
+    just the single most-profitable one), sorted by profit descending (ROI% as a
+    tie-breaker) - so that if the top route later fails a user filter (auto-load-only,
+    system), the next-best route for this SAME commodity is still available to fall back
+    to, rather than the whole commodity dropping out silently. Qualifying means the origin
+    terminal has real buy-side stock right now: price_origin > 0 (the terminal actually
+    sells it at all) AND scu_origin > 0 (real stock, not just a price with nothing to
+    sell) - the same "available to buy" bar bot/uex/stock_alerts.py uses. A route with no
+    `profit` figure at all can't be ranked by this feature's premise, so it's excluded
+    rather than sorted arbitrarily (previously this checked for a `score` instead - UEX's
+    own `score` field turned out to be an undocumented "higher is better" black box with
+    no published formula, so ranking moved to profit/ROI, which are transparent and
+    already shown in the embed). Returns [] if nothing qualifies.
     """
     candidates = [
         r
         for r in route_rows
-        if (r.get("price_origin") or 0) > 0 and (r.get("scu_origin") or 0) > 0 and r.get("score") is not None
+        if (r.get("price_origin") or 0) > 0 and (r.get("scu_origin") or 0) > 0 and r.get("profit") is not None
     ]
-    candidates.sort(key=lambda r: r["score"], reverse=True)
-    return [_build_scored_route_entry(commodity_name, id_commodity, r) for r in candidates]
+    entries = [_build_scored_route_entry(commodity_name, id_commodity, r) for r in candidates]
+    entries.sort(key=_profit_rank_key, reverse=True)
+    return entries
 
 
 def rank_top_scored_routes(entries: list[ScoredRouteEntry], limit: int = 10) -> list[ScoredRouteEntry]:
-    """Ranks across every commodity by UEX's own score, highest first, and caps the list.
-    entries can carry more than one route per commodity now (see select_available_routes)
-    - deduping back to one-per-commodity for display happens later, in
-    bot/cogs/trends.py:_send_ranked_routes, after a user's filters have had a chance to
-    pick among a commodity's alternatives."""
-    return sorted(entries, key=lambda e: e.score, reverse=True)[:limit]
+    """Ranks across every commodity by profit descending (ROI% as a tie-breaker - see
+    _profit_rank_key) and caps the list. entries can carry more than one route per
+    commodity now (see select_available_routes) - deduping back to one-per-commodity for
+    display happens later, in bot/cogs/trends.py:_send_ranked_routes, after a user's
+    filters have had a chance to pick among a commodity's alternatives."""
+    return sorted(entries, key=_profit_rank_key, reverse=True)[:limit]
 
 
 # UEX's own /commodities_status defines sell-side code 7 (86-100% inventory band) as
@@ -213,8 +233,9 @@ def select_in_stock_routes(
     and a known, applicable status other than SELL_SIDE_NO_DEMAND_CODE. SCU alone doesn't
     catch this since it is a much larger, closer-to-static figure that doesn't reflect live
     status the way the categorical code does. Returns every qualifying route sorted by
-    score descending (see select_available_routes for why this isn't just the single
-    best), or [] if nothing on this commodity qualifies.
+    profit descending, ROI% as a tie-breaker (see select_available_routes for both why
+    this isn't just the single best, and why profit/ROI replaced UEX's own score field),
+    or [] if nothing on this commodity qualifies.
     """
     candidates = [
         r
@@ -223,7 +244,8 @@ def select_in_stock_routes(
         and (r.get("scu_origin") or 0) > 0
         and (r.get("price_destination") or 0) > 0
         and has_sell_side_demand(r.get("scu_destination"), r.get("status_destination"))
-        and r.get("score") is not None
+        and r.get("profit") is not None
     ]
-    candidates.sort(key=lambda r: r["score"], reverse=True)
-    return [_build_scored_route_entry(commodity_name, id_commodity, r) for r in candidates]
+    entries = [_build_scored_route_entry(commodity_name, id_commodity, r) for r in candidates]
+    entries.sort(key=_profit_rank_key, reverse=True)
+    return entries

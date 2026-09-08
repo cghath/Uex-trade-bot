@@ -117,8 +117,10 @@ def _build_route_field(
     loc_bits = []
     if r.distance is not None:
         loc_bits.append(f"{r.distance:.1f} GM")
-    loc_bits.append(f"UEX score {r.score:,.0f}")
-    value_lines.append(" · ".join(loc_bits))
+    if r.profit is not None:
+        loc_bits.append(f"Profit: **{r.profit:,.0f} aUEC**")
+    if loc_bits:
+        value_lines.append(" · ".join(loc_bits))
 
     name = f"{i}. {r.commodity_name}: {r.origin_terminal_name} → {r.destination_terminal_name}"
     return name, "\n".join(value_lines)
@@ -593,7 +595,7 @@ class Trends(commands.Cog):
         if omitted > 0:
             await interaction.followup.send(f"{omitted} more route(s) omitted - too large to display.")
 
-    @app_commands.command(name="top-routes", description="Top trade routes by UEX score, with live-stock filtering.")
+    @app_commands.command(name="top-routes", description="Top trade routes by profit, with live-stock filtering.")
     @app_commands.describe(
         ship="Optional: check cargo/profit for a specific ship instead of your default (/set-default-ship)",
         strict="Require live stock at the origin and live demand at the destination (safer).",
@@ -621,8 +623,8 @@ class Trends(commands.Cog):
                 updated_at = self._top_in_stock_routes_updated_at
             title = "Top Trade Routes — Strict Live Availability"
             footer_note = (
-                "Ranked by UEX's route score · one route per commodity · requires real stock "
-                "at the origin and real demand at the destination right now"
+                "Ranked by profit (ROI% as a tie-breaker) · one route per commodity · requires "
+                "real stock at the origin and real demand at the destination right now"
             )
         else:
             async with self._top_scored_routes_lock:
@@ -630,8 +632,8 @@ class Trends(commands.Cog):
                 updated_at = self._top_scored_routes_updated_at
             title = "Top Trade Routes"
             footer_note = (
-                "Ranked by UEX's route score · one route per commodity · filtered to real "
-                "buy-side stock at the origin right now · use strict:True for live demand too"
+                "Ranked by profit (ROI% as a tie-breaker) · one route per commodity · filtered "
+                "to real buy-side stock at the origin right now · use strict:True for live demand too"
             )
 
         if not entries:
@@ -711,10 +713,10 @@ class Trends(commands.Cog):
 
         title = f"Best Routes from {origin_name}"
         footer_note = (
-            "Ranked by UEX's route score · requires real stock at the origin and real demand "
-            "at the destination right now" if strict else
-            "Ranked by UEX's route score · filtered to real buy-side stock at the origin right "
-            "now · use strict:True for live demand too"
+            "Ranked by profit (ROI% as a tie-breaker) · requires real stock at the origin and "
+            "real demand at the destination right now" if strict else
+            "Ranked by profit (ROI% as a tie-breaker) · filtered to real buy-side stock at the "
+            "origin right now · use strict:True for live demand too"
         )
         await self._send_ranked_routes(
             interaction,

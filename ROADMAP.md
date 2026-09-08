@@ -204,6 +204,19 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
   resolution (`Database.resolve_terminal_id_by_name`) uses the same tiered exact-then-
   unique-substring match as `find_item_id_by_name` - never guesses between two candidate
   terminals.
+- [x] **Rank `/top-routes`/`/routes-from` by profit, not UEX's own score**: Shipped
+  2026-09-08. Checked UEX's own API docs while reviewing `/routes-from`'s output:
+  `score: int // UEX score level, higher is better` is the ENTIRE published definition -
+  no formula, no breakdown of what it weighs, nothing else anywhere in the reference. A
+  fully opaque black box with no way to explain to a player why one route outranked
+  another. `select_available_routes`/`select_in_stock_routes`/`rank_top_scored_routes`
+  (`bot/uex/trends.py`) now sort by UEX's own `profit` figure (already trusted directly
+  by `/best-route`'s own primary-branch ranking) with `price_roi` as a tie-breaker,
+  instead of `score` - transparent, already-displayed figures a player can verify
+  themselves. `ScoredRouteEntry.score` is now optional and no longer required for a route
+  to qualify (previously a route missing only a UEX score was silently excluded
+  entirely); the "UEX score" display line in `/top-routes`' embed is replaced with the
+  actual ranking basis (`Profit: **X aUEC**`).
 
 ### Route Economics Depth
 
