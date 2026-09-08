@@ -103,6 +103,66 @@ def test_a_single_profitable_hop_alone_is_excluded():
     assert build_multi_stop_routes(rows, ship_capacity_scu=10) == []
 
 
+def test_start_terminal_id_restricts_chains_to_that_one_origin():
+    """/route-from-multi's anchor: two independent chain families exist (starting at
+    terminal 1 and terminal 10), 1's is more profitable overall - without the anchor it
+    would rank first. With start_terminal_id=10, only chains starting at 10 come back,
+    even though they're the LESS profitable family."""
+    rows = [
+        _row(1, 1, "Stileron", "A", price_buy=100, scu_buy=10),
+        _row(1, 2, "Stileron", "B", price_sell=150, scu_sell=10),
+        _row(2, 2, "Cobalt", "B", price_buy=50, scu_buy=10),
+        _row(2, 3, "Cobalt", "C", price_sell=90, scu_sell=10),
+        _row(3, 10, "Diamond", "X", price_buy=20, scu_buy=10),
+        _row(3, 11, "Diamond", "Y", price_sell=30, scu_sell=10),
+        _row(4, 11, "Quartz", "Y", price_buy=10, scu_buy=10),
+        _row(4, 12, "Quartz", "Z", price_sell=15, scu_sell=10),
+    ]
+    unrestricted = build_multi_stop_routes(rows, ship_capacity_scu=10)
+    assert unrestricted[0].stops == (1, 2, 3), "sanity check: the more profitable family ranks first normally"
+
+    anchored = build_multi_stop_routes(rows, ship_capacity_scu=10, start_terminal_id=10)
+    assert anchored
+    assert all(route.stops[0] == 10 for route in anchored)
+    assert all(1 not in route.stops for route in anchored)
+
+
+def test_start_terminal_id_finds_a_chain_even_when_not_globally_top_ranked():
+    """The anchor terminal's own first-hop opportunities must be searchable even if they
+    never rank in the top MAX_CANDIDATE_EDGES globally - otherwise a location-anchored
+    search could come back empty purely because other terminals looked more profitable
+    overall, defeating the entire point of 'best routes starting from HERE.'"""
+    # 25 decoy 1-leg opportunities (irrelevant on their own, excluded as single hops, but
+    # their endpoints crowd the top-ranked candidate-terminal window) all far more
+    # profitable than the anchor's own modest, genuinely valid 2-leg chain.
+    decoys = []
+    for i in range(25):
+        origin, destination = 1000 + i * 2, 1001 + i * 2
+        decoys += [
+            _row(100 + i, origin, f"Decoy{i}", f"D{origin}", price_buy=10, scu_buy=10),
+            _row(100 + i, destination, f"Decoy{i}", f"D{destination}", price_sell=10_000, scu_sell=10),
+        ]
+    anchor_chain = [
+        _row(1, 500, "Stileron", "Anchor", price_buy=100, scu_buy=10),
+        _row(1, 501, "Stileron", "Mid", price_sell=110, scu_sell=10),
+        _row(2, 501, "Cobalt", "Mid", price_buy=50, scu_buy=10),
+        _row(2, 502, "Cobalt", "Final", price_sell=60, scu_sell=10),
+    ]
+    rows = decoys + anchor_chain
+
+    routes = build_multi_stop_routes(rows, ship_capacity_scu=10, start_terminal_id=500)
+    assert routes, "the anchor's own valid chain must still be found"
+    assert routes[0].stops == (500, 501, 502)
+
+
+def test_start_terminal_id_with_no_real_opportunities_returns_empty():
+    rows = [
+        _row(1, 1, "Stileron", "Origin", price_buy=100, scu_buy=10),
+        _row(1, 2, "Stileron", "Destination", price_sell=150, scu_sell=10),
+    ]
+    assert build_multi_stop_routes(rows, ship_capacity_scu=10, start_terminal_id=999) == []
+
+
 def test_system_filter_excludes_a_chain_when_a_middle_terminal_is_out_of_system():
     rows = [
         _row(1, 1, "Stileron", "Origin", price_buy=100, scu_buy=10, star_system_name="Pyro"),

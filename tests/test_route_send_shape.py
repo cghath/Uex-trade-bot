@@ -85,10 +85,12 @@ def _transport() -> httpx.MockTransport:
     return httpx.MockTransport(handler)
 
 
-async def _run_command(tmp_path, db_name, market_rows, coro_factory):
+async def _run_command(tmp_path, db_name, market_rows, coro_factory, *, terminal_reference_rows=None):
     db = Database(tmp_path / db_name, Fernet(Fernet.generate_key()))
     await db.init()
     await db.record_terminal_market_snapshot(market_rows)
+    if terminal_reference_rows is not None:
+        await db.upsert_terminal_reference(terminal_reference_rows)
 
     client = UexClient(app_token="test", base_url="https://uex.test")
     await client._client.aclose()
@@ -122,6 +124,134 @@ def test_multi_stop_route_sends_one_message_per_route_not_batched(tmp_path):
                 "that batched shape is what caused the original stuck-thinking bug"
             )
             assert kwargs.get("embed") is not None or "content" in kwargs
+
+    asyncio.run(run())
+
+
+# A second, independent 2-leg chain starting at a DIFFERENT origin than _MULTI_STOP_ROWS -
+# used to prove /route-from-multi's location anchor actually excludes it, not just that a
+# search happens to prefer the requested origin's own chain.
+_SECOND_MULTI_STOP_ROWS = [
+    {"id_commodity": 3, "id_terminal": 10, "commodity_name": "Diamond", "terminal_name": "AltOrigin",
+     "price_buy": 20, "price_sell": 0, "scu_buy": 10, "scu_sell": 0, "status_buy": 1, "status_sell": None},
+    {"id_commodity": 3, "id_terminal": 11, "commodity_name": "Diamond", "terminal_name": "AltMid",
+     "price_buy": 0, "price_sell": 30, "scu_buy": 0, "scu_sell": 10, "status_buy": None, "status_sell": 1},
+    {"id_commodity": 4, "id_terminal": 11, "commodity_name": "Quartz", "terminal_name": "AltMid",
+     "price_buy": 10, "price_sell": 0, "scu_buy": 10, "scu_sell": 0, "status_buy": 1, "status_sell": None},
+    {"id_commodity": 4, "id_terminal": 12, "commodity_name": "Quartz", "terminal_name": "AltFinal",
+     "price_buy": 0, "price_sell": 15, "scu_buy": 0, "scu_sell": 10, "status_buy": None, "status_sell": 1},
+]
+
+_MULTI_STOP_TERMINAL_REFERENCE = [
+    {"id": 1, "name": "Origin"}, {"id": 2, "name": "Midpoint"}, {"id": 3, "name": "Final"},
+    {"id": 10, "name": "AltOrigin"}, {"id": 11, "name": "AltMid"}, {"id": 12, "name": "AltFinal"},
+]
+
+
+def test_route_from_multi_reports_when_the_location_cannot_be_resolved(tmp_path):
+    async def run():
+        interaction = await _run_command(
+            tmp_path, "route_from_multi_unresolved.sqlite3", _MULTI_STOP_ROWS,
+            lambda cog, interaction: cog.route_from_multi.callback(
+                cog, interaction, location="Nowhere Station", ship="TestShip",
+            ),
+            terminal_reference_rows=_MULTI_STOP_TERMINAL_REFERENCE,
+        )
+        assert interaction.followup.sent, "expected an immediate response after defer"
+        content = interaction.followup.sent[0][0][0]
+        assert "couldn't find" in content.lower()
+        assert not any(kwargs.get("embed") for _, kwargs in interaction.followup.sent)
+
+    asyncio.run(run())
+
+
+def test_route_from_multi_reports_when_no_chains_start_there(tmp_path):
+    """'Final' is the last stop of _MULTI_STOP_ROWS' own chain - it has no outgoing
+    opportunity of its own, so an anchored search from there must find nothing, even
+    though a chain elsewhere in the exact same data (Origin -> Midpoint -> Final) exists."""
+    async def run():
+        interaction = await _run_command(
+            tmp_path, "route_from_multi_empty.sqlite3", _MULTI_STOP_ROWS,
+            lambda cog, interaction: cog.route_from_multi.callback(
+                cog, interaction, location="Final", ship="TestShip",
+            ),
+            terminal_reference_rows=_MULTI_STOP_TERMINAL_REFERENCE,
+        )
+        assert interaction.followup.sent
+        content = interaction.followup.sent[0][0][0]
+        assert "no multi-stop chains from" in content.lower()
+        assert "final" in content.lower()
+
+    asyncio.run(run())
+
+
+def test_route_from_multi_only_returns_chains_starting_at_the_resolved_location(tmp_path):
+    """Real defect class this command exists to avoid: two independent chains exist in the
+    same market snapshot: Origin->Midpoint->Final (the more profitable ranking) and
+    AltOrigin->AltMid->AltFinal. Resolving location='AltOrigin' must return ONLY the
+    second chain, even though the first outranks it on pure profit."""
+    async def run():
+        interaction = await _run_command(
+            tmp_path, "route_from_multi_anchored.sqlite3",
+            _MULTI_STOP_ROWS + _SECOND_MULTI_STOP_ROWS,
+            lambda cog, interaction: cog.route_from_multi.callback(
+                cog, interaction, location="AltOrigin", ship="TestShip",
+            ),
+            terminal_reference_rows=_MULTI_STOP_TERMINAL_REFERENCE,
+        )
+        assert interaction.followup.sent, "expected at least one followup"
+        embeds = [kwargs["embed"] for _, kwargs in interaction.followup.sent if kwargs.get("embed")]
+        assert embeds, interaction.followup.sent
+        titles = [embed.title or "" for embed in embeds]
+        # Exact-match, not substring: "AltOrigin"/"AltFinal" contain "Origin"/"Final" as
+        # suffixes, so a naive substring check on either name is ambiguous between the
+        # two fixture chains.
+        assert titles == ["#1 AltOrigin → AltMid → AltFinal"], titles
+
+    asyncio.run(run())
+
+
+def test_route_from_multi_attaches_a_tracking_view(monkeypatch, tmp_path):
+    """Reuses the same _send_multi_stop_routes helper /multi-stop-route uses - a tracking
+    cog must still get a RouteTrackingView, with start_terminal_id correctly threaded
+    into build_multi_stop_routes."""
+    async def run():
+        captured_kwargs = {}
+        real_build = prices_module.build_multi_stop_routes
+
+        def spy_build(*args, **kwargs):
+            captured_kwargs.update(kwargs)
+            return real_build(*args, **kwargs)
+
+        monkeypatch.setattr(prices_module, "build_multi_stop_routes", spy_build)
+
+        db = Database(tmp_path / "route_from_multi_tracking.sqlite3", Fernet(Fernet.generate_key()))
+        await db.init()
+        await db.record_terminal_market_snapshot(_MULTI_STOP_ROWS)
+        await db.upsert_terminal_reference(_MULTI_STOP_TERMINAL_REFERENCE)
+
+        client = UexClient(app_token="test", base_url="https://uex.test")
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(transport=_transport())
+
+        tracking_cog = RouteProgression.__new__(RouteProgression)
+        bot = type("FakeBot", (), {})()
+        bot.db = db
+        bot.uex = client
+        bot.get_cog = lambda name: tracking_cog if name == "RouteProgression" else None
+        cog = Prices.__new__(Prices)
+        cog.bot = bot
+        interaction = _FakeInteraction(111)
+
+        try:
+            await cog.route_from_multi.callback(cog, interaction, location="Origin", ship="TestShip")
+        finally:
+            await client.aclose()
+
+        assert captured_kwargs.get("start_terminal_id") == 1, captured_kwargs
+        views = [kwargs["view"] for _, kwargs in interaction.followup.sent if kwargs.get("view")]
+        assert views, "expected a tracking view on the real command output"
+        assert isinstance(views[0], RouteTrackingView)
 
     asyncio.run(run())
 

@@ -215,8 +215,60 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
   instead of `score` - transparent, already-displayed figures a player can verify
   themselves. `ScoredRouteEntry.score` is now optional and no longer required for a route
   to qualify (previously a route missing only a UEX score was silently excluded
-  entirely); the "UEX score" display line in `/top-routes`' embed is replaced with the
-  actual ranking basis (`Profit: **X aUEC**`).
+  entirely). The "UEX score" display line was initially replaced with a raw
+  `Profit: **X aUEC**` line - see the very next entry for why that line was removed
+  again almost immediately.
+- [x] **Remove the confusing duplicate "Profit" line from `/top-routes`/`/routes-from`**:
+  Shipped 2026-09-08, same day as the ranking change above. A real user screenshot caught
+  it: the `Profit: **X aUEC**` line added to disclose the new ranking basis (previous
+  entry) is UEX's own route-level `profit` figure - computed off the FULL stock/demand
+  volume, not scaled to any ship - shown right next to the already-existing, correctly
+  ship-scaled `Run profit: **Y aUEC** for this haul` line. On a real route this was a
+  ~17x gap (5,136,000 vs. 308,160) with nothing telling the two numbers apart, easy to
+  misread as "my real profit is 5.1M." `/best-route` never had this problem - it only
+  ever shows PER-UNIT profit up top, never a second lump-sum figure. Fixed by dropping
+  the raw `r.profit` line entirely (`bot/cogs/trends.py:_build_route_field`) - the
+  ranking basis is already disclosed in the command's footer text
+  ("Ranked by profit (ROI% as a tie-breaker)"), so the per-route body doesn't also need
+  to show the literal value. Per-unit margin and the ship-scaled run profit are
+  unaffected.
+- [x] **Clarify `/multi-stop-route`/`/mixed-routes` descriptions mention the ROI
+  tie-breaker**: Shipped 2026-09-08. Both commands were already ranking by
+  `(profit, roi_pct)` from their very first commits (`bot/uex/multi_stop_routes.py`/
+  `bot/uex/mixed_routes.py`'s own `routes.sort(...)` calls) - unrelated to the
+  `/top-routes` UEX-score fix above, which never applied to either of them. But their
+  embed descriptions only said "ranked by total profit"/"ranked by estimated haul
+  profit", which reads as ROI playing no part - a user seeing a real route's footer say
+  only "ranked by total profit" reasonably asked whether ROI was actually used. Reworded
+  to match `/top-routes`' existing wording exactly: "ranked by profit (ROI% as a
+  tie-breaker)". Disclosure only, no ranking behavior changed.
+- [x] **`/route-from-multi`**: Shipped 2026-09-08. `/route-from-multi`, multi-stop
+  routing's counterpart to `/routes-from` - chains of 2-3 profitable hops anchored to a
+  `location` option (same terminal-name autocomplete/resolution as `/routes-from`)
+  instead of `/multi-stop-route`'s unconstrained "search from anywhere" candidate
+  selection. Unlike `/routes-from` (which filters an already-computed background pool),
+  multi-stop chains have no such cache - this runs a live, thread-offloaded
+  `build_multi_stop_routes` call per request, same as `/multi-stop-route` itself, now
+  with a new `start_terminal_id` parameter. Restricting the search to one origin needed
+  more than just overriding which terminal the DFS starts from: the candidate-terminal
+  window that bounds the whole search is built from globally profit-ranked edges, so a
+  single-hop-only version of "force the anchor's own opportunities into that window"
+  still let an unrelated, more-profitable cluster of edges elsewhere in the market
+  crowd out the anchor's genuine 2nd/3rd-leg terminals, silently truncating an anchored
+  search's real reach and sometimes returning nothing at all. Fixed with a bounded BFS
+  (real `opportunities` edges only, capped at `MAX_LEGS` hops) from the anchor,
+  force-adding every terminal actually reachable from it regardless of global ranking -
+  caught by a test built specifically to crowd out a valid 2-leg anchor chain with 25
+  higher-profit decoy edges elsewhere. `terminal_name_autocomplete` moved from
+  `trends.py` to `prices.py` (trends.py already imports several things FROM prices.py,
+  so the reverse direction would have been a circular import) - `/routes-from`'s own
+  autocomplete wiring updated to import it from its new home, no behavior change.
+  `/multi-stop-route`'s ~200-line per-route embed/warnings/tracking-view/fallback
+  sending logic extracted into a shared `_send_multi_stop_routes` helper both commands
+  call, rather than duplicating it a third time (the ship/prefs/capital-access setup
+  block above IS still duplicated across `/mixed-routes`, `/multi-stop-route`,
+  `/diminishing-returns`, and now this command - matching that pre-existing, not-yet-
+  centralized convention rather than doing a larger unrelated refactor).
 
 ### Route Economics Depth
 

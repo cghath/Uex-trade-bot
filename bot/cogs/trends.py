@@ -25,7 +25,12 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
-from bot.cogs.prices import SYSTEM_CHOICES, _add_chunked_fields, commodity_name_autocomplete
+from bot.cogs.prices import (
+    SYSTEM_CHOICES,
+    _add_chunked_fields,
+    commodity_name_autocomplete,
+    terminal_name_autocomplete,
+)
 from bot.cogs.route_progression import RouteLegInput, RouteTrackingView, TrackableRoute
 from bot.cogs.ships import ship_name_autocomplete
 from bot.uex.charts import render_price_history_chart
@@ -114,26 +119,19 @@ def _build_route_field(
     if pct_bits:
         value_lines.append(" · ".join(pct_bits))
 
-    loc_bits = []
+    # r.profit (UEX's own route-level figure, used for ranking) is deliberately NOT shown
+    # here - it's computed off the full stock/demand volume, not this player's actual ship
+    # capacity, and displaying it next to Run profit above (which IS ship-scaled) produced
+    # two differently-scaled "profit" numbers in the same field with nothing to tell them
+    # apart - a real report ("Profit: 5,136,000" vs. a correct "Run profit: 308,160 for
+    # this haul" two lines up, ~17x apart). Per-unit margin is already shown in the first
+    # line above, matching /best-route's own established pattern of never displaying a
+    # second, differently-scaled lump-sum profit figure.
     if r.distance is not None:
-        loc_bits.append(f"{r.distance:.1f} GM")
-    if r.profit is not None:
-        loc_bits.append(f"Profit: **{r.profit:,.0f} aUEC**")
-    if loc_bits:
-        value_lines.append(" · ".join(loc_bits))
+        value_lines.append(f"{r.distance:.1f} GM")
 
     name = f"{i}. {r.commodity_name}: {r.origin_terminal_name} → {r.destination_terminal_name}"
     return name, "\n".join(value_lines)
-
-
-async def terminal_name_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
-    """Suggest terminals for /routes-from's location option - reads the local, 24h-cached
-    terminal_reference table (same pattern as ship_name_autocomplete/commodity_name_
-    autocomplete), no live UEX call."""
-    if not current:
-        return []
-    rows = await interaction.client.db.search_terminals_by_name(current, limit=25)
-    return [app_commands.Choice(name=row["terminal_name"][:100], value=row["terminal_name"][:100]) for row in rows]
 
 
 TRENDING_REFRESH_MINUTES = 45

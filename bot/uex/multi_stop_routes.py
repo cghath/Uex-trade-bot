@@ -79,6 +79,7 @@ def build_multi_stop_routes(
     capital_access_only: bool = False,
     auto_load_only: bool = False,
     system: str | None = None,
+    start_terminal_id: int | None = None,
 ) -> list[MultiStopRoute]:
     """Return the best-profit chains of 2-3 profitable legs (MAX_LEGS).
 
@@ -87,6 +88,15 @@ def build_multi_stop_routes(
     are bounded to the endpoints of the ~MAX_CANDIDATE_EDGES most profitable single legs,
     so the chain search stays a small in-memory graph walk over the same snapshot
     /mixed-routes already reads, with no extra API calls and no scan of every terminal.
+
+    start_terminal_id restricts every returned chain to start at that one terminal
+    (/route-from-multi's "from wherever I am" anchor) instead of searching from every
+    profit-ranked candidate origin. The requested terminal, and every terminal reachable
+    from it within MAX_LEGS real hops, is force-added to the candidate set regardless of
+    global profit ranking - the profit-ranked candidate window is built assuming the
+    search can start ANYWHERE, so a real chain anchored at a lower-ranked terminal would
+    otherwise be invisible (or silently truncated partway through) to a location-anchored
+    search, even though it's the only origin this call actually cares about.
     """
     capacity = math.floor(float(ship_capacity_scu or 0))
     if capacity <= 0 or limit <= 0:
@@ -196,6 +206,32 @@ def build_multi_stop_routes(
         candidate_terminals.add(origin_id)
         candidate_terminals.add(destination_id)
 
+    if start_terminal_id is not None:
+        # Force in every terminal genuinely reachable from the anchor within MAX_LEGS
+        # real hops - not just the ones that happened to rank in the top
+        # MAX_CANDIDATE_EDGES globally. A full 3-leg chain needs its 2nd and 3rd stop to
+        # be candidates too, not just the 1st - a single-hop-only version of this fix
+        # still let an unrelated cluster of decoy edges elsewhere in the data crowd the
+        # anchor's own genuine 2nd-leg terminal out of the candidate set entirely,
+        # silently truncating an anchored search down to at most a 1-leg reach (which
+        # then produces nothing at all, since a 1-leg chain is excluded from results).
+        # Bounded to the anchor's own local neighborhood (BFS over real opportunities,
+        # not the full terminal set), so this stays small regardless of how large the
+        # overall market snapshot is.
+        reachable = {start_terminal_id}
+        frontier = {start_terminal_id}
+        for _ in range(MAX_LEGS):
+            next_frontier = {
+                destination_id
+                for origin_id, destination_id in opportunities
+                if origin_id in frontier and destination_id not in reachable
+            }
+            if not next_frontier:
+                break
+            reachable |= next_frontier
+            frontier = next_frontier
+        candidate_terminals |= reachable
+
     # Used only to *order* exploration below, not to filter it - an edge's real
     # per-leg profit is still recomputed against the real, path-dependent budget inside
     # extend() every time.
@@ -217,6 +253,11 @@ def build_multi_stop_routes(
         key=lambda t: max((edge_profit_potential.get((t, d), 0.0) for d in graph.get(t, [])), default=0.0),
         reverse=True,
     )
+    if start_terminal_id is not None:
+        # Only explore from the requested anchor - every OTHER candidate terminal stays
+        # searchable as a downstream (2nd/3rd leg) stop via the graph above, it just never
+        # starts a chain of its own.
+        ordered_starts = [start_terminal_id] if start_terminal_id in candidate_terminals else []
 
     routes: list[MultiStopRoute] = []
     explored = 0
