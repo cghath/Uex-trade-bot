@@ -22,6 +22,7 @@ from bot.uex.mixed_routes import build_mixed_routes, requires_capital_cargo_acce
 from bot.uex.multi_stop_routes import build_multi_stop_routes, find_diminishing_returns_budget, sweep_budget_curve
 from bot.uex.charts import render_budget_curve_chart
 from bot.uex.trading_preferences import describe_active_preferences
+from bot.cogs.route_progression import RouteLegInput, RouteTrackingView, TrackableRoute
 from bot.uex.route_presentation import (
     add_chunked_fields,
     approximation_note,
@@ -390,6 +391,7 @@ class Prices(commands.Cog):
                 footer += " · " + preferences_note
             embed.set_footer(text=footer)
             routes_shown = 0
+            trackable_routes: list[TrackableRoute] = []
             for r in ranked:
                 origin = r.get("origin_terminal_name", "Unknown")
                 dest = r.get("destination_terminal_name", "Unknown")
@@ -518,10 +520,38 @@ class Prices(commands.Cog):
                 if not _add_chunked_fields(embed, name=f"{origin} → {dest}", lines=value_lines):
                     break
                 routes_shown += 1
+                if origin_id is not None and destination_id is not None:
+                    trackable_routes.append(TrackableRoute(
+                        route_kind="best_route",
+                        title=f"{commodity_display}: {origin} → {dest}",
+                        legs=[
+                            RouteLegInput(
+                                side="buy", id_terminal=origin_id, id_commodity=id_commodity,
+                                terminal_name=origin, commodity_name=commodity_display,
+                                display_label=f"Buy at {origin}",
+                                quoted_price=r.get("price_origin"), quoted_scu=r.get("scu_origin"),
+                                quoted_status=r.get("status_origin"),
+                            ),
+                            RouteLegInput(
+                                side="sell", id_terminal=destination_id, id_commodity=id_commodity,
+                                terminal_name=dest, commodity_name=commodity_display,
+                                display_label=f"Sell at {dest}",
+                                quoted_price=r.get("price_destination"), quoted_scu=r.get("scu_destination"),
+                                quoted_status=r.get("status_destination"),
+                            ),
+                        ],
+                    ))
             omitted = len(ranked) - routes_shown
             if omitted > 0:
                 embed.set_footer(text=footer + f" · {omitted} more route(s) omitted - message size limit")
-            await interaction.followup.send(embed=embed)
+            # RouteProgression may not be loaded (a cog load failure elsewhere shouldn't
+            # break /best-route) - tracking buttons are additive, never required for the
+            # command's own result.
+            tracking_cog = self.bot.get_cog("RouteProgression")
+            if tracking_cog and trackable_routes:
+                await interaction.followup.send(embed=embed, view=RouteTrackingView(tracking_cog, trackable_routes))
+            else:
+                await interaction.followup.send(embed=embed)
             return
 
         # Fallback: derive routes ourselves from raw price rows (no distance data available).

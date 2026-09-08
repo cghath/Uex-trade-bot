@@ -108,11 +108,44 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
   allocator requires one to build a route at all), so "inferred"/"unknown" don't apply
   there; their existing health-warning/limiting-factor display already covers what those
   commands need.
-- [ ] **Recommendation Outcome Tracking** *(complexity: High)*: Let a user select a
-  route, then report what they actually bought/sold or where stock/access didn't match
-  the recommendation. Comparing predicted vs. actual profit surfaces which
-  recommendations are dependable. A genuinely new subsystem (a "planned trade" state
-  machine + schema + analytics) - nothing existing to build this on top of.
+- [ ] **Recommendation Outcome Tracking** *(complexity: High)*: Let a user select one of
+  the 5 suggested routes via a button, which opens a private Discord **thread** (not a
+  channel - guilds cap out at 500 channels total, threads have no such limit, and a
+  thread still supports one-user-plus-bot membership) scoped to that user for progression
+  tracking; the thread closes/archives once the route completes or is abandoned. Each leg
+  reports one of three outcomes: matched the quote (default, one tap), less than quoted
+  (actual SCU, or `is_missing` if the commodity wasn't there at all), or more than quoted
+  (actual SCU bought/sold, plus a follow-up: "drained it" - a confident exact write - vs.
+  "my hold/their demand capped me, more was there" - a floor-only correction, "at least N
+  confirmed," never written back as if it were the true exact figure). A genuinely new
+  subsystem (schema + a thread-lifecycle cog) - nothing existing to build this on top of.
+  Design settled across a design-discussion session (not yet implemented):
+  - **Phase 1, local-only**: confirmed reports write into the *same* `terminal_market_state`/
+    `terminal_market_observations` tables the intelligence collector already writes (reuse
+    `record_terminal_market_snapshot`, tag rows with a new `source` column so a player
+    report is never silently blended with UEX's own vetted figures in evidence
+    classification). Understood as a temporary correction, not a permanent fix - the next
+    scheduled UEX poll can overwrite it, and there's no fixed/knowable in-game restock rate
+    to reason about instead (checked: no CIG-documented restock mechanic more recent than a
+    2013 design doc explicitly marked "subject to change"; UEX's own API exposes no restock-
+    rate field). Highest-value initial consumer: feed confirmed outcomes into
+    `route_confidence.py`/the Evidence-Level tiers for calibration, since that improves
+    every route command simultaneously with no external dependency - ranked well above
+    trade-history/leaderboard display, which is engagement value but doesn't make any
+    future recommendation better.
+  - **Phase 2, deferred**: optionally submit the same confirmed report to UEX's own
+    `POST /data_submit` (real endpoint, confirmed in `docs/UEX_API_2.0_reference.md`).
+    Must be explicit per-report opt-in, never automatic - it's authenticated as the
+    individual player (their linked secret key, same plumbing as `account.py`), and
+    checked-research findings apply: UEX shows no visible reputation score/tier (only a
+    raw-volume "most active" leaderboard), but their Terms of Use do warn that repeatedly
+    submitting improper reports risks a temporary account lock, with no accuracy threshold
+    disclosed. Report validation is mostly automated (an approval bot approves/declines,
+    escalating only ambiguous cases to human moderators). Build and test entirely against
+    `is_production=0` (a real UEX sandbox flag - exercises full validation without ever
+    entering their live pipeline) before ever sending `is_production=1`. Also respect
+    submission-specific limits beyond the general 120 req/min cap: 500 rows/call max,
+    1000 reports/30 min, and a 5-minute block on resubmitting the same item+location.
 
 ### Route Economics Depth
 

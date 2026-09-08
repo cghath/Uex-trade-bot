@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 
+import aiosqlite
 from cryptography.fernet import Fernet
 
 from bot.db.database import Database
@@ -46,6 +47,130 @@ def test_terminal_market_history_only_records_initial_and_changed_states(tmp_pat
         async with db.connect() as sqlite:
             cursor = await sqlite.execute("SELECT COUNT(*) AS count FROM terminal_market_observations")
             assert (await cursor.fetchone())["count"] == 2
+
+    asyncio.run(run())
+
+
+def test_source_column_migration_backfills_existing_rows_and_is_idempotent(tmp_path):
+    """Recommendation Outcome Tracking (Phase 1) added `source` to terminal_market_state/
+    terminal_market_observations via an additive ALTER TABLE migration, so a database
+    created before this change (like the live Pi deployment) needs it backfilled cleanly,
+    not just fresh databases created after. Also confirms init() stays idempotent across
+    a restart once the column already exists (the "duplicate column name" swallow)."""
+    path = tmp_path / "test.sqlite3"
+    with sqlite3.connect(path) as sqlite_conn:
+        sqlite_conn.execute(
+            """CREATE TABLE terminal_market_state (
+                   id_commodity INTEGER NOT NULL, id_terminal INTEGER NOT NULL,
+                   commodity_name TEXT NOT NULL, terminal_name TEXT NOT NULL,
+                   price_buy REAL, price_sell REAL, scu_buy REAL, scu_sell REAL,
+                   status_buy INTEGER, status_sell INTEGER, quality INTEGER,
+                   volatility_buy REAL, volatility_sell REAL,
+                   buy_report_count INTEGER, sell_report_count INTEGER,
+                   last_seen TEXT NOT NULL DEFAULT (datetime('now')),
+                   PRIMARY KEY (id_commodity, id_terminal)
+               )"""
+        )
+        sqlite_conn.execute(
+            """CREATE TABLE terminal_market_observations (
+                   id_commodity INTEGER NOT NULL, id_terminal INTEGER NOT NULL,
+                   observed_at TEXT NOT NULL DEFAULT (datetime('now')),
+                   commodity_name TEXT NOT NULL, terminal_name TEXT NOT NULL,
+                   price_buy REAL, price_sell REAL, scu_buy REAL, scu_sell REAL,
+                   status_buy INTEGER, status_sell INTEGER, quality INTEGER,
+                   volatility_buy REAL, volatility_sell REAL,
+                   buy_report_count INTEGER, sell_report_count INTEGER
+               )"""
+        )
+        sqlite_conn.execute(
+            """INSERT INTO terminal_market_state
+               (id_commodity, id_terminal, commodity_name, terminal_name, price_buy, scu_buy, status_buy)
+               VALUES (1, 2, 'Gold', 'Area18 TDD', 100, 50, 3)"""
+        )
+        sqlite_conn.execute(
+            """INSERT INTO terminal_market_observations
+               (id_commodity, id_terminal, commodity_name, terminal_name, price_buy, scu_buy, status_buy)
+               VALUES (1, 2, 'Gold', 'Area18 TDD', 100, 50, 3)"""
+        )
+
+    async def run():
+        db = Database(path, Fernet(Fernet.generate_key()))
+        await db.init()
+
+        async with db.connect() as conn:
+            cursor = await conn.execute(
+                "SELECT source FROM terminal_market_state WHERE id_commodity = 1 AND id_terminal = 2"
+            )
+            assert (await cursor.fetchone())["source"] == "uex"
+            cursor = await conn.execute("SELECT source FROM terminal_market_observations LIMIT 1")
+            assert (await cursor.fetchone())["source"] == "uex"
+
+        # A fresh UEX-sourced write after the migration still defaults correctly.
+        assert await db.record_terminal_market_snapshot(
+            [{
+                "id_commodity": "1", "id_terminal": "2", "commodity_name": "Gold",
+                "terminal_name": "Area18 TDD", "price_buy": "105", "scu_buy": "40", "status_buy": "3",
+            }]
+        ) == (1, 1)
+        async with db.connect() as conn:
+            cursor = await conn.execute(
+                "SELECT source, price_buy FROM terminal_market_state WHERE id_commodity = 1 AND id_terminal = 2"
+            )
+            row = await cursor.fetchone()
+            assert row["source"] == "uex"
+            assert row["price_buy"] == 105
+
+        # A restart (a second init() against the now-migrated database) must not raise.
+        await db.init()
+
+    asyncio.run(run())
+
+
+def test_route_progression_tables_enforce_outcome_and_route_kind_checks(tmp_path):
+    """Smoke test for the two new Recommendation Outcome Tracking tables: a valid thread +
+    leg insert succeeds, and an invalid enum value (route_kind here) is rejected by the
+    CHECK constraint rather than silently accepted - the same protection route_progression_
+    legs.outcome/precision rely on."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        async with db.connect() as conn:
+            await conn.execute(
+                """INSERT INTO route_progression_threads
+                   (thread_id, user_id, guild_id, route_kind, route_snapshot, total_legs)
+                   VALUES (1, 100, 200, 'best_route', '{}', 1)"""
+            )
+            await conn.execute(
+                """INSERT INTO route_progression_legs
+                   (thread_id, leg_index, side, id_terminal, id_commodity,
+                    quoted_price, quoted_scu, quoted_status)
+                   VALUES (1, 0, 'buy', 10, 20, 100, 50, 3)"""
+            )
+            await conn.commit()
+
+            cursor = await conn.execute("SELECT status FROM route_progression_threads WHERE thread_id = 1")
+            assert (await cursor.fetchone())["status"] == "in_progress"
+
+            raised = False
+            try:
+                await conn.execute(
+                    """INSERT INTO route_progression_threads
+                       (thread_id, user_id, guild_id, route_kind, route_snapshot, total_legs)
+                       VALUES (2, 100, 200, 'not_a_real_kind', '{}', 1)"""
+                )
+            except aiosqlite.IntegrityError:
+                raised = True
+            assert raised, "an invalid route_kind should violate the CHECK constraint"
+
+            raised = False
+            try:
+                await conn.execute(
+                    """UPDATE route_progression_legs SET outcome = 'not_a_real_outcome'
+                       WHERE thread_id = 1 AND leg_index = 0"""
+                )
+            except aiosqlite.IntegrityError:
+                raised = True
+            assert raised, "an invalid outcome should violate the CHECK constraint"
 
     asyncio.run(run())
 

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+import json
 import logging
 from pathlib import Path
 from typing import Any, AsyncIterator
@@ -308,6 +309,7 @@ CREATE TABLE IF NOT EXISTS terminal_market_state (
     buy_report_count INTEGER,
     sell_report_count INTEGER,
     last_seen TEXT NOT NULL DEFAULT (datetime('now')),
+    source TEXT NOT NULL DEFAULT 'uex' CHECK (source IN ('uex', 'player_report')),
     PRIMARY KEY (id_commodity, id_terminal)
 );
 
@@ -327,7 +329,8 @@ CREATE TABLE IF NOT EXISTS terminal_market_observations (
     volatility_buy REAL,
     volatility_sell REAL,
     buy_report_count INTEGER,
-    sell_report_count INTEGER
+    sell_report_count INTEGER,
+    source TEXT NOT NULL DEFAULT 'uex' CHECK (source IN ('uex', 'player_report'))
 );
 CREATE INDEX IF NOT EXISTS idx_terminal_market_observations_lookup
     ON terminal_market_observations (id_commodity, id_terminal, observed_at);
@@ -512,6 +515,53 @@ CREATE INDEX IF NOT EXISTS idx_marketplace_post_jobs_due
     ON marketplace_post_jobs (status, scheduled_for);
 CREATE INDEX IF NOT EXISTS idx_marketplace_post_jobs_listing
     ON marketplace_post_jobs (listing_id);
+
+-- Recommendation Outcome Tracking (Phase 1, local-only): a user selects a suggested
+-- route, tracks it leg-by-leg in a private Discord thread, and reports whether each leg
+-- matched what was quoted. route_snapshot is the full route as shown at selection time,
+-- kept for display/audit only - the per-leg quoted_* columns below are the queryable
+-- subset used for confidence-calibration aggregation without parsing JSON.
+CREATE TABLE IF NOT EXISTS route_progression_threads (
+    thread_id INTEGER PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    guild_id INTEGER NOT NULL,
+    route_kind TEXT NOT NULL CHECK (
+        route_kind IN ('best_route', 'top_routes', 'mixed_routes', 'multi_stop_route')
+    ),
+    route_snapshot TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'in_progress' CHECK (
+        status IN ('in_progress', 'completed', 'abandoned')
+    ),
+    total_legs INTEGER NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    completed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_route_progression_threads_user_status
+    ON route_progression_threads (user_id, status);
+
+-- outcome is only set once a leg is reported; precision only applies to outcome='more'
+-- ('exact' when the terminal was confirmed drained, 'floor' when the player's own cargo
+-- hold or the terminal's demand capped them before the true stock/demand was known - a
+-- floor must never be written back to terminal_market_state as if it were an exact figure).
+CREATE TABLE IF NOT EXISTS route_progression_legs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    thread_id INTEGER NOT NULL,
+    leg_index INTEGER NOT NULL,
+    side TEXT NOT NULL CHECK (side IN ('buy', 'sell')),
+    id_terminal INTEGER NOT NULL,
+    id_commodity INTEGER NOT NULL,
+    quoted_price REAL,
+    quoted_scu REAL,
+    quoted_status INTEGER,
+    outcome TEXT CHECK (outcome IN ('matched', 'less', 'more', 'missing')),
+    actual_price REAL,
+    actual_scu REAL,
+    precision TEXT CHECK (precision IN ('exact', 'floor')),
+    reported_at TEXT,
+    UNIQUE (thread_id, leg_index)
+);
+CREATE INDEX IF NOT EXISTS idx_route_progression_legs_thread
+    ON route_progression_legs (thread_id, leg_index);
 """
 
 
@@ -740,6 +790,11 @@ class Database:
             "ALTER TABLE terminal_data_health_observations ADD COLUMN last_update_days_percentage INTEGER",
             "ALTER TABLE marketplace_post_jobs ADD COLUMN custom_price INTEGER",
             "ALTER TABLE user_trading_preferences ADD COLUMN ship_name TEXT",
+            # Recommendation Outcome Tracking (Phase 1): distinguishes a player-confirmed
+            # leg report from the UEX collector's own snapshot, so evidence classification
+            # never silently blends an unverified player tap with UEX's own vetted figure.
+            "ALTER TABLE terminal_market_state ADD COLUMN source TEXT NOT NULL DEFAULT 'uex' CHECK (source IN ('uex', 'player_report'))",
+            "ALTER TABLE terminal_market_observations ADD COLUMN source TEXT NOT NULL DEFAULT 'uex' CHECK (source IN ('uex', 'player_report'))",
         ]
         for statement in migrations:
             try:
@@ -800,9 +855,22 @@ class Database:
             return 1
         return 1 if (cls._integer(value) or 0) != 0 else 0
 
-    async def record_terminal_market_snapshot(self, rows: list[dict[str, Any]]) -> tuple[int, int]:
+    async def record_terminal_market_snapshot(
+        self, rows: list[dict[str, Any]], *, source: str = "uex"
+    ) -> tuple[int, int]:
         """Store all currently known terminal commodity states, appending history only for
-        changed values. Returns ``(changed_rows, valid_rows)`` for concise collector logs."""
+        changed values. Returns ``(changed_rows, valid_rows)`` for concise collector logs.
+
+        ``source`` tags who reported these figures ('uex', the default, for the intelligence
+        collector; 'player_report' for a confirmed Recommendation Outcome Tracking leg) so
+        evidence classification never silently blends an unverified player tap with UEX's
+        own vetted figure. It always overwrites the stored value on conflict - a later 'uex'
+        write correctly reverts a prior 'player_report' tag, matching the documented design
+        that a local correction is temporary, not permanent, until the next real UEX poll.
+        Excluded from the changed-detection comparison: a re-confirmation that happens to
+        match already-stored values (a 'matched' leg outcome, most commonly) shouldn't create
+        a spurious observation-history row just because its source tag differs.
+        """
         normalized: list[tuple[Any, ...]] = []
         for row in rows:
             id_commodity = self._integer(row.get("id_commodity"))
@@ -825,6 +893,7 @@ class Database:
                     self._integer(coalesce_report_count(
                         row.get("price_sell_users_rows"), row.get("scu_sell_users_rows")
                     )),
+                    source,
                 )
             )
         if not normalized:
@@ -841,13 +910,13 @@ class Database:
                 (row["id_commodity"], row["id_terminal"]): tuple(row)[2:]
                 for row in await cursor.fetchall()
             }
-            changed = [row for row in normalized if existing.get((row[0], row[1])) != row[2:]]
+            changed = [row for row in normalized if existing.get((row[0], row[1])) != row[2:-1]]
             await db.executemany(
                 """INSERT INTO terminal_market_state
                    (id_commodity, id_terminal, commodity_name, terminal_name, price_buy, price_sell,
                     scu_buy, scu_sell, status_buy, status_sell, quality, volatility_buy,
-                    volatility_sell, buy_report_count, sell_report_count, last_seen)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                    volatility_sell, buy_report_count, sell_report_count, last_seen, source)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?)
                    ON CONFLICT(id_commodity, id_terminal) DO UPDATE SET
                        commodity_name=excluded.commodity_name, terminal_name=excluded.terminal_name,
                        price_buy=excluded.price_buy, price_sell=excluded.price_sell, scu_buy=excluded.scu_buy,
@@ -855,7 +924,7 @@ class Database:
                        quality=excluded.quality, volatility_buy=excluded.volatility_buy,
                        volatility_sell=excluded.volatility_sell,
                        buy_report_count=excluded.buy_report_count, sell_report_count=excluded.sell_report_count,
-                       last_seen=datetime('now')""",
+                       last_seen=datetime('now'), source=excluded.source""",
                 normalized,
             )
             if changed:
@@ -863,12 +932,117 @@ class Database:
                     """INSERT INTO terminal_market_observations
                        (id_commodity, id_terminal, commodity_name, terminal_name, price_buy, price_sell,
                         scu_buy, scu_sell, status_buy, status_sell, quality, volatility_buy,
-                        volatility_sell, buy_report_count, sell_report_count)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        volatility_sell, buy_report_count, sell_report_count, source)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     changed,
                 )
             await db.commit()
         return (len(changed), len(normalized))
+
+    # -- Recommendation Outcome Tracking (Phase 1) ---------------------------------------
+
+    async def create_route_progression_thread(
+        self,
+        *,
+        thread_id: int,
+        user_id: int,
+        guild_id: int,
+        route_kind: str,
+        route_snapshot: dict[str, Any],
+        legs: list[dict[str, Any]],
+    ) -> None:
+        """Create a tracked route's thread row and its per-leg rows together. Each entry in
+        ``legs`` needs side/id_terminal/id_commodity, plus optional quoted_price/quoted_scu/
+        quoted_status - leg_index is assigned from list order."""
+        async with self.connect() as db:
+            await db.execute(
+                """INSERT INTO route_progression_threads
+                   (thread_id, user_id, guild_id, route_kind, route_snapshot, total_legs)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (thread_id, user_id, guild_id, route_kind, json.dumps(route_snapshot), len(legs)),
+            )
+            await db.executemany(
+                """INSERT INTO route_progression_legs
+                   (thread_id, leg_index, side, id_terminal, id_commodity,
+                    quoted_price, quoted_scu, quoted_status)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                [
+                    (
+                        thread_id, index, leg["side"], leg["id_terminal"], leg["id_commodity"],
+                        leg.get("quoted_price"), leg.get("quoted_scu"), leg.get("quoted_status"),
+                    )
+                    for index, leg in enumerate(legs)
+                ],
+            )
+            await db.commit()
+
+    async def get_route_progression_thread(self, thread_id: int) -> dict[str, Any] | None:
+        async with self.connect() as db:
+            cursor = await db.execute(
+                "SELECT * FROM route_progression_threads WHERE thread_id = ?", (thread_id,)
+            )
+            row = await cursor.fetchone()
+        return dict(row) if row is not None else None
+
+    async def get_route_progression_legs(self, thread_id: int) -> list[dict[str, Any]]:
+        async with self.connect() as db:
+            cursor = await db.execute(
+                "SELECT * FROM route_progression_legs WHERE thread_id = ? ORDER BY leg_index",
+                (thread_id,),
+            )
+            rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    async def record_route_progression_leg_outcome(
+        self,
+        *,
+        thread_id: int,
+        leg_index: int,
+        outcome: str,
+        actual_price: float | None = None,
+        actual_scu: float | None = None,
+        precision: str | None = None,
+    ) -> None:
+        async with self.connect() as db:
+            await db.execute(
+                """UPDATE route_progression_legs
+                   SET outcome = ?, actual_price = ?, actual_scu = ?, precision = ?,
+                       reported_at = datetime('now')
+                   WHERE thread_id = ? AND leg_index = ?""",
+                (outcome, actual_price, actual_scu, precision, thread_id, leg_index),
+            )
+            await db.commit()
+
+    async def set_route_progression_thread_status(self, thread_id: int, status: str) -> None:
+        """status: 'completed' or 'abandoned'. completed_at's name predates 'abandoned'
+        being added - read it as "when this thread stopped being in_progress," not
+        literally "when it succeeded"."""
+        async with self.connect() as db:
+            await db.execute(
+                """UPDATE route_progression_threads
+                   SET status = ?, completed_at = datetime('now') WHERE thread_id = ?""",
+                (status, thread_id),
+            )
+            await db.commit()
+
+    async def get_stale_route_progression_threads(self, *, older_than_hours: float) -> list[dict[str, Any]]:
+        """in_progress threads with no recent activity - used by the abandonment poller to
+        auto-close threads nobody came back to. Activity is the thread's most recently
+        reported leg, or its own created_at if no leg has been reported yet."""
+        threshold_modifier = f"-{abs(older_than_hours)} hours"
+        async with self.connect() as db:
+            cursor = await db.execute(
+                """SELECT t.* FROM route_progression_threads AS t
+                   WHERE t.status = 'in_progress'
+                     AND COALESCE(
+                           (SELECT MAX(l.reported_at) FROM route_progression_legs AS l
+                            WHERE l.thread_id = t.thread_id),
+                           t.created_at
+                         ) <= datetime('now', ?)""",
+                (threshold_modifier,),
+            )
+            rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
 
     async def record_terminal_data_health_snapshot(self, rows: list[dict[str, Any]]) -> tuple[int, int]:
         normalized = []

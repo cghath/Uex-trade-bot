@@ -20,6 +20,7 @@ import httpx
 
 from bot.cogs import prices as prices_module
 from bot.cogs.prices import Prices
+from bot.cogs.route_progression import RouteProgression, RouteTrackingView
 from bot.db.database import Database
 from bot.uex.client import UexClient
 from bot.uex.mixed_routes import MixedCargoItem, MixedRoute
@@ -96,6 +97,7 @@ async def _run_command(tmp_path, db_name, market_rows, coro_factory):
     bot = type("FakeBot", (), {})()
     bot.db = db
     bot.uex = client
+    bot.get_cog = lambda name: None
     cog = Prices.__new__(Prices)
     cog.bot = bot
     interaction = _FakeInteraction(111)
@@ -182,6 +184,7 @@ def test_multi_stop_route_fallback_preserves_warnings(tmp_path):
         bot = type("FakeBot", (), {})()
         bot.db = db
         bot.uex = client
+        bot.get_cog = lambda name: None
         cog = Prices.__new__(Prices)
         cog.bot = bot
         interaction = _FakeInteraction(111)
@@ -225,6 +228,7 @@ def test_mixed_routes_discloses_when_cargo_allocation_is_approximate(tmp_path):
         bot = type("FakeBot", (), {})()
         bot.db = db
         bot.uex = client
+        bot.get_cog = lambda name: None
         cog = Prices.__new__(Prices)
         cog.bot = bot
         interaction = _FakeInteraction(111)
@@ -331,6 +335,7 @@ def test_multi_stop_route_fallback_preserves_approximation_disclosure(tmp_path):
         bot = type("FakeBot", (), {})()
         bot.db = db
         bot.uex = client
+        bot.get_cog = lambda name: None
         cog = Prices.__new__(Prices)
         cog.bot = bot
         interaction = _FakeInteraction(111)
@@ -459,6 +464,7 @@ def test_best_route_discloses_when_routes_are_truncated_for_size(tmp_path, monke
         bot = type("FakeBot", (), {})()
         bot.db = db
         bot.uex = client
+        bot.get_cog = lambda name: None
         cog = Prices.__new__(Prices)
         cog.bot = bot
         interaction = _FakeInteraction(1)
@@ -527,6 +533,7 @@ def test_best_route_primary_branch_now_warns_on_a_cross_system_route(tmp_path):
         bot = type("FakeBot", (), {})()
         bot.db = db
         bot.uex = client
+        bot.get_cog = lambda name: None
         cog = Prices.__new__(Prices)
         cog.bot = bot
         interaction = _FakeInteraction(1)
@@ -540,6 +547,60 @@ def test_best_route_primary_branch_now_warns_on_a_cross_system_route(tmp_path):
         _, kwargs = interaction.followup.sent[0]
         embed = kwargs["embed"]
         assert any("crosses systems" in (f.value or "") for f in embed.fields), embed.fields
+
+    asyncio.run(run())
+
+
+def test_best_route_attaches_a_route_tracking_view_when_the_cog_is_loaded(tmp_path):
+    """/best-route's primary branch attaches a 'Track this route' button per route shown,
+    but only when RouteProgression actually loaded - a cog load failure elsewhere must not
+    break /best-route itself (see the bare bot.get_cog=lambda name: None fixtures on every
+    other test in this file, which exercise the no-cog fallback instead)."""
+    async def run():
+        db = Database(tmp_path / "best_route_tracking_view.sqlite3", Fernet(Fernet.generate_key()))
+        await db.init()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            path = request.url.path
+            if "commodities_prices" in path:
+                return httpx.Response(200, json={"status": "ok", "data": [
+                    {"id_commodity": 1, "commodity_name": "Gold"}
+                ]})
+            if "commodities_routes" in path:
+                return httpx.Response(200, json={"status": "ok", "data": [
+                    {
+                        "id_terminal_origin": 1, "id_terminal_destination": 101,
+                        "origin_terminal_name": "Origin 1", "destination_terminal_name": "Destination 1",
+                        "price_origin": 100, "price_destination": 200, "price_margin": 50, "price_roi": 100,
+                        "distance": 5, "score": 100, "scu_origin": 10, "scu_destination": 10,
+                        "status_origin": 1, "status_destination": 1, "profit": 100,
+                    }
+                ]})
+            return httpx.Response(200, json={"status": "ok", "data": []})
+
+        client = UexClient(app_token="test", base_url="https://uex.test")
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+        tracking_cog = RouteProgression.__new__(RouteProgression)
+        bot = type("FakeBot", (), {})()
+        bot.db = db
+        bot.uex = client
+        bot.get_cog = lambda name: tracking_cog if name == "RouteProgression" else None
+        cog = Prices.__new__(Prices)
+        cog.bot = bot
+        interaction = _FakeInteraction(1)
+
+        try:
+            await cog.best_route.callback(cog, interaction, commodity="Gold")
+        finally:
+            await client.aclose()
+
+        assert interaction.followup.sent, "expected at least one followup"
+        _, kwargs = interaction.followup.sent[0]
+        view = kwargs.get("view")
+        assert isinstance(view, RouteTrackingView)
+        assert len(view.children) == 1, "one route shown -> one tracking button"
 
     asyncio.run(run())
 
@@ -583,6 +644,7 @@ def test_best_route_primary_branch_discloses_missing_distance_instead_of_silence
         bot = type("FakeBot", (), {})()
         bot.db = db
         bot.uex = client
+        bot.get_cog = lambda name: None
         cog = Prices.__new__(Prices)
         cog.bot = bot
         interaction = _FakeInteraction(1)
@@ -659,6 +721,7 @@ def test_best_route_fallback_branch_shows_evidence_levels_for_missing_stock_and_
         bot = type("FakeBot", (), {})()
         bot.db = db
         bot.uex = client
+        bot.get_cog = lambda name: None
         cog = Prices.__new__(Prices)
         cog.bot = bot
         interaction = _FakeInteraction(1)
@@ -734,6 +797,7 @@ def test_best_route_fallback_branch_anchors_history_to_last_seen_not_wall_clock(
         bot = type("FakeBot", (), {})()
         bot.db = db
         bot.uex = client
+        bot.get_cog = lambda name: None
         cog = Prices.__new__(Prices)
         cog.bot = bot
         interaction = _FakeInteraction(1)
@@ -788,6 +852,7 @@ def test_best_route_fallback_branch_discloses_when_routes_are_truncated_for_size
         bot = type("FakeBot", (), {})()
         bot.db = db
         bot.uex = client
+        bot.get_cog = lambda name: None
         cog = Prices.__new__(Prices)
         cog.bot = bot
         interaction = _FakeInteraction(1)
