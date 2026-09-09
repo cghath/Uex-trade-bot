@@ -893,6 +893,16 @@ class Marketplace(commands.Cog):
             "id_category": category,
             "currency": currency.value,
             "unit": unit,
+            # POST /marketplace_advertise's own is_production field ("1 for production, 0
+            # for sandbox") was never set here, unlike bot/uex/inventory.py's
+            # build_inventory_listing_payload (used by /inventory-sell and
+            # /inventory-post-now), which already hardcodes 1. UEX raises no
+            # missing_is_production error - it's optional, so an omitted value silently
+            # defaults to something, and every real listing this command created still
+            # got back a normal id_listing and a "Listing posted" confirmation - it just
+            # never showed up anywhere real (not even in review), because it was never
+            # marked as a production listing in the first place.
+            "is_production": 1,
         }
 
         if item:

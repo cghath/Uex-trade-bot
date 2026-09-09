@@ -499,6 +499,39 @@ def test_marketplace_post_opens_the_modal_with_a_valid_unit(tmp_path):
     asyncio.run(run())
 
 
+def test_marketplace_post_payload_is_marked_production(tmp_path):
+    """Real defect, reported live: a listing posted successfully (a real id_listing came
+    back, the bot said "Listing posted to UEX Marketplace") but never showed up anywhere
+    on UEX's side - not even in review. POST /marketplace_advertise's own is_production
+    field ("1 for production, 0 for sandbox") was never set here, unlike bot/uex/
+    inventory.py's build_inventory_listing_payload (used by /inventory-sell and
+    /inventory-post-now), which already hardcodes it. UEX raises no missing_is_production
+    error - it's optional and silently defaults away from production when omitted."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await db.set_user_secret_key(1, "secret")
+        bot = type("FakeBot", (), {})()
+        bot.db = db
+        cog = Marketplace.__new__(Marketplace)
+        cog.bot = bot
+        interaction = _PostInteraction(1)
+
+        await cog.marketplace_post.callback(
+            cog, interaction,
+            operation=app_commands.Choice(name="Sell", value="sell"),
+            type=app_commands.Choice(name="Item", value="item"),
+            category=1,
+            currency=app_commands.Choice(name="UEC", value="UEC"),
+            unit="scu",
+        )
+
+        modal = interaction.response.modals[0]
+        assert modal.base_payload["is_production"] == 1
+
+    asyncio.run(run())
+
+
 def test_marketplace_post_a_service_only_unit_is_rejected_for_an_item_listing(tmp_path):
     """Neighboring case of the same defect class: 'hour' is a real UEX unit, just not for
     an item listing - the validation must be type-scoped, not just membership in ANY
