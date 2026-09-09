@@ -62,6 +62,20 @@ TYPE_CHOICES = [
 ]
 DEFAULT_LANGUAGE = "en_US"
 
+# UEX's own accepted `unit` values for POST /marketplace_advertise, scoped by listing
+# type - confirmed against docs/UEX_API_2.0_reference.md's "Unit Reference" table, not
+# guessed. `unit` used to be a free-text modal field with only a suggestive placeholder
+# ("e.g. unit, scu, crate, hour, day, contract") - a real listing failed live with
+# `invalid_unit` because the player typed "3" (a quantity, not a unit). Scoping
+# suggestions to the already-chosen `type` (unit_autocomplete below) is the same fix
+# category_autocomplete already applies to `category` just below.
+UNITS_BY_TYPE = {
+    "item": ["box", "crate", "cscu", "dozen", "hundred", "pack", "pair", "scu", "set", "stack", "thousand", "unit"],
+    "service": ["contract", "cycle", "day", "event", "expedition", "gm", "hour", "minute", "mission", "month",
+                "operation", "route", "run", "service", "session", "shift", "trip", "week"],
+    "contract": ["contract", "mission"],
+}
+
 # Verified against live /marketplace_prices_history data: quality_tier is a 0-7 bucket of the
 # 0-1000 `quality` field, NOT evenly spaced - see bot/uex/client.py:get_marketplace_prices_history.
 QUALITY_TIER_CHOICES = [
@@ -119,6 +133,16 @@ async def category_autocomplete(interaction: discord.Interaction, current: str) 
     current_lower = current.lower()
     matches = [c for c in categories if current_lower in (c.get("name") or "").lower()][:25]
     return [app_commands.Choice(name=(c.get("name") or "")[:100], value=c.get("id")) for c in matches]
+
+
+async def unit_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
+    # Same "read the already-chosen sibling option, fall back to 'item'" pattern as
+    # category_autocomplete above - UEX's valid unit values depend on `type`.
+    chosen_type = getattr(interaction.namespace, "type", None) or "item"
+    units = UNITS_BY_TYPE.get(chosen_type, UNITS_BY_TYPE["item"])
+    current_lower = current.lower()
+    matches = [u for u in units if current_lower in u][:25]
+    return [app_commands.Choice(name=u, value=u) for u in matches]
 
 
 class ConfirmListingView(discord.ui.View):
@@ -296,9 +320,6 @@ class ConfirmDeleteListingView(discord.ui.View):
 class ListingDetailsModal(discord.ui.Modal, title="Marketplace listing details"):
     listing_title = discord.ui.TextInput(label="Title", max_length=140, required=True)
     price = discord.ui.TextInput(label="Price (whole number)", max_length=12, required=True)
-    unit = discord.ui.TextInput(
-        label="Unit", placeholder="e.g. unit, scu, crate, hour, day, contract", max_length=32, required=True
-    )
     description = discord.ui.TextInput(label="Description", style=discord.TextStyle.paragraph, max_length=2000, required=True)
 
     def __init__(self, bot: commands.Bot, base_payload: dict) -> None:
@@ -328,7 +349,6 @@ class ListingDetailsModal(discord.ui.Modal, title="Marketplace listing details")
             {
                 "title": str(self.listing_title.value),
                 "price": price_value,
-                "unit": str(self.unit.value),
                 "description": str(self.description.value),
                 "language": DEFAULT_LANGUAGE,
             }
@@ -835,10 +855,11 @@ class Marketplace(commands.Cog):
         type="What kind of listing this is",
         category="Listing category",
         currency="Currency for the price",
+        unit="What one unit of price is measured in - options depend on the type you picked",
         item="Optional: link this listing to a specific catalog item",
     )
     @app_commands.choices(operation=OPERATION_CHOICES, type=TYPE_CHOICES, currency=CURRENCY_CHOICES)
-    @app_commands.autocomplete(category=category_autocomplete, item=traded_item_autocomplete)
+    @app_commands.autocomplete(category=category_autocomplete, unit=unit_autocomplete, item=traded_item_autocomplete)
     async def marketplace_post(
         self,
         interaction: discord.Interaction,
@@ -846,6 +867,7 @@ class Marketplace(commands.Cog):
         type: app_commands.Choice[str],
         category: int,
         currency: app_commands.Choice[str],
+        unit: str,
         item: str | None = None,
     ) -> None:
         secret_key = await self.bot.db.get_user_secret_key(interaction.user.id)
@@ -856,11 +878,21 @@ class Marketplace(commands.Cog):
             )
             return
 
+        valid_units = UNITS_BY_TYPE.get(type.value, UNITS_BY_TYPE["item"])
+        if unit not in valid_units:
+            await interaction.response.send_message(
+                f"'{unit}' isn't a valid unit for a **{type.name}** listing - pick one from the autocomplete "
+                f"list. Valid options: {', '.join(valid_units)}.",
+                ephemeral=True,
+            )
+            return
+
         base_payload = {
             "operation": operation.value,
             "type": type.value,
             "id_category": category,
             "currency": currency.value,
+            "unit": unit,
         }
 
         if item:

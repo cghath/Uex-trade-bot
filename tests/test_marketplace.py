@@ -1,15 +1,27 @@
-"""Marketplace cog tests: the delete-listing local-state ordering guard, and
-/my-negotiations' item-link resolution via a per-row listing lookup."""
+"""Marketplace cog tests: the delete-listing local-state ordering guard,
+/my-negotiations' item-link resolution via a per-row listing lookup, and
+/marketplace-post's unit validation (a real live listing failed with UEX's own
+invalid_unit rejection before this was added)."""
 from __future__ import annotations
 
 import asyncio
 import sqlite3
 from datetime import datetime, timezone
+from types import SimpleNamespace as NS
 
 from cryptography.fernet import Fernet
+import discord
+from discord import app_commands
 import httpx
 
-from bot.cogs.marketplace import ConfirmDeleteListingView, ConfirmListingView, Marketplace
+from bot.cogs.marketplace import (
+    UNITS_BY_TYPE,
+    ConfirmDeleteListingView,
+    ConfirmListingView,
+    ListingDetailsModal,
+    Marketplace,
+    unit_autocomplete,
+)
 from bot.db.database import Database
 from bot.uex.client import UexClient
 from unittest.mock import AsyncMock
@@ -361,5 +373,156 @@ def test_transient_database_error_does_not_kill_marketplace_collector():
 
         assert not instance.snapshot_item_activity.failed(), "collector task terminated after one database error"
         db.upsert_marketplace_item_activity.assert_awaited_once()
+
+    asyncio.run(run())
+
+
+# -- /marketplace-post: unit selection & validation ---------------------------------------
+
+def test_valid_units_genuinely_differ_by_listing_type():
+    """The bug's actual root cause, pinned down as a plain data assertion: UEX's valid
+    units for POST /marketplace_advertise depend on `type` - a service-only unit ('hour')
+    is not interchangeable with an item-only one ('scu')."""
+    assert "hour" in UNITS_BY_TYPE["service"] and "hour" not in UNITS_BY_TYPE["item"]
+    assert "scu" in UNITS_BY_TYPE["item"] and "scu" not in UNITS_BY_TYPE["service"]
+
+
+def test_unit_autocomplete_scopes_suggestions_to_the_chosen_type():
+    async def run():
+        interaction = NS(namespace=NS(type="service"))
+        choices = await unit_autocomplete(interaction, "")
+        values = {c.value for c in choices}
+        assert values == set(UNITS_BY_TYPE["service"])
+        assert "scu" not in values, "an item-only unit must never leak into a service listing's suggestions"
+
+    asyncio.run(run())
+
+
+def test_unit_autocomplete_falls_back_to_item_when_type_not_chosen_yet():
+    """Matches category_autocomplete's own precedent: `type` may not be filled in yet if
+    the player reaches `unit` first."""
+    async def run():
+        interaction = NS(namespace=NS())
+        choices = await unit_autocomplete(interaction, "")
+        assert {c.value for c in choices} == set(UNITS_BY_TYPE["item"])
+
+    asyncio.run(run())
+
+
+def test_unit_autocomplete_filters_by_the_typed_text():
+    async def run():
+        interaction = NS(namespace=NS(type="service"))
+        choices = await unit_autocomplete(interaction, "da")
+        assert [c.value for c in choices] == ["day"]
+
+    asyncio.run(run())
+
+
+class _PostResponse:
+    def __init__(self):
+        self.messages = []
+        self.modals = []
+
+    async def send_message(self, *args, **kwargs):
+        self.messages.append((args, kwargs))
+
+    async def send_modal(self, modal):
+        self.modals.append(modal)
+
+
+class _PostInteraction:
+    def __init__(self, user_id):
+        self.user = type("U", (), {"id": user_id})()
+        self.response = _PostResponse()
+
+
+def test_marketplace_post_rejects_an_invalid_unit_before_opening_the_modal(tmp_path):
+    """Real defect, reproduced live: a listing failed with UEX's own invalid_unit
+    rejection because the old free-text unit field let a quantity ('3') through where a
+    real unit belonged. The command must catch this itself and never even open the
+    details modal - the player should never reach a UEX-side rejection for this."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await db.set_user_secret_key(1, "secret")
+        bot = type("FakeBot", (), {})()
+        bot.db = db
+        cog = Marketplace.__new__(Marketplace)
+        cog.bot = bot
+        interaction = _PostInteraction(1)
+
+        await cog.marketplace_post.callback(
+            cog, interaction,
+            operation=app_commands.Choice(name="Sell", value="sell"),
+            type=app_commands.Choice(name="Item", value="item"),
+            category=1,
+            currency=app_commands.Choice(name="UEC", value="UEC"),
+            unit="3",
+        )
+
+        assert not interaction.response.modals, "must never open the modal for an invalid unit"
+        assert len(interaction.response.messages) == 1
+        text = interaction.response.messages[0][0][0]
+        assert "3" in text
+        assert "isn't a valid unit" in text
+        assert "scu" in text, "valid options should be listed so the player can pick a real one"
+
+    asyncio.run(run())
+
+
+def test_marketplace_post_opens_the_modal_with_a_valid_unit(tmp_path):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await db.set_user_secret_key(1, "secret")
+        bot = type("FakeBot", (), {})()
+        bot.db = db
+        cog = Marketplace.__new__(Marketplace)
+        cog.bot = bot
+        interaction = _PostInteraction(1)
+
+        await cog.marketplace_post.callback(
+            cog, interaction,
+            operation=app_commands.Choice(name="Sell", value="sell"),
+            type=app_commands.Choice(name="Item", value="item"),
+            category=1,
+            currency=app_commands.Choice(name="UEC", value="UEC"),
+            unit="scu",
+        )
+
+        assert not interaction.response.messages
+        assert len(interaction.response.modals) == 1
+        modal = interaction.response.modals[0]
+        assert isinstance(modal, ListingDetailsModal)
+        assert modal.base_payload["unit"] == "scu"
+
+    asyncio.run(run())
+
+
+def test_marketplace_post_a_service_only_unit_is_rejected_for_an_item_listing(tmp_path):
+    """Neighboring case of the same defect class: 'hour' is a real UEX unit, just not for
+    an item listing - the validation must be type-scoped, not just membership in ANY
+    valid unit across every type."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await db.set_user_secret_key(1, "secret")
+        bot = type("FakeBot", (), {})()
+        bot.db = db
+        cog = Marketplace.__new__(Marketplace)
+        cog.bot = bot
+        interaction = _PostInteraction(1)
+
+        await cog.marketplace_post.callback(
+            cog, interaction,
+            operation=app_commands.Choice(name="Sell", value="sell"),
+            type=app_commands.Choice(name="Item", value="item"),
+            category=1,
+            currency=app_commands.Choice(name="UEC", value="UEC"),
+            unit="hour",
+        )
+
+        assert not interaction.response.modals
+        assert "hour" in interaction.response.messages[0][0][0]
 
     asyncio.run(run())
