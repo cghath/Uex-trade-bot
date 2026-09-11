@@ -154,7 +154,18 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
   actually executes it). `/intelligence-brief`'s mixed-route recommendations aren't
   wired in.
 
-- [ ] **Recommendation Outcome Tracking, remaining follow-ups** *(complexity: Medium)*:
+- [x] **Show the reported outcome inline on the leg's own message**: Shipped 2026-09-10,
+  from a real user screenshot: a reported leg's message went straight to disabled
+  buttons with the original "Quoted: ..." text still showing and no visible sign of what
+  was actually reported. `describe_leg_outcome` (`bot/uex/route_progression.py`, pure
+  text formatting) now renders a short "**Reported:** ..." line per outcome (matched /
+  less / missing / more-exact / more-floor / abandoned), and every commit point
+  (`LegOutcomeView.matched`, the "less" modal, `MoreOutcomeFollowupView`'s drained/
+  capacity-limited buttons, `AbandonConfirmView.confirm`) appends it under the existing
+  "Quoted: ..." line via a new `_embed_with_outcome` helper, rather than replacing it -
+  so the same message keeps showing both what was quoted and what happened. Sets up the
+  Phase 2 UEX-submission button below to have a natural home (next to this line) once
+  it's built.
   - Extend `track_record_modifier` to `/mixed-routes`, `/multi-stop-route`, and
     `/intelligence-brief` - these all go through `cargo_confidences`
     (`bot/uex/route_presentation.py`), which would need a per-item track-record lookup
@@ -168,9 +179,11 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
     so a bot restart mid-flow doesn't break in-flight leg-outcome buttons until the 48h
     poller sweeps the thread - a real, disclosed gap today, not a silent one.
   - **Phase 2, deferred**: optionally submit a confirmed report to UEX's own
-    `POST /data_submit` (real endpoint, confirmed in `docs/UEX_API_2.0_reference.md`).
-    Must be explicit per-report opt-in, never automatic - authenticated as the individual
-    player (their linked secret key, same plumbing as `account.py`). Checked-research
+    `POST /data_submit` (real endpoint, confirmed in `docs/UEX_API_2.0_reference.md`), via
+    a button next to the "Reported: ..." line the leg's message now shows (see above) -
+    user-requested placement, not yet built. Must be explicit per-report opt-in, never
+    automatic - authenticated as the individual player (their linked secret key, same
+    plumbing as `account.py`). Checked-research
     findings: UEX shows no visible reputation score/tier (only a raw-volume "most active"
     leaderboard), but their Terms of Use warn that repeatedly submitting improper reports
     risks a temporary account lock, with no accuracy threshold disclosed. Report

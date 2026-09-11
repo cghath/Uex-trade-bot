@@ -19,8 +19,13 @@ from bot.cogs.route_progression import (
     RouteLegInput,
     RouteProgression,
 )
+from bot.cogs.route_progression import _embed_with_outcome
 from bot.db.database import Database
-from bot.uex.route_progression import is_reportable_amount, terminal_state_update_for_outcome
+from bot.uex.route_progression import (
+    describe_leg_outcome,
+    is_reportable_amount,
+    terminal_state_update_for_outcome,
+)
 
 
 def _make_db(tmp_path) -> Database:
@@ -178,6 +183,63 @@ def test_invalid_side_raises():
 def test_invalid_outcome_raises():
     with pytest.raises(ValueError):
         terminal_state_update_for_outcome(outcome="not_a_real_outcome", **_leg())
+
+
+# -- describe_leg_outcome / _embed_with_outcome (pure logic) -----------------------------
+
+def test_describe_leg_outcome_matched():
+    assert describe_leg_outcome(outcome="matched") == "**Reported:** Matched the quote."
+
+
+def test_describe_leg_outcome_missing():
+    assert describe_leg_outcome(outcome="missing") == "**Reported:** Nothing was there."
+
+
+def test_describe_leg_outcome_less_includes_the_actual_amount_and_price():
+    text = describe_leg_outcome(outcome="less", actual_scu=20.0, actual_price=95.0)
+    assert "Less than quoted" in text
+    assert "20 SCU" in text
+    assert "95.00 aUEC/unit" in text
+
+
+def test_describe_leg_outcome_less_with_no_price_omits_the_price_clause():
+    text = describe_leg_outcome(outcome="less", actual_scu=20.0)
+    assert "aUEC/unit" not in text
+
+
+def test_describe_leg_outcome_more_exact_says_drained():
+    text = describe_leg_outcome(outcome="more", actual_scu=80.0, precision="exact")
+    assert "More than quoted" in text
+    assert "drained" in text
+
+
+def test_describe_leg_outcome_more_floor_says_capped():
+    text = describe_leg_outcome(outcome="more", actual_scu=80.0, precision="floor")
+    assert "at least 80 SCU" in text
+    assert "capped" in text
+
+
+def test_describe_leg_outcome_more_without_precision_raises():
+    with pytest.raises(ValueError):
+        describe_leg_outcome(outcome="more", actual_scu=80.0)
+
+
+def test_describe_leg_outcome_rejects_an_invalid_outcome():
+    with pytest.raises(ValueError):
+        describe_leg_outcome(outcome="not_a_real_outcome")
+
+
+def test_embed_with_outcome_appends_under_the_existing_description():
+    embed = discord.Embed(description="Quoted: 100.00 aUEC/unit · 50 SCU")
+    new_embed = _embed_with_outcome(embed, "**Reported:** Matched the quote.")
+    assert new_embed.description == "Quoted: 100.00 aUEC/unit · 50 SCU\n\n**Reported:** Matched the quote."
+    assert embed.description == "Quoted: 100.00 aUEC/unit · 50 SCU", "the original embed must not be mutated"
+
+
+def test_embed_with_outcome_with_no_existing_description_just_sets_it():
+    embed = discord.Embed(description=None)
+    new_embed = _embed_with_outcome(embed, "**Reported:** Nothing was there.")
+    assert new_embed.description == "**Reported:** Nothing was there."
 
 
 # -- Database CRUD ------------------------------------------------------------------------
@@ -508,6 +570,17 @@ class _FakeInteraction:
         self.channel = None
 
 
+class _FakeMessage:
+    def __init__(self, *, embeds=None):
+        self.embeds = list(embeds) if embeds else []
+        self.edits = []
+
+    async def edit(self, **kwargs):
+        self.edits.append(kwargs)
+        if "embed" in kwargs:
+            self.embeds = [kwargs["embed"]]
+
+
 class _FakeCog:
     def __init__(self):
         self.calls = []
@@ -586,6 +659,38 @@ def test_matched_button_claims_the_leg_and_reports_immediately():
         await view.matched.callback(second)
         assert len(cog.calls) == 1, "a second click must not double-report"
         assert "already reported" in second.response.messages[0][0][0]
+
+    asyncio.run(run())
+
+
+def test_matched_button_shows_the_reported_outcome_under_the_original_quoted_line():
+    """The exact behavior the user asked for: after a leg is reported, the SAME message
+    box shows what was reported, under the original 'Quoted: ...' text - not just
+    disabled buttons with no visible result."""
+    async def run():
+        cog = _FakeCog()
+        view = LegOutcomeView(cog=cog, thread_id=1, leg_index=0, leg=_leg_input())
+        view.message = _FakeMessage(embeds=[discord.Embed(description="Quoted: 100.00 aUEC/unit · 50 SCU")])
+        interaction = _FakeInteraction()
+        await view.matched.callback(interaction)
+
+        edited_embed = interaction.response.edited_views[0]["embed"]
+        assert "Quoted: 100.00 aUEC/unit · 50 SCU" in edited_embed.description
+        assert "Matched the quote" in edited_embed.description
+
+    asyncio.run(run())
+
+
+def test_matched_button_with_no_stored_message_still_reports_without_error():
+    """view.message is only set once _post_leg_prompt actually sends it - must not crash
+    if it's somehow still None (matches every other test in this file, which never set it)."""
+    async def run():
+        cog = _FakeCog()
+        view = LegOutcomeView(cog=cog, thread_id=1, leg_index=0, leg=_leg_input())
+        interaction = _FakeInteraction()
+        await view.matched.callback(interaction)
+        assert "embed" not in interaction.response.edited_views[0]
+        assert len(cog.calls) == 1
 
     asyncio.run(run())
 
@@ -809,6 +914,77 @@ def test_less_modal_submission_after_the_leg_was_already_resolved_is_refused():
 
         assert not cog.calls, "a modal submitted after the leg resolved must not report again"
         assert "already reported" in interaction.response.messages[0][0][0]
+
+    asyncio.run(run())
+
+
+def test_less_modal_submission_shows_the_reported_amount_on_the_original_message():
+    async def run():
+        cog = _FakeCog()
+        view = LegOutcomeView(cog=cog, thread_id=1, leg_index=0, leg=_leg_input())
+        view.message = _FakeMessage(embeds=[discord.Embed(description="Quoted: 100.00 aUEC/unit · 50 SCU")])
+        modal = ActualAmountModal(
+            cog=cog, thread_id=1, leg_index=0, leg=view.leg, flow="less", parent_view=view
+        )
+        modal.scu_input._value = "20"
+        modal.price_input._value = ""
+        await modal.on_submit(_FakeInteraction())
+
+        edited_embed = view.message.edits[-1]["embed"]
+        assert "Quoted: 100.00 aUEC/unit · 50 SCU" in edited_embed.description
+        assert "Less than quoted" in edited_embed.description
+        assert "20 SCU" in edited_embed.description
+
+    asyncio.run(run())
+
+
+def test_more_outcome_drained_shows_the_reported_amount_on_the_original_message():
+    async def run():
+        cog = _FakeCog()
+        view = LegOutcomeView(cog=cog, thread_id=1, leg_index=0, leg=_leg_input())
+        view.message = _FakeMessage(embeds=[discord.Embed(description="Quoted: 100.00 aUEC/unit · 50 SCU")])
+        followup = MoreOutcomeFollowupView(
+            cog=cog, thread_id=1, leg_index=0, leg=view.leg, actual_price=None, actual_scu=80.0,
+            parent_view=view,
+        )
+        await followup.drained.callback(_FakeInteraction())
+
+        edited_embed = view.message.edits[-1]["embed"]
+        assert "More than quoted" in edited_embed.description
+        assert "drained" in edited_embed.description
+
+    asyncio.run(run())
+
+
+def test_more_outcome_capacity_limited_shows_the_floor_report_on_the_original_message():
+    async def run():
+        cog = _FakeCog()
+        view = LegOutcomeView(cog=cog, thread_id=1, leg_index=0, leg=_leg_input())
+        view.message = _FakeMessage(embeds=[discord.Embed(description="Quoted: 100.00 aUEC/unit · 50 SCU")])
+        followup = MoreOutcomeFollowupView(
+            cog=cog, thread_id=1, leg_index=0, leg=view.leg, actual_price=None, actual_scu=80.0,
+            parent_view=view,
+        )
+        await followup.capacity_limited.callback(_FakeInteraction())
+
+        edited_embed = view.message.edits[-1]["embed"]
+        assert "at least 80 SCU" in edited_embed.description
+        assert "capped" in edited_embed.description
+
+    asyncio.run(run())
+
+
+def test_abandoning_a_route_shows_an_abandoned_note_on_the_original_message():
+    async def run():
+        cog = _FakeCog()
+        view = LegOutcomeView(cog=cog, thread_id=1, leg_index=0, leg=_leg_input())
+        view.message = _FakeMessage(embeds=[discord.Embed(description="Quoted: 100.00 aUEC/unit · 50 SCU")])
+        confirm_view = AbandonConfirmView(cog=cog, thread_id=1, parent_view=view)
+        await confirm_view.confirm.callback(_FakeInteraction())
+
+        edited_embed = view.message.edits[-1]["embed"]
+        assert "Quoted: 100.00 aUEC/unit · 50 SCU" in edited_embed.description
+        assert "Route abandoned" in edited_embed.description
 
     asyncio.run(run())
 

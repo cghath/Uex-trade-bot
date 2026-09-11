@@ -19,7 +19,11 @@ import logging
 import discord
 from discord.ext import commands, tasks
 
-from bot.uex.route_progression import is_reportable_amount, terminal_state_update_for_outcome
+from bot.uex.route_progression import (
+    describe_leg_outcome,
+    is_reportable_amount,
+    terminal_state_update_for_outcome,
+)
 
 logger = logging.getLogger("uexbot.route_progression")
 
@@ -30,6 +34,15 @@ ABANDONMENT_POLL_HOURS = 6
 ABANDONMENT_HOURS = 48
 
 MAX_TRACKABLE_ROUTES = 5
+
+
+def _embed_with_outcome(embed: discord.Embed, outcome_line: str) -> discord.Embed:
+    """Append a reported-outcome line under a leg prompt's existing 'Quoted: ...' text,
+    rather than replacing it - so the box keeps showing both what was quoted and what
+    actually happened, in the same message it's always lived in."""
+    new_embed = embed.copy()
+    new_embed.description = f"{embed.description}\n\n{outcome_line}" if embed.description else outcome_line
+    return new_embed
 
 
 @dataclass
@@ -129,7 +142,8 @@ class ActualAmountModal(discord.ui.Modal):
                 # as "already reported" forever. See LegOutcomeView.release_claim.
                 self.parent_view.release_claim()
                 raise
-            await self.parent_view.disable_in_background()
+            outcome_line = describe_leg_outcome(outcome=outcome, actual_price=actual_price, actual_scu=actual_scu)
+            await self.parent_view.disable_in_background(outcome_line)
             await self.cog.handle_leg_outcome(
                 interaction.channel, self.thread_id, self.leg_index, self.leg,
                 outcome=outcome, actual_price=actual_price, actual_scu=actual_scu,
@@ -193,7 +207,10 @@ class MoreOutcomeFollowupView(discord.ui.View):
         except discord.HTTPException:
             self._release()
             raise
-        await self.parent_view.disable_in_background()
+        outcome_line = describe_leg_outcome(
+            outcome="more", actual_price=self.actual_price, actual_scu=self.actual_scu, precision="exact",
+        )
+        await self.parent_view.disable_in_background(outcome_line)
         await self.cog.handle_leg_outcome(
             interaction.channel, self.thread_id, self.leg_index, self.leg,
             outcome="more", actual_price=self.actual_price, actual_scu=self.actual_scu, precision="exact",
@@ -208,7 +225,10 @@ class MoreOutcomeFollowupView(discord.ui.View):
         except discord.HTTPException:
             self._release()
             raise
-        await self.parent_view.disable_in_background()
+        outcome_line = describe_leg_outcome(
+            outcome="more", actual_price=self.actual_price, actual_scu=self.actual_scu, precision="floor",
+        )
+        await self.parent_view.disable_in_background(outcome_line)
         await self.cog.handle_leg_outcome(
             interaction.channel, self.thread_id, self.leg_index, self.leg,
             outcome="more", actual_price=self.actual_price, actual_scu=self.actual_scu, precision="floor",
@@ -259,10 +279,13 @@ class LegOutcomeView(discord.ui.View):
         for item in self.children:
             item.disabled = False
 
-    async def disable_in_background(self) -> None:
+    async def disable_in_background(self, outcome_line: str | None = None) -> None:
         if self.message is not None:
             try:
-                await self.message.edit(view=self)
+                edit_kwargs: dict = {"view": self}
+                if outcome_line is not None and self.message.embeds:
+                    edit_kwargs["embed"] = _embed_with_outcome(self.message.embeds[0], outcome_line)
+                await self.message.edit(**edit_kwargs)
             except discord.HTTPException:
                 pass
 
@@ -271,8 +294,13 @@ class LegOutcomeView(discord.ui.View):
         if not self.claim():
             await interaction.response.send_message("This leg was already reported.", ephemeral=True)
             return
+        edit_kwargs: dict = {"view": self}
+        if self.message is not None and self.message.embeds:
+            edit_kwargs["embed"] = _embed_with_outcome(
+                self.message.embeds[0], describe_leg_outcome(outcome="matched")
+            )
         try:
-            await interaction.response.edit_message(view=self)
+            await interaction.response.edit_message(**edit_kwargs)
         except discord.HTTPException:
             # The ack failed BEFORE handle_leg_outcome ran, so nothing was persisted -
             # release the claim so a retry can still record the outcome. See
@@ -353,7 +381,7 @@ class AbandonConfirmView(discord.ui.View):
             for item in self.children:
                 item.disabled = False
             raise
-        await self.parent_view.disable_in_background()
+        await self.parent_view.disable_in_background("**Reported:** Route abandoned.")
         await self.cog.abandon_thread(interaction.channel, self.thread_id, reason="you asked to stop tracking it")
 
     @discord.ui.button(label="No, keep going", style=discord.ButtonStyle.gray)

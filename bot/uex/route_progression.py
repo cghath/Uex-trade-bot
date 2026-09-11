@@ -126,3 +126,32 @@ def terminal_state_update_for_outcome(
         scu_key: scu,
         status_key: status,
     }
+
+
+def describe_leg_outcome(
+    *,
+    outcome: str,
+    actual_price: float | None = None,
+    actual_scu: float | None = None,
+    precision: str | None = None,
+) -> str:
+    """A short, player-facing line describing what was just reported for a leg - shown
+    appended under the original 'Quoted: ...' line once a LegOutcomeView commits, so the
+    leg's message keeps showing what actually happened rather than just going to disabled
+    buttons with no visible result. Pure text formatting only - no I/O, no Discord types."""
+    if outcome not in OUTCOMES:
+        raise ValueError(f"outcome must be one of {OUTCOMES}, got {outcome!r}")
+    if outcome == "matched":
+        return "**Reported:** Matched the quote."
+    if outcome == "missing":
+        return "**Reported:** Nothing was there."
+    scu_text = f"{actual_scu:,.0f} SCU" if actual_scu is not None else "an unspecified amount"
+    price_text = f" at {actual_price:,.2f} aUEC/unit" if actual_price is not None else ""
+    if outcome == "less":
+        return f"**Reported:** Less than quoted - {scu_text}{price_text}."
+    # "more"
+    if precision not in PRECISIONS:
+        raise ValueError(f"precision must be one of {PRECISIONS} for outcome='more', got {precision!r}")
+    if precision == "floor":
+        return f"**Reported:** More than quoted - at least {scu_text}{price_text} (you were capped; more may have been there)."
+    return f"**Reported:** More than quoted - {scu_text}{price_text} (terminal was drained)."
