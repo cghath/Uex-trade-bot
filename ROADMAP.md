@@ -302,7 +302,43 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
   origin -> destination only, matching how the player actually phrased the question) -
   swap the two options to check the reverse leg. No `system` option (both endpoints are
   already fixed to specific terminals, so a star-system filter would be redundant) -
-  the only option dropped relative to `/routes-from`'s set.
+  the only option dropped relative to `/routes-from`'s set. A `budget` option was added
+  the same day, user-requested - see the very next entry.
+- [x] **`/route-on-the-way` budget option**: Shipped 2026-09-10. `estimate_route_cargo`
+  (`bot/uex/ships.py`), the shared cargo-math helper every single-commodity route command
+  (`/best-route`, `/top-routes`, `/routes-from`, `/route-on-the-way`) already calls, never
+  had a budget concept at all - only ship-cargo-capacity and real stock/demand ever capped
+  the estimate, unlike `/mixed-routes`/`/multi-stop-route`'s separate allocator. Added an
+  optional `budget` parameter: when given (and a known `price_origin` to divide it by), it
+  becomes a third candidate cap alongside ship capacity and stock - `limited_by` can now
+  also read `"budget"`. Only `/route-on-the-way` passes a real value; the other three
+  callers are unaffected (`budget=None` by default, identical behavior to before). Tie-
+  break priority generalized from the existing ship-vs-stock rule (ship wins ties, more
+  actionable than real-world stock) to three-way: `ship` > `budget` > `stock` - a player
+  can bring a bigger ship or more capital, but can't make more stock exist. The budget
+  itself is disclosed in the command's footer (`· budget 1,000 aUEC`, matching
+  `/mixed-routes`' existing footer wording exactly) and, when it's the binding constraint,
+  in the route's own Cargo line ("limited by your budget, not cargo space") - showing the
+  cap without also disclosing what it evaluated to would leave the player unable to tell
+  whether it actually did anything.
+- [x] **Saved default budget**: Shipped 2026-09-10, user-requested as a follow-up polish
+  to the entry above - budget was the one route-filter field `/mixed-routes`,
+  `/multi-stop-route`, `/route-from-multi`, and `/route-on-the-way` all take but
+  `/set-trading-preferences` had no way to save a default for, unlike ship/space-only/
+  auto-load-only/system/risk-tolerance. `user_trading_preferences` gained a `budget REAL`
+  column (additive `ALTER TABLE`, matching this table's existing no-migration-framework
+  convention), `DEFAULT_TRADING_PREFERENCES`/`get_trading_preferences`/
+  `set_trading_preferences` all extended the same way `ship_name` was - the existing
+  atomic `INSERT ... ON CONFLICT DO UPDATE` in `set_trading_preferences` needed no
+  structural change at all, since its `DO UPDATE SET` clause and column list are already
+  built from `DEFAULT_TRADING_PREFERENCES`'s own keys generically. All four budget-taking
+  commands now do `if budget is None: budget = prefs["budget"]`, the identical fallback
+  shape already used for `space_only`/`auto_load_only`/`system` in each of them - so a
+  saved budget applies automatically and an explicit `budget:` option on any one call
+  still overrides it, matching how every other saved preference already behaves.
+  `format_trading_preferences` shows the saved default (or "None set"); no dedicated
+  clear-budget command was added (`/clear-trading-preferences` already resets the whole
+  row, matching how every field except ship, which predates this table, already works).
 
 ### Route Economics Depth
 

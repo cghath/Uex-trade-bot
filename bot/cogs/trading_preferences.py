@@ -1,6 +1,5 @@
-"""Saved per-user route-filter defaults (plus your default ship), applied by /best-route,
-/top-routes, /mixed-routes, and /multi-stop-route whenever their matching option is left
-unset."""
+"""Saved per-user route-filter defaults (plus your default ship and budget), applied by
+every route command whenever its matching option is left unset."""
 from __future__ import annotations
 
 import discord
@@ -32,6 +31,7 @@ class TradingPreferences(commands.Cog):
     )
     @app_commands.describe(
         ship="Your default ship - also settable via /set-default-ship, same underlying setting",
+        budget="Default starting aUEC for mixed-routes/multi-stop-route/route-from-multi/route-on-the-way",
         space_only="mixed-routes/multi-stop-route default: require confirmed space stations only",
         capital_ship_access="mixed-routes/multi-stop-route default: force XL-hangar/freight-elevator filtering, any ship",
         auto_load_only="Default auto-load-only for all 4 route commands",
@@ -50,6 +50,7 @@ class TradingPreferences(commands.Cog):
         self,
         interaction: discord.Interaction,
         ship: str | None = None,
+        budget: app_commands.Range[float, 1, 1_000_000_000] | None = None,
         space_only: bool | None = None,
         capital_ship_access: bool | None = None,
         auto_load_only: bool | None = None,
@@ -58,6 +59,7 @@ class TradingPreferences(commands.Cog):
     ) -> None:
         if (
             ship is None
+            and budget is None
             and space_only is None
             and capital_ship_access is None
             and auto_load_only is None
@@ -104,6 +106,7 @@ class TradingPreferences(commands.Cog):
         prefs = await self.bot.db.set_trading_preferences(
             interaction.user.id,
             ship_name=resolved_ship_name,
+            budget=float(budget) if budget is not None else UNSET,
             space_only=space_only if space_only is not None else UNSET,
             capital_ship_access=capital_ship_access if capital_ship_access is not None else UNSET,
             auto_load_only=auto_load_only if auto_load_only is not None else UNSET,

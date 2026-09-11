@@ -33,7 +33,7 @@ def resolve_ship(vehicles: list[dict], query: str) -> dict | None:
 @dataclass
 class CargoEstimate:
     max_scu: float
-    limited_by: str  # "ship" | "stock" | "unknown"
+    limited_by: str  # "ship" | "stock" | "budget" | "unknown"
     run_profit: float | None
     investment: float | None
 
@@ -45,13 +45,16 @@ def estimate_route_cargo(
     destination_scu_wanted: float | None,
     ship_cargo_scu: float | None,
     price_origin: float | None = None,
+    budget: float | None = None,
 ) -> CargoEstimate | None:
     """How much of this commodity a run can actually haul, and the resulting total profit.
 
     The real limit on a haul is the smallest of: how much is in stock to buy at the origin,
-    how much the destination will actually take, and how much cargo space the ship has.
-    Missing/zero values are treated as "no data" and excluded from the comparison rather
-    than treated as a hard zero, since UEX doesn't report stock for every terminal.
+    how much the destination will actually take, how much cargo space the ship has, and (if
+    given) how much the starting budget can afford at price_origin. Missing/zero values are
+    treated as "no data" and excluded from the comparison rather than treated as a hard
+    zero, since UEX doesn't report stock for every terminal. budget is ignored (like the
+    other optional bounds) when price_origin isn't known - there's nothing to divide it by.
     """
     stock_candidates = [v for v in (origin_scu_available, destination_scu_wanted) if v and v > 0]
     stock_limit = min(stock_candidates) if stock_candidates else None
@@ -61,15 +64,22 @@ def estimate_route_cargo(
         candidates.append((stock_limit, "stock"))
     if ship_cargo_scu is not None and ship_cargo_scu > 0:
         candidates.append((ship_cargo_scu, "ship"))
+    if budget is not None and budget > 0 and price_origin is not None and price_origin > 0:
+        candidates.append((budget / price_origin, "budget"))
 
     if not candidates:
         return None
 
-    max_scu, limited_by = min(candidates, key=lambda c: c[0])
-    # If both bounds exist and are equal, credit "ship" as the binding constraint - more
-    # actionable for the player than an arbitrary stock-vs-ship tie-break.
-    if len(candidates) == 2 and candidates[0][0] == candidates[1][0]:
-        limited_by = "ship"
+    min_value = min(c[0] for c in candidates)
+    tied = [c for c in candidates if c[0] == min_value]
+    if len(tied) == 1:
+        max_scu, limited_by = tied[0]
+    else:
+        # Multiple constraints tie for the binding one - credit whichever is most
+        # actionable for the player (bring more capital, or a bigger ship) over one that
+        # isn't (real-world stock/demand, which no in-game decision changes).
+        priority = {"ship": 0, "budget": 1, "stock": 2}
+        max_scu, limited_by = min(tied, key=lambda c: priority[c[1]])
 
     run_profit = round(per_unit_profit * max_scu, 2)
     investment = round(price_origin * max_scu, 2) if price_origin is not None else None

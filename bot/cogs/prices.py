@@ -823,6 +823,8 @@ class Prices(commands.Cog):
         if auto_load_only is None:
             auto_load_only = prefs["auto_load_only"]
         system_value = system.value if system else prefs["preferred_system"]
+        if budget is None:
+            budget = prefs["budget"]
 
         ship_query = ship or await self.bot.db.get_default_ship(interaction.user.id)
         if not ship_query:
@@ -1060,6 +1062,8 @@ class Prices(commands.Cog):
         if auto_load_only is None:
             auto_load_only = prefs["auto_load_only"]
         system_value = system.value if system else prefs["preferred_system"]
+        if budget is None:
+            budget = prefs["budget"]
 
         ship_query = ship or await self.bot.db.get_default_ship(interaction.user.id)
         if not ship_query:
@@ -1395,6 +1399,8 @@ class Prices(commands.Cog):
         if auto_load_only is None:
             auto_load_only = prefs["auto_load_only"]
         system_value = system.value if system else prefs["preferred_system"]
+        if budget is None:
+            budget = prefs["budget"]
 
         ship_query = ship or await self.bot.db.get_default_ship(interaction.user.id)
         if not ship_query:

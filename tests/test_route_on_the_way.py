@@ -251,6 +251,89 @@ def test_route_on_the_way_filters_the_shared_pool_to_both_resolved_ends(tmp_path
     asyncio.run(run())
 
 
+def test_route_on_the_way_shows_the_budget_in_the_footer_and_caps_the_cargo_estimate(tmp_path):
+    """User-requested: /route-on-the-way's budget option should both cap the estimated
+    haul (via estimate_route_cargo's new budget parameter) and disclose the budget
+    itself, not just silently apply it."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await _seed_terminals(db)
+        client = UexClient(app_token="test", base_url="https://uex.test")
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json={"status": "ok", "data": []})
+        ))
+
+        bot = type("FakeBot", (), {})()
+        bot.db = db
+        bot.uex = client
+        bot.get_cog = lambda name: None
+        cog = _make_cog(bot)
+        cog._top_scored_routes_lock = asyncio.Lock()
+        cog._top_scored_routes = [
+            _entry(id_commodity=1, origin_id=1, origin_name="Area18", destination_id=2,
+                   destination_name="Port Tressler", score=100),
+        ]
+        cog._top_scored_routes_updated_at = datetime.now(timezone.utc)
+        interaction = _FakeInteraction(1)
+
+        try:
+            await cog.route_on_the_way.callback(
+                cog, interaction, origin="Area18", destination="Port Tressler", budget=1000.0
+            )
+        finally:
+            await client.aclose()
+
+        embeds = [kwargs["embed"] for _, kwargs in interaction.followup.sent if kwargs.get("embed")]
+        intro_footer = embeds[0].footer.text
+        assert "budget 1,000 aUEC" in intro_footer
+
+        route_embed = next(e for e in embeds if e.title and "Commodity 1" in e.title)
+        route_text = route_embed.fields[0].value
+        assert "limited by your budget" in route_text
+
+    asyncio.run(run())
+
+
+def test_route_on_the_way_falls_back_to_a_saved_budget_preference(tmp_path):
+    """No budget passed on the call itself - only the saved /set-trading-preferences
+    default should apply, same fallback pattern as auto-load-only/system."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await _seed_terminals(db)
+        await db.set_trading_preferences(1, budget=1000.0)
+        client = UexClient(app_token="test", base_url="https://uex.test")
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json={"status": "ok", "data": []})
+        ))
+
+        bot = type("FakeBot", (), {})()
+        bot.db = db
+        bot.uex = client
+        bot.get_cog = lambda name: None
+        cog = _make_cog(bot)
+        cog._top_scored_routes_lock = asyncio.Lock()
+        cog._top_scored_routes = [
+            _entry(id_commodity=1, origin_id=1, origin_name="Area18", destination_id=2,
+                   destination_name="Port Tressler", score=100),
+        ]
+        cog._top_scored_routes_updated_at = datetime.now(timezone.utc)
+        interaction = _FakeInteraction(1)
+
+        try:
+            await cog.route_on_the_way.callback(cog, interaction, origin="Area18", destination="Port Tressler")
+        finally:
+            await client.aclose()
+
+        embeds = [kwargs["embed"] for _, kwargs in interaction.followup.sent if kwargs.get("embed")]
+        assert "budget 1,000 aUEC" in embeds[0].footer.text
+
+    asyncio.run(run())
+
+
 def test_route_on_the_way_direction_matters(tmp_path):
     """A route in the reverse direction (destination -> origin) must not satisfy a query
     for origin -> destination - the command is direction-specific, matching how the

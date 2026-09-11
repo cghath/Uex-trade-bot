@@ -1,10 +1,11 @@
 """Saved trading preferences: pure formatting, DB round-trip, and route-command wiring.
 
 Feature: store per-user defaults for space-only terminals, capital-ship access,
-auto-loading, preferred system, and risk tolerance, applied by /best-route, /top-routes,
-/mixed-routes, and /multi-stop-route whenever their matching option is left unset.
-Risk tolerance is stored and shown but not yet enforced by any route command - a
-deliberate scoping decision, not an oversight.
+auto-loading, preferred system, risk tolerance, and starting budget, applied by every
+route command whenever its matching option is left unset (budget only applies to the
+commands that take a budget option at all: /mixed-routes, /multi-stop-route,
+/route-from-multi, /route-on-the-way). Risk tolerance is stored and shown but not yet
+enforced by any route command - a deliberate scoping decision, not an oversight.
 """
 from __future__ import annotations
 
@@ -82,6 +83,16 @@ def test_format_trading_preferences_shows_set_values():
     assert "Risk tolerance: **low**" in text
 
 
+def test_format_trading_preferences_shows_default_budget_as_not_set():
+    text = format_trading_preferences(dict(DEFAULT_TRADING_PREFERENCES))
+    assert "Default budget: **None set**" in text
+
+
+def test_format_trading_preferences_shows_a_saved_budget():
+    text = format_trading_preferences(dict(DEFAULT_TRADING_PREFERENCES, budget=500_000.0))
+    assert "Default budget: **500,000 aUEC**" in text
+
+
 # -- DB round-trip ----------------------------------------------------------------
 
 
@@ -132,6 +143,30 @@ def test_set_trading_preferences_default_kwarg_is_unset_not_a_real_value(tmp_pat
         await db.set_trading_preferences(1, space_only=True)
         prefs = await db.set_trading_preferences(1, auto_load_only=True)
         assert prefs["space_only"] is True
+
+    asyncio.run(run())
+
+
+def test_set_trading_preferences_budget_round_trips_and_survives_other_updates(tmp_path):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await db.set_trading_preferences(1, budget=250_000.0)
+        # A later call touching an unrelated field must not reset the saved budget.
+        prefs = await db.set_trading_preferences(1, space_only=True)
+        assert prefs["budget"] == 250_000.0
+        assert prefs["space_only"] is True
+
+    asyncio.run(run())
+
+
+def test_set_trading_preferences_can_explicitly_clear_budget_back_to_none(tmp_path):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await db.set_trading_preferences(1, budget=250_000.0)
+        prefs = await db.set_trading_preferences(1, budget=None)
+        assert prefs["budget"] is None
 
     asyncio.run(run())
 
@@ -400,6 +435,25 @@ def test_set_trading_preferences_command_requires_at_least_one_option(tmp_path):
     asyncio.run(run())
 
 
+def test_set_trading_preferences_command_budget_alone_counts_as_an_option(tmp_path):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        cog = TradingPreferences.__new__(TradingPreferences)
+        cog.bot = NS(db=db)
+        interaction = _FakeInteraction(1)
+        await cog.set_trading_preferences.callback(
+            cog, interaction, ship=None, budget=500_000.0, space_only=None,
+            capital_ship_access=None, auto_load_only=None, system=None, risk_tolerance=None,
+        )
+        interaction.response.defer.assert_awaited_once()
+        message = interaction.followup.send.call_args.args[0]
+        assert "Default budget: **500,000 aUEC**" in message
+        assert (await db.get_trading_preferences(1))["budget"] == 500_000.0
+
+    asyncio.run(run())
+
+
 def test_set_trading_preferences_command_updates_and_confirms(tmp_path):
     async def run():
         db = _make_db(tmp_path)
@@ -609,6 +663,38 @@ def test_mixed_routes_explicit_option_still_works_without_a_saved_preference(mon
 
     asyncio.run(run())
     assert captured["space_only"] is True
+
+
+def test_mixed_routes_falls_back_to_saved_budget_preference(monkeypatch):
+    """User-requested polish: budget, like the other route-filter defaults, should be
+    usable as a saved default rather than retyped on every /mixed-routes call."""
+    captured = {}
+
+    def fake_build_mixed_routes(*args, **kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(prices_module, "build_mixed_routes", fake_build_mixed_routes)
+
+    async def run():
+        db = NS(
+            get_default_ship=AsyncMock(return_value="Ship"),
+            get_trading_preferences=AsyncMock(
+                return_value=dict(DEFAULT_TRADING_PREFERENCES, budget=750_000.0)
+            ),
+            get_mixed_route_market_rows=AsyncMock(return_value=[]),
+        )
+        uex = NS(get_vehicles=AsyncMock(return_value=[dict(name="Ship", scu=100, pad_type="M")]))
+        cog = Prices.__new__(Prices)
+        cog.bot = NS(db=db, uex=uex)
+        interaction = _FakeInteraction(1)
+        interaction.response.defer = AsyncMock()
+        interaction.followup = NS(send=AsyncMock())
+        # No budget passed on the call itself - only the saved preference should apply.
+        await cog.mixed_routes.callback(cog, interaction, None, None, None, None, None)
+
+    asyncio.run(run())
+    assert captured["budget"] == 750_000.0
 
 
 def test_best_route_falls_back_to_saved_auto_load_preference(monkeypatch):

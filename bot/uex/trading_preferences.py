@@ -19,6 +19,7 @@ DEFAULT_TRADING_PREFERENCES: dict[str, object] = {
     "preferred_system": None,
     "risk_tolerance": None,
     "ship_name": None,
+    "budget": None,
 }
 
 # Ordered low -> high; "high" means no restriction (the default once a filter exists).
@@ -62,8 +63,11 @@ def format_trading_preferences(prefs: dict[str, object]) -> str:
     system = prefs.get("preferred_system") or "Any (no restriction)"
     risk = prefs.get("risk_tolerance") or "High (no restriction, default)"
     ship = prefs.get("ship_name") or "None set"
+    budget = prefs.get("budget")
+    budget_display = f"{budget:,.0f} aUEC" if budget else "None set"
     return "\n".join([
         f"Default ship: **{ship}**",
+        f"Default budget: **{budget_display}** (mixed-routes/multi-stop-route/route-from-multi/route-on-the-way only)",
         f"Space-only terminals: **{_yes_no(prefs.get('space_only'))}** (mixed-routes/multi-stop-route only)",
         f"Capital-ship access required: **{_yes_no(prefs.get('capital_ship_access'))}** (mixed-routes/multi-stop-route only)",
         f"Auto-load only: **{_yes_no(prefs.get('auto_load_only'))}**",

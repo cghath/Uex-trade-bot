@@ -81,6 +81,7 @@ CREATE TABLE IF NOT EXISTS user_trading_preferences (
     preferred_system TEXT,
     risk_tolerance TEXT,
     ship_name TEXT,
+    budget REAL,
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -790,6 +791,7 @@ class Database:
             "ALTER TABLE terminal_data_health_observations ADD COLUMN last_update_days_percentage INTEGER",
             "ALTER TABLE marketplace_post_jobs ADD COLUMN custom_price INTEGER",
             "ALTER TABLE user_trading_preferences ADD COLUMN ship_name TEXT",
+            "ALTER TABLE user_trading_preferences ADD COLUMN budget REAL",
             # Recommendation Outcome Tracking (Phase 1): distinguishes a player-confirmed
             # leg report from the UEX collector's own snapshot, so evidence classification
             # never silently blends an unverified player tap with UEX's own vetted figure.
@@ -1750,7 +1752,7 @@ class Database:
     # -- saved trading preferences (route-filter defaults + default ship) ----
 
     async def get_trading_preferences(self, user_id: int) -> dict[str, Any]:
-        """Always returns all 6 fields, defaulted, so callers never null-check a missing row."""
+        """Always returns all 7 fields, defaulted, so callers never null-check a missing row."""
         async with self.connect() as db:
             cursor = await db.execute(
                 "SELECT * FROM user_trading_preferences WHERE user_id = ?", (user_id,)
@@ -1765,6 +1767,7 @@ class Database:
             "preferred_system": row["preferred_system"],
             "risk_tolerance": row["risk_tolerance"],
             "ship_name": row["ship_name"],
+            "budget": row["budget"],
         }
 
     # Column -> coercion applied before storage, for the fields set_trading_preferences
@@ -1781,10 +1784,11 @@ class Database:
         preferred_system: str | None | object = UNSET,
         risk_tolerance: str | None | object = UNSET,
         ship_name: str | None | object = UNSET,
+        budget: float | None | object = UNSET,
     ) -> dict[str, Any]:
         """Partial update: a field left at UNSET (the default) keeps its current value -
         only fields the caller explicitly passes are changed, so a single-option
-        /set-trading-preferences call never resets the other 5.
+        /set-trading-preferences call never resets the other 6.
 
         Built as ONE atomic INSERT ... ON CONFLICT DO UPDATE whose DO UPDATE SET clause
         names ONLY the columns the caller actually passed - not a Python-side
@@ -1809,6 +1813,7 @@ class Database:
             ("preferred_system", preferred_system),
             ("risk_tolerance", risk_tolerance),
             ("ship_name", ship_name),
+            ("budget", budget),
         ):
             if value is not UNSET:
                 provided[column] = value

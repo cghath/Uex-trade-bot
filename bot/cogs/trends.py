@@ -66,6 +66,7 @@ def _build_route_field(
     status_lookup: dict,
     origin_evidence: EvidenceLevel,
     destination_evidence: EvidenceLevel,
+    budget: float | None = None,
 ) -> tuple[str, str]:
     """Build one route field for /top-routes."""
     per_unit_profit = r.price_destination - r.price_origin
@@ -94,11 +95,13 @@ def _build_route_field(
         destination_scu_wanted=r.scu_destination,
         ship_cargo_scu=ship_cargo_scu,
         price_origin=r.price_origin,
+        budget=budget,
     )
     if cargo is not None:
         limit_note = {
             "ship": f"limited by {ship_vehicle.get('name')}'s cargo hold" if ship_vehicle else "limited by ship capacity",
             "stock": "limited by available stock, not your ship",
+            "budget": "limited by your budget, not cargo space",
         }.get(cargo.limited_by, "")
         cargo_line = f"Cargo: **{cargo.max_scu:,.0f} SCU**"
         if limit_note:
@@ -328,6 +331,7 @@ class Trends(commands.Cog):
         auto_load_only: bool = False,
         system: str | None = None,
         risk_tolerance: str | None = None,
+        budget: float | None = None,
     ) -> None:
         await interaction.response.defer()
 
@@ -456,6 +460,8 @@ class Trends(commands.Cog):
             footer += f" · refreshed {updated_at.strftime('%Y-%m-%d %H:%M UTC')}"
         if not ship_vehicle:
             footer += " · set a default ship with /set-default-ship for cargo/run-profit numbers"
+        if budget is not None:
+            footer += f" · budget {budget:,.0f} aUEC"
         preferences_note = describe_active_preferences(
             auto_load_only=auto_load_only, system=system, risk_tolerance=risk_tolerance
         )
@@ -498,7 +504,8 @@ class Trends(commands.Cog):
                 status_sell=r.status_destination,
             )
             name, value = _build_route_field(
-                i, r, ship_vehicle, ship_cargo_scu, status_lookup, origin_evidence, destination_evidence
+                i, r, ship_vehicle, ship_cargo_scu, status_lookup, origin_evidence, destination_evidence,
+                budget=budget,
             )
             warnings = []
             for side, terminal_id in (
@@ -738,6 +745,7 @@ class Trends(commands.Cog):
         origin="Terminal you're currently at, e.g. 'Area18' or 'Port Tressler'",
         destination="Terminal you're heading to",
         ship="Optional: check cargo/profit for a specific ship instead of your default (/set-default-ship)",
+        budget="Optional: cap how much of the commodity you buy by this starting capital, in aUEC",
         strict="Require live stock at the origin and live demand at the destination (safer).",
         auto_load_only="Only show routes where both the origin and destination terminal offer UEX's auto-load",
     )
@@ -752,6 +760,7 @@ class Trends(commands.Cog):
         destination: str,
         strict: bool = False,
         ship: str | None = None,
+        budget: app_commands.Range[float, 1, 1_000_000_000] | None = None,
         auto_load_only: bool | None = None,
     ) -> None:
         resolved_origin = await self.bot.db.resolve_terminal_id_by_name(origin)
@@ -779,6 +788,8 @@ class Trends(commands.Cog):
         prefs = await self.bot.db.get_trading_preferences(interaction.user.id)
         if auto_load_only is None:
             auto_load_only = prefs["auto_load_only"]
+        if budget is None:
+            budget = prefs["budget"]
 
         # Same reuse pattern as /routes-from: filter the SAME background-refreshed
         # candidate pool /top-routes reads from, this time down to routes matching BOTH
@@ -825,6 +836,7 @@ class Trends(commands.Cog):
             auto_load_only=auto_load_only,
             system=None,
             risk_tolerance=prefs["risk_tolerance"],
+            budget=float(budget) if budget is not None else None,
         )
 
     # -- /movers: single bulk call, computed on demand -----------------------
