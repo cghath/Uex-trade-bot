@@ -46,6 +46,7 @@ def _make_cog(num_routes: int) -> tuple[Trends, object]:
         get_terminal_references_by_ids=AsyncMock(return_value=references),
         get_terminal_data_health_by_ids=AsyncMock(return_value=health),
         get_route_market_signals_by_ids=AsyncMock(return_value={}),
+        get_suppressed_sides_by_ids=AsyncMock(return_value={}),
         get_terminal_market_observations_by_ids=AsyncMock(return_value={}),
         get_commodity_references=AsyncMock(return_value={i: risk for i in range(1, num_routes + 1)}),
         get_route_progression_track_record=AsyncMock(return_value={}),
@@ -115,6 +116,68 @@ def test_truncated_routes_are_disclosed_not_silently_dropped(tmp_path):
         route_count = len(_route_embed_calls(inter.followup.send))
         if route_count < 10:
             assert any("omitted" in msg.lower() for msg in _plain_messages(inter.followup.send))
+
+    asyncio.run(run())
+
+
+def test_send_ranked_routes_excludes_a_suppressed_pair():
+    async def run():
+        cog, db = _make_cog(2)
+        db.get_suppressed_sides_by_ids = AsyncMock(
+            return_value={(1, 1): {"buy": True, "sell": False}}
+        )
+        inter = _interaction()
+        await cog._send_ranked_routes(
+            inter, entries=_routes(2), updated_at=None, ship=None,
+            title="Top routes", footer_note="Collected data", log_label="test", display_limit=10,
+        )
+        titles = " ".join(
+            call.kwargs["embed"].title for call in inter.followup.send.call_args_list
+            if call.kwargs.get("embed") and call.kwargs["embed"].title
+        )
+        assert "Commodity 1" not in titles
+        assert "Commodity 2" in titles
+
+    asyncio.run(run())
+
+
+def test_send_ranked_routes_filters_suppressed_pairs_before_truncating():
+    """A suppressed pair must be excluded from the FULL candidate pool BEFORE
+    display_limit truncation, not after - the same "filter before truncating"
+    discipline already established for auto_load_only/system. Verified by supplying
+    more candidates than display_limit with the suppressed one ranked first: a
+    truncate-then-filter implementation would already have thrown the 3rd route away
+    before ever checking suppression, showing only 1 route instead of 2."""
+    async def run():
+        cog, db = _make_cog(3)
+        db.get_suppressed_sides_by_ids = AsyncMock(
+            return_value={(1, 1): {"buy": True, "sell": False}}
+        )
+        inter = _interaction()
+        await cog._send_ranked_routes(
+            inter, entries=_routes(3), updated_at=None, ship=None,
+            title="Top routes", footer_note="Collected data", log_label="test", display_limit=2,
+        )
+        route_count = len(_route_embed_calls(inter.followup.send))
+        assert route_count == 2, "both non-suppressed routes must appear, not just one"
+
+    asyncio.run(run())
+
+
+def test_send_ranked_routes_reports_when_suppression_removes_every_candidate():
+    async def run():
+        cog, db = _make_cog(1)
+        db.get_suppressed_sides_by_ids = AsyncMock(
+            return_value={(1, 1): {"buy": True, "sell": False}}
+        )
+        inter = _interaction()
+        await cog._send_ranked_routes(
+            inter, entries=_routes(1), updated_at=None, ship=None,
+            title="Top routes", footer_note="Collected data", log_label="test", display_limit=10,
+        )
+        assert not any(call.kwargs.get("embed") for call in inter.followup.send.call_args_list)
+        message = inter.followup.send.call_args_list[0].args[0]
+        assert "reported empty" in message.lower()
 
     asyncio.run(run())
 

@@ -311,6 +311,14 @@ CREATE TABLE IF NOT EXISTS terminal_market_state (
     sell_report_count INTEGER,
     last_seen TEXT NOT NULL DEFAULT (datetime('now')),
     source TEXT NOT NULL DEFAULT 'uex' CHECK (source IN ('uex', 'player_report')),
+    -- Suppression window: set when a player report confirms a side is genuinely empty
+    -- (Recommendation Outcome Tracking's 'missing'/drained-'more' outcomes - see
+    -- bot/uex/route_progression.py's update_confirms_depletion), so route recommendations
+    -- stop suggesting that exact (commodity, terminal, side) until it's had a real chance
+    -- to refresh. NULL or in the past means "not currently suppressed" - no separate flag
+    -- needed, and nothing proactively clears it early on a later UEX poll; it just expires.
+    buy_suppressed_until TEXT,
+    sell_suppressed_until TEXT,
     PRIMARY KEY (id_commodity, id_terminal)
 );
 
@@ -797,6 +805,8 @@ class Database:
             # never silently blends an unverified player tap with UEX's own vetted figure.
             "ALTER TABLE terminal_market_state ADD COLUMN source TEXT NOT NULL DEFAULT 'uex' CHECK (source IN ('uex', 'player_report'))",
             "ALTER TABLE terminal_market_observations ADD COLUMN source TEXT NOT NULL DEFAULT 'uex' CHECK (source IN ('uex', 'player_report'))",
+            "ALTER TABLE terminal_market_state ADD COLUMN buy_suppressed_until TEXT",
+            "ALTER TABLE terminal_market_state ADD COLUMN sell_suppressed_until TEXT",
         ]
         for statement in migrations:
             try:
@@ -1037,6 +1047,69 @@ class Database:
                     ),
                 )
             await db.commit()
+
+    async def suppress_terminal_market_side(
+        self, *, id_commodity: int, id_terminal: int, side: str, until: str
+    ) -> None:
+        """Mark one (commodity, terminal) pair's buy or sell side suppressed from route
+        recommendations until `until` (a naive UTC string matching SQLite's own
+        datetime('now') format) - called after a player report confirms that side is
+        genuinely empty (see bot/uex/route_progression.py's update_confirms_depletion).
+        A no-op if the pair has no terminal_market_state row yet (nothing to suppress a
+        recommendation FROM in that case)."""
+        column = "buy_suppressed_until" if side == "buy" else "sell_suppressed_until"
+        async with self.connect() as db:
+            await db.execute(
+                f"UPDATE terminal_market_state SET {column} = ? WHERE id_commodity = ? AND id_terminal = ?",
+                (until, id_commodity, id_terminal),
+            )
+            await db.commit()
+
+    async def get_suppressed_sides_by_ids(
+        self, commodity_terminal_ids: list[tuple[int, int]], *, now: str
+    ) -> dict[tuple[int, int], dict[str, bool]]:
+        """Bulk lookup of which side(s) are CURRENTLY suppressed (until is set and still
+        in the future relative to `now`, a naive UTC string) for each requested pair -
+        same bulk-then-filter shape as get_route_market_signals_by_ids. Only pairs with at
+        least one active suppression are included in the result; a pair absent from the
+        result has neither side suppressed."""
+        keys: set[tuple[int, int]] = set()
+        for commodity_id, terminal_id in commodity_terminal_ids:
+            parsed_commodity = self._integer(commodity_id)
+            parsed_terminal = self._integer(terminal_id)
+            if (
+                parsed_commodity is not None and parsed_commodity > 0
+                and parsed_terminal is not None and parsed_terminal > 0
+            ):
+                keys.add((parsed_commodity, parsed_terminal))
+        if not keys:
+            return {}
+        commodity_ids = sorted({key[0] for key in keys})
+        terminal_ids = sorted({key[1] for key in keys})
+        commodity_marks = ",".join("?" for _ in commodity_ids)
+        terminal_marks = ",".join("?" for _ in terminal_ids)
+        async with self.connect() as db:
+            cursor = await db.execute(
+                f"""SELECT id_commodity, id_terminal, buy_suppressed_until, sell_suppressed_until
+                    FROM terminal_market_state
+                    WHERE id_commodity IN ({commodity_marks}) AND id_terminal IN ({terminal_marks})
+                      AND (
+                          (buy_suppressed_until IS NOT NULL AND buy_suppressed_until > ?)
+                          OR (sell_suppressed_until IS NOT NULL AND sell_suppressed_until > ?)
+                      )""",
+                [*commodity_ids, *terminal_ids, now, now],
+            )
+            rows = await cursor.fetchall()
+        result: dict[tuple[int, int], dict[str, bool]] = {}
+        for row in rows:
+            key = (int(row["id_commodity"]), int(row["id_terminal"]))
+            if key not in keys:
+                continue
+            result[key] = {
+                "buy": row["buy_suppressed_until"] is not None and row["buy_suppressed_until"] > now,
+                "sell": row["sell_suppressed_until"] is not None and row["sell_suppressed_until"] > now,
+            }
+        return result
 
     # -- Recommendation Outcome Tracking (Phase 1) ---------------------------------------
 
@@ -1326,10 +1399,28 @@ class Database:
             return grouped
 
     async def get_mixed_route_market_rows(self) -> list[dict[str, Any]]:
-        """Current market snapshot enriched with terminal and commodity warning metadata."""
+        """Current market snapshot enriched with terminal and commodity warning metadata.
+
+        scu_buy/scu_sell read as 0 for any side currently suppressed (see
+        suppress_terminal_market_side) - the allocator this feeds (allocate_pair_cargo)
+        already treats zero stock/demand as "skip this side," the exact same behavior a
+        genuinely empty terminal produces, so no separate suppression-aware code is
+        needed anywhere downstream. The real, unsuppressed values are still readable via
+        buy_suppressed_until/sell_suppressed_until and the row's own real scu figures are
+        never overwritten in storage - only this read is masked.
+        """
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         async with self.connect() as db:
             cursor = await db.execute(
-                """SELECT m.*,
+                """SELECT m.id_commodity, m.id_terminal, m.commodity_name, m.terminal_name,
+                          m.price_buy, m.price_sell,
+                          CASE WHEN m.buy_suppressed_until IS NOT NULL AND m.buy_suppressed_until > ?
+                               THEN 0 ELSE m.scu_buy END AS scu_buy,
+                          CASE WHEN m.sell_suppressed_until IS NOT NULL AND m.sell_suppressed_until > ?
+                               THEN 0 ELSE m.scu_sell END AS scu_sell,
+                          m.status_buy, m.status_sell, m.quality, m.volatility_buy, m.volatility_sell,
+                          m.buy_report_count, m.sell_report_count, m.last_seen, m.source,
+                          m.buy_suppressed_until, m.sell_suppressed_until,
                           t.terminal_type, t.id_space_station, t.space_station_name,
                           t.id_outpost, t.outpost_name, t.id_city,
                           t.star_system_name, t.planet_name, t.moon_name,
@@ -1340,7 +1431,8 @@ class Database:
                           c.is_explosive, c.is_buggy
                    FROM terminal_market_state AS m
                    LEFT JOIN terminal_reference AS t ON t.id_terminal = m.id_terminal
-                   LEFT JOIN commodity_reference AS c ON c.id_commodity = m.id_commodity"""
+                   LEFT JOIN commodity_reference AS c ON c.id_commodity = m.id_commodity""",
+                (now, now),
             )
             return [dict(row) for row in await cursor.fetchall()]
 

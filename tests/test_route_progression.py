@@ -4,7 +4,9 @@ leg-outcome View/Modal claim logic in bot/cogs/route_progression.py."""
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace as NS
+from unittest.mock import AsyncMock
 
 import aiosqlite
 from cryptography.fernet import Fernet
@@ -22,9 +24,11 @@ from bot.cogs.route_progression import (
 from bot.cogs.route_progression import _embed_with_outcome
 from bot.db.database import Database
 from bot.uex.route_progression import (
+    SUPPRESSION_HOURS,
     describe_leg_outcome,
     is_reportable_amount,
     terminal_state_update_for_outcome,
+    update_confirms_depletion,
 )
 
 
@@ -183,6 +187,60 @@ def test_invalid_side_raises():
 def test_invalid_outcome_raises():
     with pytest.raises(ValueError):
         terminal_state_update_for_outcome(outcome="not_a_real_outcome", **_leg())
+
+
+# -- update_confirms_depletion (pure logic, suppression window) --------------------------
+
+def test_update_confirms_depletion_true_for_missing_outcome():
+    row = terminal_state_update_for_outcome(outcome="missing", **_leg(side="buy"))
+    assert update_confirms_depletion(row, side="buy") is True
+
+
+def test_update_confirms_depletion_true_for_a_drained_more_outcome():
+    row = terminal_state_update_for_outcome(
+        outcome="more", actual_scu=80.0, precision="exact", **_leg()
+    )
+    assert update_confirms_depletion(row, side="buy") is True
+
+
+def test_update_confirms_depletion_false_for_matched():
+    row = terminal_state_update_for_outcome(outcome="matched", **_leg())
+    assert update_confirms_depletion(row, side="buy") is False
+
+
+def test_update_confirms_depletion_false_for_a_positive_less_report():
+    row = terminal_state_update_for_outcome(outcome="less", actual_scu=20.0, **_leg())
+    assert update_confirms_depletion(row, side="buy") is False
+
+
+def test_update_confirms_depletion_false_for_a_floor_capped_more_outcome():
+    """A 'more' outcome with precision='floor' never even reaches terminal_state_update_
+    for_outcome (it returns None) - there was more there, the player/cargo capped them,
+    not the terminal. Confirms depletion checking treats None the same way."""
+    row = terminal_state_update_for_outcome(
+        outcome="more", actual_scu=80.0, precision="floor", **_leg()
+    )
+    assert row is None
+    assert update_confirms_depletion(row, side="buy") is False
+
+
+def test_update_confirms_depletion_false_for_a_less_report_with_no_actual_scu():
+    row = terminal_state_update_for_outcome(outcome="less", **_leg())
+    assert row is None
+    assert update_confirms_depletion(row, side="buy") is False
+
+
+def test_update_confirms_depletion_checks_the_requested_side_not_whichever_the_row_is_for():
+    """A buy-side depletion row must not register as depletion when checked for 'sell' -
+    the two sides use different empty status codes (buy=1, sell=7), so a mismatched side
+    check must read False rather than silently comparing against the wrong code."""
+    row = terminal_state_update_for_outcome(outcome="missing", **_leg(side="buy"))
+    assert update_confirms_depletion(row, side="sell") is False
+
+
+def test_update_confirms_depletion_rejects_an_invalid_side():
+    with pytest.raises(ValueError):
+        update_confirms_depletion(None, side="both")
 
 
 # -- describe_leg_outcome / _embed_with_outcome (pure logic) -----------------------------
@@ -540,6 +598,252 @@ def test_get_route_progression_track_record_only_returns_requested_pairs(tmp_pat
     asyncio.run(run())
 
 
+# -- Suppression window (suppress_terminal_market_side / get_suppressed_sides_by_ids) ----
+
+def _future(hours: float) -> str:
+    return (datetime.now(timezone.utc) + timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+
+async def _seed_market_row(db: Database, **overrides) -> None:
+    row = dict(
+        id_commodity=1, id_terminal=10, commodity_name="Gold", terminal_name="Area18 TDD",
+        price_buy=100, price_sell=90, scu_buy=50, scu_sell=40, status_buy=3, status_sell=2,
+    )
+    row.update(overrides)
+    await db.record_terminal_market_snapshot([row])
+
+
+def test_suppress_terminal_market_side_round_trips_through_get_suppressed_sides_by_ids(tmp_path):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await _seed_market_row(db)
+        until = _future(SUPPRESSION_HOURS)
+        await db.suppress_terminal_market_side(id_commodity=1, id_terminal=10, side="buy", until=until)
+
+        result = await db.get_suppressed_sides_by_ids([(1, 10)], now=_now())
+        assert result == {(1, 10): {"buy": True, "sell": False}}
+
+    asyncio.run(run())
+
+
+def test_get_suppressed_sides_by_ids_a_pair_with_no_active_suppression_is_absent(tmp_path):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await _seed_market_row(db)
+        result = await db.get_suppressed_sides_by_ids([(1, 10)], now=_now())
+        assert (1, 10) not in result
+
+    asyncio.run(run())
+
+
+def test_get_suppressed_sides_by_ids_an_expired_suppression_reads_as_not_suppressed(tmp_path):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await _seed_market_row(db)
+        expired_until = _future(-1)  # 1 hour in the past
+        await db.suppress_terminal_market_side(id_commodity=1, id_terminal=10, side="buy", until=expired_until)
+
+        result = await db.get_suppressed_sides_by_ids([(1, 10)], now=_now())
+        assert (1, 10) not in result
+
+    asyncio.run(run())
+
+
+def test_get_suppressed_sides_by_ids_only_returns_requested_pairs(tmp_path):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await _seed_market_row(db)
+        await _seed_market_row(db, id_commodity=2, id_terminal=20, commodity_name="Cobalt", terminal_name="Elsewhere")
+        until = _future(SUPPRESSION_HOURS)
+        await db.suppress_terminal_market_side(id_commodity=1, id_terminal=10, side="buy", until=until)
+        await db.suppress_terminal_market_side(id_commodity=2, id_terminal=20, side="sell", until=until)
+
+        result = await db.get_suppressed_sides_by_ids([(1, 10)], now=_now())
+        assert result == {(1, 10): {"buy": True, "sell": False}}
+        assert (2, 20) not in result, "a pair not in the requested list must not leak in"
+
+    asyncio.run(run())
+
+
+def test_get_mixed_route_market_rows_masks_a_suppressed_side_to_zero_stock(tmp_path):
+    """The allocator (allocate_pair_cargo) this feeds already treats zero stock/demand as
+    'skip this side' - masking at read time means no separate suppression-aware code is
+    needed anywhere in bot/uex/mixed_routes.py or multi_stop_routes.py."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await _seed_market_row(db)
+        until = _future(SUPPRESSION_HOURS)
+        await db.suppress_terminal_market_side(id_commodity=1, id_terminal=10, side="buy", until=until)
+
+        rows = await db.get_mixed_route_market_rows()
+        row = next(r for r in rows if r["id_commodity"] == 1 and r["id_terminal"] == 10)
+        assert row["scu_buy"] == 0
+        assert row["scu_sell"] == 40, "the unsuppressed sell side must be untouched"
+
+    asyncio.run(run())
+
+
+def test_get_mixed_route_market_rows_an_expired_suppression_no_longer_masks(tmp_path):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await _seed_market_row(db)
+        expired_until = _future(-1)
+        await db.suppress_terminal_market_side(id_commodity=1, id_terminal=10, side="buy", until=expired_until)
+
+        rows = await db.get_mixed_route_market_rows()
+        row = next(r for r in rows if r["id_commodity"] == 1 and r["id_terminal"] == 10)
+        assert row["scu_buy"] == 50, "an expired suppression must not mask the real stock"
+
+    asyncio.run(run())
+
+
+def test_handle_leg_outcome_missing_suppresses_the_reported_side(tmp_path):
+    """End-to-end: the real cog method, not a fake - a 'missing' report must trigger
+    suppression for exactly the side that was reported, not the other side."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await _seed_market_row(db)
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db})()
+        cog._active_legs = {}
+
+        leg = _leg_input(id_terminal=10, id_commodity=1, quoted_price=100.0, quoted_scu=50.0, quoted_status=3)
+        await cog.handle_leg_outcome(None, 999, 0, leg, outcome="missing")
+
+        result = await db.get_suppressed_sides_by_ids([(1, 10)], now=_now())
+        assert result == {(1, 10): {"buy": True, "sell": False}}
+
+    asyncio.run(run())
+
+
+def test_handle_leg_outcome_matched_does_not_suppress(tmp_path):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await _seed_market_row(db)
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db})()
+        cog._active_legs = {}
+
+        leg = _leg_input(id_terminal=10, id_commodity=1, quoted_price=100.0, quoted_scu=50.0, quoted_status=3)
+        await cog.handle_leg_outcome(None, 999, 0, leg, outcome="matched")
+
+        result = await db.get_suppressed_sides_by_ids([(1, 10)], now=_now())
+        assert (1, 10) not in result
+
+    asyncio.run(run())
+
+
+def test_handle_leg_outcome_a_positive_less_report_does_not_suppress(tmp_path):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await _seed_market_row(db)
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db})()
+        cog._active_legs = {}
+
+        leg = _leg_input(id_terminal=10, id_commodity=1, quoted_price=100.0, quoted_scu=50.0, quoted_status=3)
+        await cog.handle_leg_outcome(None, 999, 0, leg, outcome="less", actual_scu=20.0)
+
+        result = await db.get_suppressed_sides_by_ids([(1, 10)], now=_now())
+        assert (1, 10) not in result
+
+    asyncio.run(run())
+
+
+def test_handle_leg_outcome_a_floor_capped_more_report_does_not_suppress(tmp_path):
+    """'more' with precision='floor' means there was MORE there, not less - the exact
+    opposite of a signal to stop recommending this side."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await _seed_market_row(db)
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db})()
+        cog._active_legs = {}
+
+        leg = _leg_input(id_terminal=10, id_commodity=1, quoted_price=100.0, quoted_scu=50.0, quoted_status=3)
+        await cog.handle_leg_outcome(None, 999, 0, leg, outcome="more", actual_scu=80.0, precision="floor")
+
+        result = await db.get_suppressed_sides_by_ids([(1, 10)], now=_now())
+        assert (1, 10) not in result
+
+    asyncio.run(run())
+
+
+def test_handle_leg_outcome_a_drained_more_report_suppresses(tmp_path):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await _seed_market_row(db)
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db})()
+        cog._active_legs = {}
+
+        leg = _leg_input(id_terminal=10, id_commodity=1, quoted_price=100.0, quoted_scu=50.0, quoted_status=3)
+        await cog.handle_leg_outcome(None, 999, 0, leg, outcome="more", actual_scu=80.0, precision="exact")
+
+        result = await db.get_suppressed_sides_by_ids([(1, 10)], now=_now())
+        assert result == {(1, 10): {"buy": True, "sell": False}}
+
+    asyncio.run(run())
+
+
+def test_handle_leg_outcome_sell_side_missing_suppresses_only_sell(tmp_path):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await _seed_market_row(db)
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db})()
+        cog._active_legs = {}
+
+        leg = _leg_input(
+            side="sell", id_terminal=10, id_commodity=1,
+            terminal_name="Area18 TDD", quoted_price=90.0, quoted_scu=40.0, quoted_status=2,
+        )
+        await cog.handle_leg_outcome(None, 999, 0, leg, outcome="missing")
+
+        result = await db.get_suppressed_sides_by_ids([(1, 10)], now=_now())
+        assert result == {(1, 10): {"buy": False, "sell": True}}
+
+    asyncio.run(run())
+
+
+def test_handle_leg_outcome_suppression_expires_after_roughly_the_configured_window(tmp_path):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await _seed_market_row(db)
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db})()
+        cog._active_legs = {}
+
+        leg = _leg_input(id_terminal=10, id_commodity=1, quoted_price=100.0, quoted_scu=50.0, quoted_status=3)
+        await cog.handle_leg_outcome(None, 999, 0, leg, outcome="missing")
+
+        row = (await db.get_mixed_route_market_rows())[0]
+        suppressed_until = datetime.strptime(row["buy_suppressed_until"], "%Y-%m-%d %H:%M:%S").replace(
+            tzinfo=timezone.utc
+        )
+        delta_hours = (suppressed_until - datetime.now(timezone.utc)).total_seconds() / 3600
+        assert abs(delta_hours - SUPPRESSION_HOURS) < 0.01
+
+    asyncio.run(run())
+
+
 # -- LegOutcomeView / ActualAmountModal / MoreOutcomeFollowupView claim logic -------------
 
 class _FakeResponse:
@@ -582,14 +886,19 @@ class _FakeMessage:
 
 
 class _FakeCog:
+    """Stands in for RouteProgression in the View/Modal claim-logic tests below - these
+    exercise the durable-commit-point call sites (_record_leg_outcome_durably/
+    _abandon_thread_durably), matching what the real Views/Modals call, but without the
+    real retry wrapper's own behavior - see test_route_progression_retry.py-style tests
+    further down for that."""
     def __init__(self):
         self.calls = []
         self.abandon_calls = []
 
-    async def handle_leg_outcome(self, channel, thread_id, leg_index, leg, **kwargs):
+    async def _record_leg_outcome_durably(self, channel, thread_id, leg_index, leg, **kwargs):
         self.calls.append((thread_id, leg_index, leg, kwargs))
 
-    async def abandon_thread(self, channel, thread_id, **kwargs):
+    async def _abandon_thread_durably(self, channel, thread_id, **kwargs):
         self.abandon_calls.append((thread_id, kwargs))
 
 
@@ -1122,5 +1431,123 @@ def test_abandon_thread_sets_status_before_touching_the_channel(tmp_path):
         thread = await db.get_route_progression_thread(1)
         assert thread["status"] == "abandoned"
         assert 1 not in cog._active_legs
+
+    asyncio.run(run())
+
+
+# -- Post-ack durable retry (_record_leg_outcome_durably / _abandon_thread_durably) -------
+# Real defect: a button/modal's claim() + Discord acknowledgement already happened by the
+# time handle_leg_outcome/abandon_thread runs - the leg looks "reported" and its buttons
+# are already disabled, so a failure at that point could not fall back on "let them click
+# again." Both wrappers retry the whole (idempotent) call a bounded number of times before
+# giving up, and must never let an exception escape a button/modal callback either way.
+
+class _FakeThreadChannel(discord.Thread):
+    """A real discord.Thread subclass (not a duck-typed stand-in) so isinstance(channel,
+    discord.Thread) - which handle_leg_outcome/abandon_thread's own real code checks -
+    still passes, with send() overridden to avoid discord.Thread's own read-only slots."""
+    def __init__(self):
+        self.send = AsyncMock()
+
+
+def _fake_thread_channel() -> "_FakeThreadChannel":
+    return _FakeThreadChannel()
+
+
+def test_record_leg_outcome_durably_retries_a_transient_failure_and_succeeds(monkeypatch):
+    from bot.cogs.route_progression import RouteProgression
+
+    async def run():
+        cog = RouteProgression.__new__(RouteProgression)
+        monkeypatch.setattr("bot.cogs.route_progression.POST_ACK_RETRY_DELAY_SECONDS", 0)
+        call_count = {"n": 0}
+
+        async def flaky_handle(*args, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] < 3:
+                raise RuntimeError("transient DB lock")
+
+        cog.handle_leg_outcome = flaky_handle
+        channel = _fake_thread_channel()
+
+        await cog._record_leg_outcome_durably(channel, 1, 0, _leg_input(), outcome="matched")
+
+        assert call_count["n"] == 3, "must keep retrying until it succeeds"
+        channel.send.assert_not_awaited(), "no failure notice once a retry succeeds"
+
+    asyncio.run(run())
+
+
+def test_record_leg_outcome_durably_gives_up_after_exhausting_retries_without_raising(monkeypatch):
+    """The whole point of this wrapper: a permanent failure must still not escape the
+    button/modal callback that called it (this bot has no global app-command error
+    handler) - it can only log and tell the thread something needs attention."""
+    from bot.cogs.route_progression import POST_ACK_RETRY_ATTEMPTS, RouteProgression
+
+    async def run():
+        cog = RouteProgression.__new__(RouteProgression)
+        monkeypatch.setattr("bot.cogs.route_progression.POST_ACK_RETRY_DELAY_SECONDS", 0)
+        call_count = {"n": 0}
+
+        async def always_fails(*args, **kwargs):
+            call_count["n"] += 1
+            raise RuntimeError("permanent failure")
+
+        cog.handle_leg_outcome = always_fails
+        channel = _fake_thread_channel()
+
+        await cog._record_leg_outcome_durably(channel, 1, 0, _leg_input(), outcome="matched")
+
+        assert call_count["n"] == POST_ACK_RETRY_ATTEMPTS
+        channel.send.assert_awaited_once()
+        assert "went wrong" in channel.send.call_args.args[0]
+
+    asyncio.run(run())
+
+
+def test_abandon_thread_durably_retries_a_transient_failure_and_succeeds(monkeypatch):
+    from bot.cogs.route_progression import RouteProgression
+
+    async def run():
+        cog = RouteProgression.__new__(RouteProgression)
+        monkeypatch.setattr("bot.cogs.route_progression.POST_ACK_RETRY_DELAY_SECONDS", 0)
+        call_count = {"n": 0}
+
+        async def flaky_abandon(*args, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] < 2:
+                raise RuntimeError("transient DB lock")
+
+        cog.abandon_thread = flaky_abandon
+        channel = _fake_thread_channel()
+
+        await cog._abandon_thread_durably(channel, 1, reason="test")
+
+        assert call_count["n"] == 2
+        channel.send.assert_not_awaited()
+
+    asyncio.run(run())
+
+
+def test_abandon_thread_durably_gives_up_after_exhausting_retries_without_raising(monkeypatch):
+    from bot.cogs.route_progression import POST_ACK_RETRY_ATTEMPTS, RouteProgression
+
+    async def run():
+        cog = RouteProgression.__new__(RouteProgression)
+        monkeypatch.setattr("bot.cogs.route_progression.POST_ACK_RETRY_DELAY_SECONDS", 0)
+        call_count = {"n": 0}
+
+        async def always_fails(*args, **kwargs):
+            call_count["n"] += 1
+            raise RuntimeError("permanent failure")
+
+        cog.abandon_thread = always_fails
+        channel = _fake_thread_channel()
+
+        await cog._abandon_thread_durably(channel, 1, reason="test")
+
+        assert call_count["n"] == POST_ACK_RETRY_ATTEMPTS
+        channel.send.assert_awaited_once()
+        assert "went wrong" in channel.send.call_args.args[0]
 
     asyncio.run(run())

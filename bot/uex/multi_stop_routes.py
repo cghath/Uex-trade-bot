@@ -360,23 +360,33 @@ def sweep_budget_curve(
 
     Stops early once a swept budget produces the byte-for-byte identical best chain
     (same profit and investment, rounded) as the previous one AND that budget already
-    covers the most expensive single buy opportunity anywhere in the data. Adjacent
-    equality alone is not proof of saturation: two consecutive budgets can both be too
-    poor to reach a pricier chain that only unlocks further out, and would otherwise
-    look identical purely because neither could afford it yet (confirmed: a sweep that
-    stopped at two matching-but-still-poor points missed a chain worth 100x more,
-    reachable only a couple of geometric steps further). Once the swept budget can
-    afford at least one unit of every known buy opportunity, a repeated signature is a
-    real plateau - real stock/demand/cargo capacity has been saturated, and every larger
-    budget would just repeat the same result. Geometric growth (3x by default) covers a
-    wide range of ship sizes in a bounded number of build_multi_stop_routes calls, each
-    of which can itself take real wall-clock time (candidate-ranking runs multiple
-    passes - see that function's own docstring) - this is deliberately capped at
-    max_points rather than run unbounded, and is meant to be called from a worker
+    covers buying a FULL SHIP-CAPACITY quantity of the most expensive single buy
+    opportunity anywhere in the data. Adjacent equality alone is not proof of
+    saturation: two consecutive budgets can both be too poor to reach a pricier chain
+    that only unlocks further out, and would otherwise look identical purely because
+    neither could afford it yet (confirmed: a sweep that stopped at two matching-but-
+    still-poor points missed a chain worth 100x more, reachable only a couple of
+    geometric steps further). A one-unit affordability floor isn't enough either - a
+    tie can appear the instant a pricier opportunity becomes affordable for exactly
+    ONE unit, while buying MORE of it (still well within real stock/demand and ship
+    capacity) keeps improving for several more geometric steps (confirmed: a
+    synthetic pricier chain ties a cheap chain's profit the moment its own one-unit
+    price is first affordable, then goes on to beat it substantially once more budget
+    lets it buy multiple units). Only once the budget could afford filling the ship's
+    ENTIRE cargo hold with the priciest known opportunity is a repeated signature a
+    real plateau - no larger budget could ever let any single buy go further than a
+    full hold of it, so real stock/demand/cargo capacity is what's binding from there
+    on, not budget. Geometric growth (3x by default) covers a wide range of ship sizes
+    in a bounded number of build_multi_stop_routes calls, each of which can itself
+    take real wall-clock time (candidate-ranking runs multiple passes - see that
+    function's own docstring) - this is deliberately capped at max_points rather than
+    run unbounded (a market with an expensive enough opportunity can still exhaust
+    every point without ever reaching this floor - the curve just keeps climbing
+    instead of falsely reporting a plateau), and is meant to be called from a worker
     thread, not the event loop.
     """
     known_buy_prices = [float(row["price_buy"]) for row in market_rows if (row.get("price_buy") or 0) > 0]
-    affordability_floor = max(known_buy_prices, default=0.0)
+    affordability_floor = max(known_buy_prices, default=0.0) * ship_capacity_scu
 
     points: list[BudgetCurvePoint] = []
     budget = starting_budget

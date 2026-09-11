@@ -128,6 +128,37 @@ def terminal_state_update_for_outcome(
     }
 
 
+# How long a confirmed-empty (commodity, terminal, side) is suppressed from route
+# recommendations before it's eligible to show up again - a deliberate best-guess
+# tunable, not observed game data (no CIG-documented restock rate exists to anchor this
+# to; see ROADMAP.md's "Discuss: bot user reporting importance" entry for the empirical
+# groundwork this number came from - a median ~18-28h restock gap measured from this
+# bot's own collected terminal_market_observations history landed the decision here,
+# splitting the difference against a much shorter, unverifiable community-claimed figure
+# that didn't hold up when its own cited source was checked).
+SUPPRESSION_HOURS = 3
+
+
+def update_confirms_depletion(update_row: dict[str, Any] | None, *, side: str) -> bool:
+    """True when a terminal_state_update_for_outcome row represents a CONFIRMED EMPTY
+    state for this side - scu=0 paired with that side's own empty status code (missing,
+    or a 'more' outcome drained to nothing with precision='exact') - the only case where
+    recommending this exact (commodity, terminal, side) again immediately would be
+    pointless. False for 'matched' (state unchanged, no depletion signal) and a positive
+    'less' partial (some stock/demand remains, just less than quoted) - both still
+    produce a real update_row, so this checks the row's own values rather than the
+    outcome/precision the caller used to build it, keeping the two functions' branching
+    in exactly one place."""
+    if side not in SIDES:
+        raise ValueError(f"side must be one of {SIDES}, got {side!r}")
+    if update_row is None:
+        return False
+    scu_key = "scu_buy" if side == "buy" else "scu_sell"
+    status_key = "status_buy" if side == "buy" else "status_sell"
+    empty_code = BUY_SIDE_EMPTY_CODE if side == "buy" else SELL_SIDE_NO_DEMAND_CODE
+    return update_row.get(scu_key) == 0.0 and update_row.get(status_key) == empty_code
+
+
 def describe_leg_outcome(
     *,
     outcome: str,

@@ -614,6 +614,46 @@ def test_multi_stop_route_attaches_a_track_button_with_flattened_legs(monkeypatc
     asyncio.run(run())
 
 
+def test_multi_stop_route_flattened_legs_use_side_specific_market_scu_not_the_pair_minimum(monkeypatch):
+    """Real defect: market_scu used to be item.available_scu (min(source.scu_buy,
+    destination.scu_sell)) for BOTH the buy and sell leg - correct only when the two
+    sides happen to match. With genuinely asymmetric stock/demand, a matched BUY report
+    must confirm the ORIGIN's own scu_buy, and a matched SELL report the DESTINATION's
+    own scu_sell - never the smaller of the two ends of the trade."""
+    async def run():
+        source = dict(scu_buy=80, status_buy=1, star_system_name="Stanton")
+        destination = dict(scu_sell=20, status_sell=1, star_system_name="Stanton")
+        cargo = (MixedCargoItem(1, "Gold", 5, 100, 200, 20, 500, 500, source, destination, limiting_factors=("stock",)),)
+        leg = MultiStopLeg(10, "Station A", 20, "Station B", cargo, 500, 1000, 500, True)
+        route = MultiStopRoute((leg,), 500, 1000, 500)
+        monkeypatch.setattr(prices_module, "build_multi_stop_routes", lambda *a, **k: [route])
+
+        bot = type("FakeBot", (), {})()
+        bot.db = type("FakeDb", (), {})()
+        bot.db.get_default_ship = AsyncMock(return_value="Ship")
+        bot.db.get_trading_preferences = AsyncMock(return_value=dict(DEFAULT_TRADING_PREFERENCES))
+        bot.db.get_mixed_route_market_rows = AsyncMock(return_value=[])
+        bot.db.get_terminal_data_health_by_ids = AsyncMock(return_value={})
+        bot.uex = type("FakeUex", (), {})()
+        bot.uex.get_vehicles = AsyncMock(return_value=[dict(name="Ship", scu=100)])
+        bot.uex.get_terminal_distance = AsyncMock(return_value=dict(distance=10))
+        tracking_cog = RouteProgression.__new__(RouteProgression)
+        bot.get_cog = lambda name: tracking_cog if name == "RouteProgression" else None
+        cog = Prices.__new__(Prices)
+        cog.bot = bot
+        cog._get_status_lookup = AsyncMock(return_value={"buy": {}, "sell": {}})
+        interaction = _FakeInteraction(1)
+
+        await cog.multi_stop_route.callback(cog, interaction)
+
+        legs = interaction.followup.sent[0][1]["view"].routes[0].legs
+        buy_leg, sell_leg = legs[0], legs[1]
+        assert buy_leg.side == "buy" and buy_leg.market_scu == 80
+        assert sell_leg.side == "sell" and sell_leg.market_scu == 20
+
+    asyncio.run(run())
+
+
 def test_best_route_discloses_when_routes_are_truncated_for_size(tmp_path, monkeypatch):
     """Second follow-up review finding: /best-route's primary branch (UEX's own
     /commodities_routes data) calls the atomic _add_chunked_fields for each ranked route
@@ -1278,18 +1318,59 @@ def test_mixed_routes_attaches_a_track_button_with_flattened_legs(monkeypatch):
     asyncio.run(run())
 
 
+def test_mixed_routes_flattened_legs_use_side_specific_market_scu_not_the_pair_minimum(monkeypatch):
+    """Same defect class as multi-stop-route's equivalent test above, for /mixed-routes'
+    own flattening: asymmetric stock/demand must not collapse to the pair minimum for
+    either side."""
+    async def run():
+        source = dict(scu_buy=80, status_buy=1, star_system_name="Stanton")
+        destination = dict(scu_sell=20, status_sell=1, star_system_name="Stanton")
+        cargo = (MixedCargoItem(1, "Gold", 5, 100, 200, 20, 500, 500, source, destination),)
+        route = NS(
+            origin_name="Station A", destination_name="Station B", origin_id=10, destination_id=20,
+            cargo=cargo, cargo_scu=5, investment=500, revenue=1000, profit=500, roi_pct=100.0, is_exact=True,
+        )
+        monkeypatch.setattr(prices_module, "build_mixed_routes", lambda *a, **k: [route])
+
+        db = NS(
+            get_default_ship=AsyncMock(return_value="Ship"),
+            get_trading_preferences=AsyncMock(return_value=dict(DEFAULT_TRADING_PREFERENCES)),
+            get_mixed_route_market_rows=AsyncMock(return_value=[]),
+            get_terminal_data_health_by_ids=AsyncMock(return_value={}),
+        )
+        uex = NS(get_vehicles=AsyncMock(return_value=[dict(name="Ship", scu=100)]))
+        tracking_cog = RouteProgression.__new__(RouteProgression)
+        cog = Prices.__new__(Prices)
+        cog.bot = NS(db=db, uex=uex, get_cog=lambda name: tracking_cog if name == "RouteProgression" else None)
+        cog._get_status_lookup = AsyncMock(return_value={"buy": {}, "sell": {}})
+        interaction = _FakeInteraction(1)
+
+        await cog.mixed_routes.callback(cog, interaction)
+
+        legs = interaction.followup.sent[0][1]["view"].routes[0].legs
+        buy_leg, sell_leg = legs[0], legs[1]
+        assert buy_leg.side == "buy" and buy_leg.market_scu == 80
+        assert sell_leg.side == "sell" and sell_leg.market_scu == 20
+
+    asyncio.run(run())
+
+
 def test_mixed_routes_matched_report_writes_real_market_stock_not_the_allocated_cargo_amount(tmp_path):
     """End-to-end regression for a real defect: /mixed-routes allocates a SHARE of a
     ship's cargo per commodity, capped by capacity/budget - far less than the terminal's
     real stock. A player confirming that allocation "matched the quote" must not shrink
-    terminal_market_state down to the size of their own purchase."""
+    terminal_market_state down to the size of their own purchase.
+
+    Cobalt's origin/destination stock genuinely differ (scu_buy=95 vs scu_sell=80, from
+    _MIXED_ROUTES_ROWS) - a real regression an earlier fix attempt introduced used
+    min(scu_buy, scu_sell)=80 for BOTH the buy and sell leg, which is right for neither
+    side whenever they differ. A matched BUY report must confirm the ORIGIN's own real
+    stock (95), not the pair-wide minimum."""
     async def run():
         db = Database(tmp_path / "mixed_matched.sqlite3", Fernet(Fernet.generate_key()))
         await db.init()
         await db.record_terminal_market_snapshot(_MIXED_ROUTES_ROWS)
-        # Cobalt's real market_available = min(scu_buy origin=95, scu_sell destination=80)
-        # = 80, from _MIXED_ROUTES_ROWS - the figure a "matched" report must confirm.
-        real_available_scu = 80
+        real_origin_scu_buy = 95
 
         client = UexClient(app_token="test", base_url="https://uex.test")
         await client._client.aclose()
@@ -1313,8 +1394,8 @@ def test_mixed_routes_matched_report_writes_real_market_stock_not_the_allocated_
             route = views[0].routes[0]
             cobalt_buy_leg = next(leg for leg in route.legs if leg.side == "buy" and leg.id_commodity == 2)
             # The ship's small cargo pool means the allocation is nowhere near the real stock.
-            assert cobalt_buy_leg.quoted_scu < real_available_scu
-            assert cobalt_buy_leg.market_scu == real_available_scu
+            assert cobalt_buy_leg.quoted_scu < real_origin_scu_buy
+            assert cobalt_buy_leg.market_scu == real_origin_scu_buy
 
             await db.create_route_progression_thread(
                 thread_id=555, user_id=111, guild_id=1, route_kind="mixed_routes",
@@ -1328,7 +1409,7 @@ def test_mixed_routes_matched_report_writes_real_market_stock_not_the_allocated_
                     "SELECT scu_buy FROM terminal_market_state WHERE id_commodity = 2 AND id_terminal = 1"
                 )
                 row = await cursor.fetchone()
-            assert row["scu_buy"] == real_available_scu, (
+            assert row["scu_buy"] == real_origin_scu_buy, (
                 cobalt_buy_leg.quoted_scu, cobalt_buy_leg.market_scu, row["scu_buy"]
             )
         finally:

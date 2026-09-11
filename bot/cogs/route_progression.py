@@ -13,16 +13,20 @@ not a silent one, and one Phase 1.5 (persistent views with custom_ids) would clo
 """
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 import logging
 
 import discord
 from discord.ext import commands, tasks
 
 from bot.uex.route_progression import (
+    SUPPRESSION_HOURS,
     describe_leg_outcome,
     is_reportable_amount,
     terminal_state_update_for_outcome,
+    update_confirms_depletion,
 )
 
 logger = logging.getLogger("uexbot.route_progression")
@@ -34,6 +38,16 @@ ABANDONMENT_POLL_HOURS = 6
 ABANDONMENT_HOURS = 48
 
 MAX_TRACKABLE_ROUTES = 5
+
+# A leg-outcome button/modal's real commit point (claim() + the Discord acknowledgement)
+# happens BEFORE handle_leg_outcome/abandon_thread ever runs - by the time either of those
+# raises, the user has already been told "reported" and the leg is locked. Retrying the
+# whole call is safe (every step it performs - the outcome/market-state upserts, the
+# thread-status update - is idempotent), so a transient DB lock or Discord hiccup gets a
+# few automatic chances to resolve itself instead of stranding the thread on the very
+# first blip. See _record_leg_outcome_durably/_abandon_thread_durably.
+POST_ACK_RETRY_ATTEMPTS = 3
+POST_ACK_RETRY_DELAY_SECONDS = 2.0
 
 
 def _embed_with_outcome(embed: discord.Embed, outcome_line: str) -> discord.Embed:
@@ -144,7 +158,7 @@ class ActualAmountModal(discord.ui.Modal):
                 raise
             outcome_line = describe_leg_outcome(outcome=outcome, actual_price=actual_price, actual_scu=actual_scu)
             await self.parent_view.disable_in_background(outcome_line)
-            await self.cog.handle_leg_outcome(
+            await self.cog._record_leg_outcome_durably(
                 interaction.channel, self.thread_id, self.leg_index, self.leg,
                 outcome=outcome, actual_price=actual_price, actual_scu=actual_scu,
             )
@@ -211,7 +225,7 @@ class MoreOutcomeFollowupView(discord.ui.View):
             outcome="more", actual_price=self.actual_price, actual_scu=self.actual_scu, precision="exact",
         )
         await self.parent_view.disable_in_background(outcome_line)
-        await self.cog.handle_leg_outcome(
+        await self.cog._record_leg_outcome_durably(
             interaction.channel, self.thread_id, self.leg_index, self.leg,
             outcome="more", actual_price=self.actual_price, actual_scu=self.actual_scu, precision="exact",
         )
@@ -229,7 +243,7 @@ class MoreOutcomeFollowupView(discord.ui.View):
             outcome="more", actual_price=self.actual_price, actual_scu=self.actual_scu, precision="floor",
         )
         await self.parent_view.disable_in_background(outcome_line)
-        await self.cog.handle_leg_outcome(
+        await self.cog._record_leg_outcome_durably(
             interaction.channel, self.thread_id, self.leg_index, self.leg,
             outcome="more", actual_price=self.actual_price, actual_scu=self.actual_scu, precision="floor",
         )
@@ -307,7 +321,7 @@ class LegOutcomeView(discord.ui.View):
             # release_claim's own docstring for why this is only safe pre-persistence.
             self.release_claim()
             raise
-        await self.cog.handle_leg_outcome(
+        await self.cog._record_leg_outcome_durably(
             interaction.channel, self.thread_id, self.leg_index, self.leg, outcome="matched"
         )
 
@@ -382,7 +396,7 @@ class AbandonConfirmView(discord.ui.View):
                 item.disabled = False
             raise
         await self.parent_view.disable_in_background("**Reported:** Route abandoned.")
-        await self.cog.abandon_thread(interaction.channel, self.thread_id, reason="you asked to stop tracking it")
+        await self.cog._abandon_thread_durably(interaction.channel, self.thread_id, reason="you asked to stop tracking it")
 
     @discord.ui.button(label="No, keep going", style=discord.ButtonStyle.gray)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
@@ -532,6 +546,11 @@ class RouteProgression(commands.Cog):
         )
         if update_row is not None:
             await self.bot.db.record_player_report_market_update(update_row)
+        if update_confirms_depletion(update_row, side=leg.side):
+            until = (datetime.now(timezone.utc) + timedelta(hours=SUPPRESSION_HOURS)).strftime("%Y-%m-%d %H:%M:%S")
+            await self.bot.db.suppress_terminal_market_side(
+                id_commodity=leg.id_commodity, id_terminal=leg.id_terminal, side=leg.side, until=until,
+            )
 
         thread_row = await self.bot.db.get_route_progression_thread(thread_id)
         if thread_row is None:
@@ -551,6 +570,62 @@ class RouteProgression(commands.Cog):
         if isinstance(channel, discord.Thread):
             await self._post_leg_prompt(channel, thread_id, next_index, legs[next_index])
 
+    async def _record_leg_outcome_durably(
+        self,
+        channel: discord.abc.MessageableChannel,
+        thread_id: int,
+        leg_index: int,
+        leg: RouteLegInput,
+        *,
+        outcome: str,
+        actual_price: float | None = None,
+        actual_scu: float | None = None,
+        precision: str | None = None,
+    ) -> None:
+        """The real commit point every leg-outcome button/modal calls, in place of
+        handle_leg_outcome directly - by the time this runs, the user has already seen
+        the leg acknowledged as "reported" (claim() + the Discord edit already
+        succeeded), so a failure here can no longer fall back on "nothing happened yet,
+        let them retry the click." handle_leg_outcome's own steps (the outcome/market-
+        state upserts, the thread-status update, the next-leg prompt) are all safe to
+        repeat, so retrying the whole call gives a transient DB lock or Discord hiccup a
+        few chances to resolve before giving up - not a full durable-queue redesign
+        (this phase's views already aren't persistent across a restart; see the module
+        docstring), just enough to stop a single blip from stranding the thread until
+        the 48h abandonment poller. One accepted edge case: if a retry's own
+        _post_leg_prompt send actually reached Discord but the success response didn't
+        reach us, the next leg's prompt can be posted twice - a duplicate, still-
+        working button pair, not a stuck thread - preferred over the alternative of not
+        retrying at all."""
+        last_exc: BaseException | None = None
+        for attempt in range(1, POST_ACK_RETRY_ATTEMPTS + 1):
+            try:
+                await self.handle_leg_outcome(
+                    channel, thread_id, leg_index, leg,
+                    outcome=outcome, actual_price=actual_price, actual_scu=actual_scu, precision=precision,
+                )
+                return
+            except Exception as exc:
+                last_exc = exc
+                logger.warning(
+                    "handle_leg_outcome attempt %d/%d failed for thread %s leg %d: %s",
+                    attempt, POST_ACK_RETRY_ATTEMPTS, thread_id, leg_index, exc,
+                )
+                if attempt < POST_ACK_RETRY_ATTEMPTS:
+                    await asyncio.sleep(POST_ACK_RETRY_DELAY_SECONDS)
+        logger.error(
+            "handle_leg_outcome permanently failed for thread %s leg %d after %d attempts",
+            thread_id, leg_index, POST_ACK_RETRY_ATTEMPTS, exc_info=last_exc,
+        )
+        if isinstance(channel, discord.Thread):
+            try:
+                await channel.send(
+                    "Something went wrong saving that report - it may not have gone through. "
+                    "This thread will close automatically after 48h of inactivity if it's stuck."
+                )
+            except discord.HTTPException:
+                pass
+
     async def abandon_thread(
         self, channel: discord.abc.MessageableChannel | None, thread_id: int, *, reason: str
     ) -> None:
@@ -566,6 +641,38 @@ class RouteProgression(commands.Cog):
             await channel.edit(archived=True, locked=False)
         except discord.HTTPException as exc:
             logger.warning("Failed to close abandoned thread %s: %s", thread_id, exc)
+
+    async def _abandon_thread_durably(
+        self, channel: discord.abc.MessageableChannel | None, thread_id: int, *, reason: str
+    ) -> None:
+        """Same post-ack retry discipline as _record_leg_outcome_durably, for
+        AbandonConfirmView.confirm's own commit point - abandon_thread's DB write is a
+        plain idempotent status update, safe to repeat."""
+        last_exc: BaseException | None = None
+        for attempt in range(1, POST_ACK_RETRY_ATTEMPTS + 1):
+            try:
+                await self.abandon_thread(channel, thread_id, reason=reason)
+                return
+            except Exception as exc:
+                last_exc = exc
+                logger.warning(
+                    "abandon_thread attempt %d/%d failed for thread %s: %s",
+                    attempt, POST_ACK_RETRY_ATTEMPTS, thread_id, exc,
+                )
+                if attempt < POST_ACK_RETRY_ATTEMPTS:
+                    await asyncio.sleep(POST_ACK_RETRY_DELAY_SECONDS)
+        logger.error(
+            "abandon_thread permanently failed for thread %s after %d attempts",
+            thread_id, POST_ACK_RETRY_ATTEMPTS, exc_info=last_exc,
+        )
+        if isinstance(channel, discord.Thread):
+            try:
+                await channel.send(
+                    "Something went wrong abandoning this route - it may still be tracked. "
+                    "This thread will close automatically after 48h of inactivity either way."
+                )
+            except discord.HTTPException:
+                pass
 
     @tasks.loop(hours=ABANDONMENT_POLL_HOURS)
     async def poll_abandoned_threads(self) -> None:

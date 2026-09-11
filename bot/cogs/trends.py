@@ -37,6 +37,7 @@ from bot.uex.charts import render_price_history_chart
 from bot.uex.exceptions import UexApiError, describe_uex_api_error
 from bot.uex.data_health import classify_terminal_health, format_health_note
 from bot.uex.route_confidence import compute_route_confidence, track_record_modifier
+from bot.uex.route_progression import SUPPRESSION_HOURS
 from bot.uex.practical_routes import route_in_system, route_practical_notes, route_supports_auto_load
 from bot.uex.commodity_risk import format_commodity_risk
 from bot.uex.route_presentation import format_evidence_note, travel_warning
@@ -352,6 +353,31 @@ class Trends(commands.Cog):
             if terminal_id is not None
         ]
         terminal_references = await self.bot.db.get_terminal_references_by_ids(terminal_ids)
+        # Suppression window: a pair a player recently confirmed genuinely empty (see
+        # update_confirms_depletion) is excluded here, on the FULL candidate pool - same
+        # "filter before truncating" discipline as auto_load_only/system below, not the
+        # smaller post-truncation set _send_ranked_routes fetches market_signals for later.
+        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        suppressed_pairs = await self.bot.db.get_suppressed_sides_by_ids(
+            [
+                (route.id_commodity, terminal_id)
+                for route in entries
+                for terminal_id in (route.origin_terminal_id, route.destination_terminal_id)
+                if terminal_id is not None
+            ],
+            now=now_str,
+        )
+        entries = [
+            route for route in entries
+            if not suppressed_pairs.get((route.id_commodity, route.origin_terminal_id), {}).get("buy")
+            and not suppressed_pairs.get((route.id_commodity, route.destination_terminal_id), {}).get("sell")
+        ]
+        if not entries:
+            await interaction.followup.send(
+                "No routes found right now - the ones that would otherwise qualify were recently "
+                f"reported empty and are given up to {SUPPRESSION_HOURS}h to refresh before showing again."
+            )
+            return
         if auto_load_only:
             entries = [
                 route for route in entries

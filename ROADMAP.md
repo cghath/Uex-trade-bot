@@ -339,6 +339,178 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
   `format_trading_preferences` shows the saved default (or "None set"); no dedicated
   clear-budget command was added (`/clear-trading-preferences` already resets the whole
   row, matching how every field except ship, which predates this table, already works).
+- [x] **Three defects from a post-implementation audit of `f664a53`**: Shipped
+  2026-09-11.
+  - **Mixed/multi-stop player reports used the wrong side's market quantity**:
+    `MixedCargoItem.available_scu` (`bot/uex/mixed_routes.py`) is
+    `min(source.scu_buy, destination.scu_sell)` - the pair-wide minimum, needed for
+    the allocator's own quantity math. `bot/cogs/prices.py`'s `/mixed-routes` and
+    `/multi-stop-route` flattening both used that SAME pair-minimum as `market_scu`
+    for BOTH the buy leg and the sell leg - correct only when the two sides happen
+    to match, and silently wrong whenever real stock and demand differ (confirmed:
+    origin `scu_buy=95`, destination `scu_sell=80` - a "matched" BUY report wrote
+    `scu_buy=80`, understating the origin's real stock by 15 SCU; the reverse
+    asymmetry corrupts the sell side identically). This was a regression in the
+    PREVIOUS session's own fix for "allocation became terminal stock" (`quantity_scu`
+    vs. `market_scu`) - splitting those two apart was correct, but `market_scu` was
+    then given the round-trip cap instead of each side's own real figure. Fixed by
+    reading `item.source["scu_buy"]`/`item.destination["scu_sell"]` directly (both
+    guaranteed real floats for any item that survived `allocate_pair_cargo`'s greedy
+    loop, which already required `float()`-ing them to compute its own stock/demand
+    caps) instead of `item.available_scu`, at all 4 call sites (buy/sell ×
+    `/mixed-routes`/`/multi-stop-route`).
+  - **A post-acknowledgement persistence failure could strand a route leg forever**:
+    every leg-outcome commit point (`LegOutcomeView.matched`, the "less" modal,
+    `MoreOutcomeFollowupView`'s drained/capacity-limited buttons,
+    `AbandonConfirmView.confirm`) claims the leg and acknowledges the Discord
+    interaction FIRST, then calls `handle_leg_outcome`/`abandon_thread` - by design,
+    since the pre-ack failure path already releases the claim on an ack failure (see
+    `release_claim`'s own docstring). But nothing covered a failure AFTER the ack: a
+    transient DB lock, or the next-leg prompt's `thread.send` hitting a Discord
+    hiccup, left the leg's buttons already disabled with nothing durable behind it -
+    no error surfaced (this bot has no global app-command error handler), and the
+    thread was stuck until the 48h abandonment poller. Fixed with
+    `RouteProgression._record_leg_outcome_durably`/`_abandon_thread_durably` -
+    thin retry wrappers (3 attempts, 2s apart) around `handle_leg_outcome`/
+    `abandon_thread`, which every commit point now calls instead of the raw method.
+    Safe to retry the whole call because every step inside it is idempotent (the
+    outcome/market-state writes are upserts, the thread-status update is a plain
+    UPDATE) - not a durable-queue redesign (this phase's views still aren't
+    persistent across a bot restart; see the module's own docstring), just enough
+    that a single transient blip no longer stalls a thread outright. One accepted
+    edge case: if a retry's own leg-prompt send actually reached Discord but the
+    success response was lost, the next leg's prompt can post twice (a harmless
+    duplicate, working button pair) - preferred over not retrying at all. After all
+    attempts are exhausted, the failure is logged and the thread gets a plain-text
+    notice rather than being left silently stuck with no signal at all.
+  - **The budget sweep could stop before a higher-budget route became worthwhile**:
+    `sweep_budget_curve`'s early-stop heuristic (`bot/uex/multi_stop_routes.py`)
+    treated a repeated best-chain signature as proof of real saturation once the
+    swept budget could afford ONE unit of the priciest known buy opportunity - but a
+    pricier chain can keep improving for several more geometric steps once it
+    affords MULTIPLE units of it, still well within real stock/demand and cargo
+    capacity (confirmed: a synthetic pricier chain ties a cheap chain's profit the
+    instant its own one-unit price is affordable, satisfying the old floor, then
+    goes on to beat it substantially at the very next geometric budget step).
+    `/diminishing-returns` could tell a player more capital wouldn't help when it
+    genuinely would have. Fixed by requiring the swept budget to afford filling the
+    ship's ENTIRE cargo hold with the priciest known opportunity before trusting a
+    repeated signature (`affordability_floor = max(known_buy_prices) *
+    ship_capacity_scu`) - no larger budget could ever need more than a full hold of
+    any single opportunity, so past that point real stock/demand/capacity is what's
+    actually binding, not budget. A market with an expensive enough opportunity can
+    still exhaust every sweep point without ever reaching this floor - the curve
+    just keeps climbing instead of falsely declaring a plateau, matching this
+    function's existing "deliberately capped at max_points, not run unbounded"
+    design.
+
+  One more risk the same audit flagged explicitly as UNCONFIRMED (lower-confidence,
+  not counted as a defect) is deliberately left open rather than guessed at:
+  `/route-on-the-way` resolves both terminal names and reads trading preferences
+  before its first `defer()`/response (same pre-existing shape as `/routes-from`,
+  unlike `/route-from-multi`, which already defers first) - a real timing gap under a
+  slow/locked local DB, but not measured, and fixing it means threading an
+  "already deferred" flag through the shared `_send_ranked_routes` helper all three
+  commands share.
+
+  The audit's OTHER flagged risk - whether a player-confirmed report should be
+  allowed to extend `terminal_market_state.last_seen`/history "freshness" the same
+  way a real UEX poll does - got talked through and decided: **keep current
+  behavior.** UEX's own commodity data is itself aggregated from individual players
+  submitting reports through UEX's platform (this codebase already tracks how many -
+  `buy_report_count`/`sell_report_count`, from UEX's `price_buy_users_rows`/
+  `scu_buy_users_rows` fields) - so "UEX-sourced" isn't some independently-verified
+  ground truth next to "player-sourced," it's the same kind of evidence funneled
+  through a different pipe. A bot-tracked report is a real, first-hand, structured
+  observation and is fine to let advance freshness the same way. The thing that
+  actually needs "don't over-trust one report" protection - displayed route
+  confidence - already has it: `track_record_modifier` stays at 0 until 3+ reports
+  accumulate for that `(commodity, terminal, side)`.
+
+- [ ] **Discuss: `buy_report_count`/`sell_report_count` go stale after a player
+  correction** *(needs a decision before building)*. Working through the freshness
+  question above surfaced a real, adjacent gap that's NOT yet decided or fixed.
+  **The mechanism:** `record_player_report_market_update` can only ever touch
+  `price_buy`/`price_sell`/`scu_buy`/`scu_sell`/`status_buy`/`status_sell`
+  (`Database._PLAYER_REPORT_OPTIONAL_COLUMNS`) - it deliberately never writes
+  `buy_report_count`/`sell_report_count`, since a bot report has no UEX-style count
+  of its own to give them. So after a correction, the stored count still reflects
+  whatever UEX last reported (say, 8 community submissions), even though the price/
+  stock figure it now sits next to came from exactly ONE bot-tracked observation.
+  **Where it bites:** `compute_route_confidence` (`bot/uex/route_confidence.py`)
+  reads that count directly - `report_depth = 25 * min(reports / 10, 1.0)`, up to a
+  quarter of the whole confidence score. Traced every consumer: `/top-routes`,
+  `/routes-from`, `/route-on-the-way` (via `_send_ranked_routes`'s `market_signals`),
+  and `/mixed-routes`, `/multi-stop-route`, `/route-from-multi`, `/intelligence-brief`
+  (via `cargo_confidences`) all read the stored, player-report-mutable column - 7
+  commands, genuinely affected. `/best-route` is NOT affected - both its branches
+  read report counts straight from a fresh UEX API response for that call
+  (`live_signals`), never the local table. Net effect: after a correction, those 7
+  commands can show inflated confidence - crediting "8 corroborating reports" for a
+  figure that's really backed by one.
+  - **Option A - leave it as-is.** Simplest, zero risk of a new distortion. Con: a
+    corrected pair keeps looking more corroborated than it is, for however long
+    until the next real UEX poll happens to overwrite that pair again (unbounded -
+    could be minutes, could be the rest of the day).
+  - **Option B - reset the touched side's count to 1 whenever a player report
+    changes it.** Honest about how thin the evidence actually is right after a
+    correction. Con: could swing a route's confidence down sharply the instant
+    someone does the RIGHT thing and corrects a stale figure - punishing the
+    correction, not rewarding it - and the drop is itself temporary (reverts on the
+    next UEX poll), so it may just be trading one kind of temporary distortion for
+    another.
+  - **Option C - track UEX-sourced and player-sourced report counts as two separate
+    numbers**, and have `compute_route_confidence` weigh them explicitly instead of
+    conflating into one column. Most honest long-term, and matches how `source`
+    already distinguishes the two everywhere else in this table. Con: real schema/
+    formula surface area - a new column, a new scoring term, more to test - not a
+    small follow-up.
+  Needs a decision on which of these (or something else) before any code changes -
+  logged here so the reasoning survives to the next discussion instead of getting
+  re-derived from scratch.
+- [x] **Suppression window for confirmed-empty pairs**: Shipped 2026-09-11,
+  user-requested - route recommendations were suggesting the exact same terminal a
+  player had just reported empty, with no cooldown before UEX's own next poll
+  happened to overwrite the correction (unbounded - could be minutes or most of a
+  day). Before picking a duration, mined this bot's own collected
+  `terminal_market_observations` history for real empty-to-restocked transition gaps
+  rather than guessing: local dev DB (13 buy-side transitions) gave a ~28h median,
+  the Pi's full production history (29 transitions) gave ~18h - both solidly in
+  "many hours," ruling out anything in the minutes-to-2h range. A separately
+  pasted community "tick rate" document claimed 15min-3h full-refill times by
+  commodity tier, but didn't hold up when checked - its own cited source (NOVA
+  Intergalactic's real wiki page) contains no such numbers, and UEX's own API
+  reference has zero restock-rate fields, matching what an earlier session already
+  established. Landed on **3 hours** as a deliberate middle point between the
+  empirical measurement and the unverifiable-but-not-nothing community claim, and
+  **hard-exclude** (a suppressed pair simply doesn't appear, matching how
+  auto-load-only/system filters already behave) over showing it with a warning.
+  `terminal_market_state` gained `buy_suppressed_until`/`sell_suppressed_until`
+  (additive `ALTER TABLE`, one column per side since a pair's two sides deplete and
+  recover independently) - set by `Database.suppress_terminal_market_side` whenever
+  `bot/uex/route_progression.py`'s new `update_confirms_depletion` says a leg
+  outcome means the side is CONFIRMED empty (a `missing` report, or a `more`
+  outcome drained to nothing with `precision='exact'` - NOT a positive `less`
+  partial, and NOT a `more`+`floor` report, which means there was MORE there, the
+  opposite signal). Consumed two different ways depending on how each route family
+  already reads market data: `/mixed-routes`/`/multi-stop-route`/`/route-from-multi`
+  (and `/intelligence-brief`, which shares the same market-row source) get it for
+  free - `get_mixed_route_market_rows()` now masks a suppressed side's `scu_buy`/
+  `scu_sell` to 0 in the SQL itself, and the allocator (`allocate_pair_cargo`)
+  already treats zero stock/demand as "skip this side" exactly like a genuinely
+  empty terminal, so no new filtering code was needed in `bot/uex/mixed_routes.py`
+  or `multi_stop_routes.py` at all. `/top-routes`, `/routes-from`, and
+  `/route-on-the-way` needed an explicit filter instead (`_send_ranked_routes`
+  reads live UEX-scored candidates, not this table, for their price/stock display) -
+  added as a new bulk lookup (`get_suppressed_sides_by_ids`) applied on the FULL
+  candidate pool, BEFORE `display_limit` truncation - not after, matching this
+  codebase's own hard-learned "filter before truncating" rule (a regression test
+  specifically proves this: 3 candidates, `display_limit=2`, the highest-ranked one
+  suppressed - a truncate-then-filter bug would show only 1 route instead of the 2
+  that should still qualify). `/best-route` was deliberately left out of this pass -
+  its live-UEX-data shape doesn't share a natural cross-reference point with the
+  other six commands' either, and would need its own separate design; logged as a
+  known gap rather than silently left inconsistent.
 
 ### Route Economics Depth
 

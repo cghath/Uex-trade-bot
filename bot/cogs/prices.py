@@ -987,10 +987,14 @@ class Prices(commands.Cog):
                             quoted_price=item.buy_price, quoted_scu=item.quantity_scu,
                             quoted_status=item.source.get("status_buy"),
                             # quantity_scu is the cargo ALLOCATED to this ship/budget, capped
-                            # by capacity - not the terminal's real stock. available_scu is
-                            # the real quoted market figure; a "matched" report must confirm
-                            # THAT, not silently shrink the terminal to this one purchase's size.
-                            market_scu=item.available_scu,
+                            # by capacity - not the terminal's real stock. market_scu is the
+                            # real quoted market figure for THIS side specifically - the
+                            # origin's own scu_buy, not available_scu (which is
+                            # min(stock, demand) across BOTH ends of the pair, and so is the
+                            # wrong number whenever the two sides differ - a matched report
+                            # must confirm what THIS terminal actually had, not the smaller
+                            # of the two ends of the trade).
+                            market_scu=float(item.source["scu_buy"]),
                         )
                         for item in route.cargo
                     ] + [
@@ -1000,7 +1004,7 @@ class Prices(commands.Cog):
                             display_label=f"Sell {item.commodity_name} at {route.destination_name}",
                             quoted_price=item.sell_price, quoted_scu=item.quantity_scu,
                             quoted_status=item.destination.get("status_sell"),
-                            market_scu=item.available_scu,
+                            market_scu=float(item.destination["scu_sell"]),
                         )
                         for item in route.cargo
                     ],
@@ -1314,8 +1318,11 @@ class Prices(commands.Cog):
                                 quoted_status=item.source.get("status_buy"),
                                 # Same allocation-vs-real-availability split as /mixed-routes
                                 # above - quantity_scu is this hop's planned load, not what
-                                # the terminal actually has.
-                                market_scu=item.available_scu,
+                                # the terminal actually has. market_scu is THIS side's own
+                                # real figure (source's scu_buy), not available_scu (the
+                                # pair-minimum across both ends - wrong whenever stock and
+                                # demand differ).
+                                market_scu=float(item.source["scu_buy"]),
                             ))
                         for item in chain_leg.cargo:
                             progression_legs.append(RouteLegInput(
@@ -1324,7 +1331,7 @@ class Prices(commands.Cog):
                                 display_label=f"Sell {item.commodity_name} at {chain_leg.destination_name}",
                                 quoted_price=item.sell_price, quoted_scu=item.quantity_scu,
                                 quoted_status=item.destination.get("status_sell"),
-                                market_scu=item.available_scu,
+                                market_scu=float(item.destination["scu_sell"]),
                             ))
                     if progression_legs:
                         view = RouteTrackingView(tracking_cog, [TrackableRoute(

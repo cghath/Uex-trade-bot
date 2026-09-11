@@ -388,6 +388,36 @@ def test_sweep_budget_curve_reports_best_so_far_when_a_larger_budget_finds_less(
     assert points[2].roi_pct == points[1].roi_pct
 
 
+def test_sweep_budget_curve_does_not_declare_saturation_at_one_unit_affordability():
+    """Real defect: the stopping heuristic used to treat a repeated signature as proof of
+    real saturation as soon as the swept budget could afford ONE unit of the priciest
+    known buy opportunity - but a pricier chain can keep improving for several more
+    geometric steps once it can afford MULTIPLE units of it, still well within real
+    stock/demand and ship capacity. Concrete counterexample: a cheap 2-hop chain (1
+    SCU each leg) nets a fixed profit; a pricier chain (100 aUEC/unit, 100 SCU stock)
+    first becomes affordable for exactly one unit at budget=135, tying the cheap
+    chain's profit and (under the old floor, exactly the priciest known price) wrongly
+    satisfying the stop condition right there - even though budget=405 already shows
+    real further improvement from buying more than one unit."""
+    rows = [
+        _row(1, 1, "Cheap", "A", price_buy=1, scu_buy=1),
+        _row(1, 2, "Cheap", "B", price_sell=3, scu_sell=1),
+        _row(2, 2, "Cheap2", "B", price_buy=1, scu_buy=1),
+        _row(2, 3, "Cheap2", "C", price_sell=3, scu_sell=1),
+        _row(3, 4, "Expensive", "D", price_buy=100, scu_buy=100),
+        _row(3, 5, "Expensive", "E", price_sell=102, scu_sell=100),
+        _row(4, 5, "Expensive2", "E", price_buy=100, scu_buy=100),
+        _row(4, 6, "Expensive2", "F", price_sell=102, scu_sell=100),
+    ]
+    points = sweep_budget_curve(
+        rows, ship_capacity_scu=100, starting_budget=5, growth_factor=3.0, max_points=6
+    )
+    # Must not stop the instant the expensive chain affords exactly one unit (budget=135,
+    # profit tied with the cheap chain at 4.0) - real improvement from buying more of it
+    # is still available just one geometric step further (budget=405, profit=16.0).
+    assert any(p.profit > 4.0 for p in points), points
+
+
 def test_sweep_budget_curve_respects_max_points_when_never_plateauing():
     # A single commodity with effectively unlimited stock and no cargo-space cap growing
     # the ship never saturates within a reasonable sweep - must still stop at max_points,
