@@ -282,6 +282,27 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
   block above IS still duplicated across `/mixed-routes`, `/multi-stop-route`,
   `/diminishing-returns`, and now this command - matching that pre-existing, not-yet-
   centralized convention rather than doing a larger unrelated refactor).
+- [x] **`/route-on-the-way`**: Shipped 2026-09-10. User-requested: "find a route from
+  where you are to where you are going" - if a profitable haul happens to line up with a
+  trip you're already making, this surfaces it. Named to avoid confusion with the rest of
+  the `route(s)-from*` family sitting right next to it in `/intro` - `/routes-from` fixes
+  only the origin (destination stays open), `/route-from-multi` fixes only the origin
+  across a multi-leg chain; this is the one that fixes BOTH ends of a single leg to
+  terminals the player names. Considered `/route-from-to` (more literal, less distinctive
+  next to the other two) before settling on the chosen name. Single-leg only, not
+  multi-stop, by deliberate scope decision - a fixed-destination multi-stop search would
+  need `build_multi_stop_routes`' DFS to require the chain's LAST leg land at a specific
+  terminal, which it isn't built to do today (only a fixed start); left as a possible
+  follow-up rather than folded into this command's first version. Reuses the exact same
+  reuse pattern as `/routes-from`: filters the SAME background-refreshed candidate pool
+  `/top-routes` maintains, now requiring both `origin_terminal_id` AND
+  `destination_terminal_id` to match the two resolved terminals - no new ranking logic, no
+  extra UEX calls, gets evidence-level labels/health warnings/confidence/tracking buttons
+  for free via the shared `_send_ranked_routes`. Direction-specific (checks
+  origin -> destination only, matching how the player actually phrased the question) -
+  swap the two options to check the reverse leg. No `system` option (both endpoints are
+  already fixed to specific terminals, so a star-system filter would be redundant) -
+  the only option dropped relative to `/routes-from`'s set.
 
 ### Route Economics Depth
 

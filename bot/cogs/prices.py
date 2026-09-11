@@ -92,8 +92,8 @@ async def terminal_history_autocomplete(
 
 
 async def terminal_name_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
-    """Suggest terminals for a "current location" option (/routes-from, /route-from-multi) -
-    reads the local, 24h-cached terminal_reference table (same pattern as
+    """Suggest terminals for a "current location" option (/routes-from, /route-from-multi,
+    /route-on-the-way) - reads the local, 24h-cached terminal_reference table (same pattern as
     ship_name_autocomplete/commodity_name_autocomplete above), no live UEX call. Lives here
     rather than in trends.py (which imports several things FROM this module already) so
     prices.py can use it too without a circular import."""

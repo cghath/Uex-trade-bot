@@ -730,6 +730,103 @@ class Trends(commands.Cog):
             risk_tolerance=prefs["risk_tolerance"],
         )
 
+    @app_commands.command(
+        name="route-on-the-way",
+        description="Check for a profitable route between two specific terminals you're already traveling between.",
+    )
+    @app_commands.describe(
+        origin="Terminal you're currently at, e.g. 'Area18' or 'Port Tressler'",
+        destination="Terminal you're heading to",
+        ship="Optional: check cargo/profit for a specific ship instead of your default (/set-default-ship)",
+        strict="Require live stock at the origin and live demand at the destination (safer).",
+        auto_load_only="Only show routes where both the origin and destination terminal offer UEX's auto-load",
+    )
+    @app_commands.rename(auto_load_only="auto-load-only")
+    @app_commands.autocomplete(
+        ship=ship_name_autocomplete, origin=terminal_name_autocomplete, destination=terminal_name_autocomplete
+    )
+    async def route_on_the_way(
+        self,
+        interaction: discord.Interaction,
+        origin: str,
+        destination: str,
+        strict: bool = False,
+        ship: str | None = None,
+        auto_load_only: bool | None = None,
+    ) -> None:
+        resolved_origin = await self.bot.db.resolve_terminal_id_by_name(origin)
+        if resolved_origin is None:
+            await interaction.response.send_message(
+                f"Couldn't find a single terminal matching '{origin}' - pick one from the "
+                "autocomplete list to make sure it's unambiguous."
+            )
+            return
+        origin_id, origin_name = resolved_origin
+
+        resolved_destination = await self.bot.db.resolve_terminal_id_by_name(destination)
+        if resolved_destination is None:
+            await interaction.response.send_message(
+                f"Couldn't find a single terminal matching '{destination}' - pick one from the "
+                "autocomplete list to make sure it's unambiguous."
+            )
+            return
+        destination_id, destination_name = resolved_destination
+
+        if origin_id == destination_id:
+            await interaction.response.send_message("Origin and destination can't be the same terminal.")
+            return
+
+        prefs = await self.bot.db.get_trading_preferences(interaction.user.id)
+        if auto_load_only is None:
+            auto_load_only = prefs["auto_load_only"]
+
+        # Same reuse pattern as /routes-from: filter the SAME background-refreshed
+        # candidate pool /top-routes reads from, this time down to routes matching BOTH
+        # the resolved origin AND destination - no separate ranking logic, no extra UEX
+        # calls. Direction-specific (origin -> destination only, matching how the player
+        # actually asked the question) - a route in the reverse direction, if one exists,
+        # is what /route-on-the-way with the two locations swapped would find.
+        if strict:
+            async with self._top_in_stock_routes_lock:
+                pool = list(self._top_in_stock_routes)
+                updated_at = self._top_in_stock_routes_updated_at
+        else:
+            async with self._top_scored_routes_lock:
+                pool = list(self._top_scored_routes)
+                updated_at = self._top_scored_routes_updated_at
+
+        entries = [
+            r for r in pool if r.origin_terminal_id == origin_id and r.destination_terminal_id == destination_id
+        ]
+        if not entries:
+            still_gathering = " (still gathering route data - try again in a few minutes)" if not pool else ""
+            await interaction.response.send_message(
+                f"No profitable routes found from **{origin_name}** to **{destination_name}** "
+                f"right now{still_gathering}."
+            )
+            return
+
+        title = f"Best Routes: {origin_name} → {destination_name}"
+        footer_note = (
+            "Ranked by profit (ROI% as a tie-breaker) · requires real stock at the origin and "
+            "real demand at the destination right now" if strict else
+            "Ranked by profit (ROI% as a tie-breaker) · filtered to real buy-side stock at the "
+            "origin right now · use strict:True for live demand too"
+        )
+        await self._send_ranked_routes(
+            interaction,
+            entries=entries,
+            updated_at=updated_at,
+            ship=ship,
+            title=title,
+            footer_note=footer_note,
+            log_label="/route-on-the-way",
+            display_limit=TOP_IN_STOCK_ROUTES_KEEP if strict else TOP_SCORED_ROUTES_KEEP,
+            auto_load_only=auto_load_only,
+            system=None,
+            risk_tolerance=prefs["risk_tolerance"],
+        )
+
     # -- /movers: single bulk call, computed on demand -----------------------
 
     @app_commands.command(name="movers", description="Commodities with the biggest sell-price swing vs their recent average.")
