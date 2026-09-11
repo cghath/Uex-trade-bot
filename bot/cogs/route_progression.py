@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import json
 import logging
 
 import discord
@@ -49,6 +50,13 @@ MAX_TRACKABLE_ROUTES = 5
 POST_ACK_RETRY_ATTEMPTS = 3
 POST_ACK_RETRY_DELAY_SECONDS = 2.0
 
+# How often the durable recovery queue is retried once POST_ACK_RETRY_ATTEMPTS are
+# exhausted for an action - short enough that a transient outage recovers well before the
+# 48h abandonment poller would otherwise be the only thing that ever touches the thread
+# again, matching this codebase's other short-interval background pollers (e.g.
+# negotiation_alerts.py's 5 min, personal_inventory.py's 5 min).
+RECOVERY_POLL_MINUTES = 15
+
 
 def _embed_with_outcome(embed: discord.Embed, outcome_line: str) -> discord.Embed:
     """Append a reported-outcome line under a leg prompt's existing 'Quoted: ...' text,
@@ -78,6 +86,20 @@ class RouteLegInput:
     # terminal_state_update_for_outcome's own docstring). None for callers where
     # quoted_scu already IS the real market figure directly (/best-route, /top-routes).
     market_scu: float | None = None
+
+
+def _leg_input_from_snapshot(leg_dict: dict) -> RouteLegInput:
+    """Rebuilds a RouteLegInput from one entry of a persisted route_snapshot (or an
+    equally-shaped dict from the recovery queue) - the DB-only path used whenever
+    RouteProgression._active_legs doesn't have the thread anymore (a bot restart, or a
+    recovery-queue retry running well after the original interaction)."""
+    return RouteLegInput(
+        side=leg_dict["side"], id_terminal=leg_dict["id_terminal"], id_commodity=leg_dict["id_commodity"],
+        terminal_name=leg_dict["terminal_name"], commodity_name=leg_dict["commodity_name"],
+        display_label=leg_dict["display_label"], quoted_price=leg_dict.get("quoted_price"),
+        quoted_scu=leg_dict.get("quoted_scu"), quoted_status=leg_dict.get("quoted_status"),
+        market_scu=leg_dict.get("market_scu"),
+    )
 
 
 @dataclass
@@ -438,9 +460,11 @@ class RouteProgression(commands.Cog):
         # limitation as the Views themselves; see the module docstring).
         self._active_legs: dict[int, list[RouteLegInput]] = {}
         self.poll_abandoned_threads.start()
+        self.retry_pending_route_progression_actions.start()
 
     def cog_unload(self) -> None:
         self.poll_abandoned_threads.cancel()
+        self.retry_pending_route_progression_actions.cancel()
 
     async def start_tracking(self, interaction: discord.Interaction, route: TrackableRoute) -> None:
         channel = interaction.channel
@@ -473,6 +497,12 @@ class RouteProgression(commands.Cog):
                     "terminal_name": leg.terminal_name, "commodity_name": leg.commodity_name,
                     "display_label": leg.display_label, "quoted_price": leg.quoted_price,
                     "quoted_scu": leg.quoted_scu, "quoted_status": leg.quoted_status,
+                    # Kept here (not just in route_progression_legs, which has no column
+                    # for it) so a leg can be fully reconstructed from the DB alone -
+                    # needed by _get_leg's restart-safe fallback and by the recovery
+                    # queue's reconstruction. See terminal_state_update_for_outcome's own
+                    # docstring for why this must stay separate from quoted_scu.
+                    "market_scu": leg.market_scu,
                 }
                 for leg in route.legs
             ],
@@ -505,9 +535,34 @@ class RouteProgression(commands.Cog):
         await self._post_leg_prompt(thread, thread.id, 0, route.legs[0])
         await interaction.followup.send(f"Started tracking in {thread.mention}.", ephemeral=True)
 
+    async def _get_leg(self, thread_id: int, leg_index: int) -> RouteLegInput | None:
+        """Looks up a leg's full input, preferring the in-memory cache (populated at
+        thread creation) but falling back to the persisted route_snapshot when it isn't
+        there - which is what lets a retry, or a recovery-queue poll tick, still complete
+        correctly after a bot restart wipes _active_legs. This closes that gap only for
+        the ALREADY-answered legs' downstream steps; a currently-unclicked prompt's own
+        buttons are still dead after a restart (see the module docstring)."""
+        legs = self._active_legs.get(thread_id)
+        if legs is not None and leg_index < len(legs):
+            return legs[leg_index]
+        thread_row = await self.bot.db.get_route_progression_thread(thread_id)
+        if thread_row is None:
+            return None
+        snapshot_legs = json.loads(thread_row["route_snapshot"]).get("legs", [])
+        if leg_index >= len(snapshot_legs):
+            return None
+        return _leg_input_from_snapshot(snapshot_legs[leg_index])
+
     async def _post_leg_prompt(
         self, thread: discord.Thread, thread_id: int, leg_index: int, leg: RouteLegInput
     ) -> None:
+        # Idempotent: only the caller that wins the DB claim for this leg_index actually
+        # sends anything - see claim_route_progression_advance. Makes a second call for
+        # the same leg_index (a retried handle_leg_outcome, or the recovery poller redoing
+        # a step whose earlier Discord send actually succeeded but whose success response
+        # never reached us) a silent no-op instead of a duplicate live prompt.
+        if not await self.bot.db.claim_route_progression_advance(thread_id, to_index=leg_index):
+            return
         if leg.quoted_price is not None and leg.quoted_scu is not None:
             quoted_line = f"Quoted: {leg.quoted_price:,.2f} aUEC/unit · {leg.quoted_scu:,.0f} SCU"
         else:
@@ -532,10 +587,45 @@ class RouteProgression(commands.Cog):
         actual_scu: float | None = None,
         precision: str | None = None,
     ) -> None:
-        await self.bot.db.record_route_progression_leg_outcome(
+        recorded = await self.bot.db.record_route_progression_leg_outcome(
             thread_id=thread_id, leg_index=leg_index, outcome=outcome,
             actual_price=actual_price, actual_scu=actual_scu, precision=precision,
         )
+        if not recorded:
+            # The outcome UPDATE's own WHERE outcome IS NULL guard means this leg was
+            # already recorded - either by a genuinely different report racing this one
+            # (two live prompts for the same leg), or by an EARLIER attempt of this exact
+            # retry chain that got this far before failing on a later step. Only the
+            # second case is safe to continue past - compare against what's actually
+            # stored to tell them apart.
+            stored = await self.bot.db.get_route_progression_leg(thread_id, leg_index)
+            is_same_report = (
+                stored is not None
+                and stored["outcome"] == outcome
+                and stored["actual_price"] == actual_price
+                and stored["actual_scu"] == actual_scu
+                and stored["precision"] == precision
+            )
+            if not is_same_report:
+                # A different report won the race. It already drove the market-state
+                # write and the next-leg/completion step - writing THIS report's values
+                # now would silently contradict what route_progression_legs actually
+                # recorded, which is exactly the "conflicting reports overwrite each
+                # other" failure mode this guard exists to prevent.
+                if isinstance(channel, discord.Thread):
+                    try:
+                        await channel.send(
+                            "This leg was already reported (likely from a duplicate prompt) - "
+                            "this report was not recorded, to avoid overwriting the earlier one."
+                        )
+                    except discord.HTTPException:
+                        pass
+                return
+            # Same report, retried - fall through. The market-state re-merge below is a
+            # safe no-op/idempotent re-write of the identical values; the next-leg/
+            # completion step is separately guarded by claim_route_progression_advance,
+            # so this finishes whichever part of the earlier attempt never completed.
+
         update_row = terminal_state_update_for_outcome(
             id_commodity=leg.id_commodity, id_terminal=leg.id_terminal,
             commodity_name=leg.commodity_name, terminal_name=leg.terminal_name,
@@ -555,9 +645,11 @@ class RouteProgression(commands.Cog):
         thread_row = await self.bot.db.get_route_progression_thread(thread_id)
         if thread_row is None:
             return
-        legs = self._active_legs.get(thread_id, [])
         next_index = leg_index + 1
-        if next_index >= thread_row["total_legs"] or next_index >= len(legs):
+        total_legs = thread_row["total_legs"]
+        if next_index >= total_legs:
+            if not await self.bot.db.claim_route_progression_advance(thread_id, to_index=total_legs):
+                return  # completion already handled by an earlier attempt
             await self.bot.db.set_route_progression_thread_status(thread_id, "completed")
             self._active_legs.pop(thread_id, None)
             if isinstance(channel, discord.Thread):
@@ -567,8 +659,9 @@ class RouteProgression(commands.Cog):
                 except discord.HTTPException as exc:
                     logger.warning("Failed to close completed thread %s: %s", thread_id, exc)
             return
-        if isinstance(channel, discord.Thread):
-            await self._post_leg_prompt(channel, thread_id, next_index, legs[next_index])
+        next_leg = await self._get_leg(thread_id, next_index)
+        if next_leg is not None and isinstance(channel, discord.Thread):
+            await self._post_leg_prompt(channel, thread_id, next_index, next_leg)
 
     async def _record_leg_outcome_durably(
         self,
@@ -586,17 +679,16 @@ class RouteProgression(commands.Cog):
         handle_leg_outcome directly - by the time this runs, the user has already seen
         the leg acknowledged as "reported" (claim() + the Discord edit already
         succeeded), so a failure here can no longer fall back on "nothing happened yet,
-        let them retry the click." handle_leg_outcome's own steps (the outcome/market-
-        state upserts, the thread-status update, the next-leg prompt) are all safe to
-        repeat, so retrying the whole call gives a transient DB lock or Discord hiccup a
-        few chances to resolve before giving up - not a full durable-queue redesign
-        (this phase's views already aren't persistent across a restart; see the module
-        docstring), just enough to stop a single blip from stranding the thread until
-        the 48h abandonment poller. One accepted edge case: if a retry's own
-        _post_leg_prompt send actually reached Discord but the success response didn't
-        reach us, the next leg's prompt can be posted twice - a duplicate, still-
-        working button pair, not a stuck thread - preferred over the alternative of not
-        retrying at all."""
+        let them retry the click." handle_leg_outcome's own steps are all safe to repeat
+        (record_route_progression_leg_outcome only ever commits the FIRST write for a
+        leg, and the next-leg/completion step is separately guarded by
+        claim_route_progression_advance - see both), so retrying the whole call gives a
+        transient DB lock or Discord hiccup a few chances to resolve before giving up.
+        If every attempt fails, the action is durably queued
+        (queue_route_progression_leg_recovery) rather than left to the 48h abandonment
+        poller as the only recourse - retry_pending_route_progression_actions keeps
+        retrying it on its own short cadence, fully reconstructed from the DB, with no
+        dependency on this process's _active_legs cache."""
         last_exc: BaseException | None = None
         for attempt in range(1, POST_ACK_RETRY_ATTEMPTS + 1):
             try:
@@ -617,11 +709,22 @@ class RouteProgression(commands.Cog):
             "handle_leg_outcome permanently failed for thread %s leg %d after %d attempts",
             thread_id, leg_index, POST_ACK_RETRY_ATTEMPTS, exc_info=last_exc,
         )
+        try:
+            await self.bot.db.queue_route_progression_leg_recovery(
+                thread_id=thread_id, leg_index=leg_index, side=leg.side,
+                id_terminal=leg.id_terminal, id_commodity=leg.id_commodity,
+                terminal_name=leg.terminal_name, commodity_name=leg.commodity_name,
+                display_label=leg.display_label, quoted_price=leg.quoted_price,
+                quoted_scu=leg.quoted_scu, quoted_status=leg.quoted_status, market_scu=leg.market_scu,
+                outcome=outcome, actual_price=actual_price, actual_scu=actual_scu, precision=precision,
+            )
+        except Exception:
+            logger.exception("Failed to queue durable recovery for thread %s leg %d", thread_id, leg_index)
         if isinstance(channel, discord.Thread):
             try:
                 await channel.send(
-                    "Something went wrong saving that report - it may not have gone through. "
-                    "This thread will close automatically after 48h of inactivity if it's stuck."
+                    "Something went wrong saving that report - it's been queued to retry "
+                    "automatically in the background, so no further action is needed."
                 )
             except discord.HTTPException:
                 pass
@@ -647,7 +750,8 @@ class RouteProgression(commands.Cog):
     ) -> None:
         """Same post-ack retry discipline as _record_leg_outcome_durably, for
         AbandonConfirmView.confirm's own commit point - abandon_thread's DB write is a
-        plain idempotent status update, safe to repeat."""
+        plain idempotent status update, safe to repeat. Exhausted retries queue a durable
+        recovery action the same way (queue_route_progression_abandon_recovery)."""
         last_exc: BaseException | None = None
         for attempt in range(1, POST_ACK_RETRY_ATTEMPTS + 1):
             try:
@@ -665,11 +769,15 @@ class RouteProgression(commands.Cog):
             "abandon_thread permanently failed for thread %s after %d attempts",
             thread_id, POST_ACK_RETRY_ATTEMPTS, exc_info=last_exc,
         )
+        try:
+            await self.bot.db.queue_route_progression_abandon_recovery(thread_id=thread_id, reason=reason)
+        except Exception:
+            logger.exception("Failed to queue durable recovery for abandoning thread %s", thread_id)
         if isinstance(channel, discord.Thread):
             try:
                 await channel.send(
-                    "Something went wrong abandoning this route - it may still be tracked. "
-                    "This thread will close automatically after 48h of inactivity either way."
+                    "Something went wrong abandoning this route - it's been queued to retry "
+                    "automatically in the background."
                 )
             except discord.HTTPException:
                 pass
@@ -686,6 +794,49 @@ class RouteProgression(commands.Cog):
                 logger.info("Couldn't reach thread %s to close it: %s", thread_id, exc)
                 channel = None
             await self.abandon_thread(channel, thread_id, reason=f"inactive for over {ABANDONMENT_HOURS:g}h")
+
+    @tasks.loop(minutes=RECOVERY_POLL_MINUTES)
+    async def retry_pending_route_progression_actions(self) -> None:
+        """Retries durably-queued actions left by an exhausted post-ack retry (see
+        _record_leg_outcome_durably/_abandon_thread_durably) - each row is fully
+        self-contained, so this never touches self._active_legs and keeps working even
+        for a thread whose in-memory cache a bot restart wiped out. A single failed
+        attempt just bumps attempts/last_attempt_at and leaves the row for the next poll
+        tick; the 48h abandonment poller remains the last-resort backstop if a
+        thread/channel is permanently unreachable."""
+        pending = await self.bot.db.get_pending_route_progression_actions()
+        for row in pending:
+            action_id = row["id"]
+            thread_id = row["thread_id"]
+            thread_row = await self.bot.db.get_route_progression_thread(thread_id)
+            if thread_row is None or thread_row["status"] != "in_progress":
+                # The thread's fate was already decided some other way (completed,
+                # abandoned, or its row is gone) - this queued action no longer applies.
+                await self.bot.db.delete_route_progression_pending_action(action_id)
+                continue
+            channel: discord.abc.MessageableChannel | None
+            try:
+                channel = self.bot.get_channel(thread_id) or await self.bot.fetch_channel(thread_id)
+            except discord.HTTPException as exc:
+                logger.info("Recovery: couldn't reach thread %s: %s", thread_id, exc)
+                channel = None
+            try:
+                if row["action_kind"] == "leg_outcome":
+                    leg = _leg_input_from_snapshot(row)
+                    await self.handle_leg_outcome(
+                        channel, thread_id, row["leg_index"], leg,
+                        outcome=row["outcome"], actual_price=row["actual_price"],
+                        actual_scu=row["actual_scu"], precision=row["precision"],
+                    )
+                else:
+                    await self.abandon_thread(channel, thread_id, reason=row["reason"])
+                await self.bot.db.delete_route_progression_pending_action(action_id)
+            except Exception as exc:
+                logger.warning(
+                    "Recovery attempt failed for pending action %s (thread %s): %s",
+                    action_id, thread_id, exc,
+                )
+                await self.bot.db.mark_route_progression_pending_action_attempted(action_id)
 
 
 async def setup(bot: commands.Bot) -> None:

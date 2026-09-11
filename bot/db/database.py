@@ -543,7 +543,14 @@ CREATE TABLE IF NOT EXISTS route_progression_threads (
     ),
     total_legs INTEGER NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    completed_at TEXT
+    completed_at TEXT,
+    -- The leg_index of the most recent "advance" step (a leg prompt posted, or the
+    -- route's completion message) this thread has actually claimed - -1 means nothing
+    -- posted yet. claim_route_progression_advance's conditional UPDATE (only advance if
+    -- the new value is higher) is what makes _post_leg_prompt/completion idempotent
+    -- across a retried handle_leg_outcome or a genuinely duplicate leg-outcome report -
+    -- see PROJECT_CONTEXT.md's writeup of the post-ack-retry durability fix.
+    advanced_to_index INTEGER NOT NULL DEFAULT -1
 );
 CREATE INDEX IF NOT EXISTS idx_route_progression_threads_user_status
     ON route_progression_threads (user_id, status);
@@ -571,6 +578,42 @@ CREATE TABLE IF NOT EXISTS route_progression_legs (
 );
 CREATE INDEX IF NOT EXISTS idx_route_progression_legs_thread
     ON route_progression_legs (thread_id, leg_index);
+
+-- Durable recovery queue for a post-ack action (a leg outcome or an abandon) whose
+-- retry attempts (POST_ACK_RETRY_ATTEMPTS in bot/cogs/route_progression.py) were all
+-- exhausted - fully self-contained (carries every field handle_leg_outcome/abandon_thread
+-- need), never dependent on RouteProgression._active_legs, so a retry_pending_route_
+-- progression_actions poll tick can complete the action even after a bot restart wiped
+-- that in-memory cache. Rows are deleted on success; a failed retry just bumps
+-- attempts/last_attempt_at and is picked up again next poll - the existing 48h
+-- abandonment poller remains the last-resort backstop if this queue itself can never
+-- succeed (e.g. the thread/channel is gone).
+CREATE TABLE IF NOT EXISTS route_progression_pending_actions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    thread_id INTEGER NOT NULL,
+    action_kind TEXT NOT NULL CHECK (action_kind IN ('leg_outcome', 'abandon')),
+    leg_index INTEGER,
+    side TEXT,
+    id_terminal INTEGER,
+    id_commodity INTEGER,
+    terminal_name TEXT,
+    commodity_name TEXT,
+    display_label TEXT,
+    quoted_price REAL,
+    quoted_scu REAL,
+    quoted_status INTEGER,
+    market_scu REAL,
+    outcome TEXT,
+    actual_price REAL,
+    actual_scu REAL,
+    precision TEXT,
+    reason TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_attempt_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_route_progression_pending_actions_thread
+    ON route_progression_pending_actions (thread_id);
 """
 
 
@@ -807,6 +850,7 @@ class Database:
             "ALTER TABLE terminal_market_observations ADD COLUMN source TEXT NOT NULL DEFAULT 'uex' CHECK (source IN ('uex', 'player_report'))",
             "ALTER TABLE terminal_market_state ADD COLUMN buy_suppressed_until TEXT",
             "ALTER TABLE terminal_market_state ADD COLUMN sell_suppressed_until TEXT",
+            "ALTER TABLE route_progression_threads ADD COLUMN advanced_to_index INTEGER NOT NULL DEFAULT -1",
         ]
         for statement in migrations:
             try:
@@ -1165,6 +1209,15 @@ class Database:
             rows = await cursor.fetchall()
         return [dict(row) for row in rows]
 
+    async def get_route_progression_leg(self, thread_id: int, leg_index: int) -> dict[str, Any] | None:
+        async with self.connect() as db:
+            cursor = await db.execute(
+                "SELECT * FROM route_progression_legs WHERE thread_id = ? AND leg_index = ?",
+                (thread_id, leg_index),
+            )
+            row = await cursor.fetchone()
+        return dict(row) if row is not None else None
+
     async def record_route_progression_leg_outcome(
         self,
         *,
@@ -1174,16 +1227,41 @@ class Database:
         actual_price: float | None = None,
         actual_scu: float | None = None,
         precision: str | None = None,
-    ) -> None:
+    ) -> bool:
+        """Records a leg's outcome - but only the FIRST time; the WHERE clause's own
+        `outcome IS NULL` guard makes this a no-op (0 rows affected) for any second call
+        against the same leg, however it was reached (a genuinely duplicate leg-outcome
+        report from two live prompts for the same leg, or a retried handle_leg_outcome
+        whose earlier attempt already got this far). Returns whether THIS call actually
+        wrote the row - callers must not treat their own outcome as authoritative unless
+        this is True, since a duplicate/losing report must never be allowed to overwrite
+        (or drive downstream side effects for) whichever report won the race."""
         async with self.connect() as db:
-            await db.execute(
+            cursor = await db.execute(
                 """UPDATE route_progression_legs
                    SET outcome = ?, actual_price = ?, actual_scu = ?, precision = ?,
                        reported_at = datetime('now')
-                   WHERE thread_id = ? AND leg_index = ?""",
+                   WHERE thread_id = ? AND leg_index = ? AND outcome IS NULL""",
                 (outcome, actual_price, actual_scu, precision, thread_id, leg_index),
             )
             await db.commit()
+            return cursor.rowcount > 0
+
+    async def claim_route_progression_advance(self, thread_id: int, *, to_index: int) -> bool:
+        """Atomically claims the right to perform the "advance" step for `to_index` (post
+        that leg's prompt, or - when to_index == total_legs - send the completion message)
+        - the conditional UPDATE only succeeds when nothing has already claimed this index
+        or a later one, so calling this twice for the same to_index (a retried
+        handle_leg_outcome, or the recovery poller redoing a step that already happened)
+        only actually performs the send once. Returns whether THIS call won the claim."""
+        async with self.connect() as db:
+            cursor = await db.execute(
+                """UPDATE route_progression_threads SET advanced_to_index = ?
+                   WHERE thread_id = ? AND advanced_to_index < ?""",
+                (to_index, thread_id, to_index),
+            )
+            await db.commit()
+            return cursor.rowcount > 0
 
     async def set_route_progression_thread_status(self, thread_id: int, status: str) -> None:
         """status: 'completed' or 'abandoned'. completed_at's name predates 'abandoned'
@@ -1215,6 +1293,75 @@ class Database:
             )
             rows = await cursor.fetchall()
         return [dict(row) for row in rows]
+
+    async def queue_route_progression_leg_recovery(
+        self,
+        *,
+        thread_id: int,
+        leg_index: int,
+        side: str,
+        id_terminal: int,
+        id_commodity: int,
+        terminal_name: str,
+        commodity_name: str,
+        display_label: str,
+        quoted_price: float | None,
+        quoted_scu: float | None,
+        quoted_status: int | None,
+        market_scu: float | None,
+        outcome: str,
+        actual_price: float | None,
+        actual_scu: float | None,
+        precision: str | None,
+    ) -> None:
+        """Durably queues a leg-outcome action whose post-ack retries were all exhausted -
+        carries every field needed to reconstruct the leg and re-run handle_leg_outcome
+        later with no dependency on RouteProgression._active_legs (see the table's own
+        comment in SCHEMA for why). Picked up by retry_pending_route_progression_actions."""
+        async with self.connect() as db:
+            await db.execute(
+                """INSERT INTO route_progression_pending_actions
+                   (thread_id, action_kind, leg_index, side, id_terminal, id_commodity,
+                    terminal_name, commodity_name, display_label, quoted_price, quoted_scu,
+                    quoted_status, market_scu, outcome, actual_price, actual_scu, precision)
+                   VALUES (?, 'leg_outcome', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    thread_id, leg_index, side, id_terminal, id_commodity, terminal_name,
+                    commodity_name, display_label, quoted_price, quoted_scu, quoted_status,
+                    market_scu, outcome, actual_price, actual_scu, precision,
+                ),
+            )
+            await db.commit()
+
+    async def queue_route_progression_abandon_recovery(self, *, thread_id: int, reason: str) -> None:
+        """Durably queues an abandon action whose post-ack retries were all exhausted."""
+        async with self.connect() as db:
+            await db.execute(
+                """INSERT INTO route_progression_pending_actions (thread_id, action_kind, reason)
+                   VALUES (?, 'abandon', ?)""",
+                (thread_id, reason),
+            )
+            await db.commit()
+
+    async def get_pending_route_progression_actions(self) -> list[dict[str, Any]]:
+        async with self.connect() as db:
+            cursor = await db.execute("SELECT * FROM route_progression_pending_actions ORDER BY id")
+            rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    async def delete_route_progression_pending_action(self, action_id: int) -> None:
+        async with self.connect() as db:
+            await db.execute("DELETE FROM route_progression_pending_actions WHERE id = ?", (action_id,))
+            await db.commit()
+
+    async def mark_route_progression_pending_action_attempted(self, action_id: int) -> None:
+        async with self.connect() as db:
+            await db.execute(
+                """UPDATE route_progression_pending_actions
+                   SET attempts = attempts + 1, last_attempt_at = datetime('now') WHERE id = ?""",
+                (action_id,),
+            )
+            await db.commit()
 
     async def get_route_progression_track_record(
         self, pairs: list[tuple[int, int, str]]

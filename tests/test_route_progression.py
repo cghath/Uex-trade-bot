@@ -617,6 +617,20 @@ async def _seed_market_row(db: Database, **overrides) -> None:
     await db.record_terminal_market_snapshot([row])
 
 
+async def _create_thread_for_leg(db: Database, thread_id: int, leg) -> None:
+    """Seeds a single-leg route_progression_threads/route_progression_legs row matching
+    `leg` - needed by the handle_leg_outcome end-to-end tests below now that
+    record_route_progression_leg_outcome's outcome-recording UPDATE only commits against
+    a real, pre-existing leg row (see its own docstring in bot/db/database.py)."""
+    await db.create_route_progression_thread(
+        thread_id=thread_id, user_id=1, guild_id=1, route_kind="best_route", route_snapshot={},
+        legs=[{
+            "side": leg.side, "id_terminal": leg.id_terminal, "id_commodity": leg.id_commodity,
+            "quoted_price": leg.quoted_price, "quoted_scu": leg.quoted_scu, "quoted_status": leg.quoted_status,
+        }],
+    )
+
+
 def test_suppress_terminal_market_side_round_trips_through_get_suppressed_sides_by_ids(tmp_path):
     async def run():
         db = _make_db(tmp_path)
@@ -719,6 +733,7 @@ def test_handle_leg_outcome_missing_suppresses_the_reported_side(tmp_path):
         cog._active_legs = {}
 
         leg = _leg_input(id_terminal=10, id_commodity=1, quoted_price=100.0, quoted_scu=50.0, quoted_status=3)
+        await _create_thread_for_leg(db, 999, leg)
         await cog.handle_leg_outcome(None, 999, 0, leg, outcome="missing")
 
         result = await db.get_suppressed_sides_by_ids([(1, 10)], now=_now())
@@ -737,6 +752,7 @@ def test_handle_leg_outcome_matched_does_not_suppress(tmp_path):
         cog._active_legs = {}
 
         leg = _leg_input(id_terminal=10, id_commodity=1, quoted_price=100.0, quoted_scu=50.0, quoted_status=3)
+        await _create_thread_for_leg(db, 999, leg)
         await cog.handle_leg_outcome(None, 999, 0, leg, outcome="matched")
 
         result = await db.get_suppressed_sides_by_ids([(1, 10)], now=_now())
@@ -755,6 +771,7 @@ def test_handle_leg_outcome_a_positive_less_report_does_not_suppress(tmp_path):
         cog._active_legs = {}
 
         leg = _leg_input(id_terminal=10, id_commodity=1, quoted_price=100.0, quoted_scu=50.0, quoted_status=3)
+        await _create_thread_for_leg(db, 999, leg)
         await cog.handle_leg_outcome(None, 999, 0, leg, outcome="less", actual_scu=20.0)
 
         result = await db.get_suppressed_sides_by_ids([(1, 10)], now=_now())
@@ -775,6 +792,7 @@ def test_handle_leg_outcome_a_floor_capped_more_report_does_not_suppress(tmp_pat
         cog._active_legs = {}
 
         leg = _leg_input(id_terminal=10, id_commodity=1, quoted_price=100.0, quoted_scu=50.0, quoted_status=3)
+        await _create_thread_for_leg(db, 999, leg)
         await cog.handle_leg_outcome(None, 999, 0, leg, outcome="more", actual_scu=80.0, precision="floor")
 
         result = await db.get_suppressed_sides_by_ids([(1, 10)], now=_now())
@@ -793,6 +811,7 @@ def test_handle_leg_outcome_a_drained_more_report_suppresses(tmp_path):
         cog._active_legs = {}
 
         leg = _leg_input(id_terminal=10, id_commodity=1, quoted_price=100.0, quoted_scu=50.0, quoted_status=3)
+        await _create_thread_for_leg(db, 999, leg)
         await cog.handle_leg_outcome(None, 999, 0, leg, outcome="more", actual_scu=80.0, precision="exact")
 
         result = await db.get_suppressed_sides_by_ids([(1, 10)], now=_now())
@@ -814,6 +833,7 @@ def test_handle_leg_outcome_sell_side_missing_suppresses_only_sell(tmp_path):
             side="sell", id_terminal=10, id_commodity=1,
             terminal_name="Area18 TDD", quoted_price=90.0, quoted_scu=40.0, quoted_status=2,
         )
+        await _create_thread_for_leg(db, 999, leg)
         await cog.handle_leg_outcome(None, 999, 0, leg, outcome="missing")
 
         result = await db.get_suppressed_sides_by_ids([(1, 10)], now=_now())
@@ -832,6 +852,7 @@ def test_handle_leg_outcome_suppression_expires_after_roughly_the_configured_win
         cog._active_legs = {}
 
         leg = _leg_input(id_terminal=10, id_commodity=1, quoted_price=100.0, quoted_scu=50.0, quoted_status=3)
+        await _create_thread_for_leg(db, 999, leg)
         await cog.handle_leg_outcome(None, 999, 0, leg, outcome="missing")
 
         row = (await db.get_mixed_route_market_rows())[0]
@@ -1549,5 +1570,303 @@ def test_abandon_thread_durably_gives_up_after_exhausting_retries_without_raisin
         assert call_count["n"] == POST_ACK_RETRY_ATTEMPTS
         channel.send.assert_awaited_once()
         assert "went wrong" in channel.send.call_args.args[0]
+
+    asyncio.run(run())
+
+
+# -- Durable recovery + conflicting-report guard (two confirmed audit findings) ----------
+# 1. Exhausted post-ack retries used to leave no durable recovery state - the thread just
+#    stayed locked until the 48h abandonment poller. Fixed with a
+#    route_progression_pending_actions queue and a short-interval poller that finishes the
+#    action later, fully reconstructed from the DB (never RouteProgression._active_legs).
+# 2. record_route_progression_leg_outcome's UPDATE was unconditional - two reports for the
+#    same leg (a genuinely duplicate live prompt, or a retried handle_leg_outcome) could
+#    silently overwrite each other, and a retried handle_leg_outcome could re-post the
+#    next leg's prompt a second time. Fixed with an `outcome IS NULL` guard (first report
+#    wins, everything after is a no-op) plus claim_route_progression_advance (only the
+#    first caller to reach a given leg_index/completion actually sends anything).
+
+def _leg_dict(leg: RouteLegInput) -> dict:
+    return {
+        "side": leg.side, "id_terminal": leg.id_terminal, "id_commodity": leg.id_commodity,
+        "terminal_name": leg.terminal_name, "commodity_name": leg.commodity_name,
+        "display_label": leg.display_label, "quoted_price": leg.quoted_price,
+        "quoted_scu": leg.quoted_scu, "quoted_status": leg.quoted_status, "market_scu": leg.market_scu,
+    }
+
+
+async def _create_thread_for_legs(db: Database, thread_id: int, legs: list[RouteLegInput]) -> None:
+    await db.create_route_progression_thread(
+        thread_id=thread_id, user_id=1, guild_id=1, route_kind="best_route",
+        route_snapshot={"title": "test route", "legs": [_leg_dict(leg) for leg in legs]},
+        legs=[_leg_dict(leg) for leg in legs],
+    )
+
+
+def test_record_route_progression_leg_outcome_a_second_write_is_a_no_op(tmp_path):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await db.create_route_progression_thread(
+            thread_id=1, user_id=1, guild_id=1, route_kind="best_route", route_snapshot={},
+            legs=[{"side": "buy", "id_terminal": 10, "id_commodity": 1}],
+        )
+
+        first = await db.record_route_progression_leg_outcome(thread_id=1, leg_index=0, outcome="matched")
+        second = await db.record_route_progression_leg_outcome(
+            thread_id=1, leg_index=0, outcome="missing"
+        )
+
+        assert first is True
+        assert second is False, "a second write for an already-reported leg must be rejected"
+        stored = await db.get_route_progression_leg(1, 0)
+        assert stored["outcome"] == "matched", "the first (winning) report must not be overwritten"
+
+    asyncio.run(run())
+
+
+def test_claim_route_progression_advance_only_the_first_caller_per_index_wins(tmp_path):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await db.create_route_progression_thread(
+            thread_id=1, user_id=1, guild_id=1, route_kind="best_route", route_snapshot={},
+            legs=[{"side": "buy", "id_terminal": 10, "id_commodity": 1}],
+        )
+
+        assert await db.claim_route_progression_advance(1, to_index=0) is True
+        assert await db.claim_route_progression_advance(1, to_index=0) is False, "same index twice must lose"
+        assert await db.claim_route_progression_advance(1, to_index=1) is True
+        assert await db.claim_route_progression_advance(1, to_index=1) is False
+        assert await db.claim_route_progression_advance(1, to_index=0) is False, "must never go backwards"
+
+    asyncio.run(run())
+
+
+def test_pending_route_progression_actions_queue_round_trips(tmp_path):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        leg = _leg_input(id_terminal=10, id_commodity=1)
+        await db.queue_route_progression_leg_recovery(
+            thread_id=1, leg_index=0, side=leg.side, id_terminal=leg.id_terminal,
+            id_commodity=leg.id_commodity, terminal_name=leg.terminal_name,
+            commodity_name=leg.commodity_name, display_label=leg.display_label,
+            quoted_price=leg.quoted_price, quoted_scu=leg.quoted_scu, quoted_status=leg.quoted_status,
+            market_scu=leg.market_scu, outcome="missing", actual_price=None, actual_scu=None, precision=None,
+        )
+        await db.queue_route_progression_abandon_recovery(thread_id=2, reason="test")
+
+        pending = await db.get_pending_route_progression_actions()
+        assert len(pending) == 2
+        leg_action = next(p for p in pending if p["action_kind"] == "leg_outcome")
+        abandon_action = next(p for p in pending if p["action_kind"] == "abandon")
+        assert leg_action["thread_id"] == 1 and leg_action["outcome"] == "missing"
+        assert abandon_action["thread_id"] == 2 and abandon_action["reason"] == "test"
+        assert leg_action["attempts"] == 0
+
+        await db.mark_route_progression_pending_action_attempted(leg_action["id"])
+        reloaded = await db.get_pending_route_progression_actions()
+        assert next(p for p in reloaded if p["id"] == leg_action["id"])["attempts"] == 1
+
+        await db.delete_route_progression_pending_action(leg_action["id"])
+        remaining = await db.get_pending_route_progression_actions()
+        assert [p["id"] for p in remaining] == [abandon_action["id"]]
+
+    asyncio.run(run())
+
+
+def test_handle_leg_outcome_a_conflicting_second_report_does_not_overwrite_or_repost(tmp_path):
+    """The exact scenario the audit named: two live prompts for the same leg (a duplicate
+    from a retried handle_leg_outcome) report DIFFERENT outcomes. The second must be
+    rejected outright - not recorded, not allowed to re-suppress/corrupt shared market
+    state, and must not re-post the next leg's prompt a second time."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await _seed_market_row(db)
+        leg0 = _leg_input(id_terminal=10, id_commodity=1, quoted_price=100.0, quoted_scu=50.0, quoted_status=3)
+        leg1 = _leg_input(
+            side="sell", id_terminal=20, id_commodity=1, terminal_name="Elsewhere",
+            display_label="Sell Gold at Elsewhere", quoted_price=90.0, quoted_scu=40.0, quoted_status=2,
+        )
+        await _create_thread_for_legs(db, 1, [leg0, leg1])
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db})()
+        cog._active_legs = {1: [leg0, leg1]}
+        channel = _fake_thread_channel()
+
+        await cog.handle_leg_outcome(channel, 1, 0, leg0, outcome="matched")
+        assert channel.send.await_count == 1, "leg 2's prompt must be posted exactly once"
+
+        await cog.handle_leg_outcome(channel, 1, 0, leg0, outcome="missing")
+        assert channel.send.await_count == 2, "the duplicate gets a rejection notice, not a second leg-2 prompt"
+        rejection_text = channel.send.call_args_list[1].args[0]
+        assert "already reported" in rejection_text
+
+        stored = await db.get_route_progression_leg(1, 0)
+        assert stored["outcome"] == "matched", "the winning report's outcome must survive untouched"
+        result = await db.get_suppressed_sides_by_ids([(1, 10)], now=_now())
+        assert (1, 10) not in result, (
+            "the rejected 'missing' report must never reach terminal_market_state/suppression - "
+            "'matched' (the real winner) doesn't suppress anything"
+        )
+
+    asyncio.run(run())
+
+
+def test_handle_leg_outcome_retrying_the_identical_report_still_finishes_advancing(tmp_path):
+    """Simulates the other half of the same audit finding: an earlier attempt already
+    durably recorded the outcome but crashed before posting the next leg's prompt (e.g. a
+    Discord hiccup right after the DB write). A retry with the SAME outcome/values must
+    still complete that missing step, not silently bail out just because
+    record_route_progression_leg_outcome's write is now a no-op."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await _seed_market_row(db)
+        leg0 = _leg_input(id_terminal=10, id_commodity=1, quoted_price=100.0, quoted_scu=50.0, quoted_status=3)
+        leg1 = _leg_input(
+            side="sell", id_terminal=20, id_commodity=1, terminal_name="Elsewhere",
+            display_label="Sell Gold at Elsewhere", quoted_price=90.0, quoted_scu=40.0, quoted_status=2,
+        )
+        await _create_thread_for_legs(db, 1, [leg0, leg1])
+        # Pre-seed exactly what a partially-succeeded earlier attempt would have left
+        # behind: the outcome already recorded, but nothing advanced past leg 0 yet.
+        assert await db.record_route_progression_leg_outcome(thread_id=1, leg_index=0, outcome="matched") is True
+
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db})()
+        cog._active_legs = {1: [leg0, leg1]}
+        channel = _fake_thread_channel()
+
+        await cog.handle_leg_outcome(channel, 1, 0, leg0, outcome="matched")
+
+        channel.send.assert_awaited_once()
+        assert "already reported" not in channel.send.call_args.args
+        thread = await db.get_route_progression_thread(1)
+        assert thread["advanced_to_index"] == 1, "leg 2's prompt must have been claimed/posted"
+
+    asyncio.run(run())
+
+
+def test_get_leg_falls_back_to_the_persisted_snapshot_when_active_legs_has_nothing(tmp_path):
+    """The restart-safety half of the recovery fix: _get_leg must reconstruct a leg from
+    route_snapshot (including market_scu, which lives nowhere else) when _active_legs
+    doesn't have the thread - simulating a bot restart wiping that in-memory cache."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        leg = _leg_input(
+            id_terminal=10, id_commodity=1, quoted_price=100.0, quoted_scu=50.0,
+            quoted_status=3, market_scu=77.0,
+        )
+        await _create_thread_for_legs(db, 1, [leg])
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db})()
+        cog._active_legs = {}  # nothing cached - as if the bot just restarted
+
+        reconstructed = await cog._get_leg(1, 0)
+
+        assert reconstructed is not None
+        assert reconstructed.market_scu == 77.0
+        assert reconstructed.terminal_name == leg.terminal_name
+        assert reconstructed.display_label == leg.display_label
+
+    asyncio.run(run())
+
+
+def test_recovery_queue_completes_an_exhausted_leg_outcome_with_no_active_legs_cache(tmp_path):
+    """End-to-end for finding #1: _record_leg_outcome_durably queues a durable recovery
+    action once retries are exhausted, and retry_pending_route_progression_actions later
+    finishes it - reconstructed entirely from the DB, with _active_legs left empty the
+    whole time to simulate a bot restart between the failure and the retry."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await _seed_market_row(db)
+        leg = _leg_input(id_terminal=10, id_commodity=1, quoted_price=100.0, quoted_scu=50.0, quoted_status=3)
+        await _create_thread_for_legs(db, 1, [leg])
+
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db, "get_channel": lambda self, thread_id: "not-a-thread"})()
+        cog._active_legs = {}
+
+        async def always_fails(*args, **kwargs):
+            raise RuntimeError("simulated total outage")
+
+        cog.handle_leg_outcome = always_fails
+        channel = _fake_thread_channel()
+        await cog._record_leg_outcome_durably(channel, 1, 0, leg, outcome="missing")
+
+        pending = await db.get_pending_route_progression_actions()
+        assert len(pending) == 1 and pending[0]["action_kind"] == "leg_outcome"
+        assert (await db.get_route_progression_leg(1, 0))["outcome"] is None, "not recorded yet"
+
+        del cog.handle_leg_outcome  # restore the real bound method for the poller below
+        await cog.retry_pending_route_progression_actions.coro(cog)
+
+        assert await db.get_pending_route_progression_actions() == []
+        stored = await db.get_route_progression_leg(1, 0)
+        assert stored["outcome"] == "missing"
+        result = await db.get_suppressed_sides_by_ids([(1, 10)], now=_now())
+        assert result == {(1, 10): {"buy": True, "sell": False}}
+
+    asyncio.run(run())
+
+
+def test_recovery_queue_completes_an_exhausted_abandon(tmp_path):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        leg = _leg_input(id_terminal=10, id_commodity=1)
+        await _create_thread_for_legs(db, 1, [leg])
+
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db, "get_channel": lambda self, thread_id: "not-a-thread"})()
+        cog._active_legs = {1: [leg]}
+
+        async def always_fails(*args, **kwargs):
+            raise RuntimeError("simulated total outage")
+
+        cog.abandon_thread = always_fails
+        channel = _fake_thread_channel()
+        await cog._abandon_thread_durably(channel, 1, reason="you asked to stop tracking it")
+
+        pending = await db.get_pending_route_progression_actions()
+        assert len(pending) == 1 and pending[0]["action_kind"] == "abandon"
+
+        del cog.abandon_thread
+        await cog.retry_pending_route_progression_actions.coro(cog)
+
+        assert await db.get_pending_route_progression_actions() == []
+        thread = await db.get_route_progression_thread(1)
+        assert thread["status"] == "abandoned"
+
+    asyncio.run(run())
+
+
+def test_recovery_queue_discards_a_pending_action_for_a_thread_already_resolved(tmp_path):
+    """If the thread's fate was already decided some other way (e.g. the user reported
+    the leg again successfully through a fresh prompt before the recovery poller got to
+    it, completing the route) a stale queued action must be dropped, not replayed against
+    an already-finished thread."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        leg = _leg_input(id_terminal=10, id_commodity=1)
+        await _create_thread_for_legs(db, 1, [leg])
+        await db.set_route_progression_thread_status(1, "completed")
+        await db.queue_route_progression_abandon_recovery(thread_id=1, reason="stale")
+
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db, "get_channel": lambda self, thread_id: "not-a-thread"})()
+        cog._active_legs = {}
+
+        await cog.retry_pending_route_progression_actions.coro(cog)
+
+        assert await db.get_pending_route_progression_actions() == []
+        thread = await db.get_route_progression_thread(1)
+        assert thread["status"] == "completed", "must not be clobbered back to 'abandoned'"
 
     asyncio.run(run())

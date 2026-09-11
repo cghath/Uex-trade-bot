@@ -511,6 +511,50 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
   its live-UEX-data shape doesn't share a natural cross-reference point with the
   other six commands' either, and would need its own separate design; logged as a
   known gap rather than silently left inconsistent.
+- [x] **Durable recovery + conflicting-report guard for the post-ack retry wrapper**:
+  Shipped 2026-09-11, from a follow-up audit of the suppression-window commit above.
+  Two confirmed findings against `_record_leg_outcome_durably`/
+  `_abandon_thread_durably` (`bot/cogs/route_progression.py`), both in the same
+  post-ack retry mechanism that commit introduced:
+  1. Exhausting all `POST_ACK_RETRY_ATTEMPTS` left no durable recovery state - the
+     leg stayed claimed (buttons disabled, nothing recorded or recorded-but-stuck)
+     until the 48h abandonment poller eventually swept the whole thread. Fixed with
+     a new `route_progression_pending_actions` table (additive) queued on
+     exhaustion via `queue_route_progression_leg_recovery`/
+     `queue_route_progression_abandon_recovery`, and a new
+     `retry_pending_route_progression_actions` poller (15 min, matching this
+     codebase's other short-interval background loops) that finishes the action
+     later. Each queued row is fully self-contained (every field
+     `handle_leg_outcome`/`abandon_thread` need, including `market_scu`, which
+     previously lived nowhere outside `RouteLegInput`) - deliberately never
+     dependent on `RouteProgression._active_legs`, so recovery still completes
+     even across a bot restart that wiped that in-memory cache. A stale queued
+     action for a thread whose status is no longer `in_progress` (resolved some
+     other way in the meantime) is discarded rather than replayed.
+  2. `record_route_progression_leg_outcome`'s `UPDATE` had no guard against a
+     leg that was already reported - two reports for the same leg (a genuinely
+     duplicate live prompt from a retried `handle_leg_outcome`, or the retry
+     itself) could silently overwrite each other, and a retry could re-post the
+     next leg's prompt a second time. Fixed two ways: the `UPDATE` now requires
+     `outcome IS NULL`, so only the first report for a leg ever commits (returns
+     whether it actually wrote); and a new `advanced_to_index` column on
+     `route_progression_threads` plus `claim_route_progression_advance` (an
+     atomic conditional `UPDATE`, same check-then-set shape as this codebase's
+     other claim guards) makes posting a leg's prompt - or sending the
+     completion message - a true one-time action regardless of how many times
+     `handle_leg_outcome` runs for it. `handle_leg_outcome` distinguishes a
+     losing duplicate (different outcome/values than what's stored - rejected,
+     with a channel notice, no market-state write) from a legitimate retry of
+     the exact report that already won (same values - proceeds to finish
+     whatever step didn't complete last time, since the market-state re-merge
+     and the advance-claim are both safe to repeat).
+  Eight pre-existing `test_handle_leg_outcome_*` tests had to start seeding a
+  real thread/leg row first (`_create_thread_for_leg`), since they'd previously
+  called `handle_leg_outcome` against a `thread_id`/`leg_index` with no
+  corresponding DB row at all - harmless before this fix (nothing checked for a
+  row to exist), but the new `outcome IS NULL` guard needs a real row to match
+  against. All 9 new regression tests were verified to fail against the
+  pre-fix source via `git stash`.
 
 ### Route Economics Depth
 
