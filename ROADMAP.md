@@ -763,6 +763,42 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
   queues) - 8 of 9 verified to fail against the pre-fix source via `git
   stash` (the final-leg guard test passes on both sides by design, since it
   pins existing behavior the fix must not break).
+- [x] **`/price` Buying Capacity**: Shipped 2026-09-12, user-initiated. Each entry in
+  "Best places to SELL" now shows how much SCU that terminal is currently buying from you
+  (UEX's `scu_sell` field), not just the price. Confirmed first that UEX has no fixed/max
+  capacity field for trading volume anywhere in its API (only a refinery-specific
+  `capacity` percentage, and `/terminals`' `max_container_size`, which is a physical
+  cargo-box size limit, not a trade-volume cap) - `scu_sell` and its `_max`/`_avg` variants
+  over day/week/month are all just observed snapshots, never a designed ceiling, so the
+  footer now says so explicitly rather than implying a hard number. Reuses the same
+  UEX status-code-7 ("Maximum Inventory, No Demand") override this codebase's Evidence-
+  Level Labels already established for `classify_supply_evidence`, extracted into a new
+  standalone `effective_sell_scu()` helper (`bot/uex/supply_demand.py`) both now call -
+  without it, a terminal whose status label already says "Maximum Inventory (No Demand)"
+  could still show a stale positive SCU figure right next to it, directly contradicting
+  itself (the same buy/sell status inversion this project has hit more than once). Scoped
+  to the sell side only, on direct user preference - stock-available-to-buy (`scu_buy`) on
+  the buy side was considered and deliberately left out.
+
+  **Same-day follow-up**: user asked for a freshness indicator next to the new SCU figure
+  (the base UEX price/scu data can go stale between whenever a player last reported that
+  terminal), then asked to condense it into a colored dot instead of spelled-out text to
+  cut down on line clutter, and explicitly said not to limit it to a 3-color traffic
+  light if the real data supported more categories. `classify_terminal_health` already
+  produces exactly 5 real statuses (fresh/recent/limited/stale/unknown), so
+  `freshness_emoji()` (`bot/uex/data_health.py`) maps each to its own dot (🟢🟡🟠🔴⚪)
+  rather than collapsing "limited coverage" and "no TTL metadata at all" into one bucket
+  - those are different KINDS of caution, not just different degrees of the same one. A
+  `FRESHNESS_LEGEND` constant explains the dots once, appended to `/price`'s footer,
+  rather than repeating the explanation on every line. Unlike the pre-existing
+  `format_health_note` (silent for good data, only speaks up for warnings),
+  `freshness_emoji` is always present - every SCU figure gets a dot. To avoid repeating
+  the same age information twice on one line, the general ⚠️ health-warning note is now
+  shown only when there's no SCU figure for the dot to sit next to instead. 5 new tests
+  covering the dot-per-status mapping (built from the same real `record_terminal_data_
+  health_snapshot` fixtures the pre-existing `classify_terminal_health` tests use), the
+  unknown-dot fallback for missing/absent health data, and the no-duplicate-warning
+  behavior. Full suite (623 tests) reverified clean.
 
 ### Route Economics Depth
 

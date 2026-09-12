@@ -31,6 +31,29 @@ def has_sell_side_demand(scu_wanted: Any, status_sell: Any) -> bool:
     return wanted > 0 and status not in (None, 0, SELL_SIDE_NO_DEMAND_CODE)
 
 
+def effective_sell_scu(scu: Any, status_sell: Any) -> float | None:
+    """A sell-side (terminal-buying-from-you) SCU figure, overridden to 0 when UEX status
+    code 7 ("Maximum Inventory, No Demand") confirms zero real demand even though scu
+    itself still reports a stale positive number - the same inversion has_sell_side_demand
+    exists for, but returning the quantity itself (not just a bool) so callers can display
+    it. Unlike has_sell_side_demand, an unknown/missing status never zeroes a live figure -
+    only code 7 is an authoritative zero-demand signal. Returns None when scu itself is
+    unparseable/missing, so a caller can distinguish "no data" from "confirmed zero"."""
+    try:
+        wanted = float(scu) if scu is not None else None
+    except (TypeError, ValueError):
+        return None
+    if wanted is None:
+        return None
+    try:
+        status_code = int(float(status_sell)) if status_sell is not None else None
+    except (TypeError, ValueError):
+        status_code = None
+    if status_code == SELL_SIDE_NO_DEMAND_CODE:
+        return 0.0
+    return wanted
+
+
 @dataclass(frozen=True)
 class TerminalMarketHistory:
     observed_hours: float
@@ -134,12 +157,7 @@ def classify_supply_evidence(
     """
     effective_scu = scu
     if side == "demand" and scu is not None:
-        try:
-            status_code = int(float(status_sell)) if status_sell is not None else None
-        except (TypeError, ValueError):
-            status_code = None
-        if status_code == SELL_SIDE_NO_DEMAND_CODE:
-            effective_scu = 0.0
+        effective_scu = effective_sell_scu(scu, status_sell)
     if effective_scu is not None:
         status = health.status if health is not None else "unknown"
         tier = "current" if status in ("fresh", "recent") else "aging"

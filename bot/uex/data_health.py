@@ -121,6 +121,34 @@ def classify_terminal_health(row: dict[str, Any], *, now: datetime | None = None
     )
 
 
+# One dot per real TerminalDataHealth.status value (classify_terminal_health only ever
+# produces these five - locally_stale is folded into "unknown" there already, not a sixth
+# case here) rather than collapsing into a plain 3-color traffic light - "limited" (partial
+# price coverage) and "unknown" (no freshness metadata at all) are different KINDS of
+# caution, not just different degrees of the same one, so they get their own dot.
+_FRESHNESS_EMOJI = {
+    "fresh": "🟢",
+    "recent": "🟡",
+    "limited": "🟠",
+    "stale": "🔴",
+    "unknown": "⚪",
+}
+FRESHNESS_LEGEND = (
+    "🟢 fresh · 🟡 recent (aging) · 🟠 limited coverage · 🔴 stale · ⚪ freshness unknown"
+)
+
+
+def freshness_emoji(health: TerminalDataHealth | None) -> str:
+    """A compact, ALWAYS-present freshness dot for display next to a live figure (e.g.
+    /price's buying-capacity SCU number) - unlike format_health_note (which stays silent
+    for good data), every figure gets one, not just the ones worth a warning. Pair with
+    FRESHNESS_LEGEND at the end of the message so the dots are explained once rather than
+    spelled out per line."""
+    if health is None:
+        return _FRESHNESS_EMOJI["unknown"]
+    return _FRESHNESS_EMOJI.get(health.status, _FRESHNESS_EMOJI["unknown"])
+
+
 def format_health_note(health: TerminalDataHealth | None) -> str | None:
     """Return a compact Discord-friendly note, only calling attention to weak data."""
     if health is None or not health.warning:

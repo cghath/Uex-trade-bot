@@ -8,8 +8,8 @@ import aiosqlite
 from cryptography.fernet import Fernet
 
 from bot.db.database import Database
-from bot.uex.data_health import classify_terminal_health, format_health_note
-from bot.uex.supply_demand import analyze_terminal_market_history, classify_supply_evidence
+from bot.uex.data_health import TerminalDataHealth, classify_terminal_health, format_health_note, freshness_emoji
+from bot.uex.supply_demand import analyze_terminal_market_history, classify_supply_evidence, effective_sell_scu
 from bot.uex.practical_routes import (
     route_in_system,
     route_practical_notes,
@@ -403,6 +403,69 @@ def test_recent_terminal_health_without_a_warning_formats_as_none():
     assert format_health_note(health) is None
 
 
+# -- freshness_emoji (the always-present dot /price shows next to a live SCU figure) -----
+
+def test_freshness_emoji_maps_every_real_status_to_its_own_dot(tmp_path):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await db.record_terminal_data_health_snapshot(
+            [
+                {
+                    "id_terminal": 1, "type": "commodity", "terminal_name": "Fresh Terminal",
+                    "prices_total": 10, "prices_updated": 10, "prices_updated_percentage": 100,
+                    "last_update_days_limit": 10, "last_update_days": 0,
+                    "last_update_days_percentage": 90,
+                },
+                {
+                    "id_terminal": 2, "type": "commodity", "terminal_name": "Recent Terminal",
+                    "prices_total": 10, "prices_updated": 10, "prices_updated_percentage": 100,
+                    "last_update_days_limit": 2, "last_update_days": 1,
+                    "last_update_days_percentage": 50,
+                },
+                {
+                    "id_terminal": 3, "type": "commodity", "terminal_name": "Limited Terminal",
+                    "prices_total": 10, "prices_updated": 3, "prices_updated_percentage": 30,
+                    "last_update_days_limit": 1, "last_update_days": 0,
+                    "last_update_days_percentage": 100,
+                },
+                {
+                    "id_terminal": 4, "type": "commodity", "terminal_name": "Stale Terminal",
+                    "prices_total": 10, "prices_updated": 10, "prices_updated_percentage": 100,
+                    "last_update_days_limit": 1, "last_update_days": 14,
+                    "last_update_days_percentage": 0,
+                },
+            ]
+        )
+        rows = await db.get_terminal_data_health_by_ids([1, 2, 3, 4])
+
+        assert freshness_emoji(classify_terminal_health(rows[1])) == "🟢"
+        assert freshness_emoji(classify_terminal_health(rows[2])) == "🟡"
+        assert freshness_emoji(classify_terminal_health(rows[3])) == "🟠"
+        assert freshness_emoji(classify_terminal_health(rows[4])) == "🔴"
+
+    asyncio.run(run())
+
+
+def test_freshness_emoji_is_the_unknown_dot_for_missing_ttl_metadata_and_no_health_at_all():
+    missing_ttl = classify_terminal_health({"terminal_name": "No TTL"})
+    assert missing_ttl.status == "unknown"
+    assert freshness_emoji(missing_ttl) == "⚪"
+    assert freshness_emoji(None) == "⚪"
+
+
+def test_freshness_emoji_is_the_unknown_dot_when_local_collection_has_stalled():
+    """locally_stale terminals are already reclassified to status="unknown" by
+    classify_terminal_health itself - freshness_emoji doesn't need a separate check for
+    the flag, just for the status it's folded into."""
+    stalled = TerminalDataHealth(
+        terminal_name="Stalled", status="unknown", last_update_days=None,
+        last_update_days_limit=None, last_update_days_percentage=None,
+        coverage_percentage=None, has_recent_reports=False, locally_stale=True,
+    )
+    assert freshness_emoji(stalled) == "⚪"
+
+
 def test_terminal_health_falls_back_to_age_ratio_at_the_exact_50_percent_boundary():
     """Every other classify_terminal_health test supplies last_update_days_percentage
     directly, so the age/age_limit fallback branch (used whenever UEX omits that field)
@@ -714,6 +777,24 @@ def test_evidence_level_supply_side_never_consults_status_sell():
     )
     assert level.tier == "current"
     assert level.quantity_scu == 500
+
+
+# -- effective_sell_scu (the extracted helper /price's buying-capacity display uses) -----
+
+def test_effective_sell_scu_zeroes_a_live_figure_when_status_confirms_no_demand():
+    assert effective_sell_scu(500, status_sell=7) == 0.0
+
+
+def test_effective_sell_scu_trusts_a_live_figure_for_any_other_status():
+    for status_sell in (None, 0, 1, 3):
+        assert effective_sell_scu(500, status_sell=status_sell) == 500.0
+
+
+def test_effective_sell_scu_returns_none_when_scu_itself_is_missing():
+    """None must stay distinguishable from a confirmed zero - a caller (like /price) needs
+    to tell "no data reported" apart from "confirmed nobody is buying"."""
+    assert effective_sell_scu(None, status_sell=1) is None
+    assert effective_sell_scu(None, status_sell=7) is None
 
 
 def test_terminal_market_name_search_is_scoped_to_commodity(tmp_path):
