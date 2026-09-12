@@ -837,7 +837,27 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
   before now. Falls back to the bare dot only when no real age is known at all (the
   "unknown" case). 3 new tests (the 0d/7d pair proving both classify as the same "fresh"
   status but now show visibly different labels, and the bare-dot fallback). Full suite
-  (626 tests) and a clean local bot start reverified.
+  (626 tests) and a clean local bot start reverified. A pure cosmetic tweak
+  followed immediately after (parenthesized the day figure - "🟢 0d" to "🟢 (0d)" - per
+  direct user preference).
+
+  **Fourth same-day follow-up**: a live screenshot showed the exact buying-amount figure
+  (`scu_sell`) on only one of five "Best places to SELL" entries - the other four all
+  showed "Out Stock" (correctly, per the sell-side inversion above) with no number at all.
+  Checked the real live data for those exact terminals rather than guessing: UEX reports
+  `scu_sell: 0` for all four - there's genuinely no recorded "amount actually bought"
+  figure for them, not a bug in this bot's display logic. UEX does separately report
+  `scu_sell_stock` for all four though (505/871/253/124/161 SCU) - a DIFFERENT figure (the
+  terminal's own on-hand inventory of the commodity, not a buying amount) that runs
+  opposite in meaning to `scu_sell`: more on-hand stock generally means closer to full and
+  less eager to buy, the same sell-side inversion `SELL_SIDE_STATUS_CLARIFIER` already
+  covers for status labels. Added a fallback - shown only when the real `scu_sell` figure
+  is absent, worded distinctly ("holds ~505 SCU already") so it's never mistaken for the
+  real buying figure - plus a footer clause explaining what it actually means. 3 new tests
+  (the fallback firing when only stock data exists, the real buying figure taking priority
+  over the fallback when both exist, and the pre-existing "nothing reported at all" case
+  extended to also assert the fallback text doesn't appear). Full suite (628 tests) and a
+  clean local bot start reverified.
 
 ### Route Economics Depth
 

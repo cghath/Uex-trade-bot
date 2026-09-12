@@ -75,6 +75,14 @@ def _positive_int(value: object) -> int | None:
     return parsed if parsed > 0 else None
 
 
+def _positive_float(value: object) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
 async def commodity_name_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
     """Autocomplete for a plain commodity-name text option, same pattern as
     ship_name_autocomplete (bot/cogs/ships.py) and item_name_autocomplete
@@ -205,7 +213,16 @@ class Prices(commands.Cog):
                 terminal_id = _positive_int(r.get("id_terminal"))
                 freshness = freshness_label(health_by_terminal.get(terminal_id))
                 capacity = effective_sell_scu(r.get("scu_sell"), r.get("status_sell"))
-                capacity_text = f" · buying {capacity:,.0f} SCU" if capacity else ""
+                if capacity:
+                    capacity_text = f" · buying {capacity:,.0f} SCU"
+                elif stock := _positive_float(r.get("scu_sell_stock")):
+                    # UEX has no recorded "amount actually bought" for this terminal, but
+                    # does report its own on-hand stock of the commodity - a DIFFERENT
+                    # figure (the terminal's inventory level, not a buying figure) shown
+                    # distinctly so it's never mistaken for the real thing.
+                    capacity_text = f" · holds ~{stock:,.0f} SCU already"
+                else:
+                    capacity_text = ""
                 lines.append(
                     f"{freshness} **{r['terminal_name']}** — {r['price_sell']:.2f} aUEC/unit"
                     f"{capacity_text}{label_text}"
@@ -222,7 +239,9 @@ class Prices(commands.Cog):
 
         embed.set_footer(
             text="Data from UEX Corp · cached up to 30 min · status = current stock/demand level · "
-            "buying SCU is the last reported figure, not a fixed capacity\n"
+            "buying SCU is the last reported figure, not a fixed capacity · "
+            "'holds ~N SCU already' is the terminal's own on-hand stock (a different figure, "
+            "shown only when no real buying amount was reported)\n"
             f"{SELL_SIDE_STATUS_CLARIFIER}\n"
             f"Data freshness:\n{FRESHNESS_LEGEND}"
         )
