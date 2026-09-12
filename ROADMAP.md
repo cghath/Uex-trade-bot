@@ -136,11 +136,9 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
   2026-09) that publishes a real per-location concentration percentage for every ore, not
   just presence/absence the way UEX's own `ids_poi`/`ids_moons` linkage does. Kept as its own
   module (not folded into the difficulty table) since it's sourced from a different site with
-  its own independent staleness risk. Surfaces the top 1-3 named spots by concentration, with
-  ties condensed to at most 3 examples and named POIs/asteroid belts preferred over bare moon
-  names when both tie at the same percentage - a deliberate condensation of the real numbers,
-  not a claim that untied locations are worse. Two ores (Savrilium, Torite) have one
-  standout 100% location (Breaker Stations' Large Geode) against 2-29% everywhere else for
+  its own independent staleness risk. Surfaces every location tied at an ore's own real
+  maximum concentration, whatever that count happens to be. Two ores (Savrilium, Torite) have
+  one standout 100% location (Breaker Stations' Large Geode) against 2-29% everywhere else for
   either ore. Directly fills the gap the location-lookup shipped with earlier the same day:
   Jaclium's only listed spot is Hathor Caves (19%, FPS hand-mining) - independently
   confirming, from a completely different source than the user's own correction, that
@@ -153,6 +151,25 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
   cross-checks cleanly against UEX's own POI list for the same commodity, which separately
   and independently lists "OV Breaker Stations (Nyx)" as a real site - two unrelated sources
   agreeing this location is real, without either one telling the other about it.
+
+  **Same-day correction**: the first shipped version of this table capped every ore at 3
+  example locations, preferring named POIs over bare moon names when several tied - caught
+  the same day when the user tested `/where-to-mine Quantainium (Raw)` live in Discord and
+  noticed real locations they knew about (Cellin, Wala) were missing. Quantainium's real
+  source data ties ALL 14 known locations at 2% - the cap was silently showing 1-2 of them.
+  Fixing Quantainium alone wasn't enough; the user asked whether the same problem existed for
+  other ores, which prompted a full re-audit of all 26 entries against the original source
+  data. Ten more ores turned out to be under-capturing their own real tied-max group by
+  varying amounts (Agricium, Aslarite, Titanium: 3 shown of 7 real; Bexalite, Borase, Gold: 2
+  of 9; Ouratite: 3 of 4; Riccite: 2 of 5; Taranite: 3 of 4; Stileron: 1 of a complete 6-way
+  tie). A twelfth inconsistency was found in the same pass, the opposite direction: Copper
+  listed Clio/Euterpe (40%) alongside Hurston's real max (44%) even though 40 isn't tied with
+  44 at all - fixed by removing the non-tied entries rather than adding more. The fixed cap
+  looked tidy but was hiding or padding real, verifiable per-ore data; the table now shows
+  exactly what the source shows for every ore, no fixed-size cap in either direction. 4 new
+  tests added covering a large tied group (Bexalite, 9-way), a complete tie (Stileron, 6-way),
+  and the corrected non-tie exclusion (Copper). Full suite (608 tests) and a local bot start
+  reverified clean after the fix.
 - [ ] **Fuel-Aware Profit**: Estimate fuel costs and show route profit after fuel for the
   user's selected ship.
 - [ ] **Marketplace Depth Analytics**: Extend sellability with buy-to-sell ratios, listing-price
