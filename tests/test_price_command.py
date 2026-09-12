@@ -1,6 +1,8 @@
 """/price end to end: the buying-capacity figure added to "Best places to SELL" - how much
 a terminal is currently buying from you (UEX's scu_sell field), not a fixed capacity - and
-its always-present freshness dot (bot/uex/data_health.py's freshness_emoji)."""
+its always-present freshness label (bot/uex/data_health.py's freshness_label: a dot plus
+the real elapsed-days figure, since two terminals both showing "fresh" can differ by
+several days and the dot alone can't tell them apart)."""
 from __future__ import annotations
 
 import asyncio
@@ -80,7 +82,9 @@ def test_price_shows_a_green_dot_for_confirmed_fresh_data(tmp_path):
         embed = interaction.followup.send.call_args.kwargs["embed"]
         fields = {f.name: f.value for f in embed.fields}
         line = fields["Best places to SELL"]
-        assert line.startswith("🟢 **Terminal A**"), f"expected the dot to lead the line: {line!r}"
+        assert line.startswith("🟢 0d **Terminal A**"), (
+            f"expected the dot plus the real elapsed-days figure to lead the line: {line!r}"
+        )
         assert "buying 250 SCU" in line
 
     asyncio.run(run())
@@ -110,7 +114,7 @@ def test_price_shows_a_red_dot_and_no_duplicate_warning_for_confirmed_stale_data
         embed = interaction.followup.send.call_args.kwargs["embed"]
         fields = {f.name: f.value for f in embed.fields}
         line = fields["Best places to SELL"]
-        assert line.startswith("🔴 **Terminal A**"), f"expected the dot to lead the line: {line!r}"
+        assert line.startswith("🔴 14d **Terminal A**"), f"expected the dot plus age to lead the line: {line!r}"
         assert "buying 250 SCU" in line
         assert "⚠️" not in line, f"expected the dot alone, no duplicate warning text: {line!r}"
 
@@ -191,6 +195,6 @@ def test_price_shows_a_freshness_dot_on_buy_section_entries_too(tmp_path):
         embed = interaction.followup.send.call_args.kwargs["embed"]
         fields = {f.name: f.value for f in embed.fields}
         line = fields["Best places to BUY"]
-        assert line.startswith("🟢 **Terminal B**"), f"expected the dot to lead the line: {line!r}"
+        assert line.startswith("🟢 0d **Terminal B**"), f"expected the dot plus age to lead the line: {line!r}"
 
     asyncio.run(run())

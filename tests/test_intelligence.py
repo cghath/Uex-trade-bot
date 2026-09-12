@@ -8,7 +8,13 @@ import aiosqlite
 from cryptography.fernet import Fernet
 
 from bot.db.database import Database
-from bot.uex.data_health import TerminalDataHealth, classify_terminal_health, format_health_note, freshness_emoji
+from bot.uex.data_health import (
+    TerminalDataHealth,
+    classify_terminal_health,
+    format_health_note,
+    freshness_emoji,
+    freshness_label,
+)
 from bot.uex.supply_demand import analyze_terminal_market_history, classify_supply_evidence, effective_sell_scu
 from bot.uex.practical_routes import (
     route_in_system,
@@ -464,6 +470,37 @@ def test_freshness_emoji_is_the_unknown_dot_when_local_collection_has_stalled():
         coverage_percentage=None, has_recent_reports=False, locally_stale=True,
     )
     assert freshness_emoji(stalled) == "⚪"
+
+
+# -- freshness_label (dot + real elapsed days, since the dot alone can't tell 0 days from
+# 7 days apart even though both land in the same "fresh" bucket) ------------------------
+
+def test_freshness_label_pairs_the_dot_with_the_real_elapsed_days():
+    fresh_today = classify_terminal_health(
+        {
+            "terminal_name": "Just Updated", "prices_updated_percentage": 100,
+            "last_update_days_limit": 15, "last_update_days": 0,
+            "last_update_days_percentage": 100,
+        }
+    )
+    fresh_a_week_ago = classify_terminal_health(
+        {
+            "terminal_name": "A Week Old", "prices_updated_percentage": 100,
+            "last_update_days_limit": 15, "last_update_days": 7,
+            "last_update_days_percentage": 53,
+        }
+    )
+    # Both classify as "fresh" (the dot alone can't tell them apart) - closing exactly the
+    # gap a user asked about: 0 days and 7 days both show 🟢 with a bare dot.
+    assert fresh_today.status == fresh_a_week_ago.status == "fresh"
+    assert freshness_label(fresh_today) == "🟢 0d"
+    assert freshness_label(fresh_a_week_ago) == "🟢 7d"
+
+
+def test_freshness_label_falls_back_to_the_bare_dot_when_no_real_age_is_known():
+    assert freshness_label(None) == "⚪"
+    missing_ttl = classify_terminal_health({"terminal_name": "No TTL"})
+    assert freshness_label(missing_ttl) == "⚪"
 
 
 def test_terminal_health_falls_back_to_age_ratio_at_the_exact_50_percent_boundary():

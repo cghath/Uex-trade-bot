@@ -10,7 +10,12 @@ from discord.ext import commands
 
 from bot.cogs.ships import ship_name_autocomplete
 from bot.uex.exceptions import UexApiError, describe_uex_api_error
-from bot.uex.data_health import FRESHNESS_LEGEND, classify_terminal_health, format_health_note, freshness_emoji
+from bot.uex.data_health import (
+    FRESHNESS_LEGEND,
+    classify_terminal_health,
+    format_health_note,
+    freshness_label,
+)
 from bot.uex.route_confidence import coalesce_report_count, compute_route_confidence, track_record_modifier
 from bot.uex.practical_routes import route_in_system, route_practical_notes, route_supports_auto_load
 from bot.uex.commodity_risk import format_commodity_risk
@@ -198,11 +203,11 @@ class Prices(commands.Cog):
                 label = resolve_status_label(status_lookup, "sell", r.get("status_sell"))
                 label_text = f" · {label}" if label else ""
                 terminal_id = _positive_int(r.get("id_terminal"))
-                emoji = freshness_emoji(health_by_terminal.get(terminal_id))
+                freshness = freshness_label(health_by_terminal.get(terminal_id))
                 capacity = effective_sell_scu(r.get("scu_sell"), r.get("status_sell"))
                 capacity_text = f" · buying {capacity:,.0f} SCU" if capacity else ""
                 lines.append(
-                    f"{emoji} **{r['terminal_name']}** — {r['price_sell']:.2f} aUEC/unit"
+                    f"{freshness} **{r['terminal_name']}** — {r['price_sell']:.2f} aUEC/unit"
                     f"{capacity_text}{label_text}"
                 )
             embed.add_field(name="Best places to SELL", value="\n".join(lines), inline=False)
@@ -211,8 +216,8 @@ class Prices(commands.Cog):
             for r in top_buy:
                 label = resolve_status_label(status_lookup, "buy", r.get("status_buy"))
                 label_text = f" · {label}" if label else ""
-                emoji = freshness_emoji(health_by_terminal.get(_positive_int(r.get("id_terminal"))))
-                lines.append(f"{emoji} **{r['terminal_name']}** — {r['price_buy']:.2f} aUEC/unit{label_text}")
+                freshness = freshness_label(health_by_terminal.get(_positive_int(r.get("id_terminal"))))
+                lines.append(f"{freshness} **{r['terminal_name']}** — {r['price_buy']:.2f} aUEC/unit{label_text}")
             embed.add_field(name="Best places to BUY", value="\n".join(lines), inline=False)
 
         embed.set_footer(

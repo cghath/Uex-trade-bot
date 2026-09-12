@@ -823,6 +823,22 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
   (624 tests) and a clean local bot start (both cogs still load with no import errors)
   reverified.
 
+  **Third same-day follow-up**: cosmetic request to move the dot to the left of each
+  terminal name instead of trailing at the end, so it reads as a left-aligned status
+  column. While confirming this, a user question ("how much time has actually passed when
+  it says fresh?") surfaced a real information gap: UEX's own commodity-data TTL is a
+  fixed 15 days for every terminal (confirmed against all 114 real tracked commodity
+  terminals in the local dataset, not just inferred), and "fresh" only means "somewhere in
+  the first half of that 15-day window" - a terminal updated 0 days ago and one updated 7
+  days ago both show the identical 🟢 dot, with no way to tell them apart. Added
+  `freshness_label()` (`bot/uex/data_health.py`), which pairs the dot with the real
+  `last_update_days` figure UEX already reports (e.g. "🟢 0d" vs "🟢 7d") - the exact
+  number was already being collected, just never surfaced for anything but the stale case
+  before now. Falls back to the bare dot only when no real age is known at all (the
+  "unknown" case). 3 new tests (the 0d/7d pair proving both classify as the same "fresh"
+  status but now show visibly different labels, and the bare-dot fallback). Full suite
+  (626 tests) and a clean local bot start reverified.
+
 ### Route Economics Depth
 
 - [ ] **Fuel-Aware Profit**: Estimate fuel costs and show route profit after fuel for the
