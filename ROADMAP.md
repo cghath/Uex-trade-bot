@@ -66,6 +66,22 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
   command tests including the multi-ore combined-ranking and duplicate-ore dedup cases).
   Verified locally: `Loaded extension bot.cogs.refinery` and `Synced 64 commands` (63 to
   64, exactly the one new command) with no `CommandSyncFailure`.
+
+  **Follow-up (2026-09-12)**: fixed an inconsistency the user spotted live in Discord -
+  `/refineries_yields`' own `terminal_name` field embeds a system suffix for some
+  terminals (gateway terminals disambiguating same-named gateways across systems, e.g. two
+  different "Nyx Gateway" terminals, one in Pyro and one in Stanton) but never for others
+  (e.g. "Refinement Center - Levski"), so the embed showed the system for exactly one
+  recommended terminal out of five with no way to tell why. Fixed by storing the
+  separately-reported, structured `star_system_name` field (new nullable column on
+  `refinery_yield_observations`, additive migration) and always appending it in
+  `display_terminal_name()` (`bot/uex/refinery.py`) - skipped only when that exact system
+  name is already substring-present in the terminal's own name, so a gateway terminal
+  doesn't read "Nyx Gateway (Stanton) (Stanton)". 4 new tests, including one that
+  reproduces the exact reported case (a gateway terminal alongside a plain one in the same
+  ranked list). Full suite (612 tests) and a local bot start reverified clean, confirming
+  the new column's `ALTER TABLE` migration applies cleanly against an already-existing
+  database.
 - [x] **Where to Mine**: Shipped 2026-09-12. `/where-to-mine ore` - one raw/mineable
   commodity, autocompleted from live `/commodities` filtered to `is_raw` only (NOT
   `is_refinable`, unlike `/refinery-advisor` - a hand-mined material with no refinery

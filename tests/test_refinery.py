@@ -11,6 +11,7 @@ from cryptography.fernet import Fernet
 from bot.cogs.refinery import Refinery
 from bot.db.database import Database
 from bot.uex.refinery import (
+    display_terminal_name,
     high_yield_refining_methods,
     rank_refinery_terminals,
     resolve_raw_commodity,
@@ -83,16 +84,38 @@ def test_high_yield_refining_methods_sorts_cheapest_then_fastest():
     assert [m["name"] for m in result] == ["Low cost, fast", "Low cost, slow", "High cost, fast"]
 
 
+# -- display_terminal_name -------------------------------------------------------------
+
+def test_display_terminal_name_appends_the_system_when_not_already_present():
+    """Most /refineries_yields terminal_name values (e.g. "Refinement Center - Levski")
+    carry no system information at all - the system must be appended so every
+    recommendation is equally clear about where to fly."""
+    assert display_terminal_name("Refinement Center - Levski", "Nyx") == "Refinement Center - Levski (Nyx)"
+
+
+def test_display_terminal_name_skips_a_system_already_embedded_in_the_name():
+    """Gateway terminals disambiguate same-named gateways across systems by embedding the
+    system directly in terminal_name (e.g. two different "Nyx Gateway" terminals exist,
+    one in Pyro and one in Stanton) - appending again would read as
+    "Nyx Gateway (Stanton) (Stanton)"."""
+    name = display_terminal_name("Refinement Processing - Nyx Gateway (Stanton)", "Stanton")
+    assert name == "Refinement Processing - Nyx Gateway (Stanton)"
+
+
+def test_display_terminal_name_returns_the_bare_name_when_system_is_unknown():
+    assert display_terminal_name("Refinement Center - Levski", None) == "Refinement Center - Levski"
+
+
 # -- rank_refinery_terminals ----------------------------------------------------------
 
 def test_rank_refinery_terminals_sums_scores_across_requested_commodities():
     yield_rows_by_commodity = {
         "Ore A": [
-            {"id_terminal": 1, "terminal_name": "T1", "yield_bonus": 10},
+            {"id_terminal": 1, "terminal_name": "T1", "star_system_name": "Stanton", "yield_bonus": 10},
             {"id_terminal": 2, "terminal_name": "T2", "yield_bonus": 8},
         ],
         "Ore B": [
-            {"id_terminal": 1, "terminal_name": "T1", "yield_bonus": 5},
+            {"id_terminal": 1, "terminal_name": "T1", "star_system_name": "Stanton", "yield_bonus": 5},
             {"id_terminal": 3, "terminal_name": "T3", "yield_bonus": 20},
         ],
     }
@@ -101,6 +124,7 @@ def test_rank_refinery_terminals_sums_scores_across_requested_commodities():
     t1 = next(t for t in ranked if t.terminal_name == "T1")
     assert t1.combined_score == 15
     assert t1.per_commodity == {"Ore A": 10, "Ore B": 5}
+    assert t1.star_system_name == "Stanton"
     t2 = next(t for t in ranked if t.terminal_name == "T2")
     assert "Ore B" not in t2.per_commodity, "a terminal with no data for an ore must not fabricate one"
 
@@ -203,7 +227,7 @@ def test_refinery_advisor_happy_path_for_one_ore(tmp_path):
         await db.init()
         await db.record_refinery_yield_snapshot([
             {"id_commodity": 1, "id_terminal": 10, "commodity_name": "Quantainium (Raw)",
-             "terminal_name": "Levski Refinery", "value": 5},
+             "terminal_name": "Levski Refinery", "star_system_name": "Nyx", "value": 5},
         ])
         commodities = [_raw(1, "Quantainium (Raw)", 100), _refined(100, "Quantainium")]
         cog = _cog(
@@ -220,11 +244,43 @@ def test_refinery_advisor_happy_path_for_one_ore(tmp_path):
         embed = interaction.followup.send.call_args.kwargs["embed"]
         assert "Quantainium (Raw)" in embed.title
         fields = {f.name: f.value for f in embed.fields}
-        assert "Levski Refinery" in fields["Best refineries by yield bonus"]
+        assert "Levski Refinery (Nyx)" in fields["Best refineries by yield bonus"], (
+            "the system must be shown consistently even for a terminal whose own UEX "
+            "terminal_name text has no system suffix baked in"
+        )
         assert "Dinyx Solventation" in fields["High-yield refining methods"]
         assert "Cormack" not in fields["High-yield refining methods"], "low-yield methods must be excluded"
         assert "Levski" in fields["Quantainium — best sell price"]
         assert "9000.00" in fields["Quantainium — best sell price"]
+
+    asyncio.run(run())
+
+
+def test_refinery_advisor_shows_the_system_consistently_across_terminals(tmp_path):
+    """Reproduces the exact inconsistency a user spotted live: UEX's own terminal_name
+    embeds a system suffix for a gateway terminal ("Nyx Gateway (Stanton)") but not for a
+    plain one ("ARC-L1") - both must show their system the same way in the embed."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await db.record_refinery_yield_snapshot([
+            {"id_commodity": 1, "id_terminal": 10, "commodity_name": "Quantainium (Raw)",
+             "terminal_name": "Refinement Processing - Nyx Gateway (Stanton)",
+             "star_system_name": "Stanton", "value": 3},
+            {"id_commodity": 1, "id_terminal": 20, "commodity_name": "Quantainium (Raw)",
+             "terminal_name": "Refinement Processing - ARC-L1", "star_system_name": "Stanton", "value": 3},
+        ])
+        commodities = [_raw(1, "Quantainium (Raw)", 100), _refined(100, "Quantainium")]
+        cog = _cog(db, commodities=commodities, methods=[])
+        interaction = _FakeInteraction()
+
+        await cog.refinery_advisor.callback(cog, interaction, ore_1="Quantainium (Raw)", ore_2=None, ore_3=None)
+
+        embed = interaction.followup.send.call_args.kwargs["embed"]
+        fields = {f.name: f.value for f in embed.fields}
+        best = fields["Best refineries by yield bonus"]
+        assert "Nyx Gateway (Stanton)" in best and "(Stanton) (Stanton)" not in best
+        assert "ARC-L1 (Stanton)" in best
 
     asyncio.run(run())
 

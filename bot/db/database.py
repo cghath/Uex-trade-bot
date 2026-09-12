@@ -443,6 +443,7 @@ CREATE TABLE IF NOT EXISTS refinery_yield_observations (
     recorded_day TEXT NOT NULL,
     commodity_name TEXT NOT NULL,
     terminal_name TEXT NOT NULL,
+    star_system_name TEXT,
     yield_bonus INTEGER,
     yield_bonus_week INTEGER,
     yield_bonus_month INTEGER,
@@ -851,6 +852,12 @@ class Database:
             "ALTER TABLE terminal_market_state ADD COLUMN buy_suppressed_until TEXT",
             "ALTER TABLE terminal_market_state ADD COLUMN sell_suppressed_until TEXT",
             "ALTER TABLE route_progression_threads ADD COLUMN advanced_to_index INTEGER NOT NULL DEFAULT -1",
+            # Consistent Refinery System Names: /refineries_yields' own terminal_name only
+            # embeds a system suffix for some terminals (gateway terminals disambiguating
+            # same-named gateways in different systems), never for others - stored
+            # separately so display logic can show the system consistently for every
+            # terminal instead of relying on whichever ones UEX's raw text happens to name.
+            "ALTER TABLE refinery_yield_observations ADD COLUMN star_system_name TEXT",
         ]
         for statement in migrations:
             try:
@@ -1834,8 +1841,10 @@ class Database:
             name, terminal = row.get("commodity_name"), row.get("terminal_name")
             if id_commodity is None or id_terminal is None or not name or not terminal:
                 continue
+            star_system = row.get("star_system_name")
             params.append(
-                (id_commodity, id_terminal, str(name), str(terminal), self._integer(row.get("value")),
+                (id_commodity, id_terminal, str(name), str(terminal),
+                 str(star_system) if star_system else None, self._integer(row.get("value")),
                  self._integer(row.get("value_week")), self._integer(row.get("value_month")))
             )
         if not params:
@@ -1844,10 +1853,11 @@ class Database:
             await db.executemany(
                 """INSERT INTO refinery_yield_observations
                    (id_commodity, id_terminal, recorded_day, commodity_name, terminal_name,
-                    yield_bonus, yield_bonus_week, yield_bonus_month)
-                   VALUES (?, ?, date('now'), ?, ?, ?, ?, ?)
+                    star_system_name, yield_bonus, yield_bonus_week, yield_bonus_month)
+                   VALUES (?, ?, date('now'), ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(id_commodity, id_terminal, recorded_day) DO UPDATE SET
                        commodity_name=excluded.commodity_name, terminal_name=excluded.terminal_name,
+                       star_system_name=excluded.star_system_name,
                        yield_bonus=excluded.yield_bonus, yield_bonus_week=excluded.yield_bonus_week,
                        yield_bonus_month=excluded.yield_bonus_month""",
                 params,

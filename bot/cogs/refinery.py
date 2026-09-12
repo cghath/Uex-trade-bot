@@ -12,6 +12,7 @@ from bot.uex.exceptions import UexApiError, describe_uex_api_error
 from bot.uex.refinery import (
     COST_LABELS,
     SPEED_LABELS,
+    display_terminal_name,
     high_yield_refining_methods,
     rank_refinery_terminals,
     resolve_raw_commodity,
@@ -118,7 +119,8 @@ class Refinery(commands.Cog):
                 )
                 missing = [c["name"] for c in resolved if c["name"] not in terminal.per_commodity]
                 missing_note = f" (no data: {', '.join(missing)})" if missing else ""
-                lines.append(f"**{terminal.terminal_name}** — {per_commodity}{missing_note}")
+                name = display_terminal_name(terminal.terminal_name, terminal.star_system_name)
+                lines.append(f"**{name}** — {per_commodity}{missing_note}")
             embed.add_field(name="Best refineries by yield bonus", value="\n".join(lines), inline=False)
         else:
             embed.add_field(

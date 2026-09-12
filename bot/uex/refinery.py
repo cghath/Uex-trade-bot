@@ -42,11 +42,28 @@ def high_yield_refining_methods(methods: list[dict[str, Any]]) -> list[dict[str,
     return sorted(high_yield, key=lambda m: (m.get("rating_cost", 0), -m.get("rating_speed", 0)))
 
 
+def display_terminal_name(terminal_name: str, star_system_name: str | None) -> str:
+    """UEX's own /refineries_yields terminal_name only embeds a system suffix for some
+    terminals (gateway terminals disambiguating same-named gateways in different systems,
+    e.g. two different "Nyx Gateway" terminals, one in Pyro and one in Stanton) and never
+    for others - showing raw terminal_name as-is is inconsistent about which recommendation
+    tells you what system to fly to. Appends " (System)" using the separately-reported,
+    structured star_system_name field so every terminal shows its system the same way;
+    skipped only when that exact system name is already present in the terminal's own name
+    (the gateway case), to avoid "Nyx Gateway (Stanton) (Stanton)"."""
+    if not star_system_name:
+        return terminal_name
+    if star_system_name.lower() in terminal_name.lower():
+        return terminal_name
+    return f"{terminal_name} ({star_system_name})"
+
+
 @dataclass
 class TerminalYield:
     id_terminal: int
     terminal_name: str
     combined_score: float
+    star_system_name: str | None = None
     # commodity_name -> yield_bonus at this terminal; a commodity absent here means this
     # terminal has no recorded yield-bonus data for it, not a confirmed 0% bonus.
     per_commodity: dict[str, int] = field(default_factory=dict)
@@ -75,7 +92,10 @@ def rank_refinery_terminals(
             terminal = by_terminal.setdefault(
                 id_terminal,
                 TerminalYield(
-                    id_terminal=id_terminal, terminal_name=row.get("terminal_name") or "Unknown", combined_score=0.0
+                    id_terminal=id_terminal,
+                    terminal_name=row.get("terminal_name") or "Unknown",
+                    combined_score=0.0,
+                    star_system_name=row.get("star_system_name"),
                 ),
             )
             terminal.per_commodity[commodity_name] = bonus
