@@ -1870,3 +1870,282 @@ def test_recovery_queue_discards_a_pending_action_for_a_thread_already_resolved(
         assert thread["status"] == "completed", "must not be clobbered back to 'abandoned'"
 
     asyncio.run(run())
+
+
+# -- Coordinated audit of 165d20d: four confirmed P2 defects in the recovery/claim design -
+# 1. advanced_to_index was committed BEFORE the send/status write it guards - a definite
+#    failure there left the claim falsely consumed, so a retry silently did nothing.
+#    Fixed with release_route_progression_advance_claim, called on definite failure.
+# 2. The recovery poller converted an unreachable channel to None and still called
+#    handle_leg_outcome for a non-final leg - the outcome got recorded, the next-leg
+#    prompt was silently skipped, and the only durable record of that gap was deleted.
+#    Fixed by requiring a real discord.Thread before running a non-final leg's recovery.
+# 3. A transient aiosqlite error escaping the recovery loop's body permanently killed the
+#    tasks.loop (sqlite errors aren't in discord.ext.tasks.Loop's reconnect set). Fixed
+#    with cycle-level and per-row exception containment, including around the
+#    failure-accounting call itself.
+# 4. A failed recovery-queue insert was logged and swallowed, but the user was still told
+#    "queued... no further action is needed" - losing the report/abandon with no trace.
+#    Fixed by branching the notice on whether the queue write actually succeeded.
+
+def test_release_route_progression_advance_claim_only_releases_the_matching_index(tmp_path):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await db.create_route_progression_thread(
+            thread_id=1, user_id=1, guild_id=1, route_kind="best_route", route_snapshot={},
+            legs=[{"side": "buy", "id_terminal": 10, "id_commodity": 1}],
+        )
+        assert await db.claim_route_progression_advance(1, to_index=0) is True
+
+        assert await db.release_route_progression_advance_claim(1, claimed_index=1, revert_to=-1) is False, (
+            "must not release when the row's current value doesn't match claimed_index"
+        )
+        assert await db.release_route_progression_advance_claim(1, claimed_index=0, revert_to=-1) is True
+
+        assert await db.claim_route_progression_advance(1, to_index=0) is True, (
+            "releasing must let a retry win the same index again"
+        )
+
+    asyncio.run(run())
+
+
+def test_post_leg_prompt_send_failure_releases_the_claim_so_a_retry_can_resend(tmp_path):
+    """Audit-confirmed defect #1: _post_leg_prompt committed advanced_to_index before
+    thread.send ran, so a definite send failure left the claim consumed and a retry
+    silently returned without ever resending the prompt."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        leg = _leg_input()
+        await _create_thread_for_legs(db, 1, [leg])
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db})()
+        cog._active_legs = {}
+        channel = _fake_thread_channel()
+        channel.send.side_effect = discord.HTTPException(NS(status=500, reason="lost"), "send failed")
+
+        try:
+            await cog._post_leg_prompt(channel, 1, 0, leg)
+        except discord.HTTPException:
+            pass
+        else:
+            raise AssertionError("the simulated send failure must propagate")
+
+        channel.send = AsyncMock()
+        await cog._post_leg_prompt(channel, 1, 0, leg)
+
+        assert channel.send.await_count == 1, "the retry must actually resend now that the claim was released"
+
+    asyncio.run(run())
+
+
+def test_completion_status_failure_releases_the_claim_so_a_retry_can_finish(tmp_path):
+    """Audit-confirmed defect #1's other half: the completion claim (to_index=total_legs)
+    committed before set_route_progression_thread_status ran, so a DB failure there left
+    the thread stuck in_progress forever - the retry saw the claim as already won and
+    returned early instead of finishing the status write."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        leg = _leg_input(id_terminal=10, id_commodity=1)
+        await _create_thread_for_legs(db, 1, [leg])
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db})()
+        cog._active_legs = {}
+
+        real_set_status = db.set_route_progression_thread_status
+        db.set_route_progression_thread_status = AsyncMock(side_effect=RuntimeError("temporary DB failure"))
+        try:
+            await cog.handle_leg_outcome(None, 1, 0, leg, outcome="matched")
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("the simulated status failure must propagate")
+
+        db.set_route_progression_thread_status = real_set_status
+        await cog.handle_leg_outcome(None, 1, 0, leg, outcome="matched")
+
+        thread = await db.get_route_progression_thread(1)
+        assert thread["status"] == "completed", "the retry must finish completion now that the claim was released"
+
+    asyncio.run(run())
+
+
+def test_recovery_keeps_action_when_next_prompt_cannot_be_delivered(tmp_path):
+    """Audit-confirmed defect #2: the poller converted an unreachable channel to None and
+    still called handle_leg_outcome for a non-final leg - the outcome got recorded, the
+    next-leg prompt was silently skipped (channel isn't a discord.Thread), and the poller
+    then deleted the only durable record telling a future tick to deliver that prompt."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        leg0 = _leg_input(id_terminal=10, id_commodity=1)
+        leg1 = _leg_input(
+            side="sell", id_terminal=20, id_commodity=1,
+            terminal_name="Elsewhere", display_label="Sell Gold at Elsewhere",
+        )
+        await _create_thread_for_legs(db, 1, [leg0, leg1])
+        await db.queue_route_progression_leg_recovery(
+            thread_id=1, leg_index=0, side=leg0.side, id_terminal=leg0.id_terminal,
+            id_commodity=leg0.id_commodity, terminal_name=leg0.terminal_name,
+            commodity_name=leg0.commodity_name, display_label=leg0.display_label,
+            quoted_price=leg0.quoted_price, quoted_scu=leg0.quoted_scu, quoted_status=leg0.quoted_status,
+            market_scu=leg0.market_scu, outcome="matched", actual_price=None, actual_scu=None, precision=None,
+        )
+
+        async def failing_fetch_channel(self, thread_id):
+            raise discord.HTTPException(NS(status=503, reason="unavailable"), "temporary outage")
+
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type(
+            "FakeBot", (),
+            {"db": db, "get_channel": lambda self, thread_id: None, "fetch_channel": failing_fetch_channel},
+        )()
+        cog._active_legs = {}
+
+        await cog.retry_pending_route_progression_actions.coro(cog)
+
+        pending = await db.get_pending_route_progression_actions()
+        assert len(pending) == 1, "must stay queued until the next prompt can actually be delivered"
+        stored = await db.get_route_progression_leg(1, 0)
+        assert stored["outcome"] is None, "must not record the outcome before the next prompt can be delivered"
+
+    asyncio.run(run())
+
+
+def test_recovery_completes_a_final_leg_even_when_the_channel_is_unreachable(tmp_path):
+    """The fix for defect #2 must not overcorrect: completion doesn't depend on a real
+    channel the way a next-leg prompt does (only the closing message/archive step, whose
+    own failure is already caught elsewhere) - so a final leg's recovery must still
+    succeed even when the thread can't be reached, exactly as it did before this fix."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        leg = _leg_input(id_terminal=10, id_commodity=1)
+        await _create_thread_for_legs(db, 1, [leg])
+        await db.queue_route_progression_leg_recovery(
+            thread_id=1, leg_index=0, side=leg.side, id_terminal=leg.id_terminal,
+            id_commodity=leg.id_commodity, terminal_name=leg.terminal_name,
+            commodity_name=leg.commodity_name, display_label=leg.display_label,
+            quoted_price=leg.quoted_price, quoted_scu=leg.quoted_scu, quoted_status=leg.quoted_status,
+            market_scu=leg.market_scu, outcome="matched", actual_price=None, actual_scu=None, precision=None,
+        )
+
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db, "get_channel": lambda self, thread_id: "not-a-thread"})()
+        cog._active_legs = {}
+
+        await cog.retry_pending_route_progression_actions.coro(cog)
+
+        assert await db.get_pending_route_progression_actions() == []
+        stored = await db.get_route_progression_leg(1, 0)
+        assert stored["outcome"] == "matched"
+        thread = await db.get_route_progression_thread(1)
+        assert thread["status"] == "completed"
+
+    asyncio.run(run())
+
+
+def test_recovery_cycle_contains_a_transient_database_failure_loading_pending_actions():
+    """Audit-confirmed defect #3: an aiosqlite.OperationalError (e.g. a lock beyond the
+    busy timeout) escaping the initial pending-actions read used to terminate this
+    tasks.loop permanently, since sqlite errors aren't in discord.ext.tasks.Loop's own
+    reconnect exception set."""
+    async def run():
+        db = type(
+            "FailingDB", (),
+            {"get_pending_route_progression_actions": AsyncMock(
+                side_effect=aiosqlite.OperationalError("database is locked")
+            )},
+        )()
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db})()
+        cog._active_legs = {}
+
+        await cog.retry_pending_route_progression_actions.coro(cog)  # must not raise
+
+    asyncio.run(run())
+
+
+def test_recovery_cycle_continues_past_a_per_row_database_failure(tmp_path):
+    """A failure looking up ONE row's thread must not escape and stop the whole cycle -
+    it must be recorded as a failed attempt (itself made failure-safe) so the row stays
+    queued for the next tick, exactly like any other failed recovery attempt."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        leg = _leg_input(id_terminal=10, id_commodity=1)
+        await db.queue_route_progression_leg_recovery(
+            thread_id=1, leg_index=0, side=leg.side, id_terminal=leg.id_terminal,
+            id_commodity=leg.id_commodity, terminal_name=leg.terminal_name,
+            commodity_name=leg.commodity_name, display_label=leg.display_label,
+            quoted_price=leg.quoted_price, quoted_scu=leg.quoted_scu, quoted_status=leg.quoted_status,
+            market_scu=leg.market_scu, outcome="matched", actual_price=None, actual_scu=None, precision=None,
+        )
+        real_get_thread = db.get_route_progression_thread
+        db.get_route_progression_thread = AsyncMock(side_effect=aiosqlite.OperationalError("database is locked"))
+
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db})()
+        cog._active_legs = {}
+
+        await cog.retry_pending_route_progression_actions.coro(cog)  # must not raise
+
+        db.get_route_progression_thread = real_get_thread
+        pending = await db.get_pending_route_progression_actions()
+        assert len(pending) == 1 and pending[0]["attempts"] == 1, (
+            "the row must stay queued with its attempt counted, not be lost or crash the cycle"
+        )
+
+    asyncio.run(run())
+
+
+def test_failed_leg_outcome_queue_write_does_not_claim_that_background_recovery_is_queued(monkeypatch):
+    """Audit-confirmed defect #4: if the recovery-queue insert itself fails during the
+    same outage that exhausted the post-ack retries, the user was still told the report
+    was queued and no further action was needed - losing the report with no trace."""
+    async def run():
+        db = type(
+            "FailingDB", (),
+            {"queue_route_progression_leg_recovery": AsyncMock(side_effect=RuntimeError("DB offline"))},
+        )()
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db})()
+        cog.handle_leg_outcome = AsyncMock(side_effect=RuntimeError("DB offline"))
+        monkeypatch.setattr("bot.cogs.route_progression.POST_ACK_RETRY_DELAY_SECONDS", 0)
+        channel = _fake_thread_channel()
+
+        await cog._record_leg_outcome_durably(channel, 1, 0, _leg_input(), outcome="matched")
+
+        channel.send.assert_awaited_once()
+        notice = channel.send.call_args.args[0]
+        assert "queued" not in notice.lower(), (
+            "must not claim the report was queued when the recovery-queue write itself failed"
+        )
+
+    asyncio.run(run())
+
+
+def test_failed_abandon_queue_write_does_not_claim_that_background_recovery_is_queued(monkeypatch):
+    """Same fix as above, applied to _abandon_thread_durably's identical pattern."""
+    async def run():
+        db = type(
+            "FailingDB", (),
+            {"queue_route_progression_abandon_recovery": AsyncMock(side_effect=RuntimeError("DB offline"))},
+        )()
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db})()
+        cog.abandon_thread = AsyncMock(side_effect=RuntimeError("DB offline"))
+        monkeypatch.setattr("bot.cogs.route_progression.POST_ACK_RETRY_DELAY_SECONDS", 0)
+        channel = _fake_thread_channel()
+
+        await cog._abandon_thread_durably(channel, 1, reason="test")
+
+        channel.send.assert_awaited_once()
+        notice = channel.send.call_args.args[0]
+        assert "queued" not in notice.lower(), (
+            "must not claim the abandon was queued when the recovery-queue write itself failed"
+        )
+
+    asyncio.run(run())

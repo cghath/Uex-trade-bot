@@ -1263,6 +1263,26 @@ class Database:
             await db.commit()
             return cursor.rowcount > 0
 
+    async def release_route_progression_advance_claim(
+        self, thread_id: int, *, claimed_index: int, revert_to: int
+    ) -> bool:
+        """Undoes a claim_route_progression_advance call whose guarded action (the
+        Discord send, or the completion status write) definitely failed - a committed
+        claim is not proof the thing it guards actually happened, so a definite failure
+        must give a retry's own claim attempt the chance to win again rather than seeing
+        the index as already (falsely) advanced. Only releases if the row still shows
+        exactly `claimed_index` - if something else has since moved it further (which
+        shouldn't happen for a single in-flight action, but costs nothing to guard),
+        this is a stale release and must not stomp on that newer progress."""
+        async with self.connect() as db:
+            cursor = await db.execute(
+                """UPDATE route_progression_threads SET advanced_to_index = ?
+                   WHERE thread_id = ? AND advanced_to_index = ?""",
+                (revert_to, thread_id, claimed_index),
+            )
+            await db.commit()
+            return cursor.rowcount > 0
+
     async def set_route_progression_thread_status(self, thread_id: int, status: str) -> None:
         """status: 'completed' or 'abandoned'. completed_at's name predates 'abandoned'
         being added - read it as "when this thread stopped being in_progress," not

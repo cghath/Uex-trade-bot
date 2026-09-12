@@ -555,6 +555,67 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
   row to exist), but the new `outcome IS NULL` guard needs a real row to match
   against. All 9 new regression tests were verified to fail against the
   pre-fix source via `git stash`.
+- [x] **Four failure-path defects in the durable recovery mechanism above**: Shipped
+  2026-09-11, from a full coordinated audit of the commit directly above (two
+  independent auditor agents plus the coordinator, cross-confirmed). The
+  recovery design was correct for the happy path but not yet durable end-to-end
+  - all four findings are in what happens when the operation a claim guards, or
+  recovery itself, fails partway:
+  1. `claim_route_progression_advance`/`advanced_to_index` was committed BEFORE
+     the Discord send (`_post_leg_prompt`) or the completion status write
+     (`handle_leg_outcome`'s final-leg branch) it was meant to guard - a
+     definite failure there left the claim durably marking an action as done
+     that never happened, so a retry saw the index as already claimed and
+     silently returned without redoing the send/write. Could strand a newly
+     tracked route with no first prompt, an acknowledged leg with no next
+     prompt, or a fully reported route stuck `in_progress` forever. Fixed with
+     a new `release_route_progression_advance_claim` (an atomic conditional
+     `UPDATE` reverting the index back down, only if nothing has since moved
+     it further) called on definite failure at both sites, so a retry's own
+     claim attempt can win again instead of finding a false no-op.
+     `start_tracking`'s own first-prompt send is now wrapped the same way and
+     tells the user via followup if it fails, instead of letting the exception
+     escape the button callback silently.
+  2. The recovery poller converted an unresolvable Discord channel to `None`
+     and still called `handle_leg_outcome` for it - the outcome got recorded,
+     but the next-leg prompt was silently skipped (the existing
+     `isinstance(channel, discord.Thread)` gate), and the poller then deleted
+     the only durable row telling a future tick to deliver that prompt,
+     permanently stranding the route. Fixed by requiring a real, reachable
+     `discord.Thread` before running a *non-final* leg's recovery at all -
+     leaving the row queued (and its attempt counted) for the next tick
+     instead. Completion doesn't need this same guard: the route's own
+     final-leg branch already tolerates a missing channel (only the optional
+     closing message/archive is skipped), so that path is unchanged.
+  3. A transient `aiosqlite.OperationalError` (e.g. a lock beyond the busy
+     timeout) escaping the recovery loop's body - from loading pending
+     actions, a per-row thread lookup, stale-row deletion, or even the
+     failure-accounting call itself - permanently killed the
+     `retry_pending_route_progression_actions` `tasks.loop`, since SQLite
+     errors aren't in `discord.ext.tasks.Loop`'s own network/timeout reconnect
+     set; every future queued recovery would then sit untouched until the
+     bot/cog restarted. Fixed with cycle-level containment around the initial
+     fetch (log and return, letting the next scheduled tick run) plus per-row
+     containment around everything else, including the failure-accounting
+     write itself, so one bad row can't take down the rest of the cycle either.
+  4. A failed recovery-queue insert (`queue_route_progression_leg_recovery`/
+     `queue_route_progression_abandon_recovery`) was logged and swallowed, but
+     the user was still unconditionally told the action "has been queued...
+     no further action is needed" - exactly during the kind of database outage
+     that makes the queue necessary in the first place, silently losing the
+     report/abandon with no trace in either `route_progression_legs` or the
+     pending-actions table. Fixed by tracking whether the insert actually
+     succeeded and branching the channel notice on it - a failed queue write
+     now tells the user to report again or contact an admin, never claims
+     automatic recovery is in progress.
+  Added 9 new regression tests (a DB round-trip for the new release method,
+  one per claim-release site, the channel-unavailable recovery gap plus a
+  non-regression guard proving a final leg still completes without a
+  reachable channel exactly as before, the two recovery-loop containment
+  cases, and one false-notice case each for the leg-outcome and abandon
+  queues) - 8 of 9 verified to fail against the pre-fix source via `git
+  stash` (the final-leg guard test passes on both sides by design, since it
+  pins existing behavior the fix must not break).
 
 ### Route Economics Depth
 

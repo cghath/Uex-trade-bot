@@ -532,7 +532,16 @@ class RouteProgression(commands.Cog):
             "closes automatically once every leg is reported (or after "
             f"{ABANDONMENT_HOURS:g}h of inactivity)."
         )
-        await self._post_leg_prompt(thread, thread.id, 0, route.legs[0])
+        try:
+            await self._post_leg_prompt(thread, thread.id, 0, route.legs[0])
+        except discord.HTTPException:
+            logger.warning("Failed to send the first leg prompt for thread %s", thread.id)
+            await interaction.followup.send(
+                f"Created {thread.mention}, but the first leg prompt failed to send - "
+                "try tracking the route again.",
+                ephemeral=True,
+            )
+            return
         await interaction.followup.send(f"Started tracking in {thread.mention}.", ephemeral=True)
 
     async def _get_leg(self, thread_id: int, leg_index: int) -> RouteLegInput | None:
@@ -573,7 +582,17 @@ class RouteProgression(commands.Cog):
             color=discord.Color.blurple(),
         )
         view = LegOutcomeView(cog=self, thread_id=thread_id, leg_index=leg_index, leg=leg)
-        view.message = await thread.send(embed=embed, view=view)
+        try:
+            view.message = await thread.send(embed=embed, view=view)
+        except discord.HTTPException:
+            # The claim above is not proof the send happened - a definite failure here
+            # must release it, or a retry's own claim attempt sees the index as already
+            # (falsely) advanced and silently skips resending. See
+            # release_route_progression_advance_claim's own docstring.
+            await self.bot.db.release_route_progression_advance_claim(
+                thread_id, claimed_index=leg_index, revert_to=leg_index - 1
+            )
+            raise
 
     async def handle_leg_outcome(
         self,
@@ -650,7 +669,18 @@ class RouteProgression(commands.Cog):
         if next_index >= total_legs:
             if not await self.bot.db.claim_route_progression_advance(thread_id, to_index=total_legs):
                 return  # completion already handled by an earlier attempt
-            await self.bot.db.set_route_progression_thread_status(thread_id, "completed")
+            try:
+                await self.bot.db.set_route_progression_thread_status(thread_id, "completed")
+            except Exception:
+                # The claim is not proof the status write happened - release it so a
+                # retry's own claim attempt can still finish completion, instead of
+                # seeing this index as already (falsely) advanced and leaving the
+                # thread stuck in_progress forever. Mirrors _post_leg_prompt's own
+                # release-on-definite-failure handling above.
+                await self.bot.db.release_route_progression_advance_claim(
+                    thread_id, claimed_index=total_legs, revert_to=leg_index
+                )
+                raise
             self._active_legs.pop(thread_id, None)
             if isinstance(channel, discord.Thread):
                 try:
@@ -709,6 +739,7 @@ class RouteProgression(commands.Cog):
             "handle_leg_outcome permanently failed for thread %s leg %d after %d attempts",
             thread_id, leg_index, POST_ACK_RETRY_ATTEMPTS, exc_info=last_exc,
         )
+        queued = False
         try:
             await self.bot.db.queue_route_progression_leg_recovery(
                 thread_id=thread_id, leg_index=leg_index, side=leg.side,
@@ -718,14 +749,27 @@ class RouteProgression(commands.Cog):
                 quoted_scu=leg.quoted_scu, quoted_status=leg.quoted_status, market_scu=leg.market_scu,
                 outcome=outcome, actual_price=actual_price, actual_scu=actual_scu, precision=precision,
             )
+            queued = True
         except Exception:
             logger.exception("Failed to queue durable recovery for thread %s leg %d", thread_id, leg_index)
         if isinstance(channel, discord.Thread):
-            try:
-                await channel.send(
+            # The notice must reflect whether the queue write actually succeeded - telling
+            # the user "no further action is needed" when the insert itself just raised
+            # (the exact outage this queue exists for) would hide a report that's now in
+            # neither route_progression_legs nor the recovery table.
+            if queued:
+                message = (
                     "Something went wrong saving that report - it's been queued to retry "
                     "automatically in the background, so no further action is needed."
                 )
+            else:
+                message = (
+                    "Something went wrong saving that report, and automatic recovery could "
+                    "not be scheduled either - please report this leg again, or contact an "
+                    "admin if it keeps failing."
+                )
+            try:
+                await channel.send(message)
             except discord.HTTPException:
                 pass
 
@@ -769,16 +813,26 @@ class RouteProgression(commands.Cog):
             "abandon_thread permanently failed for thread %s after %d attempts",
             thread_id, POST_ACK_RETRY_ATTEMPTS, exc_info=last_exc,
         )
+        queued = False
         try:
             await self.bot.db.queue_route_progression_abandon_recovery(thread_id=thread_id, reason=reason)
+            queued = True
         except Exception:
             logger.exception("Failed to queue durable recovery for abandoning thread %s", thread_id)
         if isinstance(channel, discord.Thread):
-            try:
-                await channel.send(
+            if queued:
+                message = (
                     "Something went wrong abandoning this route - it's been queued to retry "
                     "automatically in the background."
                 )
+            else:
+                message = (
+                    "Something went wrong abandoning this route, and automatic recovery could "
+                    "not be scheduled either - please try again, or contact an admin if it "
+                    "keeps failing."
+                )
+            try:
+                await channel.send(message)
             except discord.HTTPException:
                 pass
 
@@ -804,24 +858,49 @@ class RouteProgression(commands.Cog):
         attempt just bumps attempts/last_attempt_at and leaves the row for the next poll
         tick; the 48h abandonment poller remains the last-resort backstop if a
         thread/channel is permanently unreachable."""
-        pending = await self.bot.db.get_pending_route_progression_actions()
+        try:
+            pending = await self.bot.db.get_pending_route_progression_actions()
+        except Exception:
+            # A transient DB failure here must not escape - discord.ext.tasks.Loop only
+            # auto-reconnects for a fixed network/timeout exception tuple that doesn't
+            # include SQLite errors, so an uncaught exception would permanently kill this
+            # loop rather than simply skipping to the next scheduled tick.
+            logger.exception("Recovery: failed to load pending route-progression actions this cycle")
+            return
         for row in pending:
             action_id = row["id"]
             thread_id = row["thread_id"]
-            thread_row = await self.bot.db.get_route_progression_thread(thread_id)
-            if thread_row is None or thread_row["status"] != "in_progress":
-                # The thread's fate was already decided some other way (completed,
-                # abandoned, or its row is gone) - this queued action no longer applies.
-                await self.bot.db.delete_route_progression_pending_action(action_id)
-                continue
-            channel: discord.abc.MessageableChannel | None
             try:
-                channel = self.bot.get_channel(thread_id) or await self.bot.fetch_channel(thread_id)
-            except discord.HTTPException as exc:
-                logger.info("Recovery: couldn't reach thread %s: %s", thread_id, exc)
-                channel = None
-            try:
+                thread_row = await self.bot.db.get_route_progression_thread(thread_id)
+                if thread_row is None or thread_row["status"] != "in_progress":
+                    # The thread's fate was already decided some other way (completed,
+                    # abandoned, or its row is gone) - this queued action no longer applies.
+                    await self.bot.db.delete_route_progression_pending_action(action_id)
+                    continue
+                channel: discord.abc.MessageableChannel | None
+                try:
+                    channel = self.bot.get_channel(thread_id) or await self.bot.fetch_channel(thread_id)
+                except discord.HTTPException as exc:
+                    logger.info("Recovery: couldn't reach thread %s: %s", thread_id, exc)
+                    channel = None
                 if row["action_kind"] == "leg_outcome":
+                    next_index = row["leg_index"] + 1
+                    is_final_leg = next_index >= thread_row["total_legs"]
+                    if not is_final_leg and not isinstance(channel, discord.Thread):
+                        # A non-final leg's outcome isn't safe to record yet: handle_leg_
+                        # outcome would save it but then silently skip the next-leg prompt
+                        # (the isinstance(channel, discord.Thread) gate it already has),
+                        # and this poller would then delete the only durable record telling
+                        # a future tick to deliver that prompt. Leave the row queued and
+                        # try again once the thread is reachable - completion doesn't need
+                        # this same guard, since a missing channel there only skips a nice-
+                        # to-have closing message, not route continuation.
+                        logger.info(
+                            "Recovery: thread %s not reachable yet for leg %s, leaving queued",
+                            thread_id, row["leg_index"],
+                        )
+                        await self.bot.db.mark_route_progression_pending_action_attempted(action_id)
+                        continue
                     leg = _leg_input_from_snapshot(row)
                     await self.handle_leg_outcome(
                         channel, thread_id, row["leg_index"], leg,
@@ -836,7 +915,14 @@ class RouteProgression(commands.Cog):
                     "Recovery attempt failed for pending action %s (thread %s): %s",
                     action_id, thread_id, exc,
                 )
-                await self.bot.db.mark_route_progression_pending_action_attempted(action_id)
+                try:
+                    await self.bot.db.mark_route_progression_pending_action_attempted(action_id)
+                except Exception:
+                    # Failure accounting itself must not be able to escape and kill the
+                    # loop either - see the same reasoning at the top of this method.
+                    logger.exception(
+                        "Recovery: failed to record a failed attempt for pending action %s", action_id
+                    )
 
 
 async def setup(bot: commands.Bot) -> None:
