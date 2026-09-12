@@ -16,6 +16,20 @@ MIN_HISTORY_HOURS = 24
 MIN_STATE_CHANGES = 1
 SELL_SIDE_NO_DEMAND_CODE = 7
 
+# Confirmed by directly querying UEX's own /commodities_status: the sell side runs opposite
+# to the buy side. A terminal's "sell side" status is ITS OWN inventory of the commodity, so
+# "Out of Stock"/low there means the terminal is depleted and wants to buy (good for you)
+# while "Maximum" means it's fully stocked - UEX's own code table literally names that top
+# band "Maximum Inventory (No Demand)", the same SELL_SIDE_NO_DEMAND_CODE above. Without
+# this, "sell side: Out Stock" reads exactly backwards in plain English, so it's spelled out
+# once per embed rather than re-explained per entry. Lives here (not in a cog) so any
+# command showing sell-side status - /top-routes and /price both do - can share the exact
+# same wording without one cog importing from another.
+SELL_SIDE_STATUS_CLARIFIER = (
+    "'sell side' status is the TERMINAL's own stock: Out of Stock/low = they're empty and want "
+    "to buy (good for you); Maximum = fully stocked, little to no demand"
+)
+
 
 def has_sell_side_demand(scu_wanted: Any, status_sell: Any) -> bool:
     """Return whether a sell-side market is confirmed to be accepting cargo.

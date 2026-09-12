@@ -15,6 +15,7 @@ from bot.uex.route_confidence import coalesce_report_count, compute_route_confid
 from bot.uex.practical_routes import route_in_system, route_practical_notes, route_supports_auto_load
 from bot.uex.commodity_risk import format_commodity_risk
 from bot.uex.supply_demand import (
+    SELL_SIDE_STATUS_CLARIFIER,
     analyze_terminal_market_history,
     classify_supply_evidence,
     effective_sell_scu,
@@ -190,11 +191,6 @@ class Prices(commands.Cog):
         health_by_terminal = {
             terminal_id: classify_terminal_health(row) for terminal_id, row in health_rows.items()
         }
-        health_notes = {
-            terminal_id: note
-            for terminal_id, health in health_by_terminal.items()
-            if (note := format_health_note(health))
-        }
 
         if top_sell:
             lines = []
@@ -202,21 +198,12 @@ class Prices(commands.Cog):
                 label = resolve_status_label(status_lookup, "sell", r.get("status_sell"))
                 label_text = f" · {label}" if label else ""
                 terminal_id = _positive_int(r.get("id_terminal"))
+                emoji = freshness_emoji(health_by_terminal.get(terminal_id))
                 capacity = effective_sell_scu(r.get("scu_sell"), r.get("status_sell"))
-                if capacity:
-                    # The freshness dot already carries this figure's age/reliability, so
-                    # the general health warning would just repeat it - shown only when
-                    # there's no SCU figure for the dot to sit next to instead.
-                    emoji = freshness_emoji(health_by_terminal.get(terminal_id))
-                    capacity_text = f" · buying {capacity:,.0f} SCU {emoji}"
-                    health_text = ""
-                else:
-                    capacity_text = ""
-                    health_note = health_notes.get(terminal_id)
-                    health_text = f" · {health_note}" if health_note else ""
+                capacity_text = f" · buying {capacity:,.0f} SCU" if capacity else ""
                 lines.append(
                     f"**{r['terminal_name']}** — {r['price_sell']:.2f} aUEC/unit"
-                    f"{capacity_text}{label_text}{health_text}"
+                    f"{capacity_text}{label_text} {emoji}"
                 )
             embed.add_field(name="Best places to SELL", value="\n".join(lines), inline=False)
         if top_buy:
@@ -224,14 +211,15 @@ class Prices(commands.Cog):
             for r in top_buy:
                 label = resolve_status_label(status_lookup, "buy", r.get("status_buy"))
                 label_text = f" · {label}" if label else ""
-                health_note = health_notes.get(_positive_int(r.get("id_terminal")))
-                health_text = f" · {health_note}" if health_note else ""
-                lines.append(f"**{r['terminal_name']}** — {r['price_buy']:.2f} aUEC/unit{label_text}{health_text}")
+                emoji = freshness_emoji(health_by_terminal.get(_positive_int(r.get("id_terminal"))))
+                lines.append(f"**{r['terminal_name']}** — {r['price_buy']:.2f} aUEC/unit{label_text} {emoji}")
             embed.add_field(name="Best places to BUY", value="\n".join(lines), inline=False)
 
         embed.set_footer(
             text="Data from UEX Corp · cached up to 30 min · status = current stock/demand level · "
-            "buying SCU is the last reported figure, not a fixed capacity\n" + FRESHNESS_LEGEND
+            "buying SCU is the last reported figure, not a fixed capacity\n"
+            f"{SELL_SIDE_STATUS_CLARIFIER}\n"
+            f"Data freshness:\n{FRESHNESS_LEGEND}"
         )
         await interaction.followup.send(embed=embed)
 

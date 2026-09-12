@@ -43,7 +43,13 @@ from bot.uex.commodity_risk import format_commodity_risk
 from bot.uex.route_presentation import format_evidence_note, travel_warning
 from bot.uex.ships import estimate_route_cargo, resolve_ship
 from bot.uex.status import build_status_lookup, resolve_status_label
-from bot.uex.supply_demand import EvidenceLevel, analyze_terminal_market_history, classify_supply_evidence, has_sell_side_demand
+from bot.uex.supply_demand import (
+    SELL_SIDE_STATUS_CLARIFIER,
+    EvidenceLevel,
+    analyze_terminal_market_history,
+    classify_supply_evidence,
+    has_sell_side_demand,
+)
 from bot.uex.trading_preferences import describe_active_preferences
 from bot.uex.trends import (
     ScoredRouteEntry,
@@ -143,16 +149,6 @@ TRENDING_KEEP_TOP = 25
 TOP_SCORED_ROUTES_KEEP = 10
 TOP_IN_STOCK_ROUTES_KEEP = 10
 
-# Confirmed by directly querying UEX's own /commodities_status: the sell side runs opposite to
-# the buy side. A terminal's "sell side" status is ITS OWN inventory of the commodity, so "Out
-# of Stock"/low there means the terminal is depleted and wants to buy (good for you) while
-# "Maximum" means it's fully stocked - UEX's own code table literally names that top band
-# "Maximum Inventory (No Demand)". Without this, "sell side: Out Stock" reads exactly backwards
-# in plain English, so it's spelled out once per embed rather than re-explained per entry.
-SELL_SIDE_STATUS_CLARIFIER = (
-    "'sell side' status is the TERMINAL's own stock: Out of Stock/low = they're empty and want "
-    "to buy (good for you); Maximum = fully stocked, little to no demand"
-)
 # Pace background calls well under the 120/min UEX limit, leaving headroom for
 # whatever real user commands are running concurrently.
 _TRENDING_CALL_DELAY = 0.6

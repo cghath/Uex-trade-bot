@@ -792,13 +792,36 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
   `FRESHNESS_LEGEND` constant explains the dots once, appended to `/price`'s footer,
   rather than repeating the explanation on every line. Unlike the pre-existing
   `format_health_note` (silent for good data, only speaks up for warnings),
-  `freshness_emoji` is always present - every SCU figure gets a dot. To avoid repeating
-  the same age information twice on one line, the general ⚠️ health-warning note is now
-  shown only when there's no SCU figure for the dot to sit next to instead. 5 new tests
-  covering the dot-per-status mapping (built from the same real `record_terminal_data_
-  health_snapshot` fixtures the pre-existing `classify_terminal_health` tests use), the
-  unknown-dot fallback for missing/absent health data, and the no-duplicate-warning
-  behavior. Full suite (623 tests) reverified clean.
+  `freshness_emoji` is always present. 5 new tests covering the dot-per-status mapping
+  (built from the same real `record_terminal_data_health_snapshot` fixtures the
+  pre-existing `classify_terminal_health` tests use), the unknown-dot fallback for
+  missing/absent health data, and a no-duplicate-warning check. Full suite (623 tests)
+  reverified clean.
+
+  **Second same-day follow-up**: a live screenshot showed the dot appearing on only ONE
+  row out of ten (the single sell entry that happened to have a real SCU figure) - every
+  other row, on both the Sell and Buy sides, had nothing at all, since the first version
+  tied the dot's placement to whether a capacity figure was shown rather than showing it
+  per terminal unconditionally. Fixed by decoupling them entirely: every listed terminal
+  in both "Best places to SELL" and "Best places to BUY" now gets its own freshness dot
+  regardless of whether an SCU figure is shown next to it, and the old warning-only
+  `format_health_note` display in this command was removed outright (the dot already
+  covers everything it warned about, plus the healthy cases it stayed silent for).
+  Separately, the same screenshot's "Out Stock" sell-side status labels prompted a
+  factual question: confirmed from this codebase's own prior verification
+  (`scripts/dump_status_codes.py` against the live endpoint, see `bot/uex/trends.py`) that
+  sell-side status is backwards from how it reads in plain English - "Out of Stock" there
+  describes the TERMINAL's own empty warehouse, meaning it wants to buy from you, while
+  "Maximum" means it's full and not buying. `/top-routes` already had a
+  `SELL_SIDE_STATUS_CLARIFIER` footer note for exactly this, defined locally in
+  `bot/cogs/trends.py` - moved to `bot/uex/supply_demand.py` (alongside the
+  `SELL_SIDE_NO_DEMAND_CODE` constant embodying the same inversion) so `/price` could
+  reuse the identical wording without one cog importing from another (`trends.py` already
+  imports from `prices.py`, so the reverse direction would have been circular). 1 new test
+  proving the dot now shows on a Buy-side entry, plus the existing no-demand test extended
+  to confirm its dot still shows even when the SCU figure itself is suppressed. Full suite
+  (624 tests) and a clean local bot start (both cogs still load with no import errors)
+  reverified.
 
 ### Route Economics Depth
 
