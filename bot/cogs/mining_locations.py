@@ -83,7 +83,10 @@ class MiningLocations(commands.Cog):
             embed.add_field(name="Moon(s)", value=", ".join(info.moons), inline=True)
         if info.mining_pois:
             embed.add_field(name="Named mining sites", value="\n".join(info.mining_pois), inline=False)
-        if not (info.star_systems or info.planets or info.moons or info.mining_pois):
+        if info.hotspots:
+            lines = [f"**{spot.location}** — {spot.concentration_pct:g}%" for spot in info.hotspots]
+            embed.add_field(name="Richest known concentration", value="\n".join(lines), inline=False)
+        if not (info.star_systems or info.planets or info.moons or info.mining_pois or info.hotspots):
             embed.description = "No location data available for this material yet."
 
         footer = "Location data from UEX Corp, cached up to 24h."
@@ -96,7 +99,11 @@ class MiningLocations(commands.Cog):
                 "(side note only, not part of the rating above)",
             ]
             embed.add_field(name="Mining difficulty", value="\n".join(lines), inline=False)
-            footer += " Difficulty rating is community-sourced game data, not from UEX - may not reflect the current game balance."
+        if info.difficulty is not None or info.hotspots:
+            footer += (
+                " Difficulty rating and concentration hotspots are community-sourced game data, "
+                "not from UEX - may not reflect the current game balance."
+            )
 
         embed.set_footer(text=footer)
         await interaction.followup.send(embed=embed)

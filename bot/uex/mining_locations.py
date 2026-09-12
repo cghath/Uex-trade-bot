@@ -3,12 +3,15 @@ where it's actually found (star system/planet/moon/named mining POI), from UEX's
 per-commodity ids_star_systems/ids_planets/ids_moons/ids_poi fields. No Discord, no I/O -
 callers fetch the UEX reference rows and pass them in.
 
-Deliberately does not rank or recommend one location over another: UEX has no per-site
-richness/abundance data at all, and the only real POI operational flags (is_landable,
+The UEX-sourced location list itself is never ranked: UEX has no per-site richness/
+abundance data at all, and the only real POI operational flags (is_landable,
 has_quantum_marker, is_decommissioned) don't meaningfully differentiate the real mining-
 related POI set either (7 total, none decommissioned, as of this module's writing) - a
-plain list of everywhere it's known to be found is the honest answer, not a fabricated
-"best spot."
+plain list of everywhere it's known to be found is the honest answer there, not a
+fabricated "best spot." A genuinely ranked answer (the richest known concentration
+location(s)) comes from a second, separate static table instead - see
+bot/uex/mining_hotspots.py - kept apart because it's sourced from a different community
+site than the difficulty rating below, with its own staleness risk.
 
 Also attaches a per-ore mining difficulty rating and raw stats from bot/uex/
 mining_difficulty.py - the one place in this bot that uses static, externally-sourced game
@@ -17,10 +20,11 @@ its own module with its own staleness disclosure rather than blended in here.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from bot.uex.mining_difficulty import OreMiningProfile, get_mining_difficulty, get_mining_profile
+from bot.uex.mining_hotspots import MiningHotspot, get_mining_hotspots
 
 
 def resolve_mineable_commodity(commodities: list[dict[str, Any]], query: str) -> dict[str, Any] | None:
@@ -73,6 +77,10 @@ class MiningLocationInfo:
     # not from UEX).
     difficulty: str | None = None
     mining_profile: OreMiningProfile | None = None
+    # Richest known concentration spot(s), highest first - empty if this ore isn't in the
+    # static reference table (see bot/uex/mining_hotspots.py). A different, independent
+    # source from difficulty above, so one can be known without the other.
+    hotspots: list[MiningHotspot] = field(default_factory=list)
 
 
 def describe_mining_locations(
@@ -106,4 +114,5 @@ def describe_mining_locations(
         mining_pois=sorted(set(poi_lines)),
         difficulty=get_mining_difficulty(commodity.get("name") or ""),
         mining_profile=get_mining_profile(commodity.get("name") or ""),
+        hotspots=get_mining_hotspots(commodity.get("name") or ""),
     )

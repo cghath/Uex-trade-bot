@@ -126,8 +126,33 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
   and end-to-end command field-format checks). Simulated against real UEX data before
   shipping: Quantainium (Raw) - High (resistance 0.95, instability 1000); Iron (Ore) - Low
   (resistance -0.4, instability 50), with a full real location list including Aaron Halo;
-  Jaclium (Ore) - Medium difficulty shown alongside "no location data available," exactly
-  as designed.
+  Jaclium (Ore) - Medium difficulty shown alongside "no location data available" (superseded
+  by the follow-up immediately below, which gives Jaclium a real location after all).
+
+  **Second follow-up, same day**: added a "richest known concentration" ranking
+  (`bot/uex/mining_hotspots.py`) - a THIRD static, externally-sourced reference table in this
+  bot, after refining methods' rating labels and the difficulty table above, this time from a
+  different community site (SCMINER, https://scminer.rocks/data/ore-by-location as of
+  2026-09) that publishes a real per-location concentration percentage for every ore, not
+  just presence/absence the way UEX's own `ids_poi`/`ids_moons` linkage does. Kept as its own
+  module (not folded into the difficulty table) since it's sourced from a different site with
+  its own independent staleness risk. Surfaces the top 1-3 named spots by concentration, with
+  ties condensed to at most 3 examples and named POIs/asteroid belts preferred over bare moon
+  names when both tie at the same percentage - a deliberate condensation of the real numbers,
+  not a claim that untied locations are worse. Two ores (Savrilium, Torite) have one
+  standout 100% location (Breaker Stations' Large Geode) against 2-29% everywhere else for
+  either ore. Directly fills the gap the location-lookup shipped with earlier the same day:
+  Jaclium's only listed spot is Hathor Caves (19%, FPS hand-mining) - independently
+  confirming, from a completely different source than the user's own correction, that
+  Jaclium's real acquisition path is the Hathor gameplay loop rather than a standard rock/
+  asteroid deposit. Diamond and Cobalt have no entry, matching UEX's own total lack of
+  location data for both - two independent sources agreeing there's a real gap, not a
+  lookup bug on either side. 6 new tests (the hotspot table's own lookup logic including
+  the Jaclium/Hathor Caves case, and `describe_mining_locations`/command wiring). Simulated
+  against real UEX data before shipping: Savrilium (Ore)'s hotspot (Breaker Stations, 100%)
+  cross-checks cleanly against UEX's own POI list for the same commodity, which separately
+  and independently lists "OV Breaker Stations (Nyx)" as a real site - two unrelated sources
+  agreeing this location is real, without either one telling the other about it.
 - [ ] **Fuel-Aware Profit**: Estimate fuel costs and show route profit after fuel for the
   user's selected ship.
 - [ ] **Marketplace Depth Analytics**: Extend sellability with buy-to-sell ratios, listing-price

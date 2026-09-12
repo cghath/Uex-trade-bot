@@ -72,6 +72,7 @@ def test_describe_mining_locations_resolves_every_reference_field():
     assert info.mining_pois == ["Yela Ring (Yela)"], "a non-mining-related POI must be excluded"
     assert info.difficulty == "high", "Ouratite's real instability (600) alone is enough to reach the high tier"
     assert info.mining_profile is not None and info.mining_profile.instability == 600
+    assert info.hotspots and info.hotspots[0].location == "Aberdeen"
 
 
 def test_describe_mining_locations_difficulty_is_none_for_an_unlisted_material():
@@ -83,6 +84,7 @@ def test_describe_mining_locations_difficulty_is_none_for_an_unlisted_material()
     )
     assert info.difficulty is None
     assert info.mining_profile is None
+    assert info.hotspots == []
 
 
 def test_describe_mining_locations_drops_ids_with_no_matching_reference_row():
@@ -158,7 +160,27 @@ def test_where_to_mine_happy_path():
         assert "resistance 0.6" in fields["Mining difficulty"]
         assert "instability 600" in fields["Mining difficulty"]
         assert "Optimal charge window: 0.6" in fields["Mining difficulty"]
+        assert "**Aberdeen** — 10%" in fields["Richest known concentration"]
         assert "community-sourced" in embed.footer.text
+
+    asyncio.run(run())
+
+
+def test_where_to_mine_jaclium_shows_hathor_caves_as_its_only_hotspot():
+    """The one ore whose real source is a special gameplay loop rather than a standard
+    deposit - confirming /where-to-mine surfaces that via the hotspot table even when
+    UEX's own location fields are completely empty for it."""
+    async def run():
+        commodity = _raw(1, "Jaclium (Ore)", is_refinable=0)
+        cog = _cog(commodities=[commodity])
+        interaction = _FakeInteraction()
+
+        await cog.where_to_mine.callback(cog, interaction, ore="Jaclium (Ore)")
+
+        embed = interaction.followup.send.call_args.kwargs["embed"]
+        fields = {f.name: f.value for f in embed.fields}
+        assert fields["Richest known concentration"] == "**Hathor Caves** — 19%"
+        assert embed.description is None, "a real (if unusual) location is now known - must not still claim none is"
 
     asyncio.run(run())
 
