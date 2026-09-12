@@ -202,8 +202,8 @@ class Prices(commands.Cog):
                 capacity = effective_sell_scu(r.get("scu_sell"), r.get("status_sell"))
                 capacity_text = f" · buying {capacity:,.0f} SCU" if capacity else ""
                 lines.append(
-                    f"**{r['terminal_name']}** — {r['price_sell']:.2f} aUEC/unit"
-                    f"{capacity_text}{label_text} {emoji}"
+                    f"{emoji} **{r['terminal_name']}** — {r['price_sell']:.2f} aUEC/unit"
+                    f"{capacity_text}{label_text}"
                 )
             embed.add_field(name="Best places to SELL", value="\n".join(lines), inline=False)
         if top_buy:
@@ -212,7 +212,7 @@ class Prices(commands.Cog):
                 label = resolve_status_label(status_lookup, "buy", r.get("status_buy"))
                 label_text = f" · {label}" if label else ""
                 emoji = freshness_emoji(health_by_terminal.get(_positive_int(r.get("id_terminal"))))
-                lines.append(f"**{r['terminal_name']}** — {r['price_buy']:.2f} aUEC/unit{label_text} {emoji}")
+                lines.append(f"{emoji} **{r['terminal_name']}** — {r['price_buy']:.2f} aUEC/unit{label_text}")
             embed.add_field(name="Best places to BUY", value="\n".join(lines), inline=False)
 
         embed.set_footer(

@@ -50,7 +50,9 @@ def test_price_shows_buying_capacity_next_to_each_sell_location(tmp_path):
 
         embed = interaction.followup.send.call_args.kwargs["embed"]
         fields = {f.name: f.value for f in embed.fields}
-        assert "buying 250 SCU ⚪" in fields["Best places to SELL"]
+        line = fields["Best places to SELL"]
+        assert line.startswith("⚪ **Terminal A**"), f"expected the dot to lead the line: {line!r}"
+        assert "buying 250 SCU" in line
         assert FRESHNESS_LEGEND in embed.footer.text
         assert SELL_SIDE_STATUS_CLARIFIER in embed.footer.text
 
@@ -77,7 +79,9 @@ def test_price_shows_a_green_dot_for_confirmed_fresh_data(tmp_path):
 
         embed = interaction.followup.send.call_args.kwargs["embed"]
         fields = {f.name: f.value for f in embed.fields}
-        assert "buying 250 SCU 🟢" in fields["Best places to SELL"]
+        line = fields["Best places to SELL"]
+        assert line.startswith("🟢 **Terminal A**"), f"expected the dot to lead the line: {line!r}"
+        assert "buying 250 SCU" in line
 
     asyncio.run(run())
 
@@ -106,7 +110,8 @@ def test_price_shows_a_red_dot_and_no_duplicate_warning_for_confirmed_stale_data
         embed = interaction.followup.send.call_args.kwargs["embed"]
         fields = {f.name: f.value for f in embed.fields}
         line = fields["Best places to SELL"]
-        assert "buying 250 SCU 🔴" in line
+        assert line.startswith("🔴 **Terminal A**"), f"expected the dot to lead the line: {line!r}"
+        assert "buying 250 SCU" in line
         assert "⚠️" not in line, f"expected the dot alone, no duplicate warning text: {line!r}"
 
     asyncio.run(run())
@@ -134,7 +139,9 @@ def test_price_hides_buying_capacity_when_status_confirms_no_demand(tmp_path):
         fields = {f.name: f.value for f in embed.fields}
         line = fields["Best places to SELL"]
         assert "buying" not in line
-        assert "⚪" in line, f"expected a freshness dot even with no SCU figure to show: {line!r}"
+        assert line.startswith("⚪ **Terminal A**"), (
+            f"expected a leading freshness dot even with no SCU figure to show: {line!r}"
+        )
 
     asyncio.run(run())
 
@@ -183,6 +190,7 @@ def test_price_shows_a_freshness_dot_on_buy_section_entries_too(tmp_path):
 
         embed = interaction.followup.send.call_args.kwargs["embed"]
         fields = {f.name: f.value for f in embed.fields}
-        assert "🟢" in fields["Best places to BUY"]
+        line = fields["Best places to BUY"]
+        assert line.startswith("🟢 **Terminal B**"), f"expected the dot to lead the line: {line!r}"
 
     asyncio.run(run())
