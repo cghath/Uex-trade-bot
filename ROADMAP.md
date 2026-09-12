@@ -37,8 +37,35 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
   limits, cargo centers, refuel/repair availability, and player-owned or monitored locations.
 - [x] **Commodity Risk Labels**: Mark illegal, volatile, explosive, known-buggy, and other
   operationally relevant commodity traits in route recommendations.
-- [ ] **Refinery Advisor**: Compare refinery yield bonuses, processing choices, and current
-  refined-material sale value for mining runs.
+- [x] **Refinery Advisor**: Shipped 2026-09-12. `/refinery-advisor ore-1 [ore-2] [ore-3]` -
+  up to three raw/refinable commodities at once, since a mined rock/asteroid usually yields
+  more than one, autocompleted from live `/commodities` filtered to `is_raw` and
+  `is_refinable`. For each requested ore: ranks refinery terminals by yield bonus (reading
+  the already-collected `refinery_yield_observations` - see UEX Data Collection Foundation
+  above - via a new `get_latest_refinery_yields_for_commodity`, which selects only the most
+  recent `recorded_day`'s rows per commodity, not just the highest yield_bonus across all
+  history); lists only the high-yield refining methods (`rating_yield == 3` of UEX's 9
+  `/refineries_methods`, cheapest then fastest); and shows the refined commodity's current
+  best sell price/terminal (live `/commodities_prices`, resolved via `id_parent` - the
+  field UEX uses to link a raw commodity to its refined counterpart). For 2-3 ores, ranks
+  terminals by the SUM of whatever of the requested ores each has yield data for (a
+  terminal missing data for one ore is still ranked on its smaller sum, not excluded
+  outright, so a genuinely best single stop for a partial match still surfaces) - a
+  deliberate additive approximation, not weighted by how much of each ore was actually
+  mined, since this command doesn't ask for quantities. Deliberately excludes UEX's
+  `/refineries_capacities` endpoint: despite its docs claiming "yield bonus percentage,"
+  real values observed live (397, 4845, 181924, ...) are clearly not percentages, so its
+  actual meaning is unverified and it isn't used rather than guessed at (matches this
+  project's "verify empirically, don't infer from names" convention - see
+  `commodities_status`/`marketplace_listings.quality` in `CONTRIBUTING.md`). No new DB
+  table or background collector: refining methods are fetched live per call (client-side
+  cached 24h, matching UEX's own patch-cycle cadence) rather than persisted, since the
+  list is small (9 rows) and stable. 17 new tests (pure resolve/rank/filter logic, a
+  latest-recorded-day DB round trip seeded with a stale higher-yield row to prove the
+  query actually filters by date rather than sorting all history, and five end-to-end
+  command tests including the multi-ore combined-ranking and duplicate-ore dedup cases).
+  Verified locally: `Loaded extension bot.cogs.refinery` and `Synced 64 commands` (63 to
+  64, exactly the one new command) with no `CommandSyncFailure`.
 - [ ] **Fuel-Aware Profit**: Estimate fuel costs and show route profit after fuel for the
   user's selected ship.
 - [ ] **Marketplace Depth Analytics**: Extend sellability with buy-to-sell ratios, listing-price

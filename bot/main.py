@@ -42,6 +42,7 @@ INITIAL_COGS = (
     "bot.cogs.negotiation_alerts",
     "bot.cogs.trading_preferences",
     "bot.cogs.route_progression",
+    "bot.cogs.refinery",
 )
 
 

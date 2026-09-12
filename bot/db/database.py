@@ -1855,6 +1855,24 @@ class Database:
             await db.commit()
         return len(params)
 
+    async def get_latest_refinery_yields_for_commodity(self, id_commodity: int) -> list[dict[str, Any]]:
+        """The most recently recorded day's refinery-yield-bonus rows for one raw commodity,
+        across every terminal that's been reported - used by /refinery-advisor to rank
+        terminals. Empty if this commodity has never appeared in a /refineries_yields
+        snapshot (record_refinery_yield_snapshot, run by intelligence.py's reference
+        refresh)."""
+        async with self.connect() as db:
+            cursor = await db.execute(
+                """SELECT * FROM refinery_yield_observations
+                   WHERE id_commodity = ? AND recorded_day = (
+                       SELECT MAX(recorded_day) FROM refinery_yield_observations WHERE id_commodity = ?
+                   )
+                   ORDER BY yield_bonus DESC""",
+                (id_commodity, id_commodity),
+            )
+            rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
     # -- price alerts ---------------------------------------------------
 
     async def add_price_alert(

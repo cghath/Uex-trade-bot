@@ -48,6 +48,7 @@ _ENDPOINT_CACHE_TTL = {
     "data_monitor": 3600,
     "fuel_prices": 30 * 60,
     "refineries_yields": 24 * 3600,
+    "refineries_methods": 24 * 3600,
     "marketplace_prices_history": 3600,
     "marketplace_prices_averages": 3600,
     "marketplace_prices_averages_all": 3600,
@@ -436,6 +437,12 @@ class UexClient:
     async def get_refineries_yields(self, **filters: Any) -> list[dict[str, Any]]:
         """Current refinery yield bonuses by raw commodity and refinery terminal."""
         return await self._get("refineries_yields", params=filters) or []
+
+    async def get_refineries_methods(self, **filters: Any) -> list[dict[str, Any]]:
+        """The refining methods usable at any refinery (not terminal- or commodity-specific)
+        - each rated 1-3 (low/medium/high) on yield, cost, and speed. A small, patch-cadence
+        reference list; used by /refinery-advisor."""
+        return await self._get("refineries_methods", params=filters) or []
 
     # -- marketplace (player-to-player, separate from commodity/terminal trading) --
 
