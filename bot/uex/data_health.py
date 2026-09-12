@@ -150,16 +150,16 @@ def freshness_emoji(health: TerminalDataHealth | None) -> str:
 
 
 def freshness_label(health: TerminalDataHealth | None) -> str:
-    """The dot plus the REAL elapsed-days figure behind it, e.g. "🟢 0d" or "🟡 6d" - a bare
-    dot alone can't tell a terminal updated minutes ago from one seven days old even though
-    both land in the same "fresh" bucket (UEX's own commodity-data TTL is a fixed 15 days
-    for every terminal, confirmed against real collected data, so "fresh" alone spans the
-    whole 0-7.5 day first half of that window). Falls back to the dot alone when
+    """The dot plus the REAL elapsed-days figure behind it, e.g. "🟢 (0d)" or "🟡 (6d)" - a
+    bare dot alone can't tell a terminal updated minutes ago from one seven days old even
+    though both land in the same "fresh" bucket (UEX's own commodity-data TTL is a fixed 15
+    days for every terminal, confirmed against real collected data, so "fresh" alone spans
+    the whole 0-7.5 day first half of that window). Falls back to the dot alone when
     last_update_days itself isn't available (e.g. the "unknown" case, where there's no
     real age to show)."""
     emoji = freshness_emoji(health)
     if health is not None and health.last_update_days is not None:
-        return f"{emoji} {health.last_update_days:g}d"
+        return f"{emoji} ({health.last_update_days:g}d)"
     return emoji
 
 

@@ -493,8 +493,8 @@ def test_freshness_label_pairs_the_dot_with_the_real_elapsed_days():
     # Both classify as "fresh" (the dot alone can't tell them apart) - closing exactly the
     # gap a user asked about: 0 days and 7 days both show 🟢 with a bare dot.
     assert fresh_today.status == fresh_a_week_ago.status == "fresh"
-    assert freshness_label(fresh_today) == "🟢 0d"
-    assert freshness_label(fresh_a_week_ago) == "🟢 7d"
+    assert freshness_label(fresh_today) == "🟢 (0d)"
+    assert freshness_label(fresh_a_week_ago) == "🟢 (7d)"
 
 
 def test_freshness_label_falls_back_to_the_bare_dot_when_no_real_age_is_known():
