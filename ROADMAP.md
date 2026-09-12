@@ -233,6 +233,23 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
   remaining capacity/budget at pick time, not the final totals - see
   `PROJECT_CONTEXT.md` entry 54 for the real misattribution bug this distinction caught
   before it shipped.
+
+  **Follow-up (2026-09-12), user-initiated**: the "limited by demand" label named the
+  constraint but never the actual number behind it - a user asked how to see the
+  destination's real buying capacity for a leg's cargo, the same question that led to
+  `/price`'s buying-capacity figure earlier the same day. `cargo_item_warnings()`
+  (`bot/uex/route_presentation.py`) now appends the destination's real confirmed capacity
+  - reusing `effective_sell_scu()`, the identical `/price` helper (status-code-7 override
+  included) - whenever "demand" is actually among an item's limiting factors, e.g.
+  "Gold: limited by demand (destination will take ~250 SCU)". Scoped to demand-limited
+  items only: showing the destination's ceiling when stock or cargo space capped the
+  quantity instead would name an irrelevant, non-binding number. Landing the fix in this
+  shared helper (not one command's own code) means `/mixed-routes`, `/multi-stop-route`,
+  and `/intelligence-brief` all get the same wording at once, consistent with why this
+  module exists in the first place. 3 new tests (the capacity appearing when demand
+  limits, staying absent when a different factor does, and the status-7 override
+  suppressing it the same way `/price`'s does). Full suite (631 tests) and a clean local
+  bot start reverified.
 - [x] **`/diminishing-returns` chart**: Shipped 2026-09-06, user-initiated (not originally
   on this list). Sweeps a ship's starting budget geometrically against `/multi-stop-route`
   and charts ROI vs. budget, marking where more capital stops changing the recommendation

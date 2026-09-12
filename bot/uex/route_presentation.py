@@ -19,7 +19,7 @@ from bot.uex.data_health import TerminalDataHealth, format_health_note
 from bot.uex.mixed_routes import format_limiting_factors
 from bot.uex.route_confidence import RouteConfidence, compute_route_confidence
 from bot.uex.status import StatusLookup, resolve_status_label
-from bot.uex.supply_demand import EvidenceLevel, has_sell_side_demand
+from bot.uex.supply_demand import EvidenceLevel, effective_sell_scu, has_sell_side_demand
 
 # Discord's real limit on one embed's TOTAL text (title + description + every field's name
 # and value + footer, matching discord.py's own Embed.__len__) - not the same thing as any
@@ -115,7 +115,17 @@ def cargo_item_warnings(item: _CargoItemLike, *, status_lookup: StatusLookup, pr
     lines: list[str] = []
     if risk := format_commodity_risk(item.source):
         lines.append(f"{prefix}{item.commodity_name}: {risk}")
-    lines.append(f"{prefix}{item.commodity_name}: {format_limiting_factors(item.limiting_factors)}")
+    limit_text = format_limiting_factors(item.limiting_factors)
+    if "demand" in item.limiting_factors:
+        # The item's own quantity_scu is already capped to this same number (or lower, by
+        # ship space/budget) - showing the destination's own real ceiling separately tells
+        # the player whether there was more demand than they could take advantage of.
+        destination_capacity = effective_sell_scu(
+            item.destination.get("scu_sell"), item.destination.get("status_sell")
+        )
+        if destination_capacity:
+            limit_text += f" (destination will take ~{destination_capacity:,.0f} SCU)"
+    lines.append(f"{prefix}{item.commodity_name}: {limit_text}")
     buy_status = resolve_status_label(status_lookup, "buy", item.source.get("status_buy"))
     sell_status = resolve_status_label(status_lookup, "sell", item.destination.get("status_sell"))
     if buy_status or sell_status:

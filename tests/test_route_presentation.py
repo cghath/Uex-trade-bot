@@ -92,6 +92,36 @@ def test_cargo_item_warnings_omits_market_status_when_no_codes_resolve():
     assert not any("market status" in line for line in lines)
 
 
+def test_cargo_item_warnings_shows_the_destination_capacity_when_demand_is_limiting():
+    """When demand is the reason this item's quantity was capped, the raw destination
+    figure (the same effective_sell_scu /price shows) is worth showing alongside the
+    category label - it answers "was there more demand than I could take advantage of."""
+    item = _item(destination=dict(scu_sell=250, status_sell=1), limiting_factors=("demand",))
+    lines = cargo_item_warnings(item, status_lookup={"buy": {}, "sell": {}})
+    joined = "\n".join(lines)
+    assert "limited by demand (destination will take ~250 SCU)" in joined
+
+
+def test_cargo_item_warnings_omits_destination_capacity_when_demand_isnt_limiting():
+    """Showing the destination's ceiling only makes sense when demand is actually why the
+    quantity landed where it did - if stock or cargo space capped it instead, the
+    destination's own (higher, non-binding) capacity isn't the relevant number."""
+    item = _item(destination=dict(scu_sell=250, status_sell=1), limiting_factors=("stock",))
+    lines = cargo_item_warnings(item, status_lookup={"buy": {}, "sell": {}})
+    joined = "\n".join(lines)
+    assert "destination will take" not in joined
+
+
+def test_cargo_item_warnings_omits_destination_capacity_when_status_confirms_no_demand():
+    """Same status-code-7 override /price already uses - a stale positive scu_sell must
+    never be shown as a real capacity when the status confirms zero real demand, which
+    would otherwise contradict the market-status line shown right below it."""
+    item = _item(destination=dict(scu_sell=250, status_sell=7), limiting_factors=("demand",))
+    lines = cargo_item_warnings(item, status_lookup={"buy": {}, "sell": {}})
+    joined = "\n".join(lines)
+    assert "destination will take" not in joined
+
+
 def test_cargo_item_warnings_prefix_is_prepended_to_every_line():
     item = _item(source=dict(is_illegal=1))
     lines = cargo_item_warnings(item, status_lookup={"buy": {}, "sell": {}}, prefix="Leg 2 ")
