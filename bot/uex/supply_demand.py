@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from bot.uex.data_health import TerminalDataHealth
@@ -66,6 +66,53 @@ def effective_sell_scu(scu: Any, status_sell: Any) -> float | None:
     if status_code == SELL_SIDE_NO_DEMAND_CODE:
         return 0.0
     return wanted
+
+
+@dataclass(frozen=True)
+class SellCapacityEstimate:
+    scu: float
+    # Age (in days) of the specific historical record the estimate's max stock reading
+    # came from, as of `now` at call time - None if that record carries no timestamp.
+    # A quiet terminal's "highest ever seen" can itself be based on data UEX hasn't
+    # refreshed in days, which is worth disclosing alongside the number so it doesn't
+    # read as more current than it is.
+    source_age_days: float | None
+
+
+def estimate_sell_capacity_from_history(
+    history_rows: list[dict[str, Any]], current_stock: float | None, *, now: datetime | None = None
+) -> SellCapacityEstimate | None:
+    """Estimate how much MORE a terminal with no live confirmed buying figure might take,
+    from UEX's own /commodities_prices_history: the highest scu_sell_stock ever recorded
+    for this (terminal, commodity) pair, minus what it currently holds.
+
+    This is a real, UEX-provided historical figure (not something this bot has collected
+    itself), but it is still only an ESTIMATE, never a confirmed number - the terminal's
+    true capacity could exceed anything observed in whatever window UEX's history happens
+    to cover, so this is a lower bound at best, not a guarantee. Returns None when there's
+    no usable history, no current-stock context to subtract from, or the terminal is
+    already at/above its own historical high (no evidence of room to spare) - callers
+    should fall back to a plainer "holds ~N already" figure in that case, not silently
+    show nothing.
+    """
+    if current_stock is None:
+        return None
+    stock_rows = [row for row in history_rows if row.get("scu_sell_stock") is not None]
+    if not stock_rows:
+        return None
+    peak_row = max(stock_rows, key=lambda row: float(row["scu_sell_stock"]))
+    estimate = float(peak_row["scu_sell_stock"]) - current_stock
+    if estimate <= 0:
+        return None
+    age_days = None
+    date_added = peak_row.get("date_added")
+    if date_added is not None:
+        try:
+            recorded_at = datetime.fromtimestamp(float(date_added), tz=timezone.utc)
+            age_days = ((now or datetime.now(timezone.utc)) - recorded_at).total_seconds() / 86400
+        except (TypeError, ValueError, OSError):
+            age_days = None
+    return SellCapacityEstimate(scu=estimate, source_age_days=age_days)
 
 
 @dataclass(frozen=True)

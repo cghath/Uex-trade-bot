@@ -24,6 +24,7 @@ from bot.uex.supply_demand import (
     analyze_terminal_market_history,
     classify_supply_evidence,
     effective_sell_scu,
+    estimate_sell_capacity_from_history,
     has_sell_side_demand,
 )
 from bot.uex.ships import estimate_route_cargo, resolve_ship
@@ -205,6 +206,29 @@ class Prices(commands.Cog):
             terminal_id: classify_terminal_health(row) for terminal_id, row in health_rows.items()
         }
 
+        # Only fetched for sell rows with no real confirmed buying figure - a terminal
+        # already reporting a live scu_sell has nothing to estimate.
+        history_candidates = [
+            r for r in top_sell
+            if not effective_sell_scu(r.get("scu_sell"), r.get("status_sell"))
+            and _positive_int(r.get("id_terminal")) is not None
+            and r.get("id_commodity") is not None
+        ]
+        history_by_terminal: dict[int, list[dict]] = {}
+        if history_candidates:
+            async def _fetch_history(row: dict) -> list[dict]:
+                try:
+                    return await self.bot.uex.get_commodities_prices_history(
+                        id_terminal=row["id_terminal"], id_commodity=row["id_commodity"]
+                    )
+                except UexApiError:
+                    return []
+
+            history_results = await asyncio.gather(*(_fetch_history(r) for r in history_candidates))
+            history_by_terminal = {
+                _positive_int(r["id_terminal"]): rows for r, rows in zip(history_candidates, history_results)
+            }
+
         if top_sell:
             lines = []
             for r in top_sell:
@@ -213,9 +237,26 @@ class Prices(commands.Cog):
                 terminal_id = _positive_int(r.get("id_terminal"))
                 freshness = freshness_label(health_by_terminal.get(terminal_id))
                 capacity = effective_sell_scu(r.get("scu_sell"), r.get("status_sell"))
+                stock = _positive_float(r.get("scu_sell_stock"))
+                estimate = (
+                    estimate_sell_capacity_from_history(history_by_terminal[terminal_id], stock)
+                    if not capacity and terminal_id in history_by_terminal
+                    else None
+                )
                 if capacity:
                     capacity_text = f" · buying {capacity:,.0f} SCU"
-                elif stock := _positive_float(r.get("scu_sell_stock")):
+                elif estimate:
+                    # A real UEX-provided historical peak, not something this bot collected
+                    # itself - still only an estimate (the terminal's true capacity could
+                    # exceed anything UEX's own history happens to cover), so the wording
+                    # and the age of that peak are both shown rather than stating it as fact.
+                    age_note = (
+                        f", peak {estimate.source_age_days:.0f}d ago"
+                        if estimate.source_age_days is not None and estimate.source_age_days >= 1
+                        else ""
+                    )
+                    capacity_text = f" · est. buying ~{estimate.scu:,.0f} SCU{age_note}"
+                elif stock:
                     # UEX has no recorded "amount actually bought" for this terminal, but
                     # does report its own on-hand stock of the commodity - a DIFFERENT
                     # figure (the terminal's inventory level, not a buying figure) shown
@@ -240,8 +281,9 @@ class Prices(commands.Cog):
         embed.set_footer(
             text="Data from UEX Corp · cached up to 30 min · status = current stock/demand level · "
             "buying SCU is the last reported figure, not a fixed capacity · "
-            "'holds ~N SCU already' is the terminal's own on-hand stock (a different figure, "
-            "shown only when no real buying amount was reported)\n"
+            "'est. buying' is a lower-bound guess from that terminal's own historical peak "
+            "stock, not a confirmed figure · 'holds ~N SCU already' is the terminal's own "
+            "on-hand stock (a different figure, shown only when nothing else is available)\n"
             f"{SELL_SIDE_STATUS_CLARIFIER}\n"
             f"Data freshness:\n{FRESHNESS_LEGEND}"
         )

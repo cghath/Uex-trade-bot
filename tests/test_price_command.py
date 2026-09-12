@@ -23,13 +23,22 @@ class _FakeInteraction:
         self.followup = NS(send=AsyncMock())
 
 
-def _cog(db, *, price_rows):
+def _cog(db, *, price_rows, history_by_terminal=None):
+    """history_by_terminal: {id_terminal: [history rows]} - defaults every lookup to an
+    empty history (no estimate possible), matching a terminal /commodities_prices_history
+    has never recorded anything for."""
+    history_by_terminal = history_by_terminal or {}
+
+    async def get_history(**kwargs):
+        return history_by_terminal.get(kwargs.get("id_terminal"), [])
+
     cog = Prices.__new__(Prices)
     cog.bot = NS(
         db=db,
         uex=NS(
             get_commodities_prices=AsyncMock(return_value=price_rows),
             get_commodities_status=AsyncMock(return_value={"buy": [], "sell": []}),
+            get_commodities_prices_history=get_history,
         ),
     )
     return cog
@@ -196,6 +205,60 @@ def test_price_falls_back_to_on_hand_stock_when_no_buying_amount_is_reported(tmp
         assert "buying" not in line
         assert "holds ~505 SCU already" in line
         assert "on-hand stock" in embed.footer.text
+
+    asyncio.run(run())
+
+
+def test_price_shows_an_estimated_buying_capacity_from_historical_peak_stock(tmp_path):
+    """Real live case: a terminal currently holding 253 SCU whose own UEX history shows it
+    has held as much as 895 before - shown as a distinct 'est.' figure, not the real
+    'buying N SCU' wording, since it's a lower-bound guess, not a confirmed number."""
+    async def run():
+        db = Database(tmp_path / "price_estimate.sqlite3", Fernet(Fernet.generate_key()))
+        await db.init()
+        rows = [
+            {"id_terminal": 1, "id_commodity": 99, "terminal_name": "Terminal A", "commodity_name": "Gold",
+             "price_sell": 100.0, "scu_sell": 0, "scu_sell_stock": 253, "status_sell": 1},
+        ]
+        history = {1: [{"scu_sell_stock": 895, "date_added": 1000}]}
+        cog = _cog(db, price_rows=rows, history_by_terminal=history)
+        interaction = _FakeInteraction()
+
+        await cog.price.callback(cog, interaction, commodity="Gold")
+
+        embed = interaction.followup.send.call_args.kwargs["embed"]
+        fields = {f.name: f.value for f in embed.fields}
+        line = fields["Best places to SELL"]
+        assert "est. buying ~642 SCU" in line
+        assert "buying 642 SCU" not in line, "must never read as the real confirmed figure"
+        assert "holds" not in line, "the estimate takes priority over the plainer stock fallback"
+        assert "est. buying" in embed.footer.text
+
+    asyncio.run(run())
+
+
+def test_price_falls_back_to_plain_stock_when_already_at_the_historical_peak(tmp_path):
+    """No evidence of room to spare if the terminal is already at its own all-time-observed
+    high - must fall back to the plain on-hand-stock wording, not show a zero/negative or
+    fabricated 'estimate'."""
+    async def run():
+        db = Database(tmp_path / "price_at_peak.sqlite3", Fernet(Fernet.generate_key()))
+        await db.init()
+        rows = [
+            {"id_terminal": 1, "id_commodity": 99, "terminal_name": "Terminal A", "commodity_name": "Gold",
+             "price_sell": 100.0, "scu_sell": 0, "scu_sell_stock": 500, "status_sell": 1},
+        ]
+        history = {1: [{"scu_sell_stock": 500, "date_added": 1000}]}
+        cog = _cog(db, price_rows=rows, history_by_terminal=history)
+        interaction = _FakeInteraction()
+
+        await cog.price.callback(cog, interaction, commodity="Gold")
+
+        embed = interaction.followup.send.call_args.kwargs["embed"]
+        fields = {f.name: f.value for f in embed.fields}
+        line = fields["Best places to SELL"]
+        assert "est." not in line
+        assert "holds ~500 SCU already" in line
 
     asyncio.run(run())
 

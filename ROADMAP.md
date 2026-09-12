@@ -876,6 +876,40 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
   extended to also assert the fallback text doesn't appear). Full suite (628 tests) and a
   clean local bot start reverified.
 
+  **Fifth same-day follow-up**: user asked whether the "holds ~N already" fallback could
+  be turned into an actual estimated buying number by subtracting from a "confirmed max
+  capacity" - checked first and confirmed UEX has no such field anywhere (only observed
+  snapshots, never a designed ceiling). Then found the real thing that WAS usable: UEX's
+  `/commodities_prices_history` endpoint tracks `scu_sell_stock` over time per (terminal,
+  commodity) pair, and querying it live showed the historical peak is often meaningfully
+  higher than the current live reading (confirmed on real data: HUR-L3's peak was 1,049
+  SCU against a live 505; TDD's was 895 against a live 253). `estimate_sell_capacity_from_
+  history()` (`bot/uex/supply_demand.py`) estimates room to spare as
+  `historical_peak - current_stock`, returning `None` when the terminal is already at or
+  above its own recorded high (falls back to the plain stock figure in that case, not a
+  fabricated number). Also tracks and surfaces the AGE of the specific record the peak
+  came from (not just the latest record's age - the two can differ significantly, and did
+  on real data: TDD's peak reading turned out to be 14 days old even though its most
+  recent history entry was newer) alongside the estimate, since a quiet terminal's
+  all-time high can itself be based on old data. Explicitly worded "est." and never
+  "buying," with its own footer clause, so it's never mistaken for a confirmed figure.
+  Considered and declined building a dedicated collector to gather this ourselves: UEX's
+  own history endpoint turned out to be a change-log (5-11 sparse rows spanning 5-17 days
+  in the real terminals checked), not a dense hourly series despite the "hourly update"
+  label - a quiet terminal's data genuinely hasn't changed recently, so polling more often
+  ourselves would just re-record the same stale value UEX already retains, not surface
+  new information; duplicating an archive UEX already maintains would only add Pi storage
+  and maintenance for a thin benefit (insurance against UEX someday truncating its own
+  history). 9 new tests (5 pure-logic for the estimation helper - the real 895-vs-253 case,
+  the at-or-above-peak no-estimate case, missing current-stock/empty-history guards, and
+  the peak-record's-own-age calculation - plus 2 end-to-end `/price` cases and updates to
+  the pre-existing fallback tests for the new history-fetch step). Verified against real
+  live UEX data end-to-end (not just the test suite) before shipping: `/price Medical
+  Supplies` correctly showed the real confirmed figure for one terminal, a genuine
+  estimate with its peak's age for a second, and the plain stock fallback for terminals
+  already at their own historical high. Full suite (638 tests) and a clean local bot start
+  reverified.
+
 ### Route Economics Depth
 
 - [ ] **Fuel-Aware Profit**: Estimate fuel costs and show route profit after fuel for the

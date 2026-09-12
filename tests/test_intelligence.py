@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+from datetime import datetime, timezone
 
 import aiosqlite
 from cryptography.fernet import Fernet
@@ -15,7 +16,12 @@ from bot.uex.data_health import (
     freshness_emoji,
     freshness_label,
 )
-from bot.uex.supply_demand import analyze_terminal_market_history, classify_supply_evidence, effective_sell_scu
+from bot.uex.supply_demand import (
+    analyze_terminal_market_history,
+    classify_supply_evidence,
+    effective_sell_scu,
+    estimate_sell_capacity_from_history,
+)
 from bot.uex.practical_routes import (
     route_in_system,
     route_practical_notes,
@@ -832,6 +838,53 @@ def test_effective_sell_scu_returns_none_when_scu_itself_is_missing():
     to tell "no data reported" apart from "confirmed nobody is buying"."""
     assert effective_sell_scu(None, status_sell=1) is None
     assert effective_sell_scu(None, status_sell=7) is None
+
+
+# -- estimate_sell_capacity_from_history (the /price fallback for terminals with no live
+# confirmed buying figure, from UEX's own real /commodities_prices_history) --------------
+
+def test_estimate_sell_capacity_from_history_uses_the_highest_ever_recorded_stock():
+    """Real live case this was built from: a terminal currently holding 253 SCU whose own
+    UEX history shows it has held as much as 895 before - the gap is the estimate."""
+    history = [
+        {"scu_sell_stock": 253, "date_added": 1000},
+        {"scu_sell_stock": 895, "date_added": 2000},
+        {"scu_sell_stock": 400, "date_added": 3000},
+    ]
+    estimate = estimate_sell_capacity_from_history(history, current_stock=253)
+    assert estimate is not None
+    assert estimate.scu == 895 - 253
+
+
+def test_estimate_sell_capacity_from_history_returns_none_when_already_at_or_above_the_peak():
+    """No evidence of room to spare if the terminal is already at (or somehow above) the
+    highest level its own history has ever recorded - callers should fall back to a plain
+    on-hand-stock figure instead, not a zero/negative "estimate"."""
+    history = [{"scu_sell_stock": 500, "date_added": 1000}]
+    assert estimate_sell_capacity_from_history(history, current_stock=500) is None
+    assert estimate_sell_capacity_from_history(history, current_stock=600) is None
+
+
+def test_estimate_sell_capacity_from_history_returns_none_without_current_stock_context():
+    history = [{"scu_sell_stock": 500, "date_added": 1000}]
+    assert estimate_sell_capacity_from_history(history, current_stock=None) is None
+
+
+def test_estimate_sell_capacity_from_history_returns_none_for_empty_history():
+    assert estimate_sell_capacity_from_history([], current_stock=100) is None
+
+
+def test_estimate_sell_capacity_from_history_reports_the_peak_records_real_age():
+    """The peak stock reading a quiet terminal's estimate is based on can itself be many
+    days old (confirmed against real UEX data: up to ~11 days for a rarely-reported
+    terminal) - worth surfacing alongside the number so it isn't mistaken for something
+    just observed."""
+    now = datetime(2026, 9, 12, tzinfo=timezone.utc)
+    five_days_ago = now.timestamp() - 5 * 86400
+    history = [{"scu_sell_stock": 895, "date_added": five_days_ago}]
+    estimate = estimate_sell_capacity_from_history(history, current_stock=253, now=now)
+    assert estimate is not None
+    assert abs(estimate.source_age_days - 5.0) < 0.01
 
 
 def test_terminal_market_name_search_is_scoped_to_commodity(tmp_path):
