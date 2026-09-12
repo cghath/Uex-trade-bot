@@ -43,6 +43,7 @@ INITIAL_COGS = (
     "bot.cogs.trading_preferences",
     "bot.cogs.route_progression",
     "bot.cogs.refinery",
+    "bot.cogs.mining_locations",
 )
 
 

@@ -20,7 +20,7 @@ CATEGORIES: list[tuple[str, str, list[str]]] = [
     ("💰 Prices & Routes", "Terminal prices, profitable hauls, and ranked live routes.", [
         "price", "best-route", "mixed-routes", "multi-stop-route", "top-routes", "routes-from",
         "route-from-multi", "route-on-the-way", "terminal-history", "diminishing-returns",
-        "refinery-advisor",
+        "refinery-advisor", "where-to-mine",
     ]),
     ("📊 Commodity Trends", "Trade volume, price movement, and commodity price charts.", [
         "trending", "movers", "commodity-history",

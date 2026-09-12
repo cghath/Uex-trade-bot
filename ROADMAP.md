@@ -66,6 +66,68 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
   command tests including the multi-ore combined-ranking and duplicate-ore dedup cases).
   Verified locally: `Loaded extension bot.cogs.refinery` and `Synced 64 commands` (63 to
   64, exactly the one new command) with no `CommandSyncFailure`.
+- [x] **Where to Mine**: Shipped 2026-09-12. `/where-to-mine ore` - one raw/mineable
+  commodity, autocompleted from live `/commodities` filtered to `is_raw` only (NOT
+  `is_refinable`, unlike `/refinery-advisor` - a hand-mined material with no refinery
+  pathway, e.g. Jaclium, is just as relevant to "where do I find this" as anything that
+  gets refined). Shows the star system(s), planet(s), moon(s), and named mining-related
+  POIs (asteroid belts/rings, via UEX's `/poi` and its `is_mining_related` flag) a
+  commodity's own `ids_star_systems`/`ids_planets`/`ids_moons`/`ids_poi` fields resolve
+  to, using three new reference-list client methods (`get_star_systems`/`get_planets`/
+  `get_moons`, cached 24h like `get_poi`). Originally scoped as part of a broader "mining-
+  route planner" idea; deliberately narrowed to a single-location lookup instead, per
+  direct user correction - a real mining run sticks to one site, not a multi-stop route
+  the way trading does. Deliberately does not rank or recommend one location over
+  another when a commodity has several: UEX has no per-site richness/abundance data at
+  all, and live-checked, the real mining-related POI set is only 7 rows total with none
+  decommissioned, so even the one real differentiating signal available
+  (`is_landable`/`has_quantum_marker`/`is_decommissioned`) doesn't actually distinguish
+  anything in practice - a plain list is the honest answer, not a fabricated "best spot."
+  Confirmed live that Jaclium and Diamond (Raw) both have every location field empty in
+  UEX's own data (not a bug here) - per the user, Jaclium's real source is a distinct
+  gameplay loop ("Hathor"), not a minable deposit at all, which UEX has no way to flag;
+  the command's generic "no location data available" message is left as-is rather than
+  hardcoding a game fact the bot can't verify against any UEX field. 13 new tests (pure
+  resolve/describe logic, including a stale/unknown reference id being silently dropped
+  rather than shown as a fabricated name, and end-to-end command tests). Verified
+  locally: `Loaded extension bot.cogs.mining_locations` and `Synced 65 commands` (64 to
+  65) with no `CommandSyncFailure`.
+
+  **Follow-up same day**: added a per-ore mining difficulty rating to the same command's
+  embed (`bot/uex/mining_difficulty.py`) - the one place in this entire bot that uses
+  static, externally-sourced game constants instead of live UEX data or a collected
+  observation, and disclosed as such in both the module's own docstring and the command's
+  footer whenever it's shown. Sourced from SC DataHub's data-mined per-ore stats (resistance,
+  instability, optimal charge window, explosion multiplier - https://sc-datahub.com/tools/
+  mining/ores), which UEX has no equivalent of anywhere in its API (confirmed by grepping
+  the full endpoint reference for mass/resistance/instability/charge before starting this -
+  zero matches). Went through three narrower framings first, each confirmed unbuildable
+  before landing here: a per-mineral crew-size recommendation (crew size is a ship
+  attribute, not a mineral one - the same MOLE needs the same crew regardless of what it's
+  mining), a specific-rock laser-count recommendation (a rock's real mass/resistance/
+  instability is randomized per-instance in live gameplay, not knowable in advance by any
+  external database), before arriving at a general per-mineral difficulty baseline, which
+  the game genuinely does have as a fixed design constant. The rating combines only two of
+  the source's four stats - instability and resistance - taking whichever rates worse
+  (not an average, since either dimension alone can make a rock genuinely hard); optimal
+  charge window is shown as a side note only, un-ranked, alongside explosion multiplier
+  being left out of the feature entirely, since both carry negative values in the source
+  with no documented sign convention the way resistance's does ("high resistance requiring
+  high-power lasers," directly supporting a simple higher-is-harder reading) - folding them
+  into a score would be guessing, not simplifying. Tier cutoffs (instability: 0-100 low,
+  200-400 medium, 550+ high; resistance: <=0.30 low, 0.50-0.65 medium, 0.95 high) land on
+  the real gaps in the actual per-ore values, not an arbitrary even split. Difficulty and
+  location data are deliberately independent lookups - confirmed via a dedicated test that
+  Diamond (no location data in UEX at all) still shows its difficulty rating, and Jaclium
+  (whose real source, per the user, is a distinct gameplay loop rather than a minable
+  deposit) shows a difficulty rating with no location fields, rather than one gap
+  suppressing the other. 16 new tests (the difficulty table's own resolve/tier logic
+  including the take-the-worse-not-the-average case, `describe_mining_locations` wiring,
+  and end-to-end command field-format checks). Simulated against real UEX data before
+  shipping: Quantainium (Raw) - High (resistance 0.95, instability 1000); Iron (Ore) - Low
+  (resistance -0.4, instability 50), with a full real location list including Aaron Halo;
+  Jaclium (Ore) - Medium difficulty shown alongside "no location data available," exactly
+  as designed.
 - [ ] **Fuel-Aware Profit**: Estimate fuel costs and show route profit after fuel for the
   user's selected ship.
 - [ ] **Marketplace Depth Analytics**: Extend sellability with buy-to-sell ratios, listing-price

@@ -35,6 +35,10 @@ _DEFAULT_CACHE_TTL = 300  # 5 minutes, conservative default
 _ENDPOINT_CACHE_TTL = {
     "terminals": 12 * 3600,
     "space_stations": 24 * 3600,
+    "star_systems": 24 * 3600,
+    "planets": 24 * 3600,
+    "moons": 24 * 3600,
+    "poi": 24 * 3600,
     "commodities": 12 * 3600,
     "commodities_prices": 30 * 60,
     "commodities_prices_all": 30 * 60,
@@ -280,6 +284,20 @@ class UexClient:
     async def get_space_stations(self, **filters: Any) -> list[dict[str, Any]]:
         """Space-station access metadata, including pad sizes and external loading docks."""
         return await self._get("space_stations", params=filters) or []
+
+    async def get_star_systems(self, **filters: Any) -> list[dict[str, Any]]:
+        return await self._get("star_systems", params=filters) or []
+
+    async def get_planets(self, **filters: Any) -> list[dict[str, Any]]:
+        return await self._get("planets", params=filters) or []
+
+    async def get_moons(self, **filters: Any) -> list[dict[str, Any]]:
+        return await self._get("moons", params=filters) or []
+
+    async def get_poi(self, **filters: Any) -> list[dict[str, Any]]:
+        """Points of interest - includes is_mining_related, used by /where-to-mine to pick
+        out named mining sites (asteroid belts/rings) from the full POI list."""
+        return await self._get("poi", params=filters) or []
 
     async def get_commodities(self, **filters: Any) -> list[dict[str, Any]]:
         return await self._get("commodities", params=filters) or []
