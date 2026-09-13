@@ -623,16 +623,33 @@ class RouteProgression(commands.Cog):
             actual_price=actual_price, actual_scu=actual_scu, precision=precision,
         )
         if not recorded:
-            # The outcome UPDATE's own WHERE outcome IS NULL guard means this leg was
-            # already recorded - either by a genuinely different report racing this one
-            # (two live prompts for the same leg), or by an EARLIER attempt of this exact
-            # retry chain that got this far before failing on a later step. Only the
-            # second case is safe to continue past - compare against what's actually
-            # stored to tell them apart.
+            # record_route_progression_leg_outcome's UPDATE can be rejected for two
+            # structurally different reasons (audit-confirmed defect #3's fix added the
+            # second): outcome IS NOT NULL (this leg was already recorded by someone), or
+            # the thread's own status is no longer 'in_progress' (e.g. abandoned by a
+            # racing action) - the SQL ANDs both conditions together, so a False return
+            # doesn't say which one failed. But the two are still distinguishable from
+            # what's actually stored: the status check can only be what rejected this
+            # write if outcome is STILL NULL here (had it been reachable with a real
+            # in_progress status, the UPDATE would have simply succeeded) - so
+            # stored["outcome"] being None, on its own, proves the thread must have left
+            # in_progress. This must be checked BEFORE is_same_report below, not folded
+            # into "not is_same_report" - a stored outcome of None trivially never equals
+            # this call's own outcome string, so treating it as "a different report won"
+            # would misreport an abandonment race as a duplicate-report conflict.
             stored = await self.bot.db.get_route_progression_leg(thread_id, leg_index)
+            if stored is None or stored["outcome"] is None:
+                if isinstance(channel, discord.Thread):
+                    try:
+                        await channel.send(
+                            "This route is no longer being tracked (completed or abandoned) - "
+                            "this report was not recorded."
+                        )
+                    except discord.HTTPException:
+                        pass
+                return
             is_same_report = (
-                stored is not None
-                and stored["outcome"] == outcome
+                stored["outcome"] == outcome
                 and stored["actual_price"] == actual_price
                 and stored["actual_scu"] == actual_scu
                 and stored["precision"] == precision
@@ -655,7 +672,10 @@ class RouteProgression(commands.Cog):
             # Same report, retried - fall through. The market-state re-merge below is a
             # safe no-op/idempotent re-write of the identical values; the next-leg/
             # completion step is separately guarded by claim_route_progression_advance,
-            # so this finishes whichever part of the earlier attempt never completed.
+            # so this finishes whichever part of the earlier attempt never completed -
+            # including when that earlier attempt already carried the thread all the way
+            # to completion (claim_route_progression_advance/set_route_progression_thread_
+            # status simply no-op again in that case, exactly as before this fix).
 
         update_row = terminal_state_update_for_outcome(
             id_commodity=leg.id_commodity, id_terminal=leg.id_terminal,
@@ -680,9 +700,12 @@ class RouteProgression(commands.Cog):
         total_legs = thread_row["total_legs"]
         if next_index >= total_legs:
             if not await self.bot.db.claim_route_progression_advance(thread_id, to_index=total_legs):
-                return  # completion already handled by an earlier attempt
+                return  # completion already handled by an earlier attempt, or the thread
+                        # left in_progress (e.g. abandoned) since claim_route_progression_
+                        # advance now also requires it - either way, nothing to do here.
+            status_set = False
             try:
-                await self.bot.db.set_route_progression_thread_status(thread_id, "completed")
+                status_set = await self.bot.db.set_route_progression_thread_status(thread_id, "completed")
             except Exception:
                 # The claim is not proof the status write happened - release it so a
                 # retry's own claim attempt can still finish completion, instead of
@@ -694,6 +717,15 @@ class RouteProgression(commands.Cog):
                 )
                 raise
             self._active_legs.pop(thread_id, None)
+            if not status_set:
+                # Audit-confirmed defect #3: something else (an abandonment racing this
+                # same completion) already moved the thread off 'in_progress' between our
+                # claim above and this write - that other action already sent its own
+                # message and archived the thread. Sending "Route complete!" now on top of
+                # it would be a visible, confusing contradiction for a route that isn't
+                # actually being tracked anymore either way, so there's nothing further to
+                # do here.
+                return
             if isinstance(channel, discord.Thread):
                 try:
                     await channel.send("Route complete - thanks for reporting! This thread will archive now.")
@@ -791,8 +823,16 @@ class RouteProgression(commands.Cog):
         """Single close-and-archive path for both a user-initiated 'Abandon route' and the
         48h inactivity poller - the DB status is set first either way, so a channel this
         bot can no longer reach (kicked, thread deleted) still stops being tracked."""
-        await self.bot.db.set_route_progression_thread_status(thread_id, "abandoned")
+        status_set = await self.bot.db.set_route_progression_thread_status(thread_id, "abandoned")
         self._active_legs.pop(thread_id, None)
+        if not status_set:
+            # Audit-confirmed defect #3: the thread had already left 'in_progress' by the
+            # time this ran (e.g. the final leg's outcome completed the route in a race
+            # against this same abandon attempt) - that other action already sent its own
+            # message and archived the thread. Sending "was abandoned" now on top of a
+            # completed route would be a visible, confusing contradiction, so there's
+            # nothing further to do here.
+            return
         if not isinstance(channel, discord.Thread):
             return
         try:

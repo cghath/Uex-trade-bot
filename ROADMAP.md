@@ -1063,6 +1063,37 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
   packet when negotiating a newer pubkey extension, unrelated to any key/permission
   problem. First real run archived all 52 existing snapshots to the PC and pruned the Pi to
   87MB.
+- [x] **Route Progression: Atomic Status Guard**: Shipped 2026-09-13. First of the two
+  originally-deferred P2 audit findings, done as its own careful pass (a test proving the
+  race first, then the fix, then verifying it against the real cog callers) rather than a
+  quick pass alongside other fixes. The defect: `claim_route_progression_advance`,
+  `record_route_progression_leg_outcome`, and `set_route_progression_thread_status`
+  (`bot/db/database.py`) all wrote unconditionally regardless of a thread's current
+  status - a leg-outcome report or a completion racing a concurrent abandonment (or two
+  abandon/complete attempts racing each other) could resurrect an abandoned route, post a
+  next-leg prompt into a closed thread, or let 'completed' silently overwrite 'abandoned'
+  (whichever write committed second, unconditionally winning). Proven first with 3 DB-level
+  tests run against the UNFIXED code (confirmed failing), then fixed by adding
+  `AND status = 'in_progress'` to each write (a `SELECT`-subquery condition for
+  `record_route_progression_leg_outcome`, since its own UPDATE targets the sibling
+  `route_progression_legs` table). `claim_route_progression_advance`'s existing callers
+  needed no changes - both already treat a lost claim as "nothing to do, return quietly,"
+  exactly right for this new reason too. `set_route_progression_thread_status` now returns
+  whether it actually changed anything; `handle_leg_outcome`'s completion branch and
+  `abandon_thread` both now skip their own success messaging/archiving when it returns
+  False, rather than sending a visibly contradictory "Route complete!"/"was abandoned"
+  message on top of whichever action actually won the race. `record_route_progression_leg_
+  outcome`'s own False return needed care to route correctly: it can now fail for two
+  structurally different reasons (this leg already recorded vs. the thread itself no
+  longer in_progress) - naively folding the new reason into the existing "a different
+  report won" branch would have misreported a genuine abandonment race as a duplicate-
+  report conflict, caught before shipping by checking a stored outcome of `None` (which
+  can only mean the status check is what rejected the write, since the UPDATE would have
+  otherwise simply succeeded) as its own branch, checked BEFORE the existing
+  same-report-retry comparison. 9 new/updated tests (3 proving each DB-level race, 3
+  proving the cog-level messaging/silence for each caller, at the same file's usual
+  standard of proving the defect before proving the fix). Full suite (662 tests), a clean
+  local bot start, and a clean CI run reverified.
 - [ ] **Codebase Consolidation** *(complexity: High, ongoing)*: Beyond route rendering,
   organize `bot/db/database.py`'s ~30 tables by feature and keep one authoritative
   description of current behavior. Broader than a single ticket - Centralized Route

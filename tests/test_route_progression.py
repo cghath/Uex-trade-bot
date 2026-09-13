@@ -1752,6 +1752,72 @@ def test_claim_route_progression_advance_only_the_first_caller_per_index_wins(tm
     asyncio.run(run())
 
 
+def test_set_route_progression_thread_status_does_not_overwrite_a_non_in_progress_thread(tmp_path):
+    """Audit-confirmed defect #3: route outcomes/completion don't atomically require
+    status='in_progress'. Concrete race: a user abandons a route right as the final leg's
+    completion write is in flight - the unconditional UPDATE let 'completed' silently
+    stomp back over 'abandoned' (or vice versa, for two racing writes in either order)."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await db.create_route_progression_thread(
+            thread_id=1, user_id=1, guild_id=1, route_kind="best_route", route_snapshot={},
+            legs=[{"side": "buy", "id_terminal": 10, "id_commodity": 1}],
+        )
+        assert await db.set_route_progression_thread_status(1, "abandoned") is True
+
+        result = await db.set_route_progression_thread_status(1, "completed")
+
+        assert result is False, "a thread that already left in_progress must refuse a further status write"
+        thread_row = await db.get_route_progression_thread(1)
+        assert thread_row["status"] == "abandoned", "the winning status must not be overwritten"
+
+    asyncio.run(run())
+
+
+def test_claim_route_progression_advance_refuses_once_the_thread_is_no_longer_in_progress(tmp_path):
+    """Same defect, for the advance-claim used to guard posting a leg prompt or the
+    completion message - without this, a leg-outcome report racing an abandonment could
+    still post a next-leg prompt (or a completion message) into an already-abandoned
+    thread."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await db.create_route_progression_thread(
+            thread_id=1, user_id=1, guild_id=1, route_kind="best_route", route_snapshot={},
+            legs=[{"side": "buy", "id_terminal": 10, "id_commodity": 1}],
+        )
+        assert await db.set_route_progression_thread_status(1, "abandoned") is True
+
+        assert await db.claim_route_progression_advance(1, to_index=0) is False, (
+            "an abandoned thread must never let a new leg prompt or completion be claimed"
+        )
+
+    asyncio.run(run())
+
+
+def test_record_route_progression_leg_outcome_refuses_once_the_thread_is_no_longer_in_progress(tmp_path):
+    """Same defect, for the outcome write itself - without this, a leg-outcome report
+    racing an abandonment could still record an outcome (and drive its market-state side
+    effects) for a route that's no longer being tracked."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await db.create_route_progression_thread(
+            thread_id=1, user_id=1, guild_id=1, route_kind="best_route", route_snapshot={},
+            legs=[{"side": "buy", "id_terminal": 10, "id_commodity": 1}],
+        )
+        assert await db.set_route_progression_thread_status(1, "abandoned") is True
+
+        recorded = await db.record_route_progression_leg_outcome(thread_id=1, leg_index=0, outcome="matched")
+
+        assert recorded is False, "an abandoned thread's leg outcome must never be recorded"
+        stored = await db.get_route_progression_leg(1, 0)
+        assert stored["outcome"] is None, "no outcome should have been written"
+
+    asyncio.run(run())
+
+
 def test_pending_route_progression_actions_queue_round_trips(tmp_path):
     async def run():
         db = _make_db(tmp_path)
@@ -1820,6 +1886,101 @@ def test_handle_leg_outcome_a_conflicting_second_report_does_not_overwrite_or_re
             "the rejected 'missing' report must never reach terminal_market_state/suppression - "
             "'matched' (the real winner) doesn't suppress anything"
         )
+
+    asyncio.run(run())
+
+
+def test_handle_leg_outcome_ignores_a_report_for_a_route_already_abandoned_with_no_prior_outcome(tmp_path):
+    """Audit-confirmed defect #3, the other structurally different reason
+    record_route_progression_leg_outcome can reject a write: the thread was abandoned by a
+    racing action before this leg's outcome was ever recorded by anyone. Must not be
+    misreported as 'already reported (likely duplicate)' (a stored outcome of None can
+    never equal this call's own outcome string, so treating that as a duplicate-report
+    conflict would give a wrong, confusing message) - and must not drive any market-state
+    write or next-leg prompt for a route that isn't being tracked anymore."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await _seed_market_row(db)
+        leg0 = _leg_input(id_terminal=10, id_commodity=1, quoted_price=100.0, quoted_scu=50.0, quoted_status=3)
+        leg1 = _leg_input(
+            side="sell", id_terminal=20, id_commodity=1, terminal_name="Elsewhere",
+            display_label="Sell Gold at Elsewhere", quoted_price=90.0, quoted_scu=40.0, quoted_status=2,
+        )
+        await _create_thread_for_legs(db, 1, [leg0, leg1])
+        assert await db.set_route_progression_thread_status(1, "abandoned") is True
+
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db})()
+        cog._active_legs = {1: [leg0, leg1]}
+        channel = _fake_thread_channel()
+
+        await cog.handle_leg_outcome(channel, 1, 0, leg0, outcome="matched")
+
+        channel.send.assert_awaited_once()
+        message = channel.send.call_args.args[0]
+        assert "no longer being tracked" in message
+        assert "already reported" not in message, "must not be misreported as a duplicate-report conflict"
+        stored = await db.get_route_progression_leg(1, 0)
+        assert stored["outcome"] is None, "no outcome should have been recorded for an abandoned route"
+        result = await db.get_suppressed_sides_by_ids([(1, 10)], now=_now())
+        assert (1, 10) not in result, "market-state must not be touched for a report that lost this race"
+
+    asyncio.run(run())
+
+
+def test_handle_leg_outcome_completion_stays_silent_if_the_thread_was_abandoned_in_the_race(tmp_path, monkeypatch):
+    """Simulates the narrow window between claim_route_progression_advance winning the
+    completion claim and set_route_progression_thread_status actually committing - without
+    checking its return value, a completion racing a concurrent abandonment would still
+    send 'Route complete!' and archive a thread the OTHER action already closed out as
+    abandoned, a visible contradiction."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await _seed_market_row(db)
+        leg0 = _leg_input(id_terminal=10, id_commodity=1)
+        await _create_thread_for_legs(db, 1, [leg0])
+
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db})()
+        cog._active_legs = {1: [leg0]}
+        channel = _fake_thread_channel()
+
+        # Force the exact race outcome: the claim wins (status was still in_progress a
+        # moment ago), but the status-set itself loses to a concurrent abandonment.
+        monkeypatch.setattr(db, "set_route_progression_thread_status", AsyncMock(return_value=False))
+
+        await cog.handle_leg_outcome(channel, 1, 0, leg0, outcome="matched")
+
+        channel.send.assert_not_awaited()
+        thread = await db.get_route_progression_thread(1)
+        assert thread["advanced_to_index"] == 1, "the claim itself still committed - only the status write raced"
+
+    asyncio.run(run())
+
+
+def test_abandon_thread_stays_silent_if_the_route_was_already_completed_in_the_race(tmp_path, monkeypatch):
+    """Mirror of the completion-side test above, for AbandonConfirmView's own commit path -
+    must not send 'was abandoned' (and archive) a thread that a racing completion already
+    closed out as completed."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        leg0 = _leg_input(id_terminal=10, id_commodity=1)
+        await _create_thread_for_legs(db, 1, [leg0])
+
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db})()
+        cog._active_legs = {1: [leg0]}
+        channel = _fake_thread_channel()
+
+        monkeypatch.setattr(db, "set_route_progression_thread_status", AsyncMock(return_value=False))
+
+        await cog.abandon_thread(channel, 1, reason="test")
+
+        channel.send.assert_not_awaited()
+        assert 1 not in cog._active_legs, "the in-memory cache entry must still be cleared either way"
 
     asyncio.run(run())
 

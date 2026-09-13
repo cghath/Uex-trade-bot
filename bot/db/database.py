@@ -1260,14 +1260,23 @@ class Database:
         whose earlier attempt already got this far). Returns whether THIS call actually
         wrote the row - callers must not treat their own outcome as authoritative unless
         this is True, since a duplicate/losing report must never be allowed to overwrite
-        (or drive downstream side effects for) whichever report won the race."""
+        (or drive downstream side effects for) whichever report won the race.
+
+        Also refuses (0 rows affected) once the thread's own status has left 'in_progress'
+        - audit-confirmed defect #3: without this, a leg-outcome report racing a concurrent
+        abandonment could still record an outcome and drive its market-state side effects
+        for a route nobody is tracking anymore. Callers must tell this reason apart from
+        "a different report already won" (see handle_leg_outcome) - both return False here,
+        but only one means "check what's already stored," the other means "the thread is
+        gone, don't act on this report at all"."""
         async with self.connect() as db:
             cursor = await db.execute(
                 """UPDATE route_progression_legs
                    SET outcome = ?, actual_price = ?, actual_scu = ?, precision = ?,
                        reported_at = datetime('now')
-                   WHERE thread_id = ? AND leg_index = ? AND outcome IS NULL""",
-                (outcome, actual_price, actual_scu, precision, thread_id, leg_index),
+                   WHERE thread_id = ? AND leg_index = ? AND outcome IS NULL
+                     AND (SELECT status FROM route_progression_threads WHERE thread_id = ?) = 'in_progress'""",
+                (outcome, actual_price, actual_scu, precision, thread_id, leg_index, thread_id),
             )
             await db.commit()
             return cursor.rowcount > 0
@@ -1278,11 +1287,18 @@ class Database:
         - the conditional UPDATE only succeeds when nothing has already claimed this index
         or a later one, so calling this twice for the same to_index (a retried
         handle_leg_outcome, or the recovery poller redoing a step that already happened)
-        only actually performs the send once. Returns whether THIS call won the claim."""
+        only actually performs the send once. Returns whether THIS call won the claim.
+
+        Also refuses once the thread's status has left 'in_progress' - audit-confirmed
+        defect #3: without this, a leg-outcome report racing a concurrent abandonment could
+        still claim the right to post a next-leg prompt (or the completion message) into an
+        already-abandoned thread. Both existing callers (_post_leg_prompt,
+        handle_leg_outcome's completion branch) already treat a lost claim as "nothing to
+        do here, return quietly" - exactly the right behavior for this new reason too."""
         async with self.connect() as db:
             cursor = await db.execute(
                 """UPDATE route_progression_threads SET advanced_to_index = ?
-                   WHERE thread_id = ? AND advanced_to_index < ?""",
+                   WHERE thread_id = ? AND advanced_to_index < ? AND status = 'in_progress'""",
                 (to_index, thread_id, to_index),
             )
             await db.commit()
@@ -1308,17 +1324,27 @@ class Database:
             await db.commit()
             return cursor.rowcount > 0
 
-    async def set_route_progression_thread_status(self, thread_id: int, status: str) -> None:
+    async def set_route_progression_thread_status(self, thread_id: int, status: str) -> bool:
         """status: 'completed' or 'abandoned'. completed_at's name predates 'abandoned'
         being added - read it as "when this thread stopped being in_progress," not
-        literally "when it succeeded"."""
+        literally "when it succeeded".
+
+        Only writes while the thread is still 'in_progress' - audit-confirmed defect #3:
+        the previous unconditional UPDATE let a completion write silently overwrite a
+        concurrent abandonment (or vice versa), whichever call happened to run second,
+        even though the two are mutually exclusive real-world outcomes. Returns whether
+        THIS call actually changed the status - callers (handle_leg_outcome's completion
+        branch, abandon_thread) must skip their own success messaging/archiving when this
+        is False, since some other action already decided this thread's fate first."""
         async with self.connect() as db:
-            await db.execute(
+            cursor = await db.execute(
                 """UPDATE route_progression_threads
-                   SET status = ?, completed_at = datetime('now') WHERE thread_id = ?""",
+                   SET status = ?, completed_at = datetime('now')
+                   WHERE thread_id = ? AND status = 'in_progress'""",
                 (status, thread_id),
             )
             await db.commit()
+            return cursor.rowcount > 0
 
     async def get_stale_route_progression_threads(self, *, older_than_hours: float) -> list[dict[str, Any]]:
         """in_progress threads with no recent activity - used by the abandonment poller to
