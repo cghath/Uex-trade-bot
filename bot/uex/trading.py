@@ -4,6 +4,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from bot.uex.supply_demand import BUY_SIDE_OUT_OF_STOCK_CODE, SELL_SIDE_NO_DEMAND_CODE
+
+
+def _status_code(value: Any) -> int | None:
+    try:
+        return int(float(value)) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
 
 @dataclass
 class TradeRoute:
@@ -34,15 +43,32 @@ class TradeRoute:
 
 
 def best_sell_locations(price_rows: list[dict[str, Any]], limit: int = 5) -> list[dict[str, Any]]:
-    """Sort commodities_prices rows by sell price, highest first, dropping terminals not buying."""
-    sellable = [r for r in price_rows if (r.get("price_sell") or 0) > 0]
+    """Sort commodities_prices rows by sell price, highest first, dropping terminals not
+    buying - either because price_sell itself isn't reported, or because UEX's own status
+    confirms zero real demand (code 7, "Maximum Inventory, No Demand") even when a stale
+    positive price_sell is still on record. A merely-unreported scu_sell is NOT grounds
+    for exclusion on its own - a real Out-of-Stock sell-side terminal (low/no on-hand
+    stock) genuinely wants to buy but often has no live confirmed transaction amount; only
+    the confirmed no-demand status is treated as disqualifying."""
+    sellable = [
+        r for r in price_rows
+        if (r.get("price_sell") or 0) > 0
+        and _status_code(r.get("status_sell")) != SELL_SIDE_NO_DEMAND_CODE
+    ]
     sellable.sort(key=lambda r: r.get("price_sell", 0), reverse=True)
     return sellable[:limit]
 
 
 def best_buy_locations(price_rows: list[dict[str, Any]], limit: int = 5) -> list[dict[str, Any]]:
-    """Sort commodities_prices rows by buy price, lowest first, dropping terminals not selling it to you."""
-    buyable = [r for r in price_rows if (r.get("price_buy") or 0) > 0]
+    """Sort commodities_prices rows by buy price, lowest first, dropping terminals not
+    selling it to you - either because price_buy itself isn't reported, or because UEX's
+    own status confirms the terminal is out of stock (code 1) even when a stale positive
+    price_buy is still on record."""
+    buyable = [
+        r for r in price_rows
+        if (r.get("price_buy") or 0) > 0
+        and _status_code(r.get("status_buy")) != BUY_SIDE_OUT_OF_STOCK_CODE
+    ]
     buyable.sort(key=lambda r: r.get("price_buy", 0))
     return buyable[:limit]
 

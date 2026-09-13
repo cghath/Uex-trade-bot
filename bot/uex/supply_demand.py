@@ -15,6 +15,15 @@ MIN_HISTORY_HOURS = 24
 # been watched," not just "time has passed since the collector wrote one row."
 MIN_STATE_CHANGES = 1
 SELL_SIDE_NO_DEMAND_CODE = 7
+# The buy side's own analogous "confirmed can't do business here" signal - UEX's code 1
+# is literally "Out of Stock (Empty)": the terminal has nothing to sell you, even if a
+# stale positive price_buy is still on record. bot/uex/route_progression.py already
+# treats these two codes (this one and SELL_SIDE_NO_DEMAND_CODE) as the only status codes
+# it ever writes, for exactly this reason - both are the one authoritative "zero" on their
+# respective side, unlike scu_buy/scu_sell themselves, which are frequently 0 for
+# perfectly legitimate reasons (e.g. a real Out-of-Stock SELL-side terminal wants to buy
+# but has no live confirmed transaction amount - excluding it would be exactly backwards).
+BUY_SIDE_OUT_OF_STOCK_CODE = 1
 
 # Confirmed by directly querying UEX's own /commodities_status: the sell side runs opposite
 # to the buy side. A terminal's "sell side" status is ITS OWN inventory of the commodity, so

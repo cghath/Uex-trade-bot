@@ -130,18 +130,20 @@ def test_price_shows_a_red_dot_and_no_duplicate_warning_for_confirmed_stale_data
     asyncio.run(run())
 
 
-def test_price_hides_buying_capacity_when_status_confirms_no_demand(tmp_path):
-    """Regression guard: showing a stale positive scu_sell next to a status label that
-    already says 'Maximum Inventory (No Demand)' would directly contradict itself - the
-    same buy/sell status inversion this codebase has hit before. The freshness dot still
-    shows even though the SCU figure itself is suppressed - it describes this terminal's
-    data in general, not specifically the (now-hidden) capacity number."""
+def test_price_excludes_terminal_when_status_confirms_no_demand(tmp_path):
+    """Audit fix: a terminal at UEX status 7 ('Maximum Inventory, No Demand') is CONFIRMED
+    not buying even with a stale positive price_sell on record - best_sell_locations
+    (bot/uex/trading.py) now drops it from the ranking entirely, the same policy /best-route
+    and /refinery-advisor share, rather than merely hiding its (contradictory) capacity
+    figure while still recommending it as a place to sell."""
     async def run():
         db = Database(tmp_path / "price_no_demand.sqlite3", Fernet(Fernet.generate_key()))
         await db.init()
         rows = [
-            {"id_terminal": 1, "terminal_name": "Terminal A", "commodity_name": "Gold",
+            {"id_terminal": 1, "terminal_name": "Maxed", "commodity_name": "Gold",
              "price_sell": 100.0, "scu_sell": 250, "status_sell": 7},
+            {"id_terminal": 2, "terminal_name": "RealDemand", "commodity_name": "Gold",
+             "price_sell": 80.0, "scu_sell": 50, "status_sell": 3},
         ]
         cog = _cog(db, price_rows=rows)
         interaction = _FakeInteraction()
@@ -151,10 +153,8 @@ def test_price_hides_buying_capacity_when_status_confirms_no_demand(tmp_path):
         embed = interaction.followup.send.call_args.kwargs["embed"]
         fields = {f.name: f.value for f in embed.fields}
         line = fields["Best places to SELL"]
-        assert "buying" not in line
-        assert line.startswith("⚪ **Terminal A**"), (
-            f"expected a leading freshness dot even with no SCU figure to show: {line!r}"
-        )
+        assert "Maxed" not in line
+        assert "RealDemand" in line
 
     asyncio.run(run())
 
@@ -313,5 +313,34 @@ def test_price_shows_a_freshness_dot_on_buy_section_entries_too(tmp_path):
         fields = {f.name: f.value for f in embed.fields}
         line = fields["Best places to BUY"]
         assert line.startswith("🟢 (0d) **Terminal B**"), f"expected the dot plus age to lead the line: {line!r}"
+
+    asyncio.run(run())
+
+
+def test_price_guards_against_oversized_fields_instead_of_crashing(tmp_path):
+    """Audit finding: /price built its 'Best places to SELL'/'BUY' fields with a plain
+    embed.add_field() call, unlike every sibling route command - Discord raises on a
+    per-field value over 1024 chars or a combined embed over 6000, either of which a long
+    enough terminal name/status label could reach. Now routed through the same
+    add_chunked_fields guard those commands share: an oversized section is omitted (noted
+    in the footer) rather than raising and losing the whole response."""
+    async def run():
+        db = Database(tmp_path / "price_oversized.sqlite3", Fernet(Fernet.generate_key()))
+        await db.init()
+        long_name = "X" * 2000
+        rows = [
+            {"id_terminal": i, "terminal_name": f"{long_name}{i}", "commodity_name": "Gold",
+             "price_sell": 100.0 + i, "scu_sell": 250, "status_sell": 3}
+            for i in range(1, 6)
+        ]
+        cog = _cog(db, price_rows=rows)
+        interaction = _FakeInteraction()
+
+        await cog.price.callback(cog, interaction, commodity="Gold")
+
+        embed = interaction.followup.send.call_args.kwargs["embed"]
+        fields = {f.name: f.value for f in embed.fields}
+        assert "Best places to SELL" not in fields, "an oversized section must be omitted, not raise"
+        assert "SELL" in embed.footer.text and "omitted" in embed.footer.text
 
     asyncio.run(run())

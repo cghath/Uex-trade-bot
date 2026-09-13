@@ -2,12 +2,16 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import sqlite3
 from datetime import datetime, timezone
+from types import SimpleNamespace as NS
+from unittest.mock import AsyncMock
 
 import aiosqlite
 from cryptography.fernet import Fernet
 
+from bot.cogs.intelligence import REFINERY_YIELDS_ROW_CAP, Intelligence
 from bot.db.database import Database
 from bot.uex.data_health import (
     TerminalDataHealth,
@@ -1162,5 +1166,59 @@ def test_marketplace_tier_history_seeds_an_existing_current_state(tmp_path):
         async with db.connect() as sqlite:
             cursor = await sqlite.execute("SELECT COUNT(*) AS count FROM marketplace_tier_observations")
             assert (await cursor.fetchone())["count"] == 1
+
+    asyncio.run(run())
+
+
+def _refinery_row(index: int) -> dict:
+    return {
+        "id_commodity": 1, "id_terminal": index, "commodity_name": "Quantainium (Raw)",
+        "terminal_name": f"Refinery {index}", "value": 10, "value_week": 10, "value_month": 10,
+    }
+
+
+def test_refresh_reference_data_warns_when_refinery_yields_hits_the_documented_row_cap(tmp_path, caplog):
+    """Audit finding: /refineries_yields is documented ('Limits — Maximum of 500 rows')
+    as capped with no pagination offered - a response landing at that cap is
+    indistinguishable from one that's been silently truncated, and refresh_reference_data
+    had no guard at all for it. REFINERY_YIELDS_ROW_CAP now triggers a warning so a real
+    truncation doesn't silently feed /refinery-advisor an incomplete dataset."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        cog = Intelligence.__new__(Intelligence)
+        cog.bot = NS(
+            uex=NS(
+                get_terminals=AsyncMock(return_value=[]),
+                get_commodities=AsyncMock(return_value=[]),
+                get_refineries_yields=AsyncMock(
+                    return_value=[_refinery_row(i) for i in range(REFINERY_YIELDS_ROW_CAP)]
+                ),
+            ),
+            db=db,
+        )
+        with caplog.at_level(logging.WARNING, logger="uexbot.intelligence"):
+            await cog.refresh_reference_data.coro(cog)
+        assert any("500" in record.message or "cap" in record.message.lower() for record in caplog.records)
+
+    asyncio.run(run())
+
+
+def test_refresh_reference_data_does_not_warn_below_the_refinery_yields_row_cap(tmp_path, caplog):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        cog = Intelligence.__new__(Intelligence)
+        cog.bot = NS(
+            uex=NS(
+                get_terminals=AsyncMock(return_value=[]),
+                get_commodities=AsyncMock(return_value=[]),
+                get_refineries_yields=AsyncMock(return_value=[_refinery_row(i) for i in range(215)]),
+            ),
+            db=db,
+        )
+        with caplog.at_level(logging.WARNING, logger="uexbot.intelligence"):
+            await cog.refresh_reference_data.coro(cog)
+        assert not caplog.records, f"expected no warning well below the cap: {[r.message for r in caplog.records]}"
 
     asyncio.run(run())

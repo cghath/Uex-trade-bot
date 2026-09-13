@@ -45,6 +45,40 @@ def test_best_buy_locations_sorts_cheapest_first_and_drops_non_selling_terminals
     assert [r["terminal_name"] for r in result] == ["Cheap", "Mid"]
 
 
+def test_best_sell_locations_excludes_confirmed_no_demand_even_with_a_stale_positive_price():
+    """Audit finding: UEX status 7 ('Maximum Inventory, No Demand') means the terminal is
+    CONFIRMED not buying, even when price_sell itself is still a stale positive number -
+    the same inversion has_sell_side_demand/effective_sell_scu already exist for
+    elsewhere, now applied to the ranking itself, not just the displayed SCU figure."""
+    rows = [
+        _row(id_terminal=1, terminal_name="Maxed", price_sell=300, status_sell=7),
+        _row(id_terminal=2, terminal_name="RealDemand", price_sell=200, status_sell=3),
+    ]
+    result = best_sell_locations(rows)
+    assert [r["terminal_name"] for r in result] == ["RealDemand"]
+
+
+def test_best_sell_locations_keeps_a_real_out_of_stock_terminal_with_no_live_scu_figure():
+    """A real Out-of-Stock (status 1, the LOW end) sell-side terminal genuinely wants to
+    buy - excluding it for having no live scu_sell figure would be exactly backwards,
+    the same lesson SELL_SIDE_STATUS_CLARIFIER exists to spell out."""
+    rows = [_row(id_terminal=1, terminal_name="Empty", price_sell=100, scu_sell=0, status_sell=1)]
+    assert [r["terminal_name"] for r in best_sell_locations(rows)] == ["Empty"]
+
+
+def test_best_buy_locations_excludes_confirmed_empty_stock_even_with_a_stale_positive_price():
+    """Audit finding: UEX status 1 ('Out of Stock (Empty)') on the BUY side means the
+    terminal has nothing to sell you, even when price_buy itself is still a stale positive
+    number - confirmed against real live UEX data (every real status_buy==1 row has
+    scu_buy==0 across every commodity checked)."""
+    rows = [
+        _row(id_terminal=1, terminal_name="Empty", price_buy=100, scu_buy=0, status_buy=1),
+        _row(id_terminal=2, terminal_name="RealStock", price_buy=150, scu_buy=200, status_buy=3),
+    ]
+    result = best_buy_locations(rows)
+    assert [r["terminal_name"] for r in result] == ["RealStock"]
+
+
 def test_locations_respect_limit():
     rows = [_row(id_terminal=i, price_sell=i * 10, price_buy=i * 10) for i in range(1, 10)]
     assert len(best_sell_locations(rows, limit=3)) == 3

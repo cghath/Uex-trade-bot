@@ -172,10 +172,12 @@ class ActualAmountModal(discord.ui.Modal):
             outcome = "missing" if actual_scu <= 0 else "less"
             try:
                 await interaction.response.send_message("Got it, thanks for reporting.", ephemeral=True)
-            except discord.HTTPException:
+            except Exception:
                 # Failed BEFORE handle_leg_outcome ever ran - nothing was persisted, so the
                 # claim this modal just took must be released, not left stranding the leg
-                # as "already reported" forever. See LegOutcomeView.release_claim.
+                # as "already reported" forever. See LegOutcomeView.release_claim. Any
+                # failure counts, not just discord.HTTPException - a timeout or other
+                # transport error leaves persistence just as un-run.
                 self.parent_view.release_claim()
                 raise
             outcome_line = describe_leg_outcome(outcome=outcome, actual_price=actual_price, actual_scu=actual_scu)
@@ -240,7 +242,9 @@ class MoreOutcomeFollowupView(discord.ui.View):
             return
         try:
             await interaction.response.edit_message(view=self)
-        except discord.HTTPException:
+        except Exception:
+            # Any failure here (not just discord.HTTPException) means the claim was
+            # never followed by a persisted outcome - see _claim's own release path.
             self._release()
             raise
         outcome_line = describe_leg_outcome(
@@ -258,7 +262,9 @@ class MoreOutcomeFollowupView(discord.ui.View):
             return
         try:
             await interaction.response.edit_message(view=self)
-        except discord.HTTPException:
+        except Exception:
+            # Same reasoning as MoreOutcomeFollowupView.drained above - any failure,
+            # not just discord.HTTPException, leaves the outcome unpersisted.
             self._release()
             raise
         outcome_line = describe_leg_outcome(
@@ -337,10 +343,12 @@ class LegOutcomeView(discord.ui.View):
             )
         try:
             await interaction.response.edit_message(**edit_kwargs)
-        except discord.HTTPException:
+        except Exception:
             # The ack failed BEFORE handle_leg_outcome ran, so nothing was persisted -
             # release the claim so a retry can still record the outcome. See
             # release_claim's own docstring for why this is only safe pre-persistence.
+            # Any exception counts here, not just discord.HTTPException - a timeout or
+            # other transport failure leaves persistence just as un-run.
             self.release_claim()
             raise
         await self.cog._record_leg_outcome_durably(
@@ -409,10 +417,12 @@ class AbandonConfirmView(discord.ui.View):
             item.disabled = True
         try:
             await interaction.response.edit_message(view=self)
-        except discord.HTTPException:
+        except Exception:
             # Failed BEFORE abandon_thread's own DB write ever ran - release the claim
             # (and re-enable this confirmation view's own buttons) so a retry can still
             # go through, rather than stranding the leg as claimed with nothing recorded.
+            # Any exception counts, not just discord.HTTPException - a timeout or other
+            # transport failure leaves the DB write just as un-run.
             self.parent_view.release_claim()
             for item in self.children:
                 item.disabled = False
@@ -584,11 +594,13 @@ class RouteProgression(commands.Cog):
         view = LegOutcomeView(cog=self, thread_id=thread_id, leg_index=leg_index, leg=leg)
         try:
             view.message = await thread.send(embed=embed, view=view)
-        except discord.HTTPException:
+        except Exception:
             # The claim above is not proof the send happened - a definite failure here
             # must release it, or a retry's own claim attempt sees the index as already
             # (falsely) advanced and silently skips resending. See
-            # release_route_progression_advance_claim's own docstring.
+            # release_route_progression_advance_claim's own docstring. Any exception
+            # counts, not just discord.HTTPException - a timeout or other transport
+            # failure leaves the send just as un-run (this was the audit's own finding).
             await self.bot.db.release_route_progression_advance_claim(
                 thread_id, claimed_index=leg_index, revert_to=leg_index - 1
             )

@@ -940,6 +940,71 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
   cross-system wordings) and verification detail. Landed just ahead of Evidence-Level
   Labels below, specifically so that lands once through this shared module instead of
   four times.
+- [x] **Third-Party Audit Fix Round (165d20d..f8886a6)**: Shipped 2026-09-13. A solo
+  third-party audit of the range covering Centralized Route Presentation, Evidence-Level
+  Labels, and the `/price` buying-capacity/freshness work returned "Conditional pass for
+  TestBranch; hold promotion to `main`" with 6 findings. Every finding was independently
+  re-verified against current code (not trusted blindly) before fixing; 4 of the 6 were
+  fixed now, 2 deferred as needing more careful, deliberate design given their narrower
+  race windows and higher complexity:
+  - **Fixed - P1, sell/buy filtering inconsistency**: `best_sell_locations`/
+    `best_buy_locations` (`bot/uex/trading.py`) filtered only on positive price, not on
+    UEX's own status confirming zero real demand/stock (sell-side code 7, "Maximum
+    Inventory, No Demand"; the buy side's own analogous code 1, "Out of Stock (Empty)") -
+    so `/price`, `/best-route`'s fallback branch, and `/refinery-advisor` (all three share
+    these two helpers) could recommend a terminal explicitly not buying, or claim to sell
+    you stock a terminal doesn't have. The buy-side half needed its own empirical check
+    first: UEX's static API doc example shows a contradicting illustrative row
+    (`scu_buy=529` at `status_buy=1`), but querying live production data across 6
+    commodities found 100% correlation - every real `status_buy==1` row has `scu_buy==0`
+    - so the live data was trusted over the doc example, per this project's own established
+    convention. New `BUY_SIDE_OUT_OF_STOCK_CODE` in `bot/uex/supply_demand.py`, 3 new
+    tests in `test_trading.py`, and 2 pre-existing test fixtures corrected where they'd
+    used `status_buy=1`/`status_sell=1` as incidental placeholders alongside a real
+    positive SCU figure - harmless before this fix, incompatible with it.
+  - **Fixed - P2, exception-handling breadth**: The audit named one call site
+    (`_post_leg_prompt`) where a durable claim-release-on-failure guard caught only
+    `discord.HTTPException`, so a timeout or other non-Discord transport failure would
+    consume the claim without releasing it, permanently stranding a route-tracking leg.
+    Grepping the rest of `bot/cogs/route_progression.py` found the identical shape at 5
+    more call sites, not just the one named - broadened all 6 to `except Exception:`
+    (`ActualAmountModal.on_submit`'s "less" flow, both `MoreOutcomeFollowupView` buttons,
+    `LegOutcomeView.matched`, `AbandonConfirmView.confirm`, and `_post_leg_prompt` itself).
+    The other 4 `except discord.HTTPException:` sites in the same file were checked and
+    left as-is - best-effort UI-update/notification patterns with no claim state to
+    release. Added a non-`discord.HTTPException` regression test (a plain `RuntimeError`
+    or `asyncio.TimeoutError`) alongside each pre-existing HTTPException-only test, to
+    prove the broadened catch actually covers the failure mode the audit described, not
+    just a wider type signature that happens to still pass the old tests.
+  - **Fixed - P2/P3, `/price` field-size guard**: `/price`'s "Best places to SELL"/"BUY"
+    fields used a plain `embed.add_field()` call, unlike every sibling route command,
+    leaving it unprotected against Discord's 1024-char per-field or 6000-char combined
+    embed limits. Routed both through the shared `add_chunked_fields`
+    (`bot/uex/route_presentation.py`) guard, moving `embed.set_footer()` to before the
+    fields are added (this codebase's established ordering, so the guard's `len(embed)`
+    budget check already includes the real footer) and appending a short "omitted -
+    message size limit" footer note on the rare oversized case rather than crashing.
+  - **Fixed - P2/P3 risk, refinery yields coverage guard**: UEX's `/refineries_yields` is
+    documented as capped at 500 rows with no pagination offered - `refresh_reference_data`
+    (`bot/cogs/intelligence.py`) had no guard for a response silently landing at that cap,
+    which would be indistinguishable from a genuinely complete dataset. Added
+    `REFINERY_YIELDS_ROW_CAP` and a warning log when the response count reaches it (today's
+    real count is 215, nowhere close, but nothing previously would have noticed if that
+    changed).
+  - **Deferred, not started**: (1) an atomic `status='in_progress'` guard on route-
+    progression outcome/completion/advance writes (`bot/db/database.py`'s
+    `claim_route_progression_advance`, `record_route_progression_leg_outcome`,
+    `set_route_progression_thread_status` currently have none), so a simultaneous
+    abandon/recovery/outcome race could resurrect an abandoned route; (2) a provisioning/
+    reconciliation step for `start_tracking`'s partial-failure gaps (a DB or message-send
+    failure between thread creation and the first leg prompt can leave an orphaned thread
+    or a prompt-less `in_progress` route). Both flagged as real but needing more careful,
+    deliberate design and testing given their narrower race windows, rather than a quick
+    pass alongside the four fixes above.
+  - 8 new/updated tests beyond the exception-handling regression tests above (3 for the
+    P1 filter, 1 `/price` test corrected for the new exclusion behavior it now triggers,
+    1 new `/price` oversized-field test, 2 refinery-coverage-guard tests). Full suite (649
+    tests) and a clean local bot start (all 20 cogs, 65 commands synced) reverified.
 - [ ] **Codebase Consolidation** *(complexity: High, ongoing)*: Beyond route rendering,
   organize `bot/db/database.py`'s ~30 tables by feature and keep one authoritative
   description of current behavior. Broader than a single ticket - Centralized Route

@@ -62,11 +62,16 @@ def test_best_route_fallback_auto_load_filter_finds_a_lower_ranked_route(tmp_pat
         await db.upsert_terminal_reference(terminal_refs)
 
         def row(id_terminal, name, price_buy, price_sell, scu):
+            # status 3 ("Low Inventory") / 5 ("High Inventory") are placeholders standing
+            # in for "some real non-empty status" - status 1 ("Out of Stock (Empty)") is
+            # excluded on the buy side by best_buy_locations (confirmed against real UEX
+            # data: every real status_buy==1 row has scu_buy==0), which would wrongly drop
+            # these otherwise-valid buy candidates that also carry real scu_buy stock.
             return {
                 "id_terminal": id_terminal, "terminal_name": name, "id_commodity": 1,
                 "commodity_name": "Cobalt", "price_buy": price_buy, "price_sell": price_sell,
                 "scu_buy": scu if price_buy else 0, "scu_sell": scu if price_sell else 0,
-                "status_buy": 1 if price_buy else None, "status_sell": 1 if price_sell else None,
+                "status_buy": 3 if price_buy else None, "status_sell": 5 if price_sell else None,
             }
 
         rows = [
@@ -120,17 +125,21 @@ def test_best_route_fallback_pool_is_not_capped_at_a_fixed_size(tmp_path):
         terminal_refs += [{"id": 200, "name": "DecoySell", "is_auto_load": False}]
         await db.upsert_terminal_reference(terminal_refs)
 
+        # status 3 ("Low Inventory") is a placeholder for "some real non-empty status" -
+        # status 1 ("Out of Stock (Empty)") is excluded on the buy side by
+        # best_buy_locations (confirmed against real UEX data: every real status_buy==1
+        # row has scu_buy==0), which would wrongly drop these otherwise-valid decoys.
         rows = [
             {"id_terminal": 100 + i, "terminal_name": f"Decoy{i}", "id_commodity": 1, "commodity_name": "Cobalt",
-             "price_buy": i + 1, "price_sell": 0, "scu_buy": 100, "scu_sell": 0, "status_buy": 1, "status_sell": None}
+             "price_buy": i + 1, "price_sell": 0, "scu_buy": 100, "scu_sell": 0, "status_buy": 3, "status_sell": None}
             for i in range(30)
         ]
         rows.append({"id_terminal": 200, "terminal_name": "DecoySell", "id_commodity": 1, "commodity_name": "Cobalt",
-                      "price_buy": 0, "price_sell": 1000, "scu_buy": 0, "scu_sell": 100, "status_buy": None, "status_sell": 1})
+                      "price_buy": 0, "price_sell": 1000, "scu_buy": 0, "scu_sell": 100, "status_buy": None, "status_sell": 5})
         rows.append({"id_terminal": 7, "terminal_name": "BA", "id_commodity": 1, "commodity_name": "Cobalt",
-                     "price_buy": 31, "price_sell": 0, "scu_buy": 100, "scu_sell": 0, "status_buy": 1, "status_sell": None})
+                     "price_buy": 31, "price_sell": 0, "scu_buy": 100, "scu_sell": 0, "status_buy": 3, "status_sell": None})
         rows.append({"id_terminal": 8, "terminal_name": "SA", "id_commodity": 1, "commodity_name": "Cobalt",
-                     "price_buy": 0, "price_sell": 50, "scu_buy": 0, "scu_sell": 100, "status_buy": None, "status_sell": 1})
+                     "price_buy": 0, "price_sell": 50, "scu_buy": 0, "scu_sell": 100, "status_buy": None, "status_sell": 5})
 
         client = UexClient(app_token="test", base_url="https://uex.test")
         await client._client.aclose()

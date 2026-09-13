@@ -868,30 +868,43 @@ def test_handle_leg_outcome_suppression_expires_after_roughly_the_configured_win
 # -- LegOutcomeView / ActualAmountModal / MoreOutcomeFollowupView claim logic -------------
 
 class _FakeResponse:
-    def __init__(self, *, fail_edit: bool = False, fail_send_message: bool = False):
+    def __init__(
+        self, *, fail_edit: bool = False, fail_send_message: bool = False,
+        fail_exception: BaseException | None = None,
+    ):
         self.messages = []
         self.modals = []
         self.edited_views = []
         self._fail_edit = fail_edit
         self._fail_send_message = fail_send_message
+        # Defaults to discord.HTTPException so every pre-existing caller is unaffected -
+        # pass a plain exception (e.g. RuntimeError) to prove a claim-release path
+        # broadened to `except Exception:` also fires for a non-Discord failure like a
+        # transport timeout, not just Discord's own HTTP error type.
+        self._fail_exception = fail_exception or discord.HTTPException(NS(status=500, reason="test"), "test")
 
     async def send_modal(self, modal):
         self.modals.append(modal)
 
     async def send_message(self, *args, **kwargs):
         if self._fail_send_message:
-            raise discord.HTTPException(NS(status=500, reason="test"), "test")
+            raise self._fail_exception
         self.messages.append((args, kwargs))
 
     async def edit_message(self, **kwargs):
         if self._fail_edit:
-            raise discord.HTTPException(NS(status=500, reason="test"), "test")
+            raise self._fail_exception
         self.edited_views.append(kwargs)
 
 
 class _FakeInteraction:
-    def __init__(self, *, fail_edit: bool = False, fail_send_message: bool = False):
-        self.response = _FakeResponse(fail_edit=fail_edit, fail_send_message=fail_send_message)
+    def __init__(
+        self, *, fail_edit: bool = False, fail_send_message: bool = False,
+        fail_exception: BaseException | None = None,
+    ):
+        self.response = _FakeResponse(
+            fail_edit=fail_edit, fail_send_message=fail_send_message, fail_exception=fail_exception,
+        )
         self.channel = None
 
 
@@ -1047,6 +1060,29 @@ def test_a_failed_acknowledgement_releases_the_claim_so_a_retry_can_record_the_o
     asyncio.run(run())
 
 
+def test_a_non_discord_failed_acknowledgement_also_releases_the_claim():
+    """Audit finding: the release-on-failure above was originally scoped to
+    `except discord.HTTPException:` only - a timeout or other transport-level failure
+    (not a discord.py HTTP error) would consume the claim without releasing it, since it
+    isn't an HTTPException. Broadened to `except Exception:` so ANY failure before
+    persistence releases the claim, proven here with a plain RuntimeError."""
+    async def run():
+        cog = _FakeCog()
+        view = LegOutcomeView(cog=cog, thread_id=1, leg_index=0, leg=_leg_input())
+        failing = _FakeInteraction(fail_edit=True, fail_exception=RuntimeError("connection reset"))
+        with pytest.raises(RuntimeError):
+            await view.matched.callback(failing)
+        assert view.resolved is False, "must be released even for a non-HTTPException failure"
+        assert not cog.calls
+
+        retry = _FakeInteraction()
+        await view.matched.callback(retry)
+        assert view.resolved is True
+        assert len(cog.calls) == 1
+
+    asyncio.run(run())
+
+
 def test_a_failed_less_modal_acknowledgement_releases_the_claim():
     """Same defect class as the button case above, for the 'less' modal's own commit
     point (ActualAmountModal.on_submit)."""
@@ -1060,6 +1096,35 @@ def test_a_failed_less_modal_acknowledgement_releases_the_claim():
         modal.price_input._value = ""
         failing = _FakeInteraction(fail_send_message=True)
         with pytest.raises(discord.HTTPException):
+            await modal.on_submit(failing)
+        assert view.resolved is False
+        assert not cog.calls
+
+        retry_modal = ActualAmountModal(
+            cog=cog, thread_id=1, leg_index=0, leg=view.leg, flow="less", parent_view=view
+        )
+        retry_modal.scu_input._value = "20"
+        retry_modal.price_input._value = ""
+        await retry_modal.on_submit(_FakeInteraction())
+        assert view.resolved is True
+        assert len(cog.calls) == 1
+
+    asyncio.run(run())
+
+
+def test_a_non_discord_failed_less_modal_acknowledgement_also_releases_the_claim():
+    """Same broadened-exception-handling proof as above, for ActualAmountModal.on_submit's
+    own claim-release path."""
+    async def run():
+        cog = _FakeCog()
+        view = LegOutcomeView(cog=cog, thread_id=1, leg_index=0, leg=_leg_input())
+        modal = ActualAmountModal(
+            cog=cog, thread_id=1, leg_index=0, leg=view.leg, flow="less", parent_view=view
+        )
+        modal.scu_input._value = "20"
+        modal.price_input._value = ""
+        failing = _FakeInteraction(fail_send_message=True, fail_exception=RuntimeError("connection reset"))
+        with pytest.raises(RuntimeError):
             await modal.on_submit(failing)
         assert view.resolved is False
         assert not cog.calls
@@ -1099,6 +1164,30 @@ def test_a_failed_more_outcome_followup_acknowledgement_releases_the_claim():
     asyncio.run(run())
 
 
+def test_a_non_discord_failed_more_outcome_followup_acknowledgement_also_releases_the_claim():
+    """Same broadened-exception-handling proof as above, for
+    MoreOutcomeFollowupView.drained/capacity_limited's own claim-release path."""
+    async def run():
+        cog = _FakeCog()
+        view = LegOutcomeView(cog=cog, thread_id=1, leg_index=0, leg=_leg_input())
+        followup = MoreOutcomeFollowupView(
+            cog=cog, thread_id=1, leg_index=0, leg=view.leg, actual_price=None, actual_scu=80.0,
+            parent_view=view,
+        )
+        failing = _FakeInteraction(fail_edit=True, fail_exception=RuntimeError("connection reset"))
+        with pytest.raises(RuntimeError):
+            await followup.drained.callback(failing)
+        assert view.resolved is False
+        assert not cog.calls
+        assert all(not item.disabled for item in followup.children), "buttons must be re-enabled too"
+
+        await followup.drained.callback(_FakeInteraction())
+        assert view.resolved is True
+        assert len(cog.calls) == 1
+
+    asyncio.run(run())
+
+
 def test_a_failed_abandon_confirmation_acknowledgement_releases_the_claim():
     """Same defect class for AbandonConfirmView's confirm button."""
     async def run():
@@ -1107,6 +1196,26 @@ def test_a_failed_abandon_confirmation_acknowledgement_releases_the_claim():
         confirm_view = AbandonConfirmView(cog=cog, thread_id=1, parent_view=view)
         failing = _FakeInteraction(fail_edit=True)
         with pytest.raises(discord.HTTPException):
+            await confirm_view.confirm.callback(failing)
+        assert view.resolved is False
+        assert not cog.abandon_calls
+
+        await confirm_view.confirm.callback(_FakeInteraction())
+        assert view.resolved is True
+        assert len(cog.abandon_calls) == 1
+
+    asyncio.run(run())
+
+
+def test_a_non_discord_failed_abandon_confirmation_acknowledgement_also_releases_the_claim():
+    """Same broadened-exception-handling proof as above, for AbandonConfirmView.confirm's
+    own claim-release path."""
+    async def run():
+        cog = _FakeCog()
+        view = LegOutcomeView(cog=cog, thread_id=1, leg_index=0, leg=_leg_input())
+        confirm_view = AbandonConfirmView(cog=cog, thread_id=1, parent_view=view)
+        failing = _FakeInteraction(fail_edit=True, fail_exception=RuntimeError("connection reset"))
+        with pytest.raises(RuntimeError):
             await confirm_view.confirm.callback(failing)
         assert view.resolved is False
         assert not cog.abandon_calls
@@ -1928,6 +2037,39 @@ def test_post_leg_prompt_send_failure_releases_the_claim_so_a_retry_can_resend(t
         try:
             await cog._post_leg_prompt(channel, 1, 0, leg)
         except discord.HTTPException:
+            pass
+        else:
+            raise AssertionError("the simulated send failure must propagate")
+
+        channel.send = AsyncMock()
+        await cog._post_leg_prompt(channel, 1, 0, leg)
+
+        assert channel.send.await_count == 1, "the retry must actually resend now that the claim was released"
+
+    asyncio.run(run())
+
+
+def test_post_leg_prompt_non_discord_send_failure_also_releases_the_claim(tmp_path):
+    """Audit's own literal scenario for defect #1: '_post_leg_prompt releases its durable
+    claim only for discord.HTTPException' - 'a timeout or other transport failure can
+    consume the claim; recovery later skips the prompt and deletes the queued action,
+    leaving the route stuck.' Proven here with a plain asyncio.TimeoutError, which is not
+    a discord.HTTPException, to confirm the broadened `except Exception:` actually covers
+    the failure mode the audit named, not just discord.py's own HTTP error type."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        leg = _leg_input()
+        await _create_thread_for_legs(db, 1, [leg])
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db})()
+        cog._active_legs = {}
+        channel = _fake_thread_channel()
+        channel.send.side_effect = asyncio.TimeoutError("network hiccup")
+
+        try:
+            await cog._post_leg_prompt(channel, 1, 0, leg)
+        except asyncio.TimeoutError:
             pass
         else:
             raise AssertionError("the simulated send failure must propagate")

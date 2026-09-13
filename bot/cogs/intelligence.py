@@ -21,6 +21,13 @@ DATA_HEALTH_SNAPSHOT_HOURS = 1
 FUEL_SNAPSHOT_HOURS = 6
 REFERENCE_SNAPSHOT_HOURS = 24
 FUEL_BATCH_SIZE = 10  # UEX documents id_terminal batches of up to ten.
+# UEX's own docs for /refineries_yields: "Limits — Maximum of 500 rows," with no
+# pagination parameters offered to fetch anything past that cap. A response landing at
+# (or somehow above) that count is indistinguishable from a response that's been quietly
+# truncated - there's no way to tell "that's really everything" from "there's more we
+# never saw," so it's worth a warning even though the real dataset (215 rows, as of this
+# check) is nowhere close today.
+REFINERY_YIELDS_ROW_CAP = 500
 FUEL_REQUEST_DELAY_SECONDS = 0.6  # Keeps this background work well below 120 req/min.
 
 
@@ -118,6 +125,13 @@ class Intelligence(commands.Cog):
             terminal_count = await self.bot.db.upsert_terminal_reference(terminals)
             commodity_count = await self.bot.db.upsert_commodity_reference(commodities)
             yield_count = await self.bot.db.record_refinery_yield_snapshot(refinery_yields)
+            if len(refinery_yields) >= REFINERY_YIELDS_ROW_CAP:
+                logger.warning(
+                    "Refinery yields response returned %d rows, at/above UEX's documented "
+                    "%d-row cap - the dataset may be silently truncated, and this endpoint "
+                    "offers no pagination to fetch the rest.",
+                    len(refinery_yields), REFINERY_YIELDS_ROW_CAP,
+                )
             logger.info(
                 "UEX reference refresh: %d terminals, %d commodities, %d refinery yields",
                 terminal_count,

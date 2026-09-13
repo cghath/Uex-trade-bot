@@ -229,6 +229,23 @@ class Prices(commands.Cog):
                 _positive_int(r["id_terminal"]): rows for r, rows in zip(history_candidates, history_results)
             }
 
+        # Footer set BEFORE the fields below are added (not after), matching this
+        # codebase's established _add_chunked_fields convention - its len(embed) budget
+        # check needs to already include the footer's own real length, or the check can
+        # pass while the fully-assembled embed (footer included) still lands over
+        # Discord's 6000-char combined limit. See route_presentation.py's docstring and
+        # trends.py's identical footer-before-loop ordering.
+        embed.set_footer(
+            text="Data from UEX Corp · cached up to 30 min · status = current stock/demand level · "
+            "buying SCU is the last reported figure, not a fixed capacity · "
+            "'est. buying' is a lower-bound guess from that terminal's own historical peak "
+            "stock, not a confirmed figure · 'holds ~N SCU already' is the terminal's own "
+            "on-hand stock (a different figure, shown only when nothing else is available)\n"
+            f"{SELL_SIDE_STATUS_CLARIFIER}\n"
+            f"Data freshness:\n{FRESHNESS_LEGEND}"
+        )
+        omitted_sides = []
+
         if top_sell:
             lines = []
             for r in top_sell:
@@ -268,7 +285,8 @@ class Prices(commands.Cog):
                     f"{freshness} **{r['terminal_name']}** — {r['price_sell']:.2f} aUEC/unit"
                     f"{capacity_text}{label_text}"
                 )
-            embed.add_field(name="Best places to SELL", value="\n".join(lines), inline=False)
+            if not add_chunked_fields(embed, name="Best places to SELL", lines=lines):
+                omitted_sides.append("SELL")
         if top_buy:
             lines = []
             for r in top_buy:
@@ -276,17 +294,15 @@ class Prices(commands.Cog):
                 label_text = f" · {label}" if label else ""
                 freshness = freshness_label(health_by_terminal.get(_positive_int(r.get("id_terminal"))))
                 lines.append(f"{freshness} **{r['terminal_name']}** — {r['price_buy']:.2f} aUEC/unit{label_text}")
-            embed.add_field(name="Best places to BUY", value="\n".join(lines), inline=False)
+            if not add_chunked_fields(embed, name="Best places to BUY", lines=lines):
+                omitted_sides.append("BUY")
 
-        embed.set_footer(
-            text="Data from UEX Corp · cached up to 30 min · status = current stock/demand level · "
-            "buying SCU is the last reported figure, not a fixed capacity · "
-            "'est. buying' is a lower-bound guess from that terminal's own historical peak "
-            "stock, not a confirmed figure · 'holds ~N SCU already' is the terminal's own "
-            "on-hand stock (a different figure, shown only when nothing else is available)\n"
-            f"{SELL_SIDE_STATUS_CLARIFIER}\n"
-            f"Data freshness:\n{FRESHNESS_LEGEND}"
-        )
+        if omitted_sides:
+            # Bounded, short addition - the exact case TRUNCATION_NOTICE_RESERVE exists
+            # to leave room for, so appending it after add_chunked_fields' own budget
+            # check is safe rather than risking a second over-budget send.
+            embed.set_footer(text=f"{embed.footer.text}\n{'/'.join(omitted_sides)} omitted - message size limit")
+
         await interaction.followup.send(embed=embed)
 
     @app_commands.command(
