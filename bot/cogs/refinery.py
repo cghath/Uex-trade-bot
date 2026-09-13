@@ -17,6 +17,7 @@ from bot.uex.refinery import (
     rank_refinery_terminals,
     resolve_raw_commodity,
 )
+from bot.uex.route_presentation import add_chunked_fields
 from bot.uex.trading import best_sell_locations
 
 MAX_SELL_LOCATIONS = 3
@@ -110,6 +111,17 @@ class Refinery(commands.Cog):
 
         title = " + ".join(c["name"] for c in resolved)
         embed = discord.Embed(title=f"{title} — Refinery Advisor", color=discord.Color.blurple())
+        if not_found:
+            embed.description = f"Couldn't match: {', '.join(not_found)}"
+
+        # Footer set BEFORE any field is added, not after - add_chunked_fields' own
+        # len(embed) budget check needs the real footer already counted, matching this
+        # codebase's established ordering (see /price's identical fix).
+        embed.set_footer(
+            text="Refinery yield bonus collected periodically · sell prices live from UEX · "
+            "methods apply at any refinery, not tied to a specific terminal."
+        )
+        omitted_sections: list[str] = []
 
         if ranked_terminals:
             lines = []
@@ -121,7 +133,8 @@ class Refinery(commands.Cog):
                 missing_note = f" (no data: {', '.join(missing)})" if missing else ""
                 name = display_terminal_name(terminal.terminal_name, terminal.star_system_name)
                 lines.append(f"**{name}** — {per_commodity}{missing_note}")
-            embed.add_field(name="Best refineries by yield bonus", value="\n".join(lines), inline=False)
+            if not add_chunked_fields(embed, name="Best refineries by yield bonus", lines=lines):
+                omitted_sections.append("refinery list")
         else:
             embed.add_field(
                 name="Best refineries by yield bonus",
@@ -131,7 +144,8 @@ class Refinery(commands.Cog):
 
         if methods_high_yield:
             lines = [_rating_line(m) for m in methods_high_yield]
-            embed.add_field(name="High-yield refining methods", value="\n".join(lines), inline=False)
+            if not add_chunked_fields(embed, name="High-yield refining methods", lines=lines):
+                omitted_sections.append("refining methods")
 
         seen_parent_ids: set[int] = set()
         for commodity in resolved:
@@ -151,15 +165,14 @@ class Refinery(commands.Cog):
                 lines = [f"**{r['terminal_name']}** — {r['price_sell']:.2f} aUEC/unit" for r in top_sell]
             else:
                 lines = ["No current sell price data."]
-            embed.add_field(name=f"{refined['name']} — best sell price", value="\n".join(lines), inline=True)
+            # inline=True to keep this command's existing side-by-side layout for up to 3
+            # refined commodities - add_chunked_fields defaults to False everywhere else.
+            if not add_chunked_fields(embed, name=f"{refined['name']} — best sell price", lines=lines, inline=True):
+                omitted_sections.append(f"{refined['name']} sell price")
 
-        if not_found:
-            embed.description = f"Couldn't match: {', '.join(not_found)}"
+        if omitted_sections:
+            embed.set_footer(text=f"{embed.footer.text}\n{', '.join(omitted_sections)} omitted - message size limit")
 
-        embed.set_footer(
-            text="Refinery yield bonus collected periodically · sell prices live from UEX · "
-            "methods apply at any refinery, not tied to a specific terminal."
-        )
         await interaction.followup.send(embed=embed)
 
 

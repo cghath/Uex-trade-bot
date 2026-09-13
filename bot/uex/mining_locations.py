@@ -81,6 +81,17 @@ class MiningLocationInfo:
     # static reference table (see bot/uex/mining_hotspots.py). A different, independent
     # source from difficulty above, so one can be known without the other.
     hotspots: list[MiningHotspot] = field(default_factory=list)
+    # A commodity's own ids_poi can reference a POI id that /poi's own current response no
+    # longer has a row for at all - distinct from an id that resolves but isn't mining-
+    # related (correctly excluded from mining_pois above). Surfaced as a count, not
+    # silently dropped, so "found in fewer places" (a real, resolved answer) isn't
+    # confused with "UEX's own reference is missing something this commodity still claims."
+    unresolved_poi_count: int = 0
+    # Mining-related POIs that DID resolve but UEX flags is_decommissioned - kept out of
+    # mining_pois (which implies "minable now") but still shown, not dropped outright,
+    # since "used to be minable here" is real, useful information. None observed live as
+    # of this module's original writing, but nothing should assume that stays true.
+    decommissioned_pois: list[str] = field(default_factory=list)
 
 
 def describe_mining_locations(
@@ -95,17 +106,29 @@ def describe_mining_locations(
     ids_planets/ids_moons/ids_poi fields, resolving each id set to real names via reference
     tables the caller fetched from UEX's own /star_systems, /planets, /moons, /poi - only
     mining-related POIs (is_mining_related) are included, since /poi also covers unrelated
-    points like trade terminals or outposts that happen to share the same list."""
+    points like trade terminals or outposts that happen to share the same list. A referenced
+    id that isn't in poi_rows_by_id at all (unresolved) and a resolved-but-decommissioned POI
+    are each tracked separately rather than folded into the same silent `continue` a plain
+    "not mining-related" exclusion uses - see MiningLocationInfo's own field docstrings."""
     poi_lines = []
+    decommissioned_lines = []
+    unresolved_count = 0
     for poi_id in _parse_ids(commodity.get("ids_poi")):
         poi = poi_rows_by_id.get(poi_id)
-        if poi is None or not poi.get("is_mining_related"):
+        if poi is None:
+            unresolved_count += 1
+            continue
+        if not poi.get("is_mining_related"):
             continue
         name = poi.get("name")
         if not name:
             continue
         context = poi.get("moon_name") or poi.get("planet_name") or poi.get("star_system_name")
-        poi_lines.append(f"{name} ({context})" if context else name)
+        label = f"{name} ({context})" if context else name
+        if poi.get("is_decommissioned"):
+            decommissioned_lines.append(label)
+        else:
+            poi_lines.append(label)
     return MiningLocationInfo(
         commodity_name=commodity.get("name") or "Unknown",
         star_systems=_names_for_ids(commodity.get("ids_star_systems"), star_systems_by_id),
@@ -115,4 +138,6 @@ def describe_mining_locations(
         difficulty=get_mining_difficulty(commodity.get("name") or ""),
         mining_profile=get_mining_profile(commodity.get("name") or ""),
         hotspots=get_mining_hotspots(commodity.get("name") or ""),
+        unresolved_poi_count=unresolved_count,
+        decommissioned_pois=sorted(set(decommissioned_lines)),
     )

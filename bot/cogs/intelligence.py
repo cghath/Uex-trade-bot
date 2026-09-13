@@ -125,6 +125,7 @@ class Intelligence(commands.Cog):
             terminal_count = await self.bot.db.upsert_terminal_reference(terminals)
             commodity_count = await self.bot.db.upsert_commodity_reference(commodities)
             yield_count = await self.bot.db.record_refinery_yield_snapshot(refinery_yields)
+            await self.bot.db.record_refinery_yield_fetch(len(refinery_yields))
             if len(refinery_yields) >= REFINERY_YIELDS_ROW_CAP:
                 logger.warning(
                     "Refinery yields response returned %d rows, at/above UEX's documented "

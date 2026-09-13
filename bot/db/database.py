@@ -450,6 +450,18 @@ CREATE TABLE IF NOT EXISTS refinery_yield_observations (
     PRIMARY KEY (id_commodity, id_terminal, recorded_day)
 );
 
+-- Audit finding: /refineries_yields is documented as capped at 500 rows with no
+-- pagination offered, and intelligence.py's refresh_reference_data only ever logged a
+-- transient warning when a fetch reached that cap - nothing was actually persisted, so
+-- there was no way to look back and tell whether a past fetch was already truncated, or
+-- how the response size has trended over time. One row per refresh (~1/day at the current
+-- 24h collection interval), so this stays tiny indefinitely - no pruning needed.
+CREATE TABLE IF NOT EXISTS refinery_yield_fetch_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    fetched_at TEXT NOT NULL DEFAULT (datetime('now')),
+    response_count INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS marketplace_tier_observations (
     id_item INTEGER NOT NULL,
     quality_tier INTEGER NOT NULL,
@@ -858,6 +870,12 @@ class Database:
             # separately so display logic can show the system consistently for every
             # terminal instead of relying on whichever ones UEX's raw text happens to name.
             "ALTER TABLE refinery_yield_observations ADD COLUMN star_system_name TEXT",
+            # UEX's own per-row date_added/date_modified timestamps (int, per the
+            # /refineries_yields docs) - distinct from recorded_day above, which is this
+            # bot's OWN collection day, not UEX's. Lets a future look-back tell "this row
+            # is old on UEX's own side too" apart from "we just haven't re-collected it."
+            "ALTER TABLE refinery_yield_observations ADD COLUMN date_added INTEGER",
+            "ALTER TABLE refinery_yield_observations ADD COLUMN date_modified INTEGER",
         ]
         for statement in migrations:
             try:
@@ -1845,7 +1863,8 @@ class Database:
             params.append(
                 (id_commodity, id_terminal, str(name), str(terminal),
                  str(star_system) if star_system else None, self._integer(row.get("value")),
-                 self._integer(row.get("value_week")), self._integer(row.get("value_month")))
+                 self._integer(row.get("value_week")), self._integer(row.get("value_month")),
+                 self._integer(row.get("date_added")), self._integer(row.get("date_modified")))
             )
         if not params:
             return 0
@@ -1853,17 +1872,31 @@ class Database:
             await db.executemany(
                 """INSERT INTO refinery_yield_observations
                    (id_commodity, id_terminal, recorded_day, commodity_name, terminal_name,
-                    star_system_name, yield_bonus, yield_bonus_week, yield_bonus_month)
-                   VALUES (?, ?, date('now'), ?, ?, ?, ?, ?, ?)
+                    star_system_name, yield_bonus, yield_bonus_week, yield_bonus_month,
+                    date_added, date_modified)
+                   VALUES (?, ?, date('now'), ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(id_commodity, id_terminal, recorded_day) DO UPDATE SET
                        commodity_name=excluded.commodity_name, terminal_name=excluded.terminal_name,
                        star_system_name=excluded.star_system_name,
                        yield_bonus=excluded.yield_bonus, yield_bonus_week=excluded.yield_bonus_week,
-                       yield_bonus_month=excluded.yield_bonus_month""",
+                       yield_bonus_month=excluded.yield_bonus_month,
+                       date_added=excluded.date_added, date_modified=excluded.date_modified""",
                 params,
             )
             await db.commit()
         return len(params)
+
+    async def record_refinery_yield_fetch(self, response_count: int) -> None:
+        """Logs one /refineries_yields fetch's raw response row count - see
+        refinery_yield_fetch_log's own schema comment for why this is worth keeping a
+        history of, not just a transient warning at the moment a fetch happens to hit the
+        documented 500-row cap."""
+        async with self.connect() as db:
+            await db.execute(
+                "INSERT INTO refinery_yield_fetch_log (response_count) VALUES (?)",
+                (response_count,),
+            )
+            await db.commit()
 
     async def get_latest_refinery_yields_for_commodity(self, id_commodity: int) -> list[dict[str, Any]]:
         """The most recently recorded day's refinery-yield-bonus rows for one raw commodity,

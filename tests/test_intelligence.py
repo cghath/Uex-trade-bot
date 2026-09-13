@@ -1222,3 +1222,30 @@ def test_refresh_reference_data_does_not_warn_below_the_refinery_yields_row_cap(
         assert not caplog.records, f"expected no warning well below the cap: {[r.message for r in caplog.records]}"
 
     asyncio.run(run())
+
+
+def test_refresh_reference_data_persists_the_response_count_every_run(tmp_path):
+    """Audit finding: the row-cap warning above was only ever transient (a log line at the
+    moment a fetch happens to hit the cap) - nothing was persisted, so there was no way to
+    look back and tell whether a past fetch was already truncated or how the response size
+    has trended over time. refresh_reference_data now logs every fetch's count, not just
+    the ones that happen to trip the warning threshold."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        cog = Intelligence.__new__(Intelligence)
+        cog.bot = NS(
+            uex=NS(
+                get_terminals=AsyncMock(return_value=[]),
+                get_commodities=AsyncMock(return_value=[]),
+                get_refineries_yields=AsyncMock(return_value=[_refinery_row(i) for i in range(215)]),
+            ),
+            db=db,
+        )
+        await cog.refresh_reference_data.coro(cog)
+        async with db.connect() as conn:
+            cursor = await conn.execute("SELECT response_count FROM refinery_yield_fetch_log")
+            rows = await cursor.fetchall()
+        assert [r["response_count"] for r in rows] == [215]
+
+    asyncio.run(run())

@@ -12,6 +12,7 @@ from discord.ext import commands
 
 from bot.uex.exceptions import UexApiError, describe_uex_api_error
 from bot.uex.mining_locations import describe_mining_locations, resolve_mineable_commodity
+from bot.uex.route_presentation import add_chunked_fields
 
 
 async def mineable_commodity_autocomplete(
@@ -75,21 +76,48 @@ class MiningLocations(commands.Cog):
         )
 
         embed = discord.Embed(title=f"{info.commodity_name} — Where to Mine", color=discord.Color.blurple())
-        if info.star_systems:
-            embed.add_field(name="Star system(s)", value=", ".join(info.star_systems), inline=True)
-        if info.planets:
-            embed.add_field(name="Planet(s)", value=", ".join(info.planets), inline=True)
-        if info.moons:
-            embed.add_field(name="Moon(s)", value=", ".join(info.moons), inline=True)
-        if info.mining_pois:
-            embed.add_field(name="Named mining sites", value="\n".join(info.mining_pois), inline=False)
-        if info.hotspots:
-            lines = [f"**{spot.location}** — {spot.concentration_pct:g}%" for spot in info.hotspots]
-            embed.add_field(name="Richest known concentration", value="\n".join(lines), inline=False)
         if not (info.star_systems or info.planets or info.moons or info.mining_pois or info.hotspots):
             embed.description = "No location data available for this material yet."
 
+        # Footer text depends only on `info`, already fully computed above - built and set
+        # BEFORE any field is added so add_chunked_fields' own len(embed) budget check
+        # already counts it, matching this codebase's established ordering (see /price's
+        # and /refinery-advisor's identical fix).
         footer = "Location data from UEX Corp, cached up to 24h."
+        if info.difficulty is not None or info.hotspots:
+            footer += (
+                " Difficulty rating and concentration hotspots are community-sourced game data, "
+                "not from UEX - may not reflect the current game balance."
+            )
+        if info.unresolved_poi_count:
+            footer += (
+                f" {info.unresolved_poi_count} referenced mining site(s) could not be resolved "
+                "in UEX's current location data."
+            )
+        embed.set_footer(text=footer)
+        omitted_sections: list[str] = []
+
+        if info.star_systems:
+            if not add_chunked_fields(embed, name="Star system(s)", lines=[", ".join(info.star_systems)], inline=True):
+                omitted_sections.append("star systems")
+        if info.planets:
+            if not add_chunked_fields(embed, name="Planet(s)", lines=[", ".join(info.planets)], inline=True):
+                omitted_sections.append("planets")
+        if info.moons:
+            if not add_chunked_fields(embed, name="Moon(s)", lines=[", ".join(info.moons)], inline=True):
+                omitted_sections.append("moons")
+        if info.mining_pois:
+            if not add_chunked_fields(embed, name="Named mining sites", lines=info.mining_pois):
+                omitted_sections.append("mining sites")
+        if info.decommissioned_pois:
+            # Shown separately from "Named mining sites" above, not blended in unflagged -
+            # a decommissioned site is real, useful history, not a currently-minable spot.
+            if not add_chunked_fields(embed, name="Decommissioned (no longer minable)", lines=info.decommissioned_pois):
+                omitted_sections.append("decommissioned sites")
+        if info.hotspots:
+            lines = [f"**{spot.location}** — {spot.concentration_pct:g}%" for spot in info.hotspots]
+            if not add_chunked_fields(embed, name="Richest known concentration", lines=lines):
+                omitted_sections.append("concentration hotspots")
         if info.difficulty is not None and info.mining_profile is not None:
             profile = info.mining_profile
             lines = [
@@ -98,14 +126,12 @@ class MiningLocations(commands.Cog):
                 f"Optimal charge window: {profile.optimal_window:g} "
                 "(side note only, not part of the rating above)",
             ]
-            embed.add_field(name="Mining difficulty", value="\n".join(lines), inline=False)
-        if info.difficulty is not None or info.hotspots:
-            footer += (
-                " Difficulty rating and concentration hotspots are community-sourced game data, "
-                "not from UEX - may not reflect the current game balance."
-            )
+            if not add_chunked_fields(embed, name="Mining difficulty", lines=lines):
+                omitted_sections.append("difficulty rating")
 
-        embed.set_footer(text=footer)
+        if omitted_sections:
+            embed.set_footer(text=f"{embed.footer.text}\n{', '.join(omitted_sections)} omitted - message size limit")
+
         await interaction.followup.send(embed=embed)
 
 

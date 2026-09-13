@@ -115,6 +115,38 @@ def test_describe_mining_locations_poi_without_any_context_shows_bare_name():
     assert info.mining_pois == ["Deep Space Belt"]
 
 
+def test_describe_mining_locations_counts_poi_ids_that_do_not_resolve_at_all():
+    """Audit finding: an ids_poi entry with no matching row in /poi's own current response
+    is a different situation from an id that resolves but isn't mining-related (correctly
+    excluded) - it means UEX's own reference no longer has a record for something this
+    commodity still claims to be found at, which is worth surfacing as a count rather than
+    silently vanishing the same way a genuinely-excluded non-mining POI does."""
+    commodity = _raw(1, "Test Ore", ids_poi="1,2,3")
+    info = describe_mining_locations(
+        commodity, star_systems_by_id={}, planets_by_id={}, moons_by_id={},
+        poi_rows_by_id={1: {"name": "Deep Space Belt", "is_mining_related": 1}},
+    )
+    assert info.mining_pois == ["Deep Space Belt"]
+    assert info.unresolved_poi_count == 2, "ids 2 and 3 have no row in poi_rows_by_id at all"
+
+
+def test_describe_mining_locations_separates_decommissioned_pois_from_active_ones():
+    """A mining-related POI that resolves but is flagged is_decommissioned must not be
+    blended into mining_pois unflagged (which would imply it's still minable today) or
+    silently dropped (which would erase real, useful history) - it gets its own list."""
+    commodity = _raw(1, "Test Ore", ids_poi="1,2")
+    info = describe_mining_locations(
+        commodity, star_systems_by_id={}, planets_by_id={}, moons_by_id={},
+        poi_rows_by_id={
+            1: {"name": "Active Belt", "is_mining_related": 1},
+            2: {"name": "Old Belt", "is_mining_related": 1, "is_decommissioned": 1},
+        },
+    )
+    assert info.mining_pois == ["Active Belt"]
+    assert info.decommissioned_pois == ["Old Belt"]
+    assert info.unresolved_poi_count == 0
+
+
 # -- /where-to-mine command end to end ---------------------------------------------------
 
 class _FakeInteraction:
@@ -162,6 +194,30 @@ def test_where_to_mine_happy_path():
         assert "Optimal charge window: 0.6" in fields["Mining difficulty"]
         assert "**Aberdeen** — 10%" in fields["Richest known concentration"]
         assert "community-sourced" in embed.footer.text
+
+    asyncio.run(run())
+
+
+def test_where_to_mine_shows_decommissioned_sites_and_notes_unresolved_ones():
+    async def run():
+        commodity = _raw(1, "Ouratite (Raw)", ids_poi="270,271,999")
+        cog = _cog(
+            commodities=[commodity],
+            pois=[
+                {"id": 270, "name": "Yela Ring", "is_mining_related": 1},
+                {"id": 271, "name": "Old Belt", "is_mining_related": 1, "is_decommissioned": 1},
+                # id 999 is deliberately absent - simulates an id UEX's /poi no longer has.
+            ],
+        )
+        interaction = _FakeInteraction()
+
+        await cog.where_to_mine.callback(cog, interaction, ore="Ouratite (Raw)")
+
+        embed = interaction.followup.send.call_args.kwargs["embed"]
+        fields = {f.name: f.value for f in embed.fields}
+        assert fields["Named mining sites"] == "Yela Ring", "decommissioned site must not be blended in unflagged"
+        assert fields["Decommissioned (no longer minable)"] == "Old Belt"
+        assert "1 referenced mining site(s) could not be resolved" in embed.footer.text
 
     asyncio.run(run())
 

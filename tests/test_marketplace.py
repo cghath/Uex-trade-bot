@@ -10,7 +10,6 @@ from datetime import datetime, timezone
 from types import SimpleNamespace as NS
 
 from cryptography.fernet import Fernet
-import discord
 from discord import app_commands
 import httpx
 

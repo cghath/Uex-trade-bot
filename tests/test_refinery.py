@@ -189,6 +189,45 @@ def test_get_latest_refinery_yields_for_commodity_is_empty_when_never_collected(
     asyncio.run(run())
 
 
+def test_record_refinery_yield_snapshot_persists_uex_source_timestamps(tmp_path):
+    """Audit finding: UEX's own date_added/date_modified per row were fetched but never
+    stored - only this bot's own collection day (recorded_day) was kept. These are
+    distinct: recorded_day says when WE last collected, date_added/date_modified say what
+    UEX's own record says, letting a future look-back tell "stale on UEX's own side too"
+    apart from "we just haven't re-collected recently.\""""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await db.record_refinery_yield_snapshot([
+            {"id_commodity": 1, "id_terminal": 10, "commodity_name": "Quantainium (Raw)",
+             "terminal_name": "Levski Refinery", "value": 5,
+             "date_added": 1700000000, "date_modified": 1700500000},
+        ])
+        rows = await db.get_latest_refinery_yields_for_commodity(1)
+        assert rows[0]["date_added"] == 1700000000
+        assert rows[0]["date_modified"] == 1700500000
+
+    asyncio.run(run())
+
+
+def test_record_refinery_yield_fetch_logs_the_response_count(tmp_path):
+    """Audit finding: refresh_reference_data only ever logged a transient warning when a
+    fetch hit the documented 500-row cap - nothing was persisted, so there was no way to
+    look back and tell whether a past fetch was already truncated or how response size has
+    trended over time."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await db.record_refinery_yield_fetch(215)
+        await db.record_refinery_yield_fetch(500)
+        async with db.connect() as conn:
+            cursor = await conn.execute("SELECT response_count FROM refinery_yield_fetch_log ORDER BY id")
+            rows = await cursor.fetchall()
+        assert [r["response_count"] for r in rows] == [215, 500]
+
+    asyncio.run(run())
+
+
 # -- /refinery-advisor command end to end -----------------------------------------------
 
 class _FakeInteraction:
@@ -364,5 +403,34 @@ def test_refinery_advisor_deduplicates_the_same_ore_entered_twice(tmp_path):
         embed = interaction.followup.send.call_args.kwargs["embed"]
         sell_price_fields = [f for f in embed.fields if f.name.startswith("Refined A")]
         assert len(sell_price_fields) == 1, "the same ore entered twice must not produce two sell-price fields"
+
+    asyncio.run(run())
+
+
+def test_refinery_advisor_guards_against_oversized_fields_instead_of_crashing(tmp_path):
+    """Audit finding: /refinery-advisor built its fields with plain embed.add_field() calls,
+    unlike /price - a long enough terminal name could exceed Discord's 1024-char per-field
+    or 6000-char combined embed limits. Now routed through add_chunked_fields like every
+    sibling command: an oversized section is omitted (noted in the footer) rather than
+    raising and losing the whole response."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        long_name = "X" * 2000
+        await db.record_refinery_yield_snapshot([
+            {"id_commodity": 1, "id_terminal": i, "commodity_name": "Quantainium (Raw)",
+             "terminal_name": f"{long_name}{i}", "value": 5}
+            for i in range(1, 6)
+        ])
+        commodities = [_raw(1, "Quantainium (Raw)", 100), _refined(100, "Quantainium")]
+        cog = _cog(db, commodities=commodities, methods=_METHODS)
+        interaction = _FakeInteraction()
+
+        await cog.refinery_advisor.callback(cog, interaction, ore_1="Quantainium (Raw)", ore_2=None, ore_3=None)
+
+        embed = interaction.followup.send.call_args.kwargs["embed"]
+        fields = {f.name: f.value for f in embed.fields}
+        assert "Best refineries by yield bonus" not in fields, "an oversized section must be omitted, not raise"
+        assert "omitted" in embed.footer.text
 
     asyncio.run(run())

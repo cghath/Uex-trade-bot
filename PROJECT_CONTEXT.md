@@ -2285,6 +2285,26 @@ guessed at.
   history argues against assuming a second round would find nothing. Re-check live
   service and branch state rather than assuming this point-in-time
   operational note is still current.
+- **Current staging state, updated (2026-09-13)**: the entry above was flagged stale by a
+  third-party audit review (of `165d20d..f8886a6`) that explicitly called out its 331-test
+  count and 2026-09-06 snapshot as out of date - confirmed correct, and left as its own
+  historical record above rather than rewritten in place, since this file's own convention
+  is to append a new dated note rather than edit history away. Since that snapshot: the
+  full suite has grown to 656 passing tests; `TestBranch` is at `2343465` (a 4-defect audit
+  fix round - sell/buy demand filtering, broadened route-progression exception handling,
+  Discord field-size guards extended to `/refinery-advisor` and `/where-to-mine`, and
+  refinery-yields coverage tracking - see `ROADMAP.md`'s corresponding entries), and this
+  commit is confirmed deployed and running live on the Pi (`uex-trade-bot.service`,
+  20 cogs, 65 commands synced, verified via `journalctl` with no errors). GitHub Actions CI
+  (`.github/workflows/tests.yml`) was already running on every push/PR, but had actually
+  been failing silently for at least the last several TestBranch commits (a handful of
+  pre-existing unused-import/unused-variable `ruff --select F` findings in test files,
+  unrelated to any of those commits' own changes) precisely because nothing required it to
+  pass - fixed, and `TestBranch` now has branch protection requiring the `pytest` check
+  before merge, closing the audit's "add CI as a required merge gate" recommendation. As
+  always: re-check `git log`/`systemctl status uex-trade-bot`/the Actions tab before
+  assuming any of this stays true indefinitely - this is a point-in-time note, not a live
+  dashboard.
 - The data collectors in `bot/cogs/intelligence.py` only pay off once they've been running a
   while - most of the `ROADMAP.md` intelligence backlog depends on accumulated history, so
   those features will look broken/empty if built and tested against a fresh database.

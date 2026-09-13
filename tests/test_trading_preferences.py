@@ -20,10 +20,8 @@ from bot.cogs import trends as trends_module
 from bot.cogs.prices import Prices
 from bot.cogs.trading_preferences import TradingPreferences
 from bot.db.database import Database
-from bot.uex.mixed_routes import MixedCargoItem, MixedRoute
 from bot.uex.trading_preferences import (
     DEFAULT_TRADING_PREFERENCES,
-    UNSET,
     describe_active_preferences,
     format_trading_preferences,
 )

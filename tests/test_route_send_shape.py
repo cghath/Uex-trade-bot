@@ -1223,7 +1223,6 @@ def test_multi_stop_route_falls_back_to_plain_text_when_a_leg_field_does_not_fit
     field is smaller, not bigger, and sends "successfully." Forces the SECOND leg's field
     to fail deterministically rather than depending on exact byte counts."""
     async def run():
-        call_count = {"n": 0}
         real_add_chunked_fields = prices_module._add_chunked_fields
 
         def flaky_add_chunked_fields(embed, *, name, lines):

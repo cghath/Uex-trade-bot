@@ -1005,6 +1005,64 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
     P1 filter, 1 `/price` test corrected for the new exclusion behavior it now triggers,
     1 new `/price` oversized-field test, 2 refinery-coverage-guard tests). Full suite (649
     tests) and a clean local bot start (all 20 cogs, 65 commands synced) reverified.
+- [x] **Third-Party Audit Fix Round, follow-up on the recommendations**: Shipped
+  2026-09-13. A closer read of the same audit's full recommendation list (not just its
+  6-row findings table) found that two of the prior round's fixes were narrower than what
+  was actually asked for - caught by re-checking, not by a second external report:
+  - **Fixed - field-size guard was `/price`-only**: the audit's recommendation named
+    `/refinery-advisor` and `/where-to-mine` too; both still used plain unprotected
+    `embed.add_field()` calls. Routed both through `add_chunked_fields`
+    (`bot/uex/route_presentation.py`), which gained an `inline: bool = False` parameter
+    (defaulting to every existing caller's own behavior) so `/refinery-advisor`'s
+    side-by-side per-ore sell-price fields and `/where-to-mine`'s star-system/planet/moon
+    fields keep their existing layout instead of being forced to stack vertically.
+  - **Fixed - refinery yields: only the "warn at cap" half of the recommendation had
+    shipped.** Added what "persist" actually asked for: `refinery_yield_observations`
+    gained nullable `date_added`/`date_modified` columns for UEX's own per-row timestamps
+    (distinct from `recorded_day`, this bot's own collection day - additive `ALTER TABLE`,
+    matching the existing `star_system_name` migration), and a new
+    `refinery_yield_fetch_log` table records every refresh's raw response row count (not
+    just the ones that happen to trip the 500-row warning), so a future look-back can tell
+    whether a past fetch was already truncated or how response size has trended over time.
+  - **Fixed - mining locations silently dropped unresolved/decommissioned POIs.** A
+    commodity's `ids_poi` referencing an id with no row at all in `/poi`'s current response
+    (UEX's own reference missing something the commodity still claims) was folded into the
+    same silent `continue` as a resolved-but-not-mining-related exclusion (correctly
+    excluded, not a gap). Now tracked separately: `MiningLocationInfo.unresolved_poi_count`
+    surfaces as a footer note, and a resolved-but-`is_decommissioned` POI gets its own
+    "Decommissioned (no longer minable)" field instead of being blended unflagged into
+    "Named mining sites" (would wrongly imply still-minable) or dropped outright (would
+    erase real history). No live decommissioned POI existed to test against organically,
+    so covered with synthetic fixtures instead.
+  - **Fixed - CI existed but wasn't a required merge gate, and had been silently failing.**
+    `.github/workflows/tests.yml` ran on every push/PR already, but `TestBranch` had zero
+    branch protection - confirmed via `gh api`, and separately discovered every one of the
+    last several TestBranch commits had actually been failing CI, unnoticed specifically
+    *because* nothing required it to pass: a handful of pre-existing `ruff --select F`
+    findings in test files (unused imports in `test_marketplace.py`/
+    `test_trading_preferences.py`, an unused local var in `test_route_send_shape.py`),
+    unrelated to any of those commits' own changes. Fixed the lint findings, confirmed a
+    clean CI run, then added branch protection requiring the `pytest` check before merge.
+  - **Deferred to the same careful-design pass as the two originally-deferred P2
+    findings** (atomic `status='in_progress'` guard, `start_tracking` partial-failure
+    reconciliation): `route_progression_pending_actions` has no uniqueness constraint, so
+    a duplicate retry could queue the same leg's recovery twice - same narrow-race-window
+    character as the other two, grouped with them on request rather than fixed ad hoc.
+  - 11 new/updated tests. Full suite (656 tests), a clean CI run, and a clean local bot
+    start (all 20 cogs, 65 commands synced) reverified.
+- [x] **Pi Backup Retention**: Shipped 2026-09-13. `scripts/deploy_and_backup.sh` snapshots
+  the DB before every deploy but never pruned old snapshots - by this point the Pi had
+  accumulated 52 of them (1.7GB) with no cleanup anywhere in the tooling. New
+  `scripts/sync_pi_backups.sh [keep_count]`, run from the PC (git-bash) after every future
+  deploy: archives every not-yet-copied `backups/pi/<snapshot>` down to a local
+  `backups/pi-archive/` first, and only once every one is confirmed present locally does it
+  prune the Pi to its newest `keep_count` (default 2 - `revert_last_deploy.sh` only ever
+  needs the single newest snapshot by default, so 2 leaves one fallback). Must invoke the
+  Windows OpenSSH binaries directly rather than whatever `ssh`/`scp` resolve to on
+  git-bash's own PATH - its bundled Cygwin ssh client silently failed to send its signature
+  packet when negotiating a newer pubkey extension, unrelated to any key/permission
+  problem. First real run archived all 52 existing snapshots to the PC and pruned the Pi to
+  87MB.
 - [ ] **Codebase Consolidation** *(complexity: High, ongoing)*: Beyond route rendering,
   organize `bot/db/database.py`'s ~30 tables by feature and keep one authoritative
   description of current behavior. Broader than a single ticket - Centralized Route

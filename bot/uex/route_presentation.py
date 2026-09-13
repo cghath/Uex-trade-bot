@@ -58,7 +58,7 @@ def chunk_lines(lines: list[str], max_length: int = 1024) -> list[str]:
     return chunks
 
 
-def add_chunked_fields(embed: Any, *, name: str, lines: list[str]) -> bool:
+def add_chunked_fields(embed: Any, *, name: str, lines: list[str], inline: bool = False) -> bool:
     """Add one logical field as many Discord-safe continuation fields as needed - but only
     if the WHOLE set fits within Discord's combined 6000-char embed limit, never just part
     of it. All-or-nothing, not a per-chunk check: a route's cargo-risk warning often lands
@@ -68,7 +68,12 @@ def add_chunked_fields(embed: Any, *, name: str, lines: list[str]) -> bool:
     silently missing - worse than omitting the whole route, since a visible route with no
     warning reads as "checked and safe." Returns False (adding nothing at all) the moment
     the full set would overflow, so a caller adding several logical fields in a loop (e.g.
-    one per route) can treat this one as entirely omitted and stop early."""
+    one per route) can treat this one as entirely omitted and stop early.
+
+    inline defaults to False (every pre-existing caller's own behavior) - pass True for a
+    field a caller wants to keep sitting side-by-side with its neighbors (e.g. a short,
+    normally-single-chunk field); a chunked continuation still renders inline too, Discord
+    just wraps to a new row once the current one is full."""
     chunks = []
     projected_total = len(embed)
     for index, chunk in enumerate(chunk_lines(lines), 1):
@@ -79,7 +84,7 @@ def add_chunked_fields(embed: Any, *, name: str, lines: list[str]) -> bool:
     if projected_total > DISCORD_EMBED_TOTAL_CHAR_LIMIT - TRUNCATION_NOTICE_RESERVE:
         return False
     for safe_name, chunk in chunks:
-        embed.add_field(name=safe_name, value=chunk, inline=False)
+        embed.add_field(name=safe_name, value=chunk, inline=inline)
     return True
 
 
