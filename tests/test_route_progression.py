@@ -20,6 +20,7 @@ from bot.cogs.route_progression import (
     MoreOutcomeFollowupView,
     RouteLegInput,
     RouteProgression,
+    TrackableRoute,
 )
 from bot.cogs.route_progression import _embed_with_outcome
 from bot.db.database import Database
@@ -1561,6 +1562,210 @@ def test_abandon_thread_sets_status_before_touching_the_channel(tmp_path):
         thread = await db.get_route_progression_thread(1)
         assert thread["status"] == "abandoned"
         assert 1 not in cog._active_legs
+
+    asyncio.run(run())
+
+
+# -- start_tracking partial-failure gaps (audit-confirmed defect #4) ---------------------
+# Real gap: between creating the Discord thread and successfully posting the first leg
+# prompt, start_tracking has several await points (add_user, the DB write, two intro
+# messages, the first leg prompt) that can each fail independently. Before this fix, a
+# failure at any of them except the very first (create_thread itself) either propagated
+# uncaught (no error handling at all) or was misreported as "couldn't create a thread"
+# when the thread had, in fact, already been created - either way leaving an orphaned
+# Discord thread (and sometimes an orphaned in_progress DB row) behind with no cleanup.
+
+class _FakeTextChannel(discord.TextChannel):
+    """A real discord.TextChannel subclass so isinstance(channel, discord.TextChannel) -
+    which start_tracking's own real code checks - still passes."""
+    def __init__(self):
+        self.create_thread = AsyncMock()
+
+
+class _FakeTrackingThread(discord.Thread):
+    """A real discord.Thread subclass, matching _FakeThreadChannel's own pattern above,
+    with every method start_tracking can call on a freshly created thread stubbed out."""
+    def __init__(self, thread_id: int):
+        self.id = thread_id  # mention is a read-only property derived from id
+        self.add_user = AsyncMock()
+        self.send = AsyncMock()
+        self.delete = AsyncMock()
+
+
+class _FakeStartTrackingInteraction:
+    def __init__(self, *, channel, user_id: int = 1, guild_id: int = 1):
+        self.channel = channel
+        self.response = NS(defer=AsyncMock())
+        self.followup = NS(send=AsyncMock())
+        self.user = NS(id=user_id)
+        self.guild_id = guild_id
+        self.message = None
+
+
+def _trackable_route(**overrides) -> TrackableRoute:
+    base = dict(route_kind="best_route", title="Test Route", legs=[_leg_input(id_terminal=10, id_commodity=1)])
+    base.update(overrides)
+    return TrackableRoute(**base)
+
+
+def test_start_tracking_reports_the_permissions_hint_when_thread_creation_itself_fails(tmp_path):
+    """When create_thread itself is what fails, nothing was ever created - no cleanup is
+    needed, and the original, more specific hint (this is the single most common real
+    failure - a missing Manage Threads permission) is worth keeping over the generic
+    partial-failure message used once a thread actually exists."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db})()
+        cog._active_legs = {}
+        channel = _FakeTextChannel()
+        channel.create_thread = AsyncMock(
+            side_effect=discord.HTTPException(NS(status=403, reason="Forbidden"), "no perms")
+        )
+        interaction = _FakeStartTrackingInteraction(channel=channel)
+
+        await cog.start_tracking(interaction, _trackable_route())
+
+        message = interaction.followup.send.call_args.args[0]
+        assert "missing permissions" in message.lower()
+
+    asyncio.run(run())
+
+
+def test_start_tracking_cleans_up_an_orphaned_thread_when_add_user_fails(tmp_path):
+    """Real gap: add_user failing was previously caught by the SAME handler as
+    create_thread itself, which blamed 'couldn't create a private thread' even though the
+    thread genuinely was created - and never cleaned it up, since nothing at that point
+    even tracked that a thread now existed with nobody able to see the flow in it."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db})()
+        cog._active_legs = {}
+        thread = _FakeTrackingThread(555)
+        thread.add_user = AsyncMock(side_effect=discord.HTTPException(NS(status=500, reason="x"), "x"))
+        channel = _FakeTextChannel()
+        channel.create_thread = AsyncMock(return_value=thread)
+        interaction = _FakeStartTrackingInteraction(channel=channel)
+
+        await cog.start_tracking(interaction, _trackable_route())
+
+        assert thread.delete.await_count == 1, "the orphaned thread must be cleaned up, not left behind"
+        assert await db.get_route_progression_thread(555) is None
+        message = interaction.followup.send.call_args.args[0]
+        assert "try tracking the route again" in message
+        assert "missing permissions" not in message.lower(), (
+            "must not misreport this as a thread-creation failure - the thread was created fine"
+        )
+
+    asyncio.run(run())
+
+
+def test_start_tracking_cleans_up_when_the_db_write_fails(tmp_path, monkeypatch):
+    """Real gap: this step had NO error handling at all - a DB failure here propagated
+    straight out of start_tracking (this bot has no global app-command error handler), so
+    the interaction was left stuck on 'thinking...' forever while the already-created,
+    already-user-added thread sat orphaned with no DB row and no explanation."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db})()
+        cog._active_legs = {}
+        monkeypatch.setattr(db, "create_route_progression_thread", AsyncMock(side_effect=RuntimeError("db lock")))
+        thread = _FakeTrackingThread(556)
+        channel = _FakeTextChannel()
+        channel.create_thread = AsyncMock(return_value=thread)
+        interaction = _FakeStartTrackingInteraction(channel=channel)
+
+        await cog.start_tracking(interaction, _trackable_route())  # must not raise
+
+        assert thread.delete.await_count == 1
+        assert 556 not in cog._active_legs
+        interaction.followup.send.assert_awaited_once()
+
+    asyncio.run(run())
+
+
+def test_start_tracking_cleans_up_when_the_intro_message_fails(tmp_path):
+    """Real gap: by this point the DB row DOES exist (in_progress, advanced_to_index=-1)
+    but nothing was ever posted - previously self-healed only once the 48h abandonment
+    poller happened to sweep it, with zero communication to the user in the meantime."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db})()
+        cog._active_legs = {}
+        thread = _FakeTrackingThread(557)
+        thread.send = AsyncMock(side_effect=RuntimeError("network hiccup"))
+        channel = _FakeTextChannel()
+        channel.create_thread = AsyncMock(return_value=thread)
+        interaction = _FakeStartTrackingInteraction(channel=channel)
+
+        await cog.start_tracking(interaction, _trackable_route())
+
+        assert thread.delete.await_count == 1
+        assert await db.get_route_progression_thread(557) is None, "the DB row must be rolled back too"
+        assert 557 not in cog._active_legs
+
+    asyncio.run(run())
+
+
+def test_start_tracking_cleans_up_when_the_first_leg_prompt_fails(tmp_path):
+    """Same rollback, for the last step in the chain - _post_leg_prompt's own claim-
+    release (fixed earlier this round to catch any exception, not just
+    discord.HTTPException) already protects the DB-level advance claim; this proves
+    start_tracking's own outer rollback covers this step too, consistently with every
+    other one, rather than the old bespoke 'try tracking the route again, no cleanup'
+    handling this one step alone used to get."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db})()
+        cog._active_legs = {}
+        thread = _FakeTrackingThread(558)
+        channel = _FakeTextChannel()
+        channel.create_thread = AsyncMock(return_value=thread)
+        interaction = _FakeStartTrackingInteraction(channel=channel)
+
+        async def failing_post_leg_prompt(*args, **kwargs):
+            raise discord.HTTPException(NS(status=500, reason="x"), "send failed")
+
+        cog._post_leg_prompt = failing_post_leg_prompt
+
+        await cog.start_tracking(interaction, _trackable_route())
+
+        assert thread.delete.await_count == 1
+        assert await db.get_route_progression_thread(558) is None
+        assert 558 not in cog._active_legs
+
+    asyncio.run(run())
+
+
+def test_start_tracking_happy_path_leaves_nothing_orphaned(tmp_path):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db})()
+        cog._active_legs = {}
+        thread = _FakeTrackingThread(559)
+        channel = _FakeTextChannel()
+        channel.create_thread = AsyncMock(return_value=thread)
+        interaction = _FakeStartTrackingInteraction(channel=channel)
+
+        await cog.start_tracking(interaction, _trackable_route())
+
+        thread.delete.assert_not_awaited()
+        thread_row = await db.get_route_progression_thread(559)
+        assert thread_row is not None and thread_row["status"] == "in_progress"
+        assert 559 in cog._active_legs
+        message = interaction.followup.send.call_args.args[0]
+        assert "Started tracking" in message
 
     asyncio.run(run())
 

@@ -1217,6 +1217,19 @@ class Database:
             )
             await db.commit()
 
+    async def delete_route_progression_thread(self, thread_id: int) -> None:
+        """Removes a route-progression thread and its legs entirely - not part of the
+        normal lifecycle (abandon/complete via set_route_progression_thread_status are the
+        correct terminal states for a route that ever became genuinely trackable). Used
+        only by start_tracking's own rollback when a step AFTER this row was created
+        (an intro message, the first leg prompt) fails partway through - audit-confirmed
+        defect #4. No FOREIGN KEY/cascade exists on route_progression_legs, so both tables
+        need an explicit delete."""
+        async with self.connect() as db:
+            await db.execute("DELETE FROM route_progression_legs WHERE thread_id = ?", (thread_id,))
+            await db.execute("DELETE FROM route_progression_threads WHERE thread_id = ?", (thread_id,))
+            await db.commit()
+
     async def get_route_progression_thread(self, thread_id: int) -> dict[str, Any] | None:
         async with self.connect() as db:
             cursor = await db.execute(

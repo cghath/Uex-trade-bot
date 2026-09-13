@@ -484,6 +484,21 @@ class RouteProgression(commands.Cog):
             )
             return
         await interaction.response.defer(ephemeral=True)
+
+        # Audit-confirmed defect #4: route startup has partial-failure gaps after the
+        # Discord thread and/or database row are created. Everything from create_thread
+        # through the first leg prompt is one try block, not several, so ANY failure past
+        # thread creation rolls back through the SAME path below - a failure at add_user,
+        # the DB write, either intro message, or the first leg prompt used to either
+        # propagate uncaught (no handling at all) or get misreported as "couldn't create a
+        # thread" when the thread had, in fact, already been created. Nothing posted up to
+        # any of these points is unique/valuable - the recommendation embed this button
+        # was attached to is still visible in the original channel either way - so a full
+        # rollback (delete the DB row if created, delete the orphaned thread if created)
+        # plus an honest, immediately-retryable message is simpler and safer than trying
+        # to resume a half-built thread.
+        thread: discord.Thread | None = None
+        thread_row_created = False
         try:
             thread = await channel.create_thread(
                 name=f"Route: {route.title}"[:100],
@@ -492,63 +507,82 @@ class RouteProgression(commands.Cog):
                 auto_archive_duration=1440,
             )
             await thread.add_user(interaction.user)
-        except discord.HTTPException as exc:
-            logger.warning("Failed to create route-tracking thread: %s", exc)
-            await interaction.followup.send(
-                "Couldn't create a private thread for tracking (missing permissions?).", ephemeral=True
+
+            route_snapshot = {
+                "title": route.title,
+                "legs": [
+                    {
+                        "side": leg.side, "id_terminal": leg.id_terminal, "id_commodity": leg.id_commodity,
+                        "terminal_name": leg.terminal_name, "commodity_name": leg.commodity_name,
+                        "display_label": leg.display_label, "quoted_price": leg.quoted_price,
+                        "quoted_scu": leg.quoted_scu, "quoted_status": leg.quoted_status,
+                        # Kept here (not just in route_progression_legs, which has no
+                        # column for it) so a leg can be fully reconstructed from the DB
+                        # alone - needed by _get_leg's restart-safe fallback and by the
+                        # recovery queue's reconstruction. See terminal_state_update_for_
+                        # outcome's own docstring for why this must stay separate from
+                        # quoted_scu.
+                        "market_scu": leg.market_scu,
+                    }
+                    for leg in route.legs
+                ],
+            }
+            await self.bot.db.create_route_progression_thread(
+                thread_id=thread.id, user_id=interaction.user.id, guild_id=interaction.guild_id,
+                route_kind=route.route_kind, route_snapshot=route_snapshot,
+                legs=[
+                    {
+                        "side": leg.side, "id_terminal": leg.id_terminal, "id_commodity": leg.id_commodity,
+                        "quoted_price": leg.quoted_price, "quoted_scu": leg.quoted_scu,
+                        "quoted_status": leg.quoted_status,
+                    }
+                    for leg in route.legs
+                ],
             )
-            return
+            thread_row_created = True
+            self._active_legs[thread.id] = route.legs
 
-        route_snapshot = {
-            "title": route.title,
-            "legs": [
-                {
-                    "side": leg.side, "id_terminal": leg.id_terminal, "id_commodity": leg.id_commodity,
-                    "terminal_name": leg.terminal_name, "commodity_name": leg.commodity_name,
-                    "display_label": leg.display_label, "quoted_price": leg.quoted_price,
-                    "quoted_scu": leg.quoted_scu, "quoted_status": leg.quoted_status,
-                    # Kept here (not just in route_progression_legs, which has no column
-                    # for it) so a leg can be fully reconstructed from the DB alone -
-                    # needed by _get_leg's restart-safe fallback and by the recovery
-                    # queue's reconstruction. See terminal_state_update_for_outcome's own
-                    # docstring for why this must stay separate from quoted_scu.
-                    "market_scu": leg.market_scu,
-                }
-                for leg in route.legs
-            ],
-        }
-        await self.bot.db.create_route_progression_thread(
-            thread_id=thread.id, user_id=interaction.user.id, guild_id=interaction.guild_id,
-            route_kind=route.route_kind, route_snapshot=route_snapshot,
-            legs=[
-                {
-                    "side": leg.side, "id_terminal": leg.id_terminal, "id_commodity": leg.id_commodity,
-                    "quoted_price": leg.quoted_price, "quoted_scu": leg.quoted_scu,
-                    "quoted_status": leg.quoted_status,
-                }
-                for leg in route.legs
-            ],
-        )
-        self._active_legs[thread.id] = route.legs
-
-        # Post the full route breakdown the user actually picked - interaction.message is
-        # the message the "Track this route" button was attached to, carrying the same
-        # embed /best-route just sent (price, cargo, confidence, warnings, everything) -
-        # before the leg-by-leg flow starts, not just a bare title.
-        if interaction.message is not None and interaction.message.embeds:
-            await thread.send(embed=interaction.message.embeds[0])
-        await thread.send(
-            f"Tracking **{route.title}** - report each leg as you complete it. This thread "
-            "closes automatically once every leg is reported (or after "
-            f"{ABANDONMENT_HOURS:g}h of inactivity)."
-        )
-        try:
+            # Post the full route breakdown the user actually picked - interaction.message
+            # is the message the "Track this route" button was attached to, carrying the
+            # same embed /best-route just sent (price, cargo, confidence, warnings,
+            # everything) - before the leg-by-leg flow starts, not just a bare title.
+            if interaction.message is not None and interaction.message.embeds:
+                await thread.send(embed=interaction.message.embeds[0])
+            await thread.send(
+                f"Tracking **{route.title}** - report each leg as you complete it. This thread "
+                "closes automatically once every leg is reported (or after "
+                f"{ABANDONMENT_HOURS:g}h of inactivity)."
+            )
             await self._post_leg_prompt(thread, thread.id, 0, route.legs[0])
-        except discord.HTTPException:
-            logger.warning("Failed to send the first leg prompt for thread %s", thread.id)
+        except Exception as exc:
+            logger.warning(
+                "Failed to fully start tracking a route (thread=%s): %s",
+                getattr(thread, "id", None), exc,
+            )
+            if thread is None:
+                # create_thread itself failed - nothing was ever created, so there's
+                # nothing to roll back. This is also the single most common real failure
+                # (a missing Manage Threads permission), worth a more specific hint than
+                # the generic rollback message below.
+                await interaction.followup.send(
+                    "Couldn't create a private thread for tracking (missing permissions?).", ephemeral=True
+                )
+                return
+            self._active_legs.pop(thread.id, None)
+            if thread_row_created:
+                try:
+                    await self.bot.db.delete_route_progression_thread(thread.id)
+                except Exception:
+                    logger.exception(
+                        "Failed to clean up the DB row for a partially-started route (thread=%s)", thread.id
+                    )
+            try:
+                await thread.delete()
+            except discord.HTTPException:
+                logger.warning("Failed to clean up the orphaned thread %s", thread.id)
             await interaction.followup.send(
-                f"Created {thread.mention}, but the first leg prompt failed to send - "
-                "try tracking the route again.",
+                "Couldn't fully set up route tracking (a step failed partway through) - "
+                "nothing was left behind to get stuck; try tracking the route again.",
                 ephemeral=True,
             )
             return

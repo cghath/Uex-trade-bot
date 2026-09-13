@@ -1094,6 +1094,30 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
   proving the cog-level messaging/silence for each caller, at the same file's usual
   standard of proving the defect before proving the fix). Full suite (662 tests), a clean
   local bot start, and a clean CI run reverified.
+- [x] **Route Progression: Startup Rollback**: Shipped 2026-09-13. The second of the two
+  originally-deferred P2 audit findings, same careful-pass discipline as the status guard
+  above - 4 tests proving each partial-failure gap against the UNFIXED `start_tracking`
+  first (all 4 failed as expected: one propagated an uncaught exception with zero error
+  handling, one left an orphaned thread misreported as "couldn't create a thread" even
+  though it genuinely had been, two left an orphaned thread and/or DB row with no cleanup
+  at all), then the fix, then confirming all 6 tests (the 4 gaps plus the pre-existing
+  happy path and the one already-handled failure) pass. The defect: between creating the
+  Discord thread and successfully posting the first leg prompt, `start_tracking`
+  (`bot/cogs/route_progression.py`) has several `await` points (`add_user`, the DB write,
+  two intro messages, the first leg prompt) that can each fail independently - only the
+  very first (`create_thread` itself) had any error handling before this fix. Rewritten as
+  one try block covering every step from `create_thread` through `_post_leg_prompt`, with
+  a single rollback path: if `create_thread` itself never succeeded there's nothing to
+  clean up (and the original, more specific "missing permissions?" hint is kept, since
+  that's the single most common real failure); otherwise, delete the DB row if one was
+  created (new `delete_route_progression_thread` - no FK/cascade exists between
+  `route_progression_threads` and `route_progression_legs`, so both need an explicit
+  delete) and delete the orphaned Discord thread, then tell the user plainly that nothing
+  was left behind and they can just try again. Nothing posted up to any of these failure
+  points is unique or valuable - the recommendation embed the "Track this route" button
+  was attached to is still sitting in the original channel either way - so full rollback
+  was simpler and safer than trying to resume or repair a half-built thread. 6 new tests.
+  Full suite (668 tests), clean lint, and a clean local bot start reverified.
 - [ ] **Codebase Consolidation** *(complexity: High, ongoing)*: Beyond route rendering,
   organize `bot/db/database.py`'s ~30 tables by feature and keep one authoritative
   description of current behavior. Broader than a single ticket - Centralized Route
