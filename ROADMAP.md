@@ -1118,6 +1118,30 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
   was attached to is still sitting in the original channel either way - so full rollback
   was simpler and safer than trying to resume or repair a half-built thread. 6 new tests.
   Full suite (668 tests), clean lint, and a clean local bot start reverified.
+- [x] **Route Progression: Recovery-Queue Idempotency**: Shipped 2026-09-15. The third and
+  last item grouped into the "careful passes" bucket - but unlike the two above, a
+  thorough walk of every path that could queue two `route_progression_pending_actions`
+  rows for the same leg/thread found none currently reachable: `LegOutcomeView.claim()` is
+  a plain synchronous function with no `await` inside it, so two racing callback
+  invocations (a genuine duplicate prompt, or Discord redelivering the same interaction
+  event) can't interleave between its check and its set - whichever runs first completes
+  the whole thing atomically before the event loop can switch tasks; these Views also
+  aren't Discord-persistent, so a bot restart mid-retry kills the buttons outright rather
+  than enabling an automatic re-trigger; and neither `queue_route_progression_leg_recovery`
+  nor `queue_route_progression_abandon_recovery` is itself wrapped in a retry loop, so an
+  ambiguous outcome on the queue INSERT can't cause a second attempt either. Asked the user
+  whether this changes the priority - added anyway as defense-in-depth against whatever a
+  *future* code change might introduce, given this codebase's own demonstrated taste for
+  defensive completeness even on narrow/unreached windows. Two partial `UNIQUE` indexes on
+  `route_progression_pending_actions` (`(thread_id, leg_index) WHERE action_kind =
+  'leg_outcome'`, `(thread_id) WHERE action_kind = 'abandon'` - two separate indexes, not
+  one combined key, since SQLite treats every NULL as distinct for uniqueness and abandon
+  rows always have `leg_index = NULL`), both queue methods switched to `INSERT OR IGNORE`
+  so a defensively-caught duplicate is a silent no-op (the original row is still valid, so
+  the caller still correctly reports "recovery scheduled") rather than a raised
+  `IntegrityError` the existing try/except would have misreported as "recovery could not
+  be scheduled." 4 new tests. Full suite (671 tests), clean lint, and a clean local bot
+  start reverified. Closes out every item from the original third-party audit review.
 - [ ] **Codebase Consolidation** *(complexity: High, ongoing)*: Beyond route rendering,
   organize `bot/db/database.py`'s ~30 tables by feature and keep one authoritative
   description of current behavior. Broader than a single ticket - Centralized Route

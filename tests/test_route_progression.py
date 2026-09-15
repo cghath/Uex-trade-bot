@@ -2056,6 +2056,69 @@ def test_pending_route_progression_actions_queue_round_trips(tmp_path):
     asyncio.run(run())
 
 
+def test_queue_route_progression_leg_recovery_ignores_a_duplicate_for_the_same_leg(tmp_path):
+    """Defense-in-depth, not a proven-reachable bug (see idx_route_progression_pending_
+    actions_leg_unique's own schema comment) - proves the partial unique index + INSERT
+    OR IGNORE actually work together: a second call for the identical (thread_id,
+    leg_index) must not raise and must not create a second row."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        leg = _leg_input(id_terminal=10, id_commodity=1)
+        kwargs = dict(
+            thread_id=1, leg_index=0, side=leg.side, id_terminal=leg.id_terminal,
+            id_commodity=leg.id_commodity, terminal_name=leg.terminal_name,
+            commodity_name=leg.commodity_name, display_label=leg.display_label,
+            quoted_price=leg.quoted_price, quoted_scu=leg.quoted_scu, quoted_status=leg.quoted_status,
+            market_scu=leg.market_scu, outcome="missing", actual_price=None, actual_scu=None, precision=None,
+        )
+        await db.queue_route_progression_leg_recovery(**kwargs)
+        await db.queue_route_progression_leg_recovery(**kwargs)  # must not raise
+
+        pending = await db.get_pending_route_progression_actions()
+        assert len(pending) == 1, "a duplicate queue attempt for the same leg must not create a second row"
+
+    asyncio.run(run())
+
+
+def test_queue_route_progression_leg_recovery_allows_different_legs_of_the_same_thread(tmp_path):
+    """The unique index must key on (thread_id, leg_index), not thread_id alone - two
+    different legs of the same route genuinely can each need their own queued recovery."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        leg = _leg_input(id_terminal=10, id_commodity=1)
+        for leg_index in (0, 1):
+            await db.queue_route_progression_leg_recovery(
+                thread_id=1, leg_index=leg_index, side=leg.side, id_terminal=leg.id_terminal,
+                id_commodity=leg.id_commodity, terminal_name=leg.terminal_name,
+                commodity_name=leg.commodity_name, display_label=leg.display_label,
+                quoted_price=leg.quoted_price, quoted_scu=leg.quoted_scu, quoted_status=leg.quoted_status,
+                market_scu=leg.market_scu, outcome="missing", actual_price=None, actual_scu=None, precision=None,
+            )
+
+        pending = await db.get_pending_route_progression_actions()
+        assert sorted(p["leg_index"] for p in pending) == [0, 1]
+
+    asyncio.run(run())
+
+
+def test_queue_route_progression_abandon_recovery_ignores_a_duplicate_for_the_same_thread(tmp_path):
+    """Same defense-in-depth proof for the abandon side - a second call for the same
+    thread_id must not raise and must not create a second row."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await db.queue_route_progression_abandon_recovery(thread_id=1, reason="first")
+        await db.queue_route_progression_abandon_recovery(thread_id=1, reason="second")  # must not raise
+
+        pending = await db.get_pending_route_progression_actions()
+        assert len(pending) == 1
+        assert pending[0]["reason"] == "first", "the original queued reason must survive untouched"
+
+    asyncio.run(run())
+
+
 def test_handle_leg_outcome_a_conflicting_second_report_does_not_overwrite_or_repost(tmp_path):
     """The exact scenario the audit named: two live prompts for the same leg (a duplicate
     from a retried handle_leg_outcome) report DIFFERENT outcomes. The second must be

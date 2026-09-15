@@ -627,6 +627,22 @@ CREATE TABLE IF NOT EXISTS route_progression_pending_actions (
 );
 CREATE INDEX IF NOT EXISTS idx_route_progression_pending_actions_thread
     ON route_progression_pending_actions (thread_id);
+-- Defense-in-depth, not a confirmed-reachable-bug fix: no path was found by which the
+-- current code could actually queue two rows for the same leg/thread (LegOutcomeView's
+-- claim() is a synchronous check-then-set with no await inside it, so two racing
+-- callbacks can't interleave between the check and the set; these Views also aren't
+-- Discord-persistent, so a bot restart kills the buttons outright rather than enabling an
+-- automatic re-trigger) - kept cheap and additive against whatever a FUTURE change might
+-- introduce. Two separate partial indexes, not one combined UNIQUE(thread_id, action_kind,
+-- leg_index): 'leg_outcome' rows key on (thread_id, leg_index), but 'abandon' rows always
+-- have leg_index NULL, and SQLite treats every NULL as distinct for uniqueness purposes -
+-- a single combined index would never catch two abandon rows for the same thread.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_route_progression_pending_actions_leg_unique
+    ON route_progression_pending_actions (thread_id, leg_index)
+    WHERE action_kind = 'leg_outcome';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_route_progression_pending_actions_abandon_unique
+    ON route_progression_pending_actions (thread_id)
+    WHERE action_kind = 'abandon';
 """
 
 
@@ -1401,10 +1417,16 @@ class Database:
         """Durably queues a leg-outcome action whose post-ack retries were all exhausted -
         carries every field needed to reconstruct the leg and re-run handle_leg_outcome
         later with no dependency on RouteProgression._active_legs (see the table's own
-        comment in SCHEMA for why). Picked up by retry_pending_route_progression_actions."""
+        comment in SCHEMA for why). Picked up by retry_pending_route_progression_actions.
+
+        INSERT OR IGNORE against idx_route_progression_pending_actions_leg_unique - see
+        that index's own schema comment for why this is defense-in-depth rather than a
+        confirmed-reachable case. A silently-ignored duplicate is still correctly reported
+        as "recovery scheduled" by the caller either way, since the original row is still
+        there and still valid."""
         async with self.connect() as db:
             await db.execute(
-                """INSERT INTO route_progression_pending_actions
+                """INSERT OR IGNORE INTO route_progression_pending_actions
                    (thread_id, action_kind, leg_index, side, id_terminal, id_commodity,
                     terminal_name, commodity_name, display_label, quoted_price, quoted_scu,
                     quoted_status, market_scu, outcome, actual_price, actual_scu, precision)
@@ -1418,10 +1440,12 @@ class Database:
             await db.commit()
 
     async def queue_route_progression_abandon_recovery(self, *, thread_id: int, reason: str) -> None:
-        """Durably queues an abandon action whose post-ack retries were all exhausted."""
+        """Durably queues an abandon action whose post-ack retries were all exhausted.
+        INSERT OR IGNORE against idx_route_progression_pending_actions_abandon_unique -
+        same defense-in-depth reasoning as queue_route_progression_leg_recovery."""
         async with self.connect() as db:
             await db.execute(
-                """INSERT INTO route_progression_pending_actions (thread_id, action_kind, reason)
+                """INSERT OR IGNORE INTO route_progression_pending_actions (thread_id, action_kind, reason)
                    VALUES (?, 'abandon', ?)""",
                 (thread_id, reason),
             )
