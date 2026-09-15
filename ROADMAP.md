@@ -1142,6 +1142,30 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
   `IntegrityError` the existing try/except would have misreported as "recovery could not
   be scheduled." 4 new tests. Full suite (671 tests), clean lint, and a clean local bot
   start reverified. Closes out every item from the original third-party audit review.
+- [x] **Pi Backup Retention: Interrupted-Copy Safety**: Shipped 2026-09-15. A follow-up
+  audit of this session's own work (`f0fcc40..dd8444a`) found a real data-loss risk in
+  `scripts/sync_pi_backups.sh`: its "already archived" check only tested whether
+  `backups/pi-archive/<snapshot>` EXISTED, not whether the copy inside it was actually
+  complete - an `scp -r` that dies partway (a dropped connection) still leaves a partial
+  directory behind, and a later run would treat that partial directory as a verified prior
+  success and go on to authorize pruning the Pi's own real copy, permanently losing the
+  good data and keeping only the broken half-copy. Confirmed with a real reproduction (a
+  fixture harness with `ssh`/`scp` replaced by fake binaries a first run leaves a partial
+  `meta.txt`-only copy, a second run promotes only once the copy is genuinely complete;
+  verified the incomplete run never touches `ARCHIVE_ROOT` or the "remote" Pi's files, and
+  a real run against the live Pi still recognizes its existing complete archives
+  correctly). Fixed two ways together: (1) a backup directory is now only trusted once it
+  has both `meta.txt` and the DB file `meta.txt` itself names - the same completeness
+  check `revert_last_deploy.sh` already applies before trusting a backup, reused here
+  rather than invented fresh; (2) `scp` now lands in a staging directory first, only
+  atomically promoted (`mv` on the same filesystem) to the final archive location once
+  verified complete, so the final path is never observably partial to a later run even if
+  THIS run is interrupted immediately after. Also validated `keep_count` itself (a
+  malformed or `0` value would previously reach the prune command's arithmetic
+  unchecked - `0` specifically would prune every snapshot, including the newest).
+  `SSH_BIN`/`SCP_BIN` env-var overrides added (matching the existing `PI_HOST`/`PI_REPO`
+  pattern) specifically so this could be tested with fixture binaries instead of a real
+  Pi connection.
 - [ ] **Codebase Consolidation** *(complexity: High, ongoing)*: Beyond route rendering,
   organize `bot/db/database.py`'s ~30 tables by feature and keep one authoritative
   description of current behavior. Broader than a single ticket - Centralized Route
