@@ -1746,6 +1746,89 @@ def test_start_tracking_cleans_up_when_the_first_leg_prompt_fails(tmp_path):
     asyncio.run(run())
 
 
+def test_start_tracking_does_not_claim_nothing_was_left_behind_when_thread_cleanup_fails(tmp_path):
+    """Audit finding #2 (2026-09-15 executive audit): the rollback path's own
+    thread.delete() can itself fail (the thread is still there), but the old code sent
+    the reassuring "nothing was left behind to get stuck" message unconditionally - a
+    user acting on that message has no idea a real orphaned thread exists."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db})()
+        cog._active_legs = {}
+        thread = _FakeTrackingThread(560)
+        thread.add_user = AsyncMock(side_effect=discord.HTTPException(NS(status=500, reason="x"), "x"))
+        thread.delete = AsyncMock(side_effect=discord.HTTPException(NS(status=500, reason="x"), "cleanup failed"))
+        channel = _FakeTextChannel()
+        channel.create_thread = AsyncMock(return_value=thread)
+        interaction = _FakeStartTrackingInteraction(channel=channel)
+
+        await cog.start_tracking(interaction, _trackable_route())  # must not raise
+
+        message = interaction.followup.send.call_args.args[0]
+        assert "nothing was left behind" not in message, (
+            "the cleanup itself failed - the message must not claim it didn't"
+        )
+
+    asyncio.run(run())
+
+
+def test_start_tracking_does_not_claim_nothing_was_left_behind_when_db_cleanup_fails(tmp_path, monkeypatch):
+    """Same gap as above, for the DB-row side of cleanup: delete_route_progression_thread
+    failing (already logged via logger.exception) still let the unconditional "nothing
+    was left behind" message go out even though the in_progress row is still there."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db})()
+        cog._active_legs = {}
+        thread = _FakeTrackingThread(561)
+        thread.send = AsyncMock(side_effect=RuntimeError("network hiccup"))
+        channel = _FakeTextChannel()
+        channel.create_thread = AsyncMock(return_value=thread)
+        interaction = _FakeStartTrackingInteraction(channel=channel)
+        monkeypatch.setattr(
+            db, "delete_route_progression_thread", AsyncMock(side_effect=RuntimeError("db lock"))
+        )
+
+        await cog.start_tracking(interaction, _trackable_route())  # must not raise
+
+        message = interaction.followup.send.call_args.args[0]
+        assert "nothing was left behind" not in message, (
+            "the DB cleanup itself failed - the message must not claim it didn't"
+        )
+
+    asyncio.run(run())
+
+
+def test_start_tracking_survives_a_non_http_exception_during_thread_cleanup(tmp_path):
+    """Audit finding #2: the old code only caught discord.HTTPException around
+    thread.delete() - a non-HTTPException (a raw transport error, a bug in a
+    discord.py internal) escaped the rollback's own except block entirely, which this
+    bot has no global app-command error handler to catch, leaving the interaction stuck
+    on "thinking..." forever."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db})()
+        cog._active_legs = {}
+        thread = _FakeTrackingThread(562)
+        thread.add_user = AsyncMock(side_effect=discord.HTTPException(NS(status=500, reason="x"), "x"))
+        thread.delete = AsyncMock(side_effect=RuntimeError("connection reset"))
+        channel = _FakeTextChannel()
+        channel.create_thread = AsyncMock(return_value=thread)
+        interaction = _FakeStartTrackingInteraction(channel=channel)
+
+        await cog.start_tracking(interaction, _trackable_route())  # must not raise
+
+        interaction.followup.send.assert_awaited_once()
+
+    asyncio.run(run())
+
+
 def test_start_tracking_happy_path_leaves_nothing_orphaned(tmp_path):
     async def run():
         db = _make_db(tmp_path)

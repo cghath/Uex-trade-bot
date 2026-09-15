@@ -569,22 +569,35 @@ class RouteProgression(commands.Cog):
                 )
                 return
             self._active_legs.pop(thread.id, None)
+            db_cleaned = True
             if thread_row_created:
                 try:
                     await self.bot.db.delete_route_progression_thread(thread.id)
                 except Exception:
+                    db_cleaned = False
                     logger.exception(
                         "Failed to clean up the DB row for a partially-started route (thread=%s)", thread.id
                     )
+            thread_cleaned = True
             try:
                 await thread.delete()
-            except discord.HTTPException:
+            except Exception:
+                thread_cleaned = False
                 logger.warning("Failed to clean up the orphaned thread %s", thread.id)
-            await interaction.followup.send(
-                "Couldn't fully set up route tracking (a step failed partway through) - "
-                "nothing was left behind to get stuck; try tracking the route again.",
-                ephemeral=True,
-            )
+            if db_cleaned and thread_cleaned:
+                await interaction.followup.send(
+                    "Couldn't fully set up route tracking (a step failed partway through) - "
+                    "nothing was left behind to get stuck; try tracking the route again.",
+                    ephemeral=True,
+                )
+            else:
+                await interaction.followup.send(
+                    "Couldn't fully set up route tracking, and the automatic cleanup "
+                    "afterward didn't fully succeed either - a leftover thread or "
+                    "tracking record may still exist. Please let an admin know before "
+                    "trying again, rather than retrying immediately.",
+                    ephemeral=True,
+                )
             return
         await interaction.followup.send(f"Started tracking in {thread.mention}.", ephemeral=True)
 

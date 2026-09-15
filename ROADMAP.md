@@ -1166,6 +1166,28 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
   `SSH_BIN`/`SCP_BIN` env-var overrides added (matching the existing `PI_HOST`/`PI_REPO`
   pattern) specifically so this could be tested with fixture binaries instead of a real
   Pi connection.
+- [x] **Route Progression: Honest Startup-Rollback Reporting**: Shipped 2026-09-15. Same
+  follow-up audit as the backup-retention fix above found a real gap in the Startup
+  Rollback fix from two entries up: `start_tracking`'s rollback (`bot/cogs/
+  route_progression.py`) sent "nothing was left behind to get stuck" unconditionally,
+  even when the cleanup it had just attempted - deleting the DB row, deleting the orphaned
+  Discord thread - itself failed. A user acting on that message had no way to know a real
+  orphaned thread or `in_progress` DB row might still exist. Separately, `thread.delete()`
+  was only wrapped in `except discord.HTTPException:`, so a non-HTTPException (a raw
+  transport error) would escape the rollback's own except block entirely - this bot has no
+  global app-command error handler, so that would have left the interaction stuck on
+  "thinking..." forever. Proven first with 3 new tests against the unfixed code (all 3
+  failed: two showed the false-reassurance message going out after a failed thread/DB
+  cleanup, one showed a plain `RuntimeError` from `thread.delete()` propagating out of
+  `start_tracking` uncaught). Fixed by tracking whether the DB delete and the thread delete
+  each actually succeeded and branching the followup message on both flags - the original
+  "nothing was left behind, try again" message only when cleanup genuinely succeeded,
+  otherwise a message naming that cleanup itself didn't fully succeed and pointing the user
+  to an admin rather than an immediate retry (a stuck DB row or Discord thread could still
+  exist, so blindly retrying risks a second, redundant thread on top of the first). Also
+  broadened `except discord.HTTPException:` to `except Exception:` around `thread.delete()`,
+  matching the exception-breadth fix already applied to every other route-progression call
+  site. 3 new tests. Full suite and clean lint reverified.
 - [ ] **Codebase Consolidation** *(complexity: High, ongoing)*: Beyond route rendering,
   organize `bot/db/database.py`'s ~30 tables by feature and keep one authoritative
   description of current behavior. Broader than a single ticket - Centralized Route
