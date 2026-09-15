@@ -685,23 +685,51 @@ class RouteProgression(commands.Cog):
     async def _post_leg_prompt(
         self, thread: discord.Thread, thread_id: int, leg_index: int, leg: RouteLegInput
     ) -> None:
-        # Idempotent: only the caller that wins the DB claim for this leg_index actually
-        # sends anything - see claim_route_progression_advance. Makes a second call for
-        # the same leg_index (a retried handle_leg_outcome, or the recovery poller redoing
-        # a step whose earlier Discord send actually succeeded but whose success response
-        # never reached us) a silent no-op instead of a duplicate live prompt.
-        if not await self.bot.db.claim_route_progression_advance(thread_id, to_index=leg_index):
-            return
         if leg.quoted_price is not None and leg.quoted_scu is not None:
             quoted_line = f"Quoted: {leg.quoted_price:,.2f} aUEC/unit · {leg.quoted_scu:,.0f} SCU"
         else:
             quoted_line = "No quoted figures were available for this leg."
-        embed = discord.Embed(
-            title=f"Leg {leg_index + 1}: {leg.display_label}",
-            description=quoted_line,
-            color=discord.Color.blurple(),
-        )
+        title = f"Leg {leg_index + 1}: {leg.display_label}"
+        embed = discord.Embed(title=title, description=quoted_line, color=discord.Color.blurple())
         view = LegOutcomeView(cog=self, thread_id=thread_id, leg_index=leg_index, leg=leg)
+
+        # Idempotent: only the caller that wins the DB claim for this leg_index actually
+        # sends anything - see claim_route_progression_advance. A second call for the
+        # same leg_index (a retried handle_leg_outcome, or the recovery poller redoing a
+        # step) normally means an earlier attempt already succeeded and there's nothing
+        # to do.
+        #
+        # Follow-up audit-confirmed defect (2026-09-15, finding #3): that was only true
+        # when the earlier attempt actually resolved to success - a held claim can ALSO
+        # mean an earlier attempt ended in genuine, still-unresolved ambiguity (both its
+        # send AND its own reconciliation failed, see the except Exception branch below).
+        # Blindly trusting "claim held" as proof of success there let a retry return
+        # normally with nothing ever sent and nothing ever queued for recovery - this
+        # function's own ambiguous-failure safety net (raise, so the caller's
+        # retry-then-durable-queue logic actually engages) never got the chance to run.
+        # Re-verify against Discord's own history every time the claim is already held,
+        # exactly like the send-failure path below does, instead of trusting it on faith.
+        if not await self.bot.db.claim_route_progression_advance(thread_id, to_index=leg_index):
+            checked_ok, found = await self._find_sent_leg_prompt(thread, title)
+            if found is not None:
+                view.message = found
+                self.bot.add_view(view, message_id=found.id)
+                return
+            if not checked_ok:
+                logger.error(
+                    "Leg prompt claim for thread %s leg %d is held from an earlier "
+                    "attempt whose outcome was never resolved, and reconciling against "
+                    "thread history failed again just now - still unresolved; this "
+                    "route needs manual review", thread_id, leg_index,
+                )
+                raise RuntimeError(
+                    f"leg prompt for thread {thread_id} leg {leg_index} is still "
+                    "unresolved (claim held, history unreachable)"
+                )
+            # Confirmed genuinely absent: the earlier attempt's send never actually
+            # landed. The claim is already correctly held at this leg_index (nothing to
+            # re-claim), so fall through and perform the send now instead of returning.
+
         try:
             view.message = await thread.send(embed=embed, view=view)
         except discord.HTTPException:
@@ -719,7 +747,7 @@ class RouteProgression(commands.Cog):
             # genuine duplicate live prompt if the message actually sent and only its
             # confirmation was lost. Reconcile against Discord's own message history
             # instead of guessing either way - see _find_sent_leg_prompt's docstring.
-            checked_ok, found = await self._find_sent_leg_prompt(thread, embed.title)
+            checked_ok, found = await self._find_sent_leg_prompt(thread, title)
             if found is not None:
                 # It really did send - only the confirmation was lost. thread.send()
                 # never returned, so discord.py never registered this view's buttons
@@ -792,9 +820,11 @@ class RouteProgression(commands.Cog):
         )
         # False here (the default) whenever `recorded` is True too - the leg's outcome was
         # never written before THIS call, so nothing could have marked its market update
-        # applied yet either. Only the same-report-retried fallthrough below can set this
-        # True, from the leg row it already had to fetch anyway.
+        # (or suppression - follow-up audit finding #2) applied yet either. Only the
+        # same-report-retried fallthrough below can set either True, from the leg row it
+        # already had to fetch anyway.
         market_update_already_applied = False
+        suppression_already_applied = False
         if not recorded:
             # record_route_progression_leg_outcome's UPDATE can be rejected for two
             # structurally different reasons (audit-confirmed defect #3's fix added the
@@ -858,10 +888,21 @@ class RouteProgression(commands.Cog):
             # report's own (now possibly stale) values would silently clobber that newer
             # data. market_update_applied_at is how record_player_report_market_update
             # marks that it has already run once for this leg - checked here so a replay
-            # skips re-running it, not inside that method, since skipping must also cover
-            # suppress_terminal_market_side (repeated depletion reports would otherwise
-            # keep refreshing the suppression window's expiry to "now" on every replay too).
+            # skips re-running it.
+            #
+            # Follow-up audit finding #2 (2026-09-15): suppression used to share that same
+            # marker, gated behind the same "not market_update_already_applied" check
+            # below - so if suppress_terminal_market_side alone failed AFTER the market
+            # update had already committed (and marked itself applied), no later replay
+            # ever retried suppression again, since market_update_already_applied being
+            # True skipped that whole block, suppression call included. Tracked with its
+            # own independent marker (suppression_applied_at) instead - a repeated
+            # depletion report can still safely refresh the suppression window's expiry
+            # on a genuine same-report replay, since suppress_terminal_market_side's own
+            # marker check only blocks a SECOND replay once suppression has actually
+            # succeeded once, not every retry of a failed one.
             market_update_already_applied = stored["market_update_applied_at"] is not None
+            suppression_already_applied = stored["suppression_applied_at"] is not None
 
         update_row = terminal_state_update_for_outcome(
             id_commodity=leg.id_commodity, id_terminal=leg.id_terminal,
@@ -875,13 +916,19 @@ class RouteProgression(commands.Cog):
             await self.bot.db.record_player_report_market_update(
                 update_row, thread_id=thread_id, leg_index=leg_index
             )
-            if update_confirms_depletion(update_row, side=leg.side):
-                until = (
-                    datetime.now(timezone.utc) + timedelta(hours=SUPPRESSION_HOURS)
-                ).strftime("%Y-%m-%d %H:%M:%S")
-                await self.bot.db.suppress_terminal_market_side(
-                    id_commodity=leg.id_commodity, id_terminal=leg.id_terminal, side=leg.side, until=until,
-                )
+        # Independently gated from the market-state write above (finding #2) - a replay
+        # whose market update already landed must still retry suppression if IT is the
+        # part that previously failed.
+        if update_row is not None and not suppression_already_applied and update_confirms_depletion(
+            update_row, side=leg.side
+        ):
+            until = (
+                datetime.now(timezone.utc) + timedelta(hours=SUPPRESSION_HOURS)
+            ).strftime("%Y-%m-%d %H:%M:%S")
+            await self.bot.db.suppress_terminal_market_side(
+                id_commodity=leg.id_commodity, id_terminal=leg.id_terminal, side=leg.side, until=until,
+                thread_id=thread_id, leg_index=leg_index,
+            )
 
         thread_row = await self.bot.db.get_route_progression_thread(thread_id)
         if thread_row is None:
@@ -955,12 +1002,13 @@ class RouteProgression(commands.Cog):
         dependency on this process's _active_legs cache.
 
         Returns whether the outcome ended up handled at all - either recorded outright,
-        or durably queued for the recovery poller to keep retrying. False only in the
-        audit-confirmed carry-forward case where BOTH fail: nothing was saved, and no
-        recovery was scheduled either - the caller must release the view's claim and
-        restore its buttons in that case, or the "please report this leg again" notice
-        below would be telling the user to do something the button no longer lets them
-        do."""
+        durably queued for the recovery poller to keep retrying, or (follow-up audit
+        finding #4, 2026-09-15) already saved despite the queue write also failing - see
+        the already_saved check below for why that last case must NOT be treated the
+        same as "nothing was saved." False only when the report was genuinely never
+        saved anywhere: the caller must release the view's claim and restore its buttons
+        in that case, or the "please report this leg again" notice below would be
+        telling the user to do something the button no longer lets them do."""
         last_exc: BaseException | None = None
         for attempt in range(1, POST_ACK_RETRY_ATTEMPTS + 1):
             try:
@@ -994,6 +1042,31 @@ class RouteProgression(commands.Cog):
             queued = True
         except Exception:
             logger.exception("Failed to queue durable recovery for thread %s leg %d", thread_id, leg_index)
+
+        already_saved = False
+        if not queued:
+            # Audit-confirmed follow-up defect (finding #4, 2026-09-15): every retry
+            # above re-ran handle_leg_outcome's WHOLE call, but that call's own outcome
+            # write is only its FIRST step - a later step (the next-leg prompt, the
+            # market/suppression writes) can keep failing on every attempt even though
+            # the outcome itself was durably saved on attempt 1 (handle_leg_outcome's
+            # is_same_report fall-through is exactly what makes replaying the whole call
+            # safe to retry in the first place). If the queue write also failed, the
+            # caller must not treat this as "nothing was saved" - reopening the view
+            # would let a second, different report through, which record_route_
+            # progression_leg_outcome correctly rejects as conflicting, permanently
+            # abandoning the real, already-saved report's own unfinished downstream
+            # work with no path left to resume it. route_progression_legs is the source
+            # of truth here, not this call's own success/failure.
+            stored = await self.bot.db.get_route_progression_leg(thread_id, leg_index)
+            already_saved = (
+                stored is not None
+                and stored["outcome"] == outcome
+                and stored["actual_price"] == actual_price
+                and stored["actual_scu"] == actual_scu
+                and stored["precision"] == precision
+            )
+
         if isinstance(channel, discord.Thread):
             # The notice must reflect whether the queue write actually succeeded - telling
             # the user "no further action is needed" when the insert itself just raised
@@ -1003,6 +1076,13 @@ class RouteProgression(commands.Cog):
                 message = (
                     "Something went wrong saving that report - it's been queued to retry "
                     "automatically in the background, so no further action is needed."
+                )
+            elif already_saved:
+                message = (
+                    "Your report was saved, but we couldn't confirm the next step went "
+                    "through, and automatic recovery could not be scheduled either - "
+                    "please let an admin know so the route can be checked. No need to "
+                    "report this leg again."
                 )
             else:
                 message = (
@@ -1014,7 +1094,7 @@ class RouteProgression(commands.Cog):
                 await channel.send(message)
             except discord.HTTPException:
                 pass
-        return queued
+        return queued or already_saved
 
     async def abandon_thread(
         self, channel: discord.abc.MessageableChannel | None, thread_id: int, *, reason: str

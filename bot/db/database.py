@@ -588,6 +588,7 @@ CREATE TABLE IF NOT EXISTS route_progression_legs (
     precision TEXT CHECK (precision IN ('exact', 'floor')),
     reported_at TEXT,
     market_update_applied_at TEXT,
+    suppression_applied_at TEXT,
     UNIQUE (thread_id, leg_index)
 );
 CREATE INDEX IF NOT EXISTS idx_route_progression_legs_thread
@@ -862,31 +863,118 @@ class Database:
 
         Must run after every other migration above and before the two CREATE UNIQUE INDEX
         statements issued explicitly in init() (not left in SCHEMA - see its own comment).
-        For each action_kind's own uniqueness key, keeps only the highest `id` (the
-        freshest queued attempt - AUTOINCREMENT id is a strict, gap-free ordering, unlike
-        created_at's one-second text resolution) and deletes the rest. Not a blind delete:
-        any one surviving row still safely completes the recovery on its own - handle_leg_
-        outcome's own conflicting-report guard (see record_route_progression_leg_outcome)
-        already tolerates a duplicate being processed after another one already won, so
-        which specific row survives here doesn't change the outcome, only which attempt's
-        queued payload gets replayed. Idempotent and cheap: a no-op once no duplicates
+        For 'abandon', keeps only the highest `id` (the freshest queued attempt -
+        AUTOINCREMENT id is a strict, gap-free ordering, unlike created_at's one-second
+        text resolution) and deletes the rest - there's no conflicting-payload concept
+        for an abandon action (it either applies or it doesn't; two duplicate rows can't
+        disagree about anything the way two different leg-outcome reports can), so which
+        one survives never matters. Idempotent and cheap: a no-op once no duplicates
         remain, which is every ordinary startup from here on.
+
+        'leg_outcome' needs its own, more careful reconciliation - see
+        _dedupe_leg_outcome_pending_actions below for why a blind highest-id pick isn't
+        safe for it the way it is for 'abandon' (follow-up audit finding #5, 2026-09-15).
         """
-        for action_kind, key_columns in (("leg_outcome", "thread_id, leg_index"), ("abandon", "thread_id")):
-            cursor = await db.execute(
-                f"""DELETE FROM route_progression_pending_actions
-                    WHERE action_kind = ? AND id NOT IN (
-                        SELECT MAX(id) FROM route_progression_pending_actions
-                        WHERE action_kind = ? GROUP BY {key_columns}
-                    )""",
-                (action_kind, action_kind),
+        cursor = await db.execute(
+            """DELETE FROM route_progression_pending_actions
+                WHERE action_kind = 'abandon' AND id NOT IN (
+                    SELECT MAX(id) FROM route_progression_pending_actions
+                    WHERE action_kind = 'abandon' GROUP BY thread_id
+                )"""
+        )
+        if cursor.rowcount > 0:
+            logger.warning(
+                "Removed %d duplicate 'abandon' row(s) from route_progression_pending_actions "
+                "before creating its uniqueness index - each duplicate is already safely "
+                "covered by whichever row remains", cursor.rowcount,
             )
-            if cursor.rowcount > 0:
-                logger.warning(
-                    "Removed %d duplicate '%s' row(s) from route_progression_pending_actions "
-                    "before creating its uniqueness index - each duplicate is already safely "
-                    "covered by whichever row remains", cursor.rowcount, action_kind,
-                )
+        await self._dedupe_leg_outcome_pending_actions(db)
+
+    async def _dedupe_leg_outcome_pending_actions(self, db: aiosqlite.Connection) -> None:
+        """The 'leg_outcome' half of _migrate_dedupe_route_progression_pending_actions.
+
+        Follow-up audit finding #5 (2026-09-15): unlike 'abandon', a blind highest-id
+        pick here can discard the one duplicate that actually MATCHES an outcome already
+        committed to route_progression_legs, in favor of a conflicting one that
+        handle_leg_outcome's own conflicting-report guard will just reject (harmlessly,
+        but uselessly) the next time the recovery poller replays it - silently losing the
+        only payload able to resume that leg's unfinished downstream work. A matching
+        replay isn't just "also valid" the way two genuinely-interchangeable duplicates
+        would be: handle_leg_outcome's own is_same_report fall-through specifically exists
+        so a replay of the SAME already-saved report skips the redundant write and
+        proceeds straight to whatever didn't finish last time (the next-leg prompt, or
+        completion) - a non-matching replay can never do that, it can only ever produce a
+        "this leg was already reported" message and get discarded. Confirmed via the
+        audit's own reproduction: a 'matched' outcome saved without ever advancing, plus
+        legacy duplicate rows ('matched', then a higher-id 'missing') - the old rule kept
+        'missing' and the route never advanced, since the one payload that could have
+        resumed it was gone.
+
+        Reconciled in Python, not one clean DELETE, since "prefer the row that matches
+        the committed outcome, else fall back to highest-id" isn't expressible as a
+        single set-based SQL statement the way the abandon case is - but this only ever
+        runs once per group of real duplicates (rare, legacy-only), so the extra
+        round trips per group cost nothing that matters.
+        """
+        # init()'s own connection has no row_factory set (unlike self.connect()'s), so
+        # every row read here is a plain positional tuple - matching this file's existing
+        # precedent for other init()-time migrations (e.g. _migrate_pricing_strategy_check's
+        # own row[0] access), not the column-name access self.connect()-based methods use.
+        cursor = await db.execute(
+            "SELECT DISTINCT thread_id, leg_index FROM route_progression_pending_actions "
+            "WHERE action_kind = 'leg_outcome'"
+        )
+        groups = await cursor.fetchall()
+        removed = 0
+        for thread_id, leg_index in groups:
+            cursor = await db.execute(
+                """SELECT id, outcome, actual_price, actual_scu, precision
+                   FROM route_progression_pending_actions
+                   WHERE action_kind = 'leg_outcome' AND thread_id = ? AND leg_index = ?
+                   ORDER BY id""",
+                (thread_id, leg_index),
+            )
+            candidates = await cursor.fetchall()
+            if len(candidates) <= 1:
+                continue
+            stored_cursor = await db.execute(
+                """SELECT outcome, actual_price, actual_scu, precision FROM route_progression_legs
+                   WHERE thread_id = ? AND leg_index = ?""",
+                (thread_id, leg_index),
+            )
+            stored = await stored_cursor.fetchone()
+            keep_id = None
+            if stored is not None and stored[0] is not None:
+                stored_outcome, stored_price, stored_scu, stored_precision = stored
+                for candidate_id, outcome, actual_price, actual_scu, precision in candidates:
+                    if (
+                        outcome == stored_outcome
+                        and actual_price == stored_price
+                        and actual_scu == stored_scu
+                        and precision == stored_precision
+                    ):
+                        keep_id = candidate_id
+                        break
+            if keep_id is None:
+                # No committed outcome to reconcile against yet, or none of the
+                # candidates match it (every one is equally useless to keep) - the
+                # highest-id (freshest attempt) fallback matches the pre-existing,
+                # still-correct behavior for that case. candidates is ORDER BY id, so
+                # the last row is the highest id.
+                keep_id = candidates[-1][0]
+            ids_to_remove = [candidate_id for candidate_id, *_ in candidates if candidate_id != keep_id]
+            await db.executemany(
+                "DELETE FROM route_progression_pending_actions WHERE id = ?",
+                [(row_id,) for row_id in ids_to_remove],
+            )
+            removed += len(ids_to_remove)
+        if removed > 0:
+            logger.warning(
+                "Removed %d duplicate 'leg_outcome' row(s) from route_progression_pending_actions "
+                "before creating its uniqueness index - preferred a payload matching an "
+                "already-committed outcome where one exists, so its own unfinished "
+                "downstream work can still be resumed", removed,
+            )
 
     async def _run_migrations(self, db: aiosqlite.Connection) -> None:
         """Additive-only migrations for columns added to a table after it may have already
@@ -954,6 +1042,13 @@ class Database:
             # has - see record_player_report_market_update's own docstring for why this is
             # set atomically alongside the write itself, not as a separate step.
             "ALTER TABLE route_progression_legs ADD COLUMN market_update_applied_at TEXT",
+            # Follow-up audit finding #2 (2026-09-15): market_update_applied_at above
+            # used to gate BOTH the market-state write and the separate suppression
+            # write - if suppression alone failed after the marker committed, no replay
+            # ever retried it again. Tracked independently, set atomically inside
+            # suppress_terminal_market_side's own transaction the same way
+            # market_update_applied_at is - see that method's docstring.
+            "ALTER TABLE route_progression_legs ADD COLUMN suppression_applied_at TEXT",
         ]
         for statement in migrations:
             try:
@@ -1216,19 +1311,36 @@ class Database:
             await db.commit()
 
     async def suppress_terminal_market_side(
-        self, *, id_commodity: int, id_terminal: int, side: str, until: str
+        self, *, id_commodity: int, id_terminal: int, side: str, until: str,
+        thread_id: int, leg_index: int,
     ) -> None:
         """Mark one (commodity, terminal) pair's buy or sell side suppressed from route
         recommendations until `until` (a naive UTC string matching SQLite's own
         datetime('now') format) - called after a player report confirms that side is
         genuinely empty (see bot/uex/route_progression.py's update_confirms_depletion).
-        A no-op if the pair has no terminal_market_state row yet (nothing to suppress a
-        recommendation FROM in that case)."""
+        A no-op (on the suppression write itself) if the pair has no terminal_market_state
+        row yet (nothing to suppress a recommendation FROM in that case).
+
+        Also marks route_progression_legs.suppression_applied_at for (thread_id,
+        leg_index) in this SAME transaction - follow-up audit finding #2 (2026-09-15):
+        this used to share market_update_applied_at with record_player_report_market_
+        update's own write, so a suppression failure occurring AFTER that marker had
+        already committed was never retried again on any later replay (the caller
+        skipped this whole call once market_update_already_applied was true). Tracked
+        with its own independent marker instead, set atomically alongside this write for
+        the exact same reason record_player_report_market_update's own marker is: a
+        failure here must leave it unmarked (so a retry tries again), and success must
+        never be observably separate from the marker being set."""
         column = "buy_suppressed_until" if side == "buy" else "sell_suppressed_until"
         async with self.connect() as db:
             await db.execute(
                 f"UPDATE terminal_market_state SET {column} = ? WHERE id_commodity = ? AND id_terminal = ?",
                 (until, id_commodity, id_terminal),
+            )
+            await db.execute(
+                """UPDATE route_progression_legs SET suppression_applied_at = datetime('now')
+                   WHERE thread_id = ? AND leg_index = ? AND suppression_applied_at IS NULL""",
+                (thread_id, leg_index),
             )
             await db.commit()
 

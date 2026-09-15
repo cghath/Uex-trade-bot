@@ -1390,6 +1390,114 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
   `test_route_filter_ordering.py`), the ship-naming and budget-display fixes each
   confirmed failing against the unfixed code first. Full suite and clean lint
   reverified.
+- [x] **Five Findings from the 2026-09-15 Follow-Up Audit**: Shipped 2026-09-15.
+  A fresh executive audit of `dd8444a..1e336db` (the prior four commits) found five real
+  defects; every one independently re-verified against current code before trusting the
+  audit's own writeup, per this project's established practice. Four of the five turned
+  out to share one root cause and were designed and fixed together as one connected
+  change; the fifth (backup verification) was independent and fixed separately.
+  - **Backup verification accepted a truncated or sidecar-dropping transfer as
+    complete.** `sync_pi_backups.sh`'s `is_complete_backup` only checked that `meta.txt`
+    and the DB filename it names were PRESENT locally - a `scp -r` that silently
+    truncated the destination file, or dropped just a `-wal`/`-shm` sidecar, still read
+    as "complete" and could authorize pruning the Pi's own good copy. Reproduced with a
+    fixture harness (fake SSH/SCP standing in for the real Pi round trip) before fixing:
+    confirmed the old check exited 0 and archived a 20-byte truncated copy of a 56-byte
+    real file. Fixed by fetching the Pi's real per-file byte sizes in one `find -printf`
+    round trip and checking every local file (main DB and whichever sidecars the Pi
+    actually has for that snapshot) against them - re-verified on EVERY run, not skipped
+    for a dir that already exists locally, since skipping verification for
+    already-copied dirs is exactly what let a stale local copy go on authorizing prunes
+    indefinitely. Verified against three scenarios via the same harness: a truncated DB
+    is now refused, a dropped sidecar is now refused, and a genuinely complete transfer
+    (main DB + a real `-wal` sidecar) is still accepted and still prunes correctly - no
+    pytest coverage for this one (matches this project's standing practice for
+    `deploy_and_backup.sh`/`revert_last_deploy.sh`: verify shell scripts via a throwaway
+    fixture harness, not committed test files).
+  - **The shared root cause behind the other four**: `_record_leg_outcome_durably`'s
+    retry-then-durable-queue wrapper treats `handle_leg_outcome`'s entire multi-step call
+    (record the outcome, write market state, suppress a confirmed-empty side, dispatch
+    the next leg or complete the route) as one all-or-nothing unit, behind a single
+    boolean. That boolean can't distinguish "the report itself never saved" from "the
+    report saved fine but a LATER step keeps failing" - and three of the four defects
+    below are different consequences of that same gap. Considered a heavier redesign
+    (new pending-action kinds, a resume-point field) before settling on smaller, targeted
+    fixes once tracing the actual call sequence showed the existing recovery machinery
+    (post-ack retry, then the durable queue, then the recovery poller) already works
+    correctly once each individual gap is closed - no new schema for the ambiguous-send
+    or partial-failure findings, only for the one that genuinely needed its own marker.
+  - **A held claim was trusted as proof of delivery, even when it was really an
+    unresolved failure.** When a leg prompt's send AND its own history-reconciliation
+    (added earlier this session for the ambiguous-send fix) both failed, `_post_leg_prompt`
+    correctly held its claim and raised - but the very next retry saw that claim already
+    held and just returned normally, with no resend and no exception. Traced the exact
+    consequence: `_record_leg_outcome_durably`'s wrapper read that silent return as
+    success after only 2 attempts, so its own durable-queue safety net never engaged at
+    all - the route stalled `in_progress` forever with nothing recorded anywhere but a
+    log line. Fixed by re-verifying against Discord's own message history every time the
+    claim is already held, not just on the first send failure: found means reattach and
+    finish; confirmed absent means the claim is still validly held, so send now instead
+    of returning; still unresolvable means raise again, so retries keep counting instead
+    of silently "succeeding." 4 new tests plus an end-to-end reproduction through the
+    real durable wrapper (confirms a pending recovery action is now actually queued),
+    every one confirmed failing against the unfixed code first - including one
+    pre-existing test that had (unknowingly) codified the old, buggy behavior as
+    "correct," updated to assert the real fix instead.
+  - **A wrapper reporting "not handled" could still mean the report was already saved.**
+    Once the outcome-persistence step of `handle_leg_outcome` commits, every later step
+    failing (the next-leg prompt, market/suppression writes) still makes every retry of
+    the WHOLE call raise - so if the durable-queue insert also then failed,
+    `_record_leg_outcome_durably` unconditionally told its callers "not handled,"
+    reopening the view. A second, different report through a different button/modal was
+    then rejected by the DB's own conflict guard, permanently abandoning the real,
+    already-saved report's unfinished downstream work with no route left to resume it.
+    Fixed by checking `route_progression_legs` (the actual source of truth) before
+    deciding: an already-saved outcome now returns `True` and leaves the view resolved,
+    with an honest "your report was saved, but..." notice instead of the actively wrong
+    "please report this leg again." 3 new tests, including one driven through the real
+    `LegOutcomeView.matched` button callback (matching the audit's own reproduction
+    style) and a control case proving a genuinely never-saved report still correctly
+    reopens the view exactly as before. Two pre-existing tests needed fixture updates
+    (a missing `get_route_progression_leg` stub on their fake DB objects) to keep
+    working with the new check - not behavior regressions, just exercising a code path
+    they hadn't needed to stub before.
+  - **Suppression shared its retry marker with an unrelated write.**
+    `market_update_applied_at` gated BOTH the market-state write and the separate
+    `suppress_terminal_market_side` call - if suppression alone failed after the market
+    write had already committed and set that marker, no later replay ever retried
+    suppression again, since the marker being set skipped the whole block, suppression
+    included. A depleted terminal could permanently lose its suppression protection.
+    Fixed with its own independent `suppression_applied_at` column on
+    `route_progression_legs`, set atomically inside `suppress_terminal_market_side`'s own
+    transaction the same way the existing market-update marker is - the two writes are
+    now gated and retried completely independently. 1 new test (a "missing" report whose
+    suppression fails once, then succeeds on a same-report replay even though the market
+    update's own marker was already set), confirmed failing against the unfixed gating
+    logic first.
+  - **The legacy duplicate-recovery-queue migration could discard the one payload able
+    to resume a route.** Migrating pre-existing duplicate rows down to one per key
+    (needed before the uniqueness index introduced in the prior audit round could be
+    created) blindly kept the highest `id` - but a duplicate's replay is only useful if
+    it MATCHES what's already committed to `route_progression_legs`; a non-matching
+    replay just gets rejected as a conflict and discarded by the recovery poller, wasting
+    the one chance to finish that leg's unfinished downstream work (the next-leg
+    dispatch or completion step `handle_leg_outcome`'s own same-report fall-through
+    exists to resume). Reproduced the audit's own scenario directly: a `matched` outcome
+    saved without ever advancing, plus legacy duplicate rows (`matched`, then a
+    higher-id `missing`) - the old rule kept `missing` and the route never advanced.
+    Fixed by reconciling in Python against the real committed outcome first (preferring
+    a duplicate that matches it), falling back to the pre-existing highest-id rule only
+    when nothing is committed yet to reconcile against (still correct and still safe for
+    that case - abandon-kind duplicates are unaffected, since there's no
+    conflicting-payload concept for a plain abandon action). 2 new tests - the
+    match-preferred case and a control case proving the highest-id fallback still holds
+    with nothing yet saved - both run against the same pre-existing duplicate-reconciles
+    test harness this session's earlier carry-forward-defects round already built.
+
+  712 project tests passing (10 net new), clean lint, clean local bot start (22 cogs,
+  65 commands). Every fix confirmed failing against the unfixed code first, including
+  temporary narrow reverts of individual pieces of the connected route-progression
+  change to prove each one's own test actually exercises it (not just the combined diff).
 - [ ] **Codebase Consolidation** *(complexity: High, ongoing)*: Beyond route rendering,
   organize `bot/db/database.py`'s ~30 tables by feature and keep one authoritative
   description of current behavior. Broader than a single ticket - Centralized Route

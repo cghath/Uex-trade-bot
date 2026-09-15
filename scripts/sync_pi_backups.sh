@@ -62,7 +62,7 @@ mkdir -p "$ARCHIVE_ROOT" "$STAGING_ROOT"
 # test harness with SSH/SCP replaced by fakes: an interrupted first run left a partial
 # folder, a second run accepted it and requested pruning).
 #
-# Fixed two ways together: (1) a backup dir is only ever trusted once it has both a
+# Fixed three ways together: (1) a backup dir is only ever trusted once it has both a
 # meta.txt and the DB file meta.txt itself names - the same completeness check
 # revert_last_deploy.sh already applies before trusting a backup, reused here rather than
 # invented fresh, so a half-copied directory (old bug, or a future interrupted transfer)
@@ -70,15 +70,49 @@ mkdir -p "$ARCHIVE_ROOT" "$STAGING_ROOT"
 # in the final archive location, and is only atomically promoted (via `mv` - a rename on
 # the same filesystem, never a partial-state window at the final path) once verified
 # complete - so the final ARCHIVE_ROOT/$dir path itself is never observably partial to a
-# later run, even if THIS run is interrupted immediately after.
+# later run, even if THIS run is interrupted immediately after; (3) presence alone is
+# verified against the Pi's own real file sizes (REMOTE_SIZE, below) - see this
+# function's own follow-up audit comment for why presence stopped being enough.
+#
+# Follow-up audit-confirmed defect (P1, 2026-09-15): presence-only checking couldn't tell
+# a genuinely complete file from one scp -r truncated mid-transfer while still exiting 0 -
+# confirmed via a real reproduction (fixture SSH/SCP, a transfer that silently truncated
+# the destination DB file: the old check accepted it as complete and the script exited 0,
+# ready to authorize pruning the Pi's real copy). It also never looked at -wal/-shm
+# sidecars at all, so a transfer that dropped just a sidecar was invisible to it too. Both
+# closed the same way: REMOTE_SIZE (populated below from one `find -printf` round trip
+# over the Pi's whole backups/pi tree) gives this function the real byte size of every
+# file the CURRENT remote snapshot actually has - main DB and whichever sidecars are
+# present - and it now checks every local file's size against that, not just its
+# existence. Deliberately re-verified every run, even for a dir that already exists
+# locally (no "already archived, skip checking it" fast path) - skipping verification for
+# already-copied dirs is exactly what let a stale/truncated local copy go on authorizing a
+# prune indefinitely once its own scp had already finished (successfully or not).
 is_complete_backup() {
-    local dir="$1"
+    local dir="$1" snapshot="$2"
     local meta="$dir/meta.txt"
     [ -f "$meta" ] || return 1
-    local db_path
+    local db_path db_name
     db_path="$(grep -E '^db_path=' "$meta" | tail -n1 | cut -d= -f2-)"
     [ -n "$db_path" ] || return 1
-    [ -f "$dir/$(basename "$db_path")" ]
+    db_name="$(basename "$db_path")"
+
+    local suffix relpath expected_size local_file local_size found_db=0
+    for suffix in "" "-wal" "-shm"; do
+        relpath="$snapshot/${db_name}${suffix}"
+        expected_size="${REMOTE_SIZE[$relpath]:-}"
+        # No entry at all means the Pi doesn't have this file for this snapshot right
+        # now - for a sidecar that's normal (SQLite doesn't always have a live -wal/-shm),
+        # so there's nothing to check; for the main DB itself it means this snapshot
+        # couldn't be verified against the Pi at all, handled by found_db staying 0 below.
+        [ -n "$expected_size" ] || continue
+        [ "$suffix" = "" ] && found_db=1
+        local_file="$dir/${db_name}${suffix}"
+        [ -f "$local_file" ] || return 1
+        local_size="$(wc -c < "$local_file")" || return 1
+        [ "$local_size" -eq "$expected_size" ] || return 1
+    done
+    [ "$found_db" -eq 1 ]
 }
 
 echo "Listing backups on the Pi..."
@@ -89,11 +123,22 @@ if [ "${#REMOTE_DIRS[@]}" -eq 0 ]; then
     exit 0
 fi
 
+# One round trip for every file's real size across the whole backups/pi tree (path
+# relative to it, then its byte size) - cheaper than a separate remote stat per file, and
+# lets is_complete_backup verify sizes without knowing in advance which sidecars exist.
+declare -A REMOTE_SIZE=()
+mapfile -t REMOTE_MANIFEST < <("$SSH" -o BatchMode=yes "$PI_HOST" \
+    "find '$PI_REPO/backups/pi' -mindepth 2 -maxdepth 2 -type f -printf '%P %s\n' 2>/dev/null || true")
+for entry in "${REMOTE_MANIFEST[@]}"; do
+    [ -n "$entry" ] || continue
+    REMOTE_SIZE["${entry% *}"]="${entry##* }"
+done
+
 copied=0
 for dir in "${REMOTE_DIRS[@]}"; do
     [ -n "$dir" ] || continue
-    if is_complete_backup "$ARCHIVE_ROOT/$dir"; then
-        continue  # already archived and verified complete from a previous run
+    if is_complete_backup "$ARCHIVE_ROOT/$dir" "$dir"; then
+        continue  # already archived and verified complete against the Pi's current copy
     fi
     # Clears out any stale partial copy at either path - a leftover from an interrupted
     # PREVIOUS attempt (this run's own retry, or one left by the old, unfixed script)
@@ -101,8 +146,8 @@ for dir in "${REMOTE_DIRS[@]}"; do
     rm -rf "${ARCHIVE_ROOT:?}/$dir" "${STAGING_ROOT:?}/$dir"
     echo "Archiving $dir..."
     "$SCP" -rq "$PI_HOST:$PI_REPO/backups/pi/$dir" "$STAGING_ROOT/$dir"
-    if ! is_complete_backup "$STAGING_ROOT/$dir"; then
-        echo "Copy of $dir finished but looks incomplete (no meta.txt/DB file) - refusing to promote it." >&2
+    if ! is_complete_backup "$STAGING_ROOT/$dir" "$dir"; then
+        echo "Copy of $dir finished but doesn't match the Pi's own file sizes (meta.txt/DB/sidecars) - refusing to promote it." >&2
         rm -rf "${STAGING_ROOT:?}/$dir"
         exit 1
     fi
@@ -116,7 +161,7 @@ echo "Archived $copied new snapshot(s) to $ARCHIVE_ROOT (${#REMOTE_DIRS[@]} tota
 missing=0
 for dir in "${REMOTE_DIRS[@]}"; do
     [ -n "$dir" ] || continue
-    if ! is_complete_backup "$ARCHIVE_ROOT/$dir"; then
+    if ! is_complete_backup "$ARCHIVE_ROOT/$dir" "$dir"; then
         echo "Missing or incomplete archive copy of $dir - refusing to prune anything this run." >&2
         missing=1
     fi

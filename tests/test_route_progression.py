@@ -650,7 +650,9 @@ def test_suppress_terminal_market_side_round_trips_through_get_suppressed_sides_
         await db.init()
         await _seed_market_row(db)
         until = _future(SUPPRESSION_HOURS)
-        await db.suppress_terminal_market_side(id_commodity=1, id_terminal=10, side="buy", until=until)
+        await db.suppress_terminal_market_side(
+            id_commodity=1, id_terminal=10, side="buy", until=until, thread_id=1, leg_index=0
+        )
 
         result = await db.get_suppressed_sides_by_ids([(1, 10)], now=_now())
         assert result == {(1, 10): {"buy": True, "sell": False}}
@@ -675,7 +677,9 @@ def test_get_suppressed_sides_by_ids_an_expired_suppression_reads_as_not_suppres
         await db.init()
         await _seed_market_row(db)
         expired_until = _future(-1)  # 1 hour in the past
-        await db.suppress_terminal_market_side(id_commodity=1, id_terminal=10, side="buy", until=expired_until)
+        await db.suppress_terminal_market_side(
+            id_commodity=1, id_terminal=10, side="buy", until=expired_until, thread_id=1, leg_index=0
+        )
 
         result = await db.get_suppressed_sides_by_ids([(1, 10)], now=_now())
         assert (1, 10) not in result
@@ -690,8 +694,12 @@ def test_get_suppressed_sides_by_ids_only_returns_requested_pairs(tmp_path):
         await _seed_market_row(db)
         await _seed_market_row(db, id_commodity=2, id_terminal=20, commodity_name="Cobalt", terminal_name="Elsewhere")
         until = _future(SUPPRESSION_HOURS)
-        await db.suppress_terminal_market_side(id_commodity=1, id_terminal=10, side="buy", until=until)
-        await db.suppress_terminal_market_side(id_commodity=2, id_terminal=20, side="sell", until=until)
+        await db.suppress_terminal_market_side(
+            id_commodity=1, id_terminal=10, side="buy", until=until, thread_id=1, leg_index=0
+        )
+        await db.suppress_terminal_market_side(
+            id_commodity=2, id_terminal=20, side="sell", until=until, thread_id=1, leg_index=0
+        )
 
         result = await db.get_suppressed_sides_by_ids([(1, 10)], now=_now())
         assert result == {(1, 10): {"buy": True, "sell": False}}
@@ -709,7 +717,9 @@ def test_get_mixed_route_market_rows_masks_a_suppressed_side_to_zero_stock(tmp_p
         await db.init()
         await _seed_market_row(db)
         until = _future(SUPPRESSION_HOURS)
-        await db.suppress_terminal_market_side(id_commodity=1, id_terminal=10, side="buy", until=until)
+        await db.suppress_terminal_market_side(
+            id_commodity=1, id_terminal=10, side="buy", until=until, thread_id=1, leg_index=0
+        )
 
         rows = await db.get_mixed_route_market_rows()
         row = next(r for r in rows if r["id_commodity"] == 1 and r["id_terminal"] == 10)
@@ -725,7 +735,9 @@ def test_get_mixed_route_market_rows_an_expired_suppression_no_longer_masks(tmp_
         await db.init()
         await _seed_market_row(db)
         expired_until = _future(-1)
-        await db.suppress_terminal_market_side(id_commodity=1, id_terminal=10, side="buy", until=expired_until)
+        await db.suppress_terminal_market_side(
+            id_commodity=1, id_terminal=10, side="buy", until=expired_until, thread_id=1, leg_index=0
+        )
 
         rows = await db.get_mixed_route_market_rows()
         row = next(r for r in rows if r["id_commodity"] == 1 and r["id_terminal"] == 10)
@@ -2066,6 +2078,14 @@ def test_record_leg_outcome_durably_gives_up_after_exhausting_retries_without_ra
             raise RuntimeError("permanent failure")
 
         cog.handle_leg_outcome = always_fails
+        # handle_leg_outcome never even reaches a DB write in this fully-mocked scenario,
+        # so the outcome genuinely was never saved - queue_route_progression_leg_recovery
+        # also fails here, and get_route_progression_leg (finding #4's already-saved
+        # check) must correctly find nothing.
+        db = Mock()
+        db.queue_route_progression_leg_recovery = AsyncMock(side_effect=RuntimeError("queue also down"))
+        db.get_route_progression_leg = AsyncMock(return_value=None)
+        cog.bot = type("FakeBot", (), {"db": db})()
         channel = _fake_thread_channel()
 
         await cog._record_leg_outcome_durably(channel, 1, 0, _leg_input(), outcome="matched")
@@ -2411,6 +2431,85 @@ def test_init_reconciles_legacy_duplicate_pending_actions_instead_of_crashing(tm
     asyncio.run(run())
 
 
+def test_init_reconciliation_prefers_the_duplicate_matching_an_already_saved_outcome(tmp_path):
+    """Follow-up audit finding #5 (2026-09-15): a blind highest-id pick can discard the
+    one duplicate that actually MATCHES an outcome already committed to
+    route_progression_legs, in favor of a conflicting one the recovery poller's own
+    guard will just reject as "already reported" - permanently losing the only payload
+    able to resume that leg's unfinished downstream work (handle_leg_outcome's own
+    is_same_report fall-through is exactly what a matching replay uses to finish the
+    next-leg dispatch/completion step that never happened). Reproduces the audit's own
+    scenario directly: a 'matched' outcome is already saved (without ever advancing),
+    and the legacy duplicate queue holds ('matched', then a HIGHER-id 'missing') - the
+    old highest-id rule would keep 'missing' and delete the one payload that could
+    actually resume the route."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await _create_thread_for_legs(db, 1, [_leg_input()])
+        recorded = await db.record_route_progression_leg_outcome(thread_id=1, leg_index=0, outcome="matched")
+        assert recorded is True, "the outcome must actually be committed for this scenario to be meaningful"
+
+        async with db.connect() as conn:
+            await conn.execute("DROP INDEX idx_route_progression_pending_actions_leg_unique")
+            await conn.execute("DROP INDEX idx_route_progression_pending_actions_abandon_unique")
+            await conn.execute(
+                "INSERT INTO route_progression_pending_actions (thread_id, action_kind, leg_index, outcome) "
+                "VALUES (1, 'leg_outcome', 0, 'matched')"
+            )
+            # Inserted SECOND, so it has the higher id - a blind highest-id pick would
+            # wrongly prefer this conflicting row over the one matching what's saved.
+            await conn.execute(
+                "INSERT INTO route_progression_pending_actions (thread_id, action_kind, leg_index, outcome) "
+                "VALUES (1, 'leg_outcome', 0, 'missing')"
+            )
+            await conn.commit()
+
+        await db.init()
+
+        pending = await db.get_pending_route_progression_actions()
+        leg_outcome_rows = [row for row in pending if row["action_kind"] == "leg_outcome"]
+        assert len(leg_outcome_rows) == 1
+        assert leg_outcome_rows[0]["outcome"] == "matched", (
+            "must keep the duplicate matching the already-saved outcome, not the higher-id "
+            "one that will just be rejected as conflicting - discarding it would leave "
+            "nothing able to resume this leg's unfinished downstream work"
+        )
+
+    asyncio.run(run())
+
+
+def test_init_reconciliation_falls_back_to_highest_id_when_nothing_is_saved_yet(tmp_path):
+    """Control case, matching the pre-existing (still correct) behavior: when nothing has
+    been committed to route_progression_legs yet, there's nothing to reconcile duplicates
+    against - any one of them will become the first real commit once replayed, so the
+    highest-id (freshest attempt) fallback is still the right, harmless default."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        async with db.connect() as conn:
+            await conn.execute("DROP INDEX idx_route_progression_pending_actions_leg_unique")
+            await conn.execute("DROP INDEX idx_route_progression_pending_actions_abandon_unique")
+            await conn.execute(
+                "INSERT INTO route_progression_pending_actions (thread_id, action_kind, leg_index, outcome) "
+                "VALUES (1, 'leg_outcome', 0, 'matched')"
+            )
+            await conn.execute(
+                "INSERT INTO route_progression_pending_actions (thread_id, action_kind, leg_index, outcome) "
+                "VALUES (1, 'leg_outcome', 0, 'missing')"
+            )
+            await conn.commit()
+
+        await db.init()
+
+        pending = await db.get_pending_route_progression_actions()
+        leg_outcome_rows = [row for row in pending if row["action_kind"] == "leg_outcome"]
+        assert len(leg_outcome_rows) == 1
+        assert leg_outcome_rows[0]["outcome"] == "missing", "keeps the freshest (highest-id) row"
+
+    asyncio.run(run())
+
+
 def test_init_is_a_no_op_on_an_already_deduplicated_database(tmp_path):
     """Repeated initialization (every real bot restart) must stay a cheap no-op once no
     duplicates remain - proven separately from the reconciliation test above, which only
@@ -2495,9 +2594,16 @@ def test_handle_leg_outcome_same_report_retry_does_not_clobber_newer_market_data
         # the conflicting-report test's own established pattern above.
         await _create_thread_for_legs(db, 1, [leg0, leg1])
         cog = RouteProgression.__new__(RouteProgression)
-        cog.bot = type("FakeBot", (), {"db": db})()
+        cog.bot = type("FakeBot", (), {"db": db, "user": NS(id=1), "add_view": Mock()})()
         cog._active_legs = {1: [leg0, leg1]}
         channel = _fake_thread_channel()
+        # The first handle_leg_outcome call below advances to leg 1 and genuinely sends
+        # its prompt (channel.send succeeds) - the replay's own leg-1 dispatch then finds
+        # that claim already held and, per finding #3's fix, reconciles against history
+        # rather than trusting the claim blindly. Give it a matching message so that
+        # reconciliation resolves as "confirmed already sent" instead of raising, which
+        # is what a genuinely successful first delivery looks like.
+        channel.history = _fake_history([_fake_sent_message(author_id=1, title="Leg 2: Sell Gold at Elsewhere")])
 
         await cog.handle_leg_outcome(channel, 1, 0, leg0, outcome="matched")
 
@@ -2523,6 +2629,78 @@ def test_handle_leg_outcome_same_report_retry_does_not_clobber_newer_market_data
         assert await _price_buy() == 999.0, (
             "the replay must not clobber the newer price with its own now-stale report"
         )
+
+    asyncio.run(run())
+
+
+# -- suppression retried independently of the market-update marker (follow-up audit ------
+# finding #2, 2026-09-15) --------------------------------------------------------------
+# Real gap: market_update_applied_at used to gate BOTH the market-state write and the
+# separate suppress_terminal_market_side call - if suppression alone failed after the
+# marker had already committed, market_update_already_applied being True on every later
+# replay skipped the whole block, suppression included, so a depleted terminal never
+# actually got suppressed no matter how many times the report was retried.
+
+def test_handle_leg_outcome_retries_suppression_even_when_the_market_update_already_applied(tmp_path):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await _seed_market_row(db)
+        leg0 = _leg_input(id_terminal=10, id_commodity=1, quoted_price=100.0, quoted_scu=50.0, quoted_status=3)
+        leg1 = _leg_input(
+            side="sell", id_terminal=20, id_commodity=1, terminal_name="Elsewhere",
+            display_label="Sell Gold at Elsewhere", quoted_price=90.0, quoted_scu=40.0, quoted_status=2,
+        )
+        await _create_thread_for_legs(db, 1, [leg0, leg1])
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db, "user": NS(id=1), "add_view": Mock()})()
+        cog._active_legs = {1: [leg0, leg1]}
+        channel = _fake_thread_channel()
+
+        # Suppression fails on its first attempt only (the market-state write itself
+        # succeeds normally on that same first attempt).
+        real_suppress = db.suppress_terminal_market_side
+        call_count = {"n": 0}
+
+        async def flaky_suppress(*args, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                raise RuntimeError("transient failure")
+            return await real_suppress(*args, **kwargs)
+        db.suppress_terminal_market_side = flaky_suppress
+
+        async def _suppressed_until():
+            async with db.connect() as conn:
+                cursor = await conn.execute(
+                    "SELECT buy_suppressed_until FROM terminal_market_state "
+                    "WHERE id_commodity = 1 AND id_terminal = 10"
+                )
+                row = await cursor.fetchone()
+                return row["buy_suppressed_until"] if row else None
+
+        # A "missing" report confirms depletion (scu=0, empty buy status) and never even
+        # reaches leg 1's dispatch - the suppression failure raises first.
+        try:
+            await cog.handle_leg_outcome(channel, 1, 0, leg0, outcome="missing")
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("the simulated suppression failure must propagate")
+
+        assert await _suppressed_until() is None, "suppression must not have landed on the failed attempt"
+        stored = await db.get_route_progression_leg(1, 0)
+        assert stored["market_update_applied_at"] is not None, "the market write itself must have succeeded"
+        assert stored["suppression_applied_at"] is None, "the failed suppression must not be marked applied"
+
+        # A replay of the SAME report (is_same_report fall-through) must still retry
+        # suppression, even though the market update's own marker is already set.
+        await cog.handle_leg_outcome(channel, 1, 0, leg0, outcome="missing")
+
+        assert await _suppressed_until() is not None, (
+            "the replay must actually retry suppression, not skip it just because the "
+            "market update's own marker was already applied"
+        )
+        assert call_count["n"] == 2, "suppression must have been attempted exactly twice: once failed, once retried"
 
     asyncio.run(run())
 
@@ -2965,12 +3143,322 @@ def test_post_leg_prompt_ambiguous_failure_unreconcilable_holds_the_claim_but_st
         else:
             raise AssertionError("the original send failure must still propagate")
 
-        # The claim must still be held (not released) - a retry must not resend, since
-        # whether the first attempt actually landed was never actually resolved.
+        # The claim must still be held (not released) - see the three follow-up tests
+        # below for what a SUBSEQUENT call must do with that held claim (2026-09-15
+        # follow-up audit finding #3): it must never again be trusted as silent proof of
+        # success, the way this test's own earlier version wrongly asserted.
+
+    asyncio.run(run())
+
+
+# -- retrying a held-but-unresolved claim (2026-09-15 follow-up audit finding #3) --------
+# Real gap found on top of the reconciliation above: once a claim was held from an
+# ambiguous, never-resolved first attempt, _post_leg_prompt's claim-already-held branch
+# used to trust that as proof of success and just return - so a RETRY (from
+# _record_leg_outcome_durably's own loop, or the recovery poller) silently reported
+# success without ever delivering the prompt, without ever reaching the durable-queue
+# safety net, and without ever recovering once history became reachable again. These
+# three tests prove the fix: still-unresolvable keeps raising (so retries keep counting
+# and eventually queue for recovery), genuinely-absent-now actually sends, and
+# found-now reattaches the view exactly like the original send-failure path does.
+
+def test_post_leg_prompt_retry_of_held_unresolved_claim_keeps_raising_while_still_unresolvable(tmp_path):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        leg = _leg_input()
+        await _create_thread_for_legs(db, 1, [leg])
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db, "user": NS(id=1), "add_view": Mock()})()
+        cog._active_legs = {}
+        channel = _fake_thread_channel()
+        channel.send.side_effect = asyncio.TimeoutError("network hiccup")
+
+        def broken_history(*, limit=None, **kwargs):
+            raise discord.Forbidden(NS(status=403, reason="x"), "lost channel access")
+        channel.history = broken_history
+
+        for attempt in range(3):
+            try:
+                await cog._post_leg_prompt(channel, 1, 0, leg)
+            except Exception:
+                pass
+            else:
+                raise AssertionError(f"attempt {attempt} must still raise - history is still unreachable")
+
+        # Only the very first attempt actually calls thread.send (and fails) - every
+        # later attempt finds the claim already held and re-verifies via history
+        # instead, without ever attempting a real send while still unresolved.
+        assert channel.send.await_count == 1
+
+    asyncio.run(run())
+
+
+def test_post_leg_prompt_retry_of_held_unresolved_claim_sends_once_confirmed_genuinely_absent(tmp_path):
+    """History was unreachable on the first attempt but becomes checkable again on a
+    retry, and confirms the prompt genuinely never sent - the claim is already validly
+    held at this leg_index, so the retry must go ahead and send now (recovering) rather
+    than treating the still-held claim as if it already meant success."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        leg = _leg_input()
+        await _create_thread_for_legs(db, 1, [leg])
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db, "user": NS(id=1), "add_view": Mock()})()
+        cog._active_legs = {}
+        channel = _fake_thread_channel()
+        channel.send.side_effect = asyncio.TimeoutError("network hiccup")
+
+        def broken_history(*, limit=None, **kwargs):
+            raise discord.Forbidden(NS(status=403, reason="x"), "lost channel access")
+        channel.history = broken_history
+
+        try:
+            await cog._post_leg_prompt(channel, 1, 0, leg)
+        except asyncio.TimeoutError:
+            pass
+        else:
+            raise AssertionError("the first attempt must still raise")
+
         channel.send = AsyncMock()
-        channel.history = _fake_history([])
+        channel.history = _fake_history([])  # now reachable, and genuinely empty
         await cog._post_leg_prompt(channel, 1, 0, leg)
-        channel.send.assert_not_awaited()
+
+        channel.send.assert_awaited_once(), "must actually deliver the prompt now that it's confirmed absent"
+
+    asyncio.run(run())
+
+
+def test_post_leg_prompt_retry_of_held_unresolved_claim_reattaches_view_once_confirmed_sent(tmp_path):
+    """History was unreachable on the first attempt but becomes checkable again on a
+    retry, and this time finds the message really did send the first time - must
+    reattach the view (so its buttons still work) and must not send a duplicate."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        leg = _leg_input()
+        await _create_thread_for_legs(db, 1, [leg])
+        cog = RouteProgression.__new__(RouteProgression)
+        add_view = Mock()
+        cog.bot = type("FakeBot", (), {"db": db, "user": NS(id=1), "add_view": add_view})()
+        cog._active_legs = {}
+        channel = _fake_thread_channel()
+        channel.send.side_effect = asyncio.TimeoutError("network hiccup")
+
+        def broken_history(*, limit=None, **kwargs):
+            raise discord.Forbidden(NS(status=403, reason="x"), "lost channel access")
+        channel.history = broken_history
+
+        try:
+            await cog._post_leg_prompt(channel, 1, 0, leg)
+        except asyncio.TimeoutError:
+            pass
+        else:
+            raise AssertionError("the first attempt must still raise")
+
+        channel.send = AsyncMock()
+        sent_message = _fake_sent_message(author_id=1, title="Leg 1: Buy Gold at Area18 TDD")
+        channel.history = _fake_history([sent_message])
+        await cog._post_leg_prompt(channel, 1, 0, leg)  # must not raise
+
+        channel.send.assert_not_awaited(), "must not send a duplicate once confirmed already sent"
+        add_view.assert_called_once()
+        assert add_view.call_args.kwargs["message_id"] == sent_message.id
+
+    asyncio.run(run())
+
+
+def test_record_leg_outcome_durably_eventually_queues_recovery_when_prompt_stays_genuinely_ambiguous(
+    monkeypatch, tmp_path
+):
+    """End-to-end reproduction of the audit's own finding #3 scenario: the next-leg send
+    and history reconciliation both fail on every attempt. Before this fix, the second
+    in-process retry saw the claim held from attempt 1 and returned normally, so
+    _record_leg_outcome_durably reported success after only 2 attempts without ever
+    reaching its own durable-queue safety net - the route silently stalled forever with
+    nothing recorded anywhere except a log line. After the fix, every attempt keeps
+    raising while genuinely unresolved, so the wrapper exhausts its retries and actually
+    queues a recovery action."""
+    async def run():
+        monkeypatch.setattr("bot.cogs.route_progression.POST_ACK_RETRY_DELAY_SECONDS", 0)
+        db = _make_db(tmp_path)
+        await db.init()
+        leg0 = _leg_input()
+        leg1 = _leg_input(display_label="Sell Gold at Levski")
+        await _create_thread_for_legs(db, 1, [leg0, leg1])
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db, "user": NS(id=1), "add_view": Mock()})()
+        cog._active_legs = {1: [leg0, leg1]}
+        channel = _fake_thread_channel()
+
+        async def flaky_send(*args, **kwargs):
+            # Only the leg-1 prompt send (embed=/view=) is the thing that's genuinely
+            # ambiguous here - the wrapper's own plain-text recovery notice at the end
+            # must still go through, or this test can't tell "queued for recovery" apart
+            # from "notifying about it also happened to fail."
+            if "embed" in kwargs:
+                raise asyncio.TimeoutError("network hiccup")
+            return NS(id=999)
+        channel.send = AsyncMock(side_effect=flaky_send)
+
+        def broken_history(*, limit=None, **kwargs):
+            raise discord.Forbidden(NS(status=403, reason="x"), "lost channel access")
+        channel.history = broken_history
+
+        handled = await cog._record_leg_outcome_durably(channel, 1, 0, leg0, outcome="matched")
+
+        assert handled is True, "must report handled - the outcome itself was saved and recovery was queued"
+        pending = await db.get_pending_route_progression_actions()
+        assert len(pending) == 1, (
+            "the durable-queue safety net must actually engage instead of a hollow "
+            "'claim already held' success after only 2 attempts"
+        )
+        assert pending[0]["action_kind"] == "leg_outcome"
+        assert pending[0]["leg_index"] == 0
+        stored = await db.get_route_progression_leg(1, 0)
+        assert stored is not None and stored["outcome"] == "matched", (
+            "the leg-0 outcome itself must still be saved even though leg 1's prompt never delivered"
+        )
+
+    asyncio.run(run())
+
+
+# -- partial-failure recovery return semantics (2026-09-15 follow-up audit finding #4) ---
+# Real gap: _record_leg_outcome_durably's every retry re-runs handle_leg_outcome's WHOLE
+# call, but that call's own outcome write is only its first step - a later step (the
+# next-leg prompt, market/suppression writes) can keep failing on every attempt even
+# though the outcome itself was durably saved on attempt 1. If the durable recovery queue
+# insert ALSO then failed, the wrapper used to report "not handled" unconditionally,
+# telling its caller to release the claim and reopen the view - letting a second,
+# different report through a different button/modal, which the DB's own conflict guard
+# correctly rejects, permanently abandoning the real, already-saved report's unfinished
+# downstream work. These tests prove the fix: an already-saved outcome is recognized even
+# when queuing failed, and the view is not reopened for it.
+
+def test_record_leg_outcome_durably_reports_handled_when_outcome_was_saved_despite_queue_failure(
+    monkeypatch, tmp_path
+):
+    async def run():
+        from bot.cogs.route_progression import RouteProgression
+        monkeypatch.setattr("bot.cogs.route_progression.POST_ACK_RETRY_DELAY_SECONDS", 0)
+        db = _make_db(tmp_path)
+        await db.init()
+        leg0 = _leg_input()
+        leg1 = _leg_input(display_label="Sell Gold at Levski")
+        await _create_thread_for_legs(db, 1, [leg0, leg1])
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db, "user": NS(id=1), "add_view": Mock()})()
+        cog._active_legs = {1: [leg0, leg1]}
+        channel = _fake_thread_channel()
+
+        async def flaky_send(*args, **kwargs):
+            if "embed" in kwargs:
+                raise asyncio.TimeoutError("network hiccup")
+            return NS(id=999)
+        channel.send = AsyncMock(side_effect=flaky_send)
+
+        def broken_history(*, limit=None, **kwargs):
+            raise discord.Forbidden(NS(status=403, reason="x"), "lost channel access")
+        channel.history = broken_history
+
+        async def failing_queue(*args, **kwargs):
+            raise RuntimeError("db unreachable")
+        db.queue_route_progression_leg_recovery = failing_queue
+
+        handled = await cog._record_leg_outcome_durably(channel, 1, 0, leg0, outcome="matched")
+
+        assert handled is True, (
+            "must report handled - the outcome was already saved even though nothing "
+            "could be automatically queued to finish the rest"
+        )
+        pending = await db.get_pending_route_progression_actions()
+        assert len(pending) == 0, "the failed queue insert must not have silently succeeded"
+        stored = await db.get_route_progression_leg(1, 0)
+        assert stored is not None and stored["outcome"] == "matched"
+
+    asyncio.run(run())
+
+
+def test_record_leg_outcome_durably_reports_not_handled_when_nothing_was_ever_saved(monkeypatch, tmp_path):
+    """Control case: the outcome write itself never commits (handle_leg_outcome fails
+    before ever reaching the DB), so once the queue also fails there is genuinely nothing
+    saved - the wrapper must still report False so the caller releases the claim and lets
+    the user try again, exactly as before this fix."""
+    async def run():
+        from bot.cogs.route_progression import RouteProgression
+        monkeypatch.setattr("bot.cogs.route_progression.POST_ACK_RETRY_DELAY_SECONDS", 0)
+        cog = RouteProgression.__new__(RouteProgression)
+
+        async def always_fails(*args, **kwargs):
+            raise RuntimeError("permanent failure before anything is saved")
+        cog.handle_leg_outcome = always_fails
+
+        class _FakeDB:
+            async def queue_route_progression_leg_recovery(self, **kwargs):
+                raise RuntimeError("db unreachable")
+
+            async def get_route_progression_leg(self, thread_id, leg_index):
+                return None
+
+        cog.bot = type("FakeBot", (), {"db": _FakeDB()})()
+        channel = _fake_thread_channel()
+
+        handled = await cog._record_leg_outcome_durably(channel, 1, 0, _leg_input(), outcome="matched")
+
+        assert handled is False, "nothing was ever saved - must still report not handled"
+
+    asyncio.run(run())
+
+
+def test_matched_button_does_not_reopen_the_view_when_the_outcome_was_already_saved(monkeypatch, tmp_path):
+    """End-to-end through the real button callback (matching the audit's own reproduction
+    technique): 'Matched quote' is clicked, the outcome commits, but the next-leg prompt
+    delivery AND the durable recovery queue both then fail. Before this fix, the button's
+    own `if not handled: release_claim(); reenable_in_background()` would reopen the
+    view - the audit's reproduction showed a subsequent 'Less / not there' submission
+    then getting rejected as conflicting, permanently stranding the route with no next
+    prompt and no recovery job. After the fix, the view stays resolved because the report
+    itself is recognized as already saved."""
+    async def run():
+        monkeypatch.setattr("bot.cogs.route_progression.POST_ACK_RETRY_DELAY_SECONDS", 0)
+        db = _make_db(tmp_path)
+        await db.init()
+        leg0 = _leg_input()
+        leg1 = _leg_input(display_label="Sell Gold at Levski")
+        await _create_thread_for_legs(db, 1, [leg0, leg1])
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db, "user": NS(id=1), "add_view": Mock()})()
+        cog._active_legs = {1: [leg0, leg1]}
+        channel = _fake_thread_channel()
+
+        async def flaky_send(*args, **kwargs):
+            if "embed" in kwargs:
+                raise asyncio.TimeoutError("network hiccup")
+            return NS(id=999)
+        channel.send = AsyncMock(side_effect=flaky_send)
+
+        def broken_history(*, limit=None, **kwargs):
+            raise discord.Forbidden(NS(status=403, reason="x"), "lost channel access")
+        channel.history = broken_history
+
+        async def failing_queue(*args, **kwargs):
+            raise RuntimeError("db unreachable")
+        db.queue_route_progression_leg_recovery = failing_queue
+
+        view = LegOutcomeView(cog=cog, thread_id=1, leg_index=0, leg=leg0)
+        view.message = _FakeMessage()
+        interaction = _FakeInteraction()
+        interaction.channel = channel
+
+        await view.matched.callback(interaction)
+
+        assert view.resolved is True, (
+            "the view must stay resolved - reopening it would let a conflicting second "
+            "report through for a leg that's already genuinely saved"
+        )
+        stored = await db.get_route_progression_leg(1, 0)
+        assert stored is not None and stored["outcome"] == "matched"
 
     asyncio.run(run())
 
@@ -3143,7 +3631,13 @@ def test_failed_leg_outcome_queue_write_does_not_claim_that_background_recovery_
     async def run():
         db = type(
             "FailingDB", (),
-            {"queue_route_progression_leg_recovery": AsyncMock(side_effect=RuntimeError("DB offline"))},
+            {
+                "queue_route_progression_leg_recovery": AsyncMock(side_effect=RuntimeError("DB offline")),
+                # Nothing was ever saved in this scenario (handle_leg_outcome itself
+                # always fails before reaching any real write) - finding #4's
+                # already-saved check must correctly find nothing here too.
+                "get_route_progression_leg": AsyncMock(return_value=None),
+            },
         )()
         cog = RouteProgression.__new__(RouteProgression)
         cog.bot = type("FakeBot", (), {"db": db})()
