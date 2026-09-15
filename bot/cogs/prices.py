@@ -552,7 +552,16 @@ class Prices(commands.Cog):
             if risk_warning:
                 intro_embed.description = risk_warning
             footer = "Data from UEX Corp /commodities_routes"
-            if not ship_vehicle:
+            # Consistency fix: a resolved ship used to only get named inside a per-route
+            # cargo line, and only for a route that happened to be ship-limited
+            # specifically - so the exact same ship, used to compute cargo/profit for
+            # every route shown, could go completely unnamed. Named here unconditionally
+            # instead, matching how /mixed-routes and /multi-stop-route already do.
+            if ship_vehicle and ship_cargo_scu is not None:
+                footer += f" · cargo/run-profit numbers use {ship_vehicle.get('name', ship_query)}'s {ship_cargo_scu:,.0f} SCU hold"
+            elif ship_vehicle:
+                footer += f" · using {ship_vehicle.get('name', ship_query)} (no cargo capacity on record)"
+            else:
                 footer += " · set a default ship with /set-default-ship for cargo/run-profit numbers"
             if preferences_note:
                 footer += " · " + preferences_note
@@ -821,7 +830,12 @@ class Prices(commands.Cog):
             embed.description = risk_warning
         # Set before the field loop, not after - see the matching comment above.
         footer = "Data from UEX Corp · does not account for travel time between terminals"
-        if not ship_vehicle:
+        # Consistency fix - see the matching comment in the UEX-routes branch above.
+        if ship_vehicle and ship_cargo_scu is not None:
+            footer += f" · cargo/run-profit numbers use {ship_vehicle.get('name', ship_query)}'s {ship_cargo_scu:,.0f} SCU hold"
+        elif ship_vehicle:
+            footer += f" · using {ship_vehicle.get('name', ship_query)} (no cargo capacity on record)"
+        else:
             footer += " · set a default ship with /set-default-ship for cargo/run-profit numbers"
         if preferences_note:
             footer += " · " + preferences_note

@@ -185,6 +185,37 @@ def test_routes_embed_now_shows_limiting_factors_health_and_confidence(tmp_path)
     asyncio.run(run())
 
 
+def test_routes_embed_shows_the_budget_in_the_footer(tmp_path):
+    """Consistency fix: budget was already used to build these routes (passed straight
+    into build_mixed_routes), but never shown anywhere in the response, unlike every
+    sibling route command (/mixed-routes, /multi-stop-route, /route-on-the-way) that
+    uses a budget - a user had no way to confirm their budget was actually applied."""
+    async def run():
+        cog, client = await _make_cog(tmp_path, "brief_budget_footer.sqlite3", _MIXED_ROUTES_ROWS, ship_scu=10)
+        try:
+            embed = await cog._routes_embed("TestShip", 5000.0, False)
+        finally:
+            await client.aclose()
+
+        assert embed.footer.text is not None
+        assert "Budget 5,000 aUEC" in embed.footer.text, embed.footer.text
+
+    asyncio.run(run())
+
+
+def test_routes_embed_has_no_budget_footer_when_none_was_given(tmp_path):
+    async def run():
+        cog, client = await _make_cog(tmp_path, "brief_no_budget_footer.sqlite3", _MIXED_ROUTES_ROWS, ship_scu=10)
+        try:
+            embed = await cog._routes_embed("TestShip", None, False)
+        finally:
+            await client.aclose()
+
+        assert embed.footer.text is None or "budget" not in embed.footer.text.lower()
+
+    asyncio.run(run())
+
+
 def test_routes_embed_discloses_truncation_instead_of_silently_dropping_routes(tmp_path, monkeypatch):
     """Centralized Route Presentation: /intelligence-brief had NO Discord-size protection
     at all before - every sibling route command already learned this lesson the hard way

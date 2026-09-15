@@ -108,6 +108,51 @@ def test_best_route_fallback_auto_load_filter_finds_a_lower_ranked_route(tmp_pat
     asyncio.run(run())
 
 
+def test_best_route_fallback_names_the_resolved_ship_in_the_footer(tmp_path):
+    """Same consistency fix as the UEX-routes primary branch, applied to /best-route's
+    OWN fallback branch (buy/sell pairing, used when UEX has no route data for this
+    commodity) - it builds its own separate intro embed/footer and had the identical
+    ship-naming gap."""
+    async def run():
+        db = Database(tmp_path / "best_route_fallback_ship.sqlite3", Fernet(Fernet.generate_key()))
+        await db.init()
+        rows = [
+            {"id_terminal": 1, "terminal_name": "B1", "id_commodity": 1, "commodity_name": "Cobalt",
+             "price_buy": 10, "price_sell": 0, "scu_buy": 100, "scu_sell": 0, "status_buy": 3, "status_sell": None},
+            {"id_terminal": 2, "terminal_name": "S1", "id_commodity": 1, "commodity_name": "Cobalt",
+             "price_buy": 0, "price_sell": 50, "scu_buy": 0, "scu_sell": 100, "status_buy": None, "status_sell": 5},
+        ]
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            path = request.url.path
+            if "commodities_prices" in path:
+                return httpx.Response(200, json={"status": "ok", "data": rows})
+            if "vehicles" in path:
+                return httpx.Response(200, json={"status": "ok", "data": [{"name": "Polaris", "scu": 576}]})
+            return httpx.Response(200, json={"status": "ok", "data": []})
+
+        client = UexClient(app_token="test", base_url="https://uex.test")
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+        bot = type("FakeBot", (), {})()
+        bot.db = db
+        bot.uex = client
+        cog = Prices.__new__(Prices)
+        cog.bot = bot
+        interaction = _FakeInteraction(111)
+
+        try:
+            await cog.best_route.callback(cog, interaction, commodity="Cobalt", ship="Polaris")
+        finally:
+            await client.aclose()
+
+        embed = interaction.followup.sent[0][1]["embed"]
+        assert "Polaris's 576 SCU hold" in embed.footer.text, embed.footer.text
+
+    asyncio.run(run())
+
+
 def test_best_route_fallback_pool_is_not_capped_at_a_fixed_size(tmp_path):
     """Regression: the fallback's first fix widened the candidate pool from
     MAX_FIELD_ROWS (5) to a fixed ROUTE_FILTER_CANDIDATE_POOL (25) before filtering -
@@ -373,5 +418,93 @@ def test_top_routes_auto_load_filter_finds_a_lower_scored_route(tmp_path):
             )
         finally:
             await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_top_routes_shows_the_budget_in_the_footer_and_caps_the_cargo_estimate(tmp_path):
+    """Consistency fix: /top-routes shared the same underlying candidate pool and
+    cargo/budget machinery as /route-on-the-way but never accepted a budget option at
+    all - unlike /mixed-routes, /multi-stop-route, and /route-on-the-way, which all cap
+    the cargo estimate by budget and disclose it."""
+    async def run():
+        db = Database(tmp_path / "top_routes_budget.sqlite3", Fernet(Fernet.generate_key()))
+        await db.init()
+        entry = ScoredRouteEntry(
+            commodity_name="Gold", id_commodity=1,
+            origin_terminal_name="Origin", destination_terminal_name="Destination",
+            price_origin=100.0, price_destination=200.0, price_margin=100.0, price_roi=100.0,
+            distance=10.0, score=100, scu_origin=50, scu_destination=50,
+            status_origin=1, status_destination=1,
+            origin_terminal_id=1, destination_terminal_id=2,
+        )
+
+        client = UexClient(app_token="test", base_url="https://uex.test")
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(transport=_catch_all_transport([]))
+
+        bot = type("FakeBot", (), {})()
+        bot.db = db
+        bot.uex = client
+        bot.get_cog = lambda name: None
+        cog = Trends.__new__(Trends)
+        cog.bot = bot
+        cog._top_scored_routes_lock = asyncio.Lock()
+        cog._top_scored_routes = [entry]
+        cog._top_scored_routes_updated_at = datetime.now(timezone.utc)
+        interaction = _FakeInteraction(1)
+
+        try:
+            await cog.top_routes.callback(cog, interaction, budget=1000.0)
+        finally:
+            await client.aclose()
+
+        embeds = [kwargs["embed"] for _, kwargs in interaction.followup.sent if kwargs.get("embed")]
+        intro_footer = embeds[0].footer.text
+        assert "budget 1,000 aUEC" in intro_footer
+
+        route_embed = next(e for e in embeds if e.title and "Gold" in e.title)
+        route_text = route_embed.fields[0].value
+        assert "limited by your budget" in route_text
+
+    asyncio.run(run())
+
+
+def test_top_routes_falls_back_to_a_saved_budget_preference(tmp_path):
+    async def run():
+        db = Database(tmp_path / "top_routes_budget_prefs.sqlite3", Fernet(Fernet.generate_key()))
+        await db.init()
+        await db.set_trading_preferences(1, budget=1000.0)
+        entry = ScoredRouteEntry(
+            commodity_name="Gold", id_commodity=1,
+            origin_terminal_name="Origin", destination_terminal_name="Destination",
+            price_origin=100.0, price_destination=200.0, price_margin=100.0, price_roi=100.0,
+            distance=10.0, score=100, scu_origin=50, scu_destination=50,
+            status_origin=1, status_destination=1,
+            origin_terminal_id=1, destination_terminal_id=2,
+        )
+
+        client = UexClient(app_token="test", base_url="https://uex.test")
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(transport=_catch_all_transport([]))
+
+        bot = type("FakeBot", (), {})()
+        bot.db = db
+        bot.uex = client
+        bot.get_cog = lambda name: None
+        cog = Trends.__new__(Trends)
+        cog.bot = bot
+        cog._top_scored_routes_lock = asyncio.Lock()
+        cog._top_scored_routes = [entry]
+        cog._top_scored_routes_updated_at = datetime.now(timezone.utc)
+        interaction = _FakeInteraction(1)
+
+        try:
+            await cog.top_routes.callback(cog, interaction)
+        finally:
+            await client.aclose()
+
+        embeds = [kwargs["embed"] for _, kwargs in interaction.followup.sent if kwargs.get("embed")]
+        assert "budget 1,000 aUEC" in embeds[0].footer.text
 
     asyncio.run(run())

@@ -654,6 +654,63 @@ def test_multi_stop_route_flattened_legs_use_side_specific_market_scu_not_the_pa
     asyncio.run(run())
 
 
+def test_best_route_names_the_resolved_ship_in_the_footer_unconditionally(tmp_path):
+    """Consistency fix: a resolved ship used to only get named inside a per-route cargo
+    line, and only for a route that happened to be ship-limited specifically (not
+    stock-limited) - so the exact same ship, used to compute cargo/profit for every
+    route shown, could go completely unnamed. Named in the intro embed's footer
+    unconditionally instead, matching how /mixed-routes and /multi-stop-route already
+    name theirs up front."""
+    async def run():
+        db = Database(tmp_path / "best_route_ship_footer.sqlite3", Fernet(Fernet.generate_key()))
+        await db.init()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            path = request.url.path
+            if "commodities_prices" in path:
+                return httpx.Response(200, json={"status": "ok", "data": [
+                    {"id_commodity": 1, "commodity_name": "Gold"}
+                ]})
+            if "commodities_routes" in path:
+                return httpx.Response(200, json={"status": "ok", "data": [
+                    {
+                        "id_terminal_origin": 1, "id_terminal_destination": 101,
+                        "origin_terminal_name": "Good Origin", "destination_terminal_name": "Good Destination",
+                        "price_origin": 100, "price_destination": 200, "price_margin": 100, "price_roi": 100,
+                        "distance": 5, "score": 50, "scu_origin": 1000, "scu_destination": 1000,
+                        "status_origin": 1, "status_destination": 1, "profit": 1000,
+                    },
+                ]})
+            if "vehicles" in path:
+                return httpx.Response(200, json={"status": "ok", "data": [
+                    {"name": "Polaris", "scu": 576},
+                ]})
+            return httpx.Response(200, json={"status": "ok", "data": []})
+
+        client = UexClient(app_token="test", base_url="https://uex.test")
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+        bot = type("FakeBot", (), {})()
+        bot.db = db
+        bot.uex = client
+        bot.get_cog = lambda name: None
+        cog = Prices.__new__(Prices)
+        cog.bot = bot
+        interaction = _FakeInteraction(1)
+
+        try:
+            await cog.best_route.callback(cog, interaction, commodity="Gold", ship="Polaris")
+        finally:
+            await client.aclose()
+
+        intro_footer = interaction.followup.sent[0][1]["embed"].footer.text
+        assert "Polaris's 576 SCU hold" in intro_footer, intro_footer
+        assert "set a default ship" not in intro_footer
+
+    asyncio.run(run())
+
+
 def test_best_route_excludes_a_negative_profit_uex_route(tmp_path):
     """Real defect a user hit live: /best-route's primary branch ranked straight from
     UEX's own /commodities_routes data by profit descending with no check that profit was

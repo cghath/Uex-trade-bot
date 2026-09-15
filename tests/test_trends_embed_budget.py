@@ -383,6 +383,43 @@ def test_top_routes_never_shows_a_route_without_its_risk_warning():
     asyncio.run(run())
 
 
+def test_send_ranked_routes_names_the_resolved_ship_in_the_footer_unconditionally():
+    """Consistency fix: a resolved ship used to only get named inside a per-route cargo
+    line, and only for a route that happened to be ship-limited specifically (not stock-
+    or budget-limited) - so the exact same ship, used to compute cargo/profit for every
+    route shown, could go completely unnamed. _make_cog's default fixture ("Ship", 100
+    SCU) always resolves a ship; the intro embed's footer must name it regardless of
+    which routes are shown or why."""
+    async def run():
+        cog, _ = _make_cog(1)
+        inter = _interaction()
+        await cog._send_ranked_routes(
+            inter, entries=_routes(1), updated_at=None, ship=None,
+            title="Top routes", footer_note="Collected data", log_label="test", display_limit=10,
+        )
+        intro_footer = inter.followup.send.call_args_list[0].kwargs["embed"].footer.text
+        assert "Ship's 100 SCU hold" in intro_footer, intro_footer
+        assert "set a default ship" not in intro_footer
+
+    asyncio.run(run())
+
+
+def test_send_ranked_routes_footer_prompts_for_a_ship_when_none_resolves():
+    async def run():
+        cog, db = _make_cog(1)
+        db.get_default_ship = AsyncMock(return_value=None)
+        inter = _interaction()
+        await cog._send_ranked_routes(
+            inter, entries=_routes(1), updated_at=None, ship=None,
+            title="Top routes", footer_note="Collected data", log_label="test", display_limit=10,
+        )
+        intro_footer = inter.followup.send.call_args_list[0].kwargs["embed"].footer.text
+        assert "set a default ship" in intro_footer
+        assert "SCU hold" not in intro_footer
+
+    asyncio.run(run())
+
+
 def test_top_routes_shows_investment():
     """CargoEstimate now carries an investment figure alongside Run profit (bot/uex/
     ships.py) - /top-routes' shared _build_route_field must show it too."""

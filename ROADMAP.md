@@ -1348,6 +1348,48 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
   `test_route_send_shape.py` for `/best-route`'s own branch - one negative-route-
   excluded case, one all-routes-unprofitable case), every one confirmed failing against
   the unfixed code first. Full suite and clean lint reverified.
+- [x] **Route Commands: Ship/Budget Messaging Consistency**: Shipped 2026-09-15.
+  User-requested audit: "do all route commands display ship and budget when
+  applicable?" Investigated with a subagent first, then independently re-verified every
+  finding against the actual embed-building code (not trusted from the report alone)
+  before fixing anything. Found and fixed three real inconsistencies:
+  - **`/intelligence-brief` used its `budget` option but never showed it.** Unlike
+    `/mixed-routes`, `/multi-stop-route`, and `/route-on-the-way` - which all cap the
+    cargo estimate by budget AND disclose the figure - `/intelligence-brief` passed
+    `budget` straight into `build_mixed_routes` with no footer line anywhere in
+    `_routes_embed`, so a user had no way to confirm their budget actually applied.
+    Fixed by setting the footer BEFORE the route-field loop (not after), matching this
+    codebase's own footer-before-loop convention (`add_chunked_fields`' budget check
+    measures `len(embed)`, which only includes the footer once it's actually set) - the
+    existing "N more omitted" suffix now appends onto the budget line instead of
+    replacing it.
+  - **A resolved ship was only named when it happened to be the binding constraint.**
+    `/best-route` (both its UEX-routes primary branch and its buy/sell-pairing fallback)
+    and the shared `_send_ranked_routes` (`/top-routes`, `/routes-from`,
+    `/route-on-the-way`) all named the ship ONLY inside a per-route cargo line, and only
+    for a route whose cargo happened to be limited by that ship's hold specifically -
+    not stock- or budget-limited. The exact same ship, used to compute cargo/profit for
+    every route in the response, could go completely unnamed if none of the shown
+    routes hit that one condition (confirmed live in a user screenshot: a route named
+    "Polaris" only because it happened to be ship-limited). `/mixed-routes`,
+    `/multi-stop-route`, and `/intelligence-brief` already named their (required) ship
+    unconditionally up front - this brings the four optional-ship commands to the same
+    standard, in the intro embed's footer rather than buried per-route. Guarded against
+    a resolved vehicle with no recorded SCU figure (would have crashed the new `:,.0f`
+    format) with a distinct "no cargo capacity on record" fallback line.
+  - **`/top-routes` and `/routes-from` never accepted a `budget` option at all** - not
+    even from the saved trading-preference default - despite sharing the exact same
+    `_build_route_field`/`estimate_route_cargo` machinery `/route-on-the-way` already
+    uses for budget capping and disclosure, with a ready-made "limited by your budget"
+    cargo note that simply never got wired up for these two. Added the option (with the
+    same preference fallback as `/mixed-routes`/`/multi-stop-route`/`/route-on-the-way`)
+    to both, reusing `_send_ranked_routes`'s existing `budget` parameter.
+
+  15 new tests across six files (`test_intelligence_brief_routes.py`,
+  `test_route_send_shape.py`, `test_trends_embed_budget.py`, `test_routes_from.py`,
+  `test_route_filter_ordering.py`), the ship-naming and budget-display fixes each
+  confirmed failing against the unfixed code first. Full suite and clean lint
+  reverified.
 - [ ] **Codebase Consolidation** *(complexity: High, ongoing)*: Beyond route rendering,
   organize `bot/db/database.py`'s ~30 tables by feature and keep one authoritative
   description of current behavior. Broader than a single ticket - Centralized Route

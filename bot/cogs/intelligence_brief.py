@@ -140,6 +140,15 @@ class IntelligenceBrief(commands.Cog):
             return embed
 
         embed.description = f"Top opportunities for **{vehicle.get('name', ship_query)}**"
+        # Consistency fix: budget was already used above to build these routes, but never
+        # shown anywhere - unlike /mixed-routes, /multi-stop-route, and /route-on-the-way,
+        # which all surface it. Set BEFORE the field loop, not after - add_chunked_fields'
+        # own budget check measures the embed's real total via len(embed), which only
+        # includes the footer once it's actually set (see route_presentation.py's
+        # docstring and trends.py's identical footer-before-loop ordering).
+        footer_text = f"Budget {budget:,.0f} aUEC" if budget is not None else None
+        if footer_text:
+            embed.set_footer(text=footer_text)
         terminal_ids = [terminal_id for route in routes for terminal_id in (route.origin_id, route.destination_id)]
         health_rows = await self.bot.db.get_terminal_data_health_by_ids(terminal_ids)
         status_lookup = await self._get_status_lookup()
@@ -185,7 +194,8 @@ class IntelligenceBrief(commands.Cog):
 
         omitted = len(routes) - routes_shown
         if omitted > 0:
-            embed.set_footer(text=f"{omitted} more route(s) omitted - message size limit")
+            omission_note = f"{omitted} more route(s) omitted - message size limit"
+            embed.set_footer(text=f"{footer_text} · {omission_note}" if footer_text else omission_note)
         return embed
 
     def _market_shifts_embed(self, shifts: list[dict]) -> discord.Embed:

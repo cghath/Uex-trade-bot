@@ -480,7 +480,17 @@ class Trends(commands.Cog):
         footer = footer_note + " · " + SELL_SIDE_STATUS_CLARIFIER
         if updated_at:
             footer += f" · refreshed {updated_at.strftime('%Y-%m-%d %H:%M UTC')}"
-        if not ship_vehicle:
+        if ship_vehicle and ship_cargo_scu is not None:
+            # Consistency fix: a resolved ship used to only get named inside a per-route
+            # cargo line, and only for a route that happened to be ship-limited
+            # specifically (not stock- or budget-limited) - so the exact same ship, used
+            # to compute cargo/profit for every route shown, could go completely
+            # unnamed. Named here unconditionally instead, matching how /mixed-routes and
+            # /multi-stop-route already name theirs up front.
+            footer += f" · cargo/run-profit numbers use {ship_vehicle.get('name', ship_query)}'s {ship_cargo_scu:,.0f} SCU hold"
+        elif ship_vehicle:
+            footer += f" · using {ship_vehicle.get('name', ship_query)} (no cargo capacity on record)"
+        else:
             footer += " · set a default ship with /set-default-ship for cargo/run-profit numbers"
         if budget is not None:
             footer += f" · budget {budget:,.0f} aUEC"
@@ -628,6 +638,7 @@ class Trends(commands.Cog):
         strict="Require live stock at the origin and live demand at the destination (safer).",
         auto_load_only="Only show routes where both the origin and destination terminal offer UEX's auto-load",
         system="Optional: require both ends of the route to be in this star system",
+        budget="Optional: cap the cargo shown by how much you can actually afford to spend",
     )
     @app_commands.rename(auto_load_only="auto-load-only")
     @app_commands.choices(system=SYSTEM_CHOICES)
@@ -639,11 +650,19 @@ class Trends(commands.Cog):
         ship: str | None = None,
         auto_load_only: bool | None = None,
         system: app_commands.Choice[str] | None = None,
+        budget: app_commands.Range[float, 1, 1_000_000_000] | None = None,
     ) -> None:
         prefs = await self.bot.db.get_trading_preferences(interaction.user.id)
         if auto_load_only is None:
             auto_load_only = prefs["auto_load_only"]
         system_value = system.value if system else prefs["preferred_system"]
+        # Consistency fix: /mixed-routes, /multi-stop-route, and /route-on-the-way all
+        # already fall back to the saved trading-preference budget - /top-routes and
+        # /routes-from shared the exact same underlying cargo/budget machinery
+        # (_build_route_field, estimate_route_cargo) but never plumbed a budget option
+        # through to it at all, so a user's saved budget silently had no effect here.
+        if budget is None:
+            budget = prefs["budget"]
         if strict:
             async with self._top_in_stock_routes_lock:
                 entries = list(self._top_in_stock_routes)
@@ -681,6 +700,7 @@ class Trends(commands.Cog):
             auto_load_only=auto_load_only,
             system=system_value,
             risk_tolerance=prefs["risk_tolerance"],
+            budget=float(budget) if budget is not None else None,
         )
 
     @app_commands.command(name="routes-from", description="Best trade routes starting from wherever you currently are.")
@@ -690,6 +710,7 @@ class Trends(commands.Cog):
         strict="Require live stock at the origin and live demand at the destination (safer).",
         auto_load_only="Only show routes where both the origin and destination terminal offer UEX's auto-load",
         system="Optional: require the destination to be in this star system too",
+        budget="Optional: cap the cargo shown by how much you can actually afford to spend",
     )
     @app_commands.rename(auto_load_only="auto-load-only")
     @app_commands.choices(system=SYSTEM_CHOICES)
@@ -702,6 +723,7 @@ class Trends(commands.Cog):
         ship: str | None = None,
         auto_load_only: bool | None = None,
         system: app_commands.Choice[str] | None = None,
+        budget: app_commands.Range[float, 1, 1_000_000_000] | None = None,
     ) -> None:
         resolved = await self.bot.db.resolve_terminal_id_by_name(location)
         if resolved is None:
@@ -716,6 +738,9 @@ class Trends(commands.Cog):
         if auto_load_only is None:
             auto_load_only = prefs["auto_load_only"]
         system_value = system.value if system else prefs["preferred_system"]
+        # See /top-routes' own identical fix for why this consistency gap existed.
+        if budget is None:
+            budget = prefs["budget"]
 
         # Reuses the SAME background-refreshed candidate pool /top-routes reads from
         # (comprehensive across every commodity UEX has route data for, not truncated),
@@ -757,6 +782,7 @@ class Trends(commands.Cog):
             auto_load_only=auto_load_only,
             system=system_value,
             risk_tolerance=prefs["risk_tolerance"],
+            budget=float(budget) if budget is not None else None,
         )
 
     @app_commands.command(
