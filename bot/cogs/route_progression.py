@@ -641,17 +641,75 @@ class RouteProgression(commands.Cog):
         view = LegOutcomeView(cog=self, thread_id=thread_id, leg_index=leg_index, leg=leg)
         try:
             view.message = await thread.send(embed=embed, view=view)
-        except Exception:
-            # The claim above is not proof the send happened - a definite failure here
-            # must release it, or a retry's own claim attempt sees the index as already
-            # (falsely) advanced and silently skips resending. See
-            # release_route_progression_advance_claim's own docstring. Any exception
-            # counts, not just discord.HTTPException - a timeout or other transport
-            # failure leaves the send just as un-run (this was the audit's own finding).
+        except discord.HTTPException:
+            # A real HTTP response came back rejecting the request - Discord never
+            # created the message, so it's safe to release the claim and let a retry
+            # resend. See release_route_progression_advance_claim's own docstring.
             await self.bot.db.release_route_progression_advance_claim(
                 thread_id, claimed_index=leg_index, revert_to=leg_index - 1
             )
             raise
+        except Exception as exc:
+            # No confirmed response at all (a timeout or other transport failure) - unlike
+            # discord.HTTPException above, this does NOT prove the send never happened.
+            # Audit-confirmed defect #3: blindly releasing here (as this used to) risks a
+            # genuine duplicate live prompt if the message actually sent and only its
+            # confirmation was lost. Reconcile against Discord's own message history
+            # instead of guessing either way - see _find_sent_leg_prompt's docstring.
+            checked_ok, found = await self._find_sent_leg_prompt(thread, embed.title)
+            if found is not None:
+                # It really did send - only the confirmation was lost. thread.send()
+                # never returned, so discord.py never registered this view's buttons
+                # against the real message - re-attach them explicitly, and treat this
+                # as success: the claim stays held, nothing is released or re-raised.
+                view.message = found
+                self.bot.add_view(view, message_id=found.id)
+                return
+            if checked_ok:
+                # Confirmed genuinely absent from recent history - safe to release and
+                # let a retry resend, exactly like the discord.HTTPException case above.
+                await self.bot.db.release_route_progression_advance_claim(
+                    thread_id, claimed_index=leg_index, revert_to=leg_index - 1
+                )
+                raise
+            # Reconciliation itself couldn't get an answer (thread unreachable,
+            # permissions lost - a second, independent failure on top of the first).
+            # Genuinely ambiguous, so per this project's own "quarantine ambiguous
+            # outcomes, never blindly retry" convention: hold the claim rather than risk
+            # a duplicate. Unlike simply never releasing on every ambiguous failure, this
+            # is the rare case that's actually unresolvable - logged loudly rather than
+            # left as a silent stall, since every retry from here on will otherwise see
+            # the claim already held and quietly do nothing.
+            logger.error(
+                "Could not confirm whether the leg prompt for thread %s leg %d actually "
+                "sent (send failed with %s, and reconciling against thread history also "
+                "failed) - holding its claim rather than risking a duplicate; this route "
+                "needs manual review", thread_id, leg_index, type(exc).__name__,
+            )
+            raise
+
+    async def _find_sent_leg_prompt(
+        self, thread: discord.Thread, title: str
+    ) -> tuple[bool, discord.Message | None]:
+        """Reconciles an ambiguous thread.send() failure against Discord's own message
+        history - the only real way to know whether a leg prompt actually sent, rather
+        than guessing. Returns (True, message) if a matching message is found, (True,
+        None) if recent history was checked and it's genuinely absent, or (False, None)
+        if the check itself couldn't get an answer. Matches on author + exact embed title
+        only, no time window - a leg's title (which encodes its leg_index) is only ever
+        posted once per thread's lifetime, so any match in recent history is unambiguous
+        regardless of age."""
+        try:
+            async for message in thread.history(limit=10):
+                if (
+                    message.author.id == self.bot.user.id
+                    and message.embeds
+                    and message.embeds[0].title == title
+                ):
+                    return True, message
+            return True, None
+        except Exception:
+            return False, None
 
     async def handle_leg_outcome(
         self,

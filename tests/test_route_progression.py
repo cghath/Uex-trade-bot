@@ -6,7 +6,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace as NS
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import aiosqlite
 from cryptography.fernet import Fernet
@@ -2561,23 +2561,47 @@ def test_post_leg_prompt_send_failure_releases_the_claim_so_a_retry_can_resend(t
     asyncio.run(run())
 
 
-def test_post_leg_prompt_non_discord_send_failure_also_releases_the_claim(tmp_path):
-    """Audit's own literal scenario for defect #1: '_post_leg_prompt releases its durable
-    claim only for discord.HTTPException' - 'a timeout or other transport failure can
-    consume the claim; recovery later skips the prompt and deletes the queued action,
-    leaving the route stuck.' Proven here with a plain asyncio.TimeoutError, which is not
-    a discord.HTTPException, to confirm the broadened `except Exception:` actually covers
-    the failure mode the audit named, not just discord.py's own HTTP error type."""
+def _fake_history(messages: list):
+    """A stand-in for discord.Thread.history() - a callable that returns a fresh async
+    iterator over `messages` each time it's invoked, matching the real method's own
+    signature (called as `thread.history(limit=...)`)."""
+    def history(*, limit=None, **kwargs):
+        async def gen():
+            for message in messages:
+                yield message
+        return gen()
+    return history
+
+
+def _fake_sent_message(*, author_id: int, title: str, message_id: int = 999):
+    return NS(id=message_id, author=NS(id=author_id), embeds=[NS(title=title)])
+
+
+# -- _post_leg_prompt ambiguous-send reconciliation (2026-09-15 follow-up audit finding #3) -
+# Real gap: the broadened `except Exception:` above (audit-confirmed defect #1, fixed
+# earlier this session) released the durable claim for EVERY send failure, including an
+# ambiguous transport-level one where the message may have actually reached Discord and
+# only the confirmation was lost - releasing in that case lets a retry post a genuine
+# duplicate live prompt. These tests prove the reconciliation added to close that gap:
+# discord.HTTPException (a real rejection response) still releases immediately with no
+# history lookup; anything else first checks Discord's own message history before
+# deciding, and only releases when that check confirms the message is genuinely absent.
+
+def test_post_leg_prompt_ambiguous_failure_confirmed_absent_releases_the_claim(tmp_path):
+    """The message really didn't send (history confirms it) - safe to release and retry,
+    same outcome as a definite discord.HTTPException failure, just reached via a real
+    reconciliation check instead of assuming it from the exception type alone."""
     async def run():
         db = _make_db(tmp_path)
         await db.init()
         leg = _leg_input()
         await _create_thread_for_legs(db, 1, [leg])
         cog = RouteProgression.__new__(RouteProgression)
-        cog.bot = type("FakeBot", (), {"db": db})()
+        cog.bot = type("FakeBot", (), {"db": db, "user": NS(id=1), "add_view": Mock()})()
         cog._active_legs = {}
         channel = _fake_thread_channel()
         channel.send.side_effect = asyncio.TimeoutError("network hiccup")
+        channel.history = _fake_history([])  # nothing in recent history at all
 
         try:
             await cog._post_leg_prompt(channel, 1, 0, leg)
@@ -2590,6 +2614,77 @@ def test_post_leg_prompt_non_discord_send_failure_also_releases_the_claim(tmp_pa
         await cog._post_leg_prompt(channel, 1, 0, leg)
 
         assert channel.send.await_count == 1, "the retry must actually resend now that the claim was released"
+
+    asyncio.run(run())
+
+
+def test_post_leg_prompt_ambiguous_failure_confirmed_sent_holds_the_claim_and_reattaches_view(tmp_path):
+    """The message actually did send - only the confirmation was lost. Must NOT release
+    the claim (a retry would duplicate a genuinely live prompt) and must NOT propagate the
+    exception (this is a success, just a late-discovered one) - and since discord.py never
+    registered the view's buttons against a message it doesn't know exists, they must be
+    explicitly re-attached via bot.add_view so they still work."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        leg = _leg_input()
+        await _create_thread_for_legs(db, 1, [leg])
+        cog = RouteProgression.__new__(RouteProgression)
+        add_view = Mock()
+        cog.bot = type("FakeBot", (), {"db": db, "user": NS(id=1), "add_view": add_view})()
+        cog._active_legs = {}
+        channel = _fake_thread_channel()
+        channel.send.side_effect = asyncio.TimeoutError("network hiccup")
+        sent_message = _fake_sent_message(author_id=1, title="Leg 1: Buy Gold at Area18 TDD")
+        channel.history = _fake_history([sent_message])
+
+        await cog._post_leg_prompt(channel, 1, 0, leg)  # must not raise
+
+        add_view.assert_called_once()
+        assert add_view.call_args.kwargs["message_id"] == sent_message.id
+
+        # The claim must still be held - a second call for the same leg must not resend.
+        channel.send = AsyncMock()
+        await cog._post_leg_prompt(channel, 1, 0, leg)
+        channel.send.assert_not_awaited()
+
+    asyncio.run(run())
+
+
+def test_post_leg_prompt_ambiguous_failure_unreconcilable_holds_the_claim_but_still_raises(tmp_path):
+    """Reconciliation itself fails too (e.g. the thread became unreachable) - genuinely
+    can't tell whether the message sent. Per this project's "quarantine ambiguous outcomes,
+    never blindly retry" convention, the claim must NOT be released (that would risk a
+    duplicate if it actually did send) - but the original exception must still propagate,
+    so this is logged/retried rather than silently swallowed as if it were a success."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        leg = _leg_input()
+        await _create_thread_for_legs(db, 1, [leg])
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db, "user": NS(id=1), "add_view": Mock()})()
+        cog._active_legs = {}
+        channel = _fake_thread_channel()
+        channel.send.side_effect = asyncio.TimeoutError("network hiccup")
+
+        def broken_history(*, limit=None, **kwargs):
+            raise discord.Forbidden(NS(status=403, reason="x"), "lost channel access")
+        channel.history = broken_history
+
+        try:
+            await cog._post_leg_prompt(channel, 1, 0, leg)
+        except asyncio.TimeoutError:
+            pass
+        else:
+            raise AssertionError("the original send failure must still propagate")
+
+        # The claim must still be held (not released) - a retry must not resend, since
+        # whether the first attempt actually landed was never actually resolved.
+        channel.send = AsyncMock()
+        channel.history = _fake_history([])
+        await cog._post_leg_prompt(channel, 1, 0, leg)
+        channel.send.assert_not_awaited()
 
     asyncio.run(run())
 

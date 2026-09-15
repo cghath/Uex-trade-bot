@@ -1188,6 +1188,34 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
   broadened `except discord.HTTPException:` to `except Exception:` around `thread.delete()`,
   matching the exception-breadth fix already applied to every other route-progression call
   site. 3 new tests. Full suite and clean lint reverified.
+- [x] **Route Progression: Ambiguous-Send Reconciliation**: Shipped 2026-09-15. The same
+  follow-up audit's finding #3, done as its own design discussion given the real
+  trade-off involved: `_post_leg_prompt`'s claim-release-on-failure guard (see the
+  exception-breadth fix earlier in this list) released the durable
+  `claim_route_progression_advance` claim for EVERY `thread.send()` failure, including a
+  transport-level timeout where the message may have actually reached Discord and only
+  its confirmation was lost - releasing in that case lets a retry post a genuine
+  duplicate live prompt into the thread. Investigation found the "obvious" fix (just
+  never release on anything but `discord.HTTPException`) is not actually safer: every
+  retry path here (`_record_leg_outcome_durably`'s bounded 3-attempt retry, and the
+  15-minute `retry_pending_route_progression_actions` poller after that, indefinitely)
+  sees an already-held claim as "nothing to do, return quietly" with no error and no log
+  - so a genuinely un-sent message under that naive fix would leave the route silently
+  and permanently stuck at that leg, strictly worse than today's rare, visible,
+  self-healing duplicate. Fixed instead by resolving the ambiguity rather than guessing:
+  on any non-`discord.HTTPException` failure, `_find_sent_leg_prompt` checks the thread's
+  recent message history (author + exact embed title match, unambiguous since a leg's
+  title encodes its leg_index and is only ever posted once per thread) before deciding -
+  confirmed sent: hold the claim, treat as success, and explicitly re-attach the view's
+  buttons via `bot.add_view(view, message_id=...)` (discord.py never got to register them
+  client-side, since that only happens after a successful `.send()` response, which never
+  arrived here); confirmed absent: release the claim exactly like a definite
+  `discord.HTTPException` failure; the check itself fails too (thread unreachable,
+  permissions lost): hold the claim without releasing it (per this project's own
+  "quarantine ambiguous outcomes, never blindly retry" convention - a duplicate is worse
+  to risk than a stall in that doubly-rare case), but log at ERROR specifically so it's
+  discoverable rather than a silent stall like the naive fix would produce everywhere. 3
+  new/rewritten tests covering all three outcomes. Full suite and clean lint reverified.
 - [ ] **Codebase Consolidation** *(complexity: High, ongoing)*: Beyond route rendering,
   organize `bot/db/database.py`'s ~30 tables by feature and keep one authoritative
   description of current behavior. Broader than a single ticket - Centralized Route
