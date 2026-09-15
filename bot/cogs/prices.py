@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 
 import discord
 from discord import app_commands
@@ -82,6 +83,23 @@ def _positive_float(value: object) -> float | None:
     except (TypeError, ValueError):
         return None
     return parsed if parsed > 0 else None
+
+
+def _nonnegative_float(value: object) -> float | None:
+    """Like _positive_float, but preserves a genuine zero instead of discarding it.
+    _positive_float's exclude-zero behavior is correct for a QUOTED buying/selling
+    figure (a real transaction amount of zero isn't meaningful) - but current STOCK is a
+    state reading, not a transaction, and a terminal genuinely holding none right now is
+    real, useful information, not the same as 'no data at all'. Audit-confirmed
+    carry-forward defect: using _positive_float for scu_sell_stock silently suppressed
+    estimate_sell_capacity_from_history's own historical-peak estimate for every
+    genuinely empty terminal, even though that function already accepts and uses a real
+    0.0 current_stock to compute one."""
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) and parsed >= 0 else None
 
 
 async def commodity_name_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
@@ -254,7 +272,12 @@ class Prices(commands.Cog):
                 terminal_id = _positive_int(r.get("id_terminal"))
                 freshness = freshness_label(health_by_terminal.get(terminal_id))
                 capacity = effective_sell_scu(r.get("scu_sell"), r.get("status_sell"))
-                stock = _positive_float(r.get("scu_sell_stock"))
+                # Audit-confirmed carry-forward defect: _positive_float discarded a
+                # genuine zero, so a currently-empty terminal (real, useful information -
+                # not "no data") silently lost its historical-peak estimate below, even
+                # though estimate_sell_capacity_from_history already accepts and uses a
+                # real 0.0 current_stock to compute one.
+                stock = _nonnegative_float(r.get("scu_sell_stock"))
                 estimate = (
                     estimate_sell_capacity_from_history(history_by_terminal[terminal_id], stock)
                     if not capacity and terminal_id in history_by_terminal
@@ -273,11 +296,14 @@ class Prices(commands.Cog):
                         else ""
                     )
                     capacity_text = f" · est. buying ~{estimate.scu:,.0f} SCU{age_note}"
-                elif stock:
+                elif stock is not None:
                     # UEX has no recorded "amount actually bought" for this terminal, but
                     # does report its own on-hand stock of the commodity - a DIFFERENT
                     # figure (the terminal's inventory level, not a buying figure) shown
-                    # distinctly so it's never mistaken for the real thing.
+                    # distinctly so it's never mistaken for the real thing. `is not None`,
+                    # not a truthy check - stock=0.0 (genuinely empty right now) is real,
+                    # useful information and must not silently fall through to no display
+                    # at all, same reasoning as switching to _nonnegative_float above.
                     capacity_text = f" · holds ~{stock:,.0f} SCU already"
                 else:
                     capacity_text = ""
@@ -435,7 +461,34 @@ class Prices(commands.Cog):
                 if terminal_id is not None
             ]
             terminal_references = await self.bot.db.get_terminal_references_by_ids(route_terminal_ids)
-            candidates = uex_routes
+            # Audit-confirmed real defect: this used to rank straight from uex_routes with
+            # no baseline filter at all - not even real stock at the origin, and no check
+            # that profit is actually positive. UEX's own /commodities_routes can include
+            # a route where the destination price is below the origin's; without this,
+            # the "top 5 by profit" could show a route that loses money, or one with no
+            # real stock to even buy, as if either were a real recommendation. Matches the
+            # same bar select_available_routes (bot/uex/trends.py) uses for /top-routes -
+            # real buy-side stock at the origin, and a genuinely positive profit figure.
+            # Audit-confirmed real defect: this used to rank straight from uex_routes with
+            # no baseline filter at all - not even real stock at the origin, and no check
+            # that profit is actually positive. UEX's own /commodities_routes can include
+            # a route where the destination price is below the origin's; without this,
+            # the "top 5 by profit" could show a route that loses money, or one with no
+            # real stock to even buy, as if either were a real recommendation. Matches the
+            # same bar select_available_routes (bot/uex/trends.py) uses for /top-routes -
+            # real buy-side stock at the origin, and a genuinely positive profit figure.
+            candidates = [
+                r
+                for r in uex_routes
+                if (r.get("price_origin") or 0) > 0
+                and (r.get("scu_origin") or 0) > 0
+                and (r.get("profit") or 0) > 0
+            ]
+            if not candidates:
+                await interaction.followup.send(
+                    f"No profitable routes with real stock found for '{commodity_display}' right now."
+                )
+                return
             if auto_load_only:
                 candidates = [
                     r for r in candidates

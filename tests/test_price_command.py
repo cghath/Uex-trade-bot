@@ -263,6 +263,58 @@ def test_price_falls_back_to_plain_stock_when_already_at_the_historical_peak(tmp
     asyncio.run(run())
 
 
+def test_price_shows_an_estimate_for_a_terminal_currently_holding_zero_stock(tmp_path):
+    """Carry-forward defect from the 2026-09-13 audit: current stock used to be parsed
+    with _positive_float, which discards a genuine zero - a terminal that's actually
+    sold out RIGHT NOW (real, useful information, not the same as "no data") silently
+    lost its historical-peak estimate entirely, even though estimate_sell_capacity_from_
+    history already accepts and uses a real 0.0 current_stock to compute one."""
+    async def run():
+        db = Database(tmp_path / "price_zero_stock_estimate.sqlite3", Fernet(Fernet.generate_key()))
+        await db.init()
+        rows = [
+            {"id_terminal": 1, "id_commodity": 99, "terminal_name": "Terminal A", "commodity_name": "Gold",
+             "price_sell": 100.0, "scu_sell": 0, "scu_sell_stock": 0, "status_sell": 1},
+        ]
+        history = {1: [{"scu_sell_stock": 1000, "date_added": 1000}]}
+        cog = _cog(db, price_rows=rows, history_by_terminal=history)
+        interaction = _FakeInteraction()
+
+        await cog.price.callback(cog, interaction, commodity="Gold")
+
+        embed = interaction.followup.send.call_args.kwargs["embed"]
+        fields = {f.name: f.value for f in embed.fields}
+        line = fields["Best places to SELL"]
+        assert "est. buying ~1,000 SCU" in line, f"must show the full historical peak as the estimate: {line!r}"
+
+    asyncio.run(run())
+
+
+def test_price_shows_zero_on_hand_stock_when_genuinely_empty_with_no_history(tmp_path):
+    """Same carry-forward defect, the OTHER fallback branch: even once current stock is
+    correctly parsed as a real 0.0 rather than None, a terminal with no usable history to
+    estimate from must still show "holds ~0 SCU already" - not silently nothing - since a
+    plain truthy check on stock=0.0 is falsy too."""
+    async def run():
+        db = Database(tmp_path / "price_zero_stock_no_history.sqlite3", Fernet(Fernet.generate_key()))
+        await db.init()
+        rows = [
+            {"id_terminal": 1, "terminal_name": "Terminal A", "commodity_name": "Gold",
+             "price_sell": 100.0, "scu_sell": 0, "scu_sell_stock": 0, "status_sell": 1},
+        ]
+        cog = _cog(db, price_rows=rows)
+        interaction = _FakeInteraction()
+
+        await cog.price.callback(cog, interaction, commodity="Gold")
+
+        embed = interaction.followup.send.call_args.kwargs["embed"]
+        fields = {f.name: f.value for f in embed.fields}
+        line = fields["Best places to SELL"]
+        assert "holds ~0 SCU already" in line
+
+    asyncio.run(run())
+
+
 def test_price_prefers_the_real_buying_amount_over_the_stock_fallback(tmp_path):
     """When UEX DOES report a real scu_sell figure, the on-hand-stock fallback must not
     also be shown - the real buying amount always wins when both are present."""

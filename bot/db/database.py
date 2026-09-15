@@ -587,6 +587,7 @@ CREATE TABLE IF NOT EXISTS route_progression_legs (
     actual_scu REAL,
     precision TEXT CHECK (precision IN ('exact', 'floor')),
     reported_at TEXT,
+    market_update_applied_at TEXT,
     UNIQUE (thread_id, leg_index)
 );
 CREATE INDEX IF NOT EXISTS idx_route_progression_legs_thread
@@ -943,6 +944,16 @@ class Database:
             # is old on UEX's own side too" apart from "we just haven't re-collected it."
             "ALTER TABLE refinery_yield_observations ADD COLUMN date_added INTEGER",
             "ALTER TABLE refinery_yield_observations ADD COLUMN date_modified INTEGER",
+            # Audit-confirmed carry-forward defect: a retried/replayed leg report (after a
+            # delivery failure, or via the durable recovery queue) always re-applied its
+            # terminal_market_state update unconditionally - if anything else (a fresh UEX
+            # collector snapshot, a different leg touching the same commodity/terminal)
+            # wrote a newer value in the meantime, the replay silently overwrote it with
+            # this report's own stale one. Marks whether THIS leg's update has already been
+            # successfully applied, so a same-report replay can skip re-applying it once it
+            # has - see record_player_report_market_update's own docstring for why this is
+            # set atomically alongside the write itself, not as a separate step.
+            "ALTER TABLE route_progression_legs ADD COLUMN market_update_applied_at TEXT",
         ]
         for statement in migrations:
             try:
@@ -1096,7 +1107,9 @@ class Database:
         "price_buy", "price_sell", "scu_buy", "scu_sell", "status_buy", "status_sell",
     )
 
-    async def record_player_report_market_update(self, row: dict[str, Any]) -> None:
+    async def record_player_report_market_update(
+        self, row: dict[str, Any], *, thread_id: int, leg_index: int
+    ) -> None:
         """Merge ONE confirmed player-reported leg outcome into terminal_market_state,
         touching only the side's fields the outcome actually carries - unlike
         record_terminal_market_snapshot's full-row UEX-collector semantics (a complete
@@ -1117,6 +1130,19 @@ class Database:
         record_terminal_market_snapshot's own change-only history semantics - a 'matched'
         re-confirmation that happens to match what's already stored doesn't create a
         spurious observation.
+
+        Also marks route_progression_legs.market_update_applied_at for (thread_id,
+        leg_index) in this SAME transaction (one connection, one commit) - audit-confirmed
+        carry-forward defect: the caller (handle_leg_outcome) must never call this again
+        for a leg once it's applied, since terminal_market_state may have moved on to
+        something newer by the time a replay reaches here, and reapplying this report's
+        own values would silently clobber it. The marker has to land in the SAME commit as
+        the write it's guarding - marking it in a separate call, before this one, would
+        mean a failure in the write below leaves it falsely marked "applied" with nothing
+        actually written; marking it after, in a separate call, would mean a crash between
+        the two leaves it un-marked, which is safe (a retry just re-applies once more) but
+        only if callers can't observe a nonatomic half-state in between, which a single
+        transaction guarantees and two separate calls would not.
         """
         id_commodity = self._integer(row.get("id_commodity"))
         id_terminal = self._integer(row.get("id_terminal"))
@@ -1182,6 +1208,11 @@ class Database:
                         existing.get("sell_report_count") if existing else None,
                     ),
                 )
+            await db.execute(
+                """UPDATE route_progression_legs SET market_update_applied_at = datetime('now')
+                   WHERE thread_id = ? AND leg_index = ? AND market_update_applied_at IS NULL""",
+                (thread_id, leg_index),
+            )
             await db.commit()
 
     async def suppress_terminal_market_side(

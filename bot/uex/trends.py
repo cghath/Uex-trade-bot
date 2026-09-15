@@ -196,7 +196,17 @@ def select_available_routes(
     candidates = [
         r
         for r in route_rows
-        if (r.get("price_origin") or 0) > 0 and (r.get("scu_origin") or 0) > 0 and r.get("profit") is not None
+        # profit must be POSITIVE, not just present - audit-confirmed real defect: UEX's
+        # own /commodities_routes can include a route where the destination price is
+        # below the origin's, and without this check it could still fill a remaining
+        # "top N" slot once genuinely profitable candidates from this origin run out,
+        # showing a route that loses money as if it were a real recommendation.
+        # best_routes (bot/uex/trading.py) and build_pair_opportunities
+        # (bot/uex/mixed_routes.py) already require this same positive-margin bar; this
+        # was the one place in the route-ranking family that didn't.
+        if (r.get("price_origin") or 0) > 0
+        and (r.get("scu_origin") or 0) > 0
+        and (r.get("profit") or 0) > 0
     ]
     entries = [_build_scored_route_entry(commodity_name, id_commodity, r) for r in candidates]
     entries.sort(key=_profit_rank_key, reverse=True)
@@ -244,7 +254,9 @@ def select_in_stock_routes(
         and (r.get("scu_origin") or 0) > 0
         and (r.get("price_destination") or 0) > 0
         and has_sell_side_demand(r.get("scu_destination"), r.get("status_destination"))
-        and r.get("profit") is not None
+        # profit must be POSITIVE, not just present - see select_available_routes's own
+        # comment on the identical check for the full explanation of this real defect.
+        and (r.get("profit") or 0) > 0
     ]
     entries = [_build_scored_route_entry(commodity_name, id_commodity, r) for r in candidates]
     entries.sort(key=_profit_rank_key, reverse=True)

@@ -456,10 +456,13 @@ def test_record_player_report_market_update_preserves_the_unreported_side_and_me
             price_buy=100, price_sell=90, scu_buy=50, scu_sell=80, status_buy=3, status_sell=2,
             quality=4, volatility_price_buy=2, price_sell_users_rows=7,
         )])
-        await db.record_player_report_market_update({
-            "id_commodity": 1, "id_terminal": 10, "commodity_name": "Gold",
-            "terminal_name": "Area18 TDD", "price_buy": 100, "scu_buy": 50, "status_buy": 3,
-        })
+        await db.record_player_report_market_update(
+            {
+                "id_commodity": 1, "id_terminal": 10, "commodity_name": "Gold",
+                "terminal_name": "Area18 TDD", "price_buy": 100, "scu_buy": 50, "status_buy": 3,
+            },
+            thread_id=1, leg_index=0,
+        )
         async with db.connect() as conn:
             cursor = await conn.execute(
                 "SELECT * FROM terminal_market_state WHERE id_commodity = 1 AND id_terminal = 10"
@@ -486,10 +489,13 @@ def test_record_player_report_market_update_preserves_the_buy_side_on_a_sell_rep
             id_commodity=1, id_terminal=10, commodity_name="Gold", terminal_name="Area18 TDD",
             price_buy=100, price_sell=90, scu_buy=50, scu_sell=80, status_buy=3, status_sell=2,
         )])
-        await db.record_player_report_market_update({
-            "id_commodity": 1, "id_terminal": 10, "commodity_name": "Gold",
-            "terminal_name": "Area18 TDD", "price_sell": 95, "scu_sell": 20, "status_sell": None,
-        })
+        await db.record_player_report_market_update(
+            {
+                "id_commodity": 1, "id_terminal": 10, "commodity_name": "Gold",
+                "terminal_name": "Area18 TDD", "price_sell": 95, "scu_sell": 20, "status_sell": None,
+            },
+            thread_id=1, leg_index=0,
+        )
         async with db.connect() as conn:
             cursor = await conn.execute(
                 "SELECT * FROM terminal_market_state WHERE id_commodity = 1 AND id_terminal = 10"
@@ -515,10 +521,13 @@ def test_record_player_report_market_update_a_present_none_writes_a_real_null(tm
             id_commodity=1, id_terminal=10, commodity_name="Gold", terminal_name="Area18 TDD",
             price_buy=100, scu_buy=50, status_buy=3,
         )])
-        await db.record_player_report_market_update({
-            "id_commodity": 1, "id_terminal": 10, "commodity_name": "Gold",
-            "terminal_name": "Area18 TDD", "price_buy": None, "scu_buy": 0.0, "status_buy": 1,
-        })
+        await db.record_player_report_market_update(
+            {
+                "id_commodity": 1, "id_terminal": 10, "commodity_name": "Gold",
+                "terminal_name": "Area18 TDD", "price_buy": None, "scu_buy": 0.0, "status_buy": 1,
+            },
+            thread_id=1, leg_index=0,
+        )
         async with db.connect() as conn:
             cursor = await conn.execute(
                 "SELECT * FROM terminal_market_state WHERE id_commodity = 1 AND id_terminal = 10"
@@ -537,10 +546,13 @@ def test_record_player_report_market_update_creates_a_new_row_when_none_existed(
     async def run():
         db = _make_db(tmp_path)
         await db.init()
-        await db.record_player_report_market_update({
-            "id_commodity": 1, "id_terminal": 10, "commodity_name": "Gold",
-            "terminal_name": "Area18 TDD", "price_buy": 100.0, "scu_buy": 50.0, "status_buy": 3,
-        })
+        await db.record_player_report_market_update(
+            {
+                "id_commodity": 1, "id_terminal": 10, "commodity_name": "Gold",
+                "terminal_name": "Area18 TDD", "price_buy": 100.0, "scu_buy": 50.0, "status_buy": 3,
+            },
+            thread_id=1, leg_index=0,
+        )
         async with db.connect() as conn:
             cursor = await conn.execute(
                 "SELECT * FROM terminal_market_state WHERE id_commodity = 1 AND id_terminal = 10"
@@ -925,16 +937,24 @@ class _FakeCog:
     exercise the durable-commit-point call sites (_record_leg_outcome_durably/
     _abandon_thread_durably), matching what the real Views/Modals call, but without the
     real retry wrapper's own behavior - see test_route_progression_retry.py-style tests
-    further down for that."""
-    def __init__(self):
+    further down for that.
+
+    handled defaults to True (the ordinary case: the real method's return value says the
+    outcome/abandon was recorded outright or durably queued) - a test proving the carry-
+    forward "neither succeeded, restore reportability" defect sets it False to simulate
+    the real method's own False return."""
+    def __init__(self, *, handled: bool = True):
         self.calls = []
         self.abandon_calls = []
+        self.handled = handled
 
     async def _record_leg_outcome_durably(self, channel, thread_id, leg_index, leg, **kwargs):
         self.calls.append((thread_id, leg_index, leg, kwargs))
+        return self.handled
 
     async def _abandon_thread_durably(self, channel, thread_id, **kwargs):
         self.abandon_calls.append((thread_id, kwargs))
+        return self.handled
 
 
 def _leg_input(**overrides):
@@ -1057,6 +1077,55 @@ def test_a_failed_acknowledgement_releases_the_claim_so_a_retry_can_record_the_o
         await view.matched.callback(retry)
         assert view.resolved is True
         assert len(cog.calls) == 1, "the retry must actually record the outcome"
+
+    asyncio.run(run())
+
+
+def test_disable_in_background_swallows_any_exception_not_just_http():
+    """Carry-forward defect from the 2026-09-13 audit: disable_in_background (the
+    PARENT view's own purely cosmetic message edit - separate from the interaction's own
+    acknowledgement) used to catch only discord.HTTPException. It holds no claim of its
+    own to release, but every real caller invokes it BETWEEN their own successful
+    acknowledgement and the real durable write - so a non-HTTPException escaping here
+    (a raw transport timeout, not a real Discord error response) skipped that durable
+    call entirely, even though the leg was already claimed and the user already saw it
+    acknowledged. Fixed by swallowing any exception, not just discord.HTTPException -
+    nothing durable rides on this specific edit landing."""
+    async def run():
+        cog = _FakeCog()
+        view = LegOutcomeView(cog=cog, thread_id=1, leg_index=0, leg=_leg_input())
+        broken_message = _FakeMessage()
+        broken_message.edit = AsyncMock(side_effect=RuntimeError("connection reset"))
+        view.message = broken_message
+
+        await view.disable_in_background("some outcome line")  # must not raise
+
+    asyncio.run(run())
+
+
+def test_disable_in_background_failure_does_not_block_the_durable_abandon_call():
+    """Same defect, proven end-to-end through one of its four real call sites -
+    AbandonConfirmView.confirm, matching the audit's own literal reproduction. The
+    interaction's own acknowledgement succeeds; only the SEPARATE parent-message cosmetic
+    edit inside disable_in_background fails. Before the fix, that RuntimeError escaped
+    disable_in_background uncaught and _abandon_thread_durably was never called - the
+    route was left claimed/locked with nothing actually persisted. The identical shape
+    covers the other three call sites (ActualAmountModal's 'less' flow and both
+    MoreOutcomeFollowupView buttons), which all share this same disable_in_background
+    call, so a per-call-site regression test isn't needed for each of them."""
+    async def run():
+        cog = _FakeCog()
+        view = LegOutcomeView(cog=cog, thread_id=1, leg_index=0, leg=_leg_input())
+        broken_message = _FakeMessage(embeds=[discord.Embed(description="Quoted: 100.00 aUEC/unit · 50 SCU")])
+        broken_message.edit = AsyncMock(side_effect=RuntimeError("connection reset"))
+        view.message = broken_message
+        confirm_view = AbandonConfirmView(cog=cog, thread_id=1, parent_view=view)
+
+        await confirm_view.confirm.callback(_FakeInteraction())  # must not raise
+
+        assert len(cog.abandon_calls) == 1, (
+            "the durable abandon call must still run despite the cosmetic parent-message edit failing"
+        )
 
     asyncio.run(run())
 
@@ -1185,6 +1254,91 @@ def test_a_non_discord_failed_more_outcome_followup_acknowledgement_also_release
         await followup.drained.callback(_FakeInteraction())
         assert view.resolved is True
         assert len(cog.calls) == 1
+
+    asyncio.run(run())
+
+
+# -- Restoring real reportability when BOTH the save and its durable recovery fail ------
+# Carry-forward defect from the 2026-09-13 audit: _record_leg_outcome_durably/
+# _abandon_thread_durably's final notice ("please report this leg again") used to go out
+# regardless of whether the button the user would need to click for that was still
+# usable - claim() had already disabled it, and disable_in_background had already pushed
+# that disabled state to the real Discord message, so "report it again" was a dead end
+# even though the message said otherwise. Fixed by having both methods return whether
+# they actually handled it (recorded outright or durably queued) and having every caller
+# release the claim AND re-push the now-re-enabled view when they return False - proven
+# here via _FakeCog(handled=False), which simulates that real False return.
+
+def test_matched_button_restores_reportability_when_recovery_also_fails():
+    async def run():
+        cog = _FakeCog(handled=False)
+        view = LegOutcomeView(cog=cog, thread_id=1, leg_index=0, leg=_leg_input())
+        message = _FakeMessage(embeds=[discord.Embed(description="Quoted: 100.00 aUEC/unit · 50 SCU")])
+        view.message = message
+
+        await view.matched.callback(_FakeInteraction())
+
+        assert view.resolved is False, "the leg must become reportable again"
+        assert all(not item.disabled for item in view.children), "buttons must be re-enabled"
+        assert message.edits[-1]["view"] is view, "the real Discord message must reflect it"
+
+    asyncio.run(run())
+
+
+def test_less_modal_restores_reportability_when_recovery_also_fails():
+    async def run():
+        cog = _FakeCog(handled=False)
+        view = LegOutcomeView(cog=cog, thread_id=1, leg_index=0, leg=_leg_input())
+        message = _FakeMessage(embeds=[discord.Embed(description="Quoted: 100.00 aUEC/unit · 50 SCU")])
+        view.message = message
+        modal = ActualAmountModal(
+            cog=cog, thread_id=1, leg_index=0, leg=view.leg, flow="less", parent_view=view
+        )
+        modal.scu_input._value = "20"
+        modal.price_input._value = ""
+
+        await modal.on_submit(_FakeInteraction())
+
+        assert view.resolved is False, "the leg must become reportable again"
+        assert all(not item.disabled for item in view.children), "buttons must be re-enabled"
+        assert message.edits[-1]["view"] is view, "the real Discord message must reflect it"
+
+    asyncio.run(run())
+
+
+def test_more_outcome_followup_restores_reportability_when_recovery_also_fails():
+    async def run():
+        cog = _FakeCog(handled=False)
+        view = LegOutcomeView(cog=cog, thread_id=1, leg_index=0, leg=_leg_input())
+        message = _FakeMessage(embeds=[discord.Embed(description="Quoted: 100.00 aUEC/unit · 50 SCU")])
+        view.message = message
+        followup = MoreOutcomeFollowupView(
+            cog=cog, thread_id=1, leg_index=0, leg=view.leg, actual_price=None, actual_scu=80.0,
+            parent_view=view,
+        )
+
+        await followup.drained.callback(_FakeInteraction())
+
+        assert view.resolved is False, "the leg must become reportable again"
+        assert all(not item.disabled for item in view.children), "buttons must be re-enabled"
+        assert message.edits[-1]["view"] is view, "the real Discord message must reflect it"
+
+    asyncio.run(run())
+
+
+def test_abandon_confirm_restores_reportability_when_recovery_also_fails():
+    async def run():
+        cog = _FakeCog(handled=False)
+        view = LegOutcomeView(cog=cog, thread_id=1, leg_index=0, leg=_leg_input())
+        message = _FakeMessage(embeds=[discord.Embed(description="Quoted: 100.00 aUEC/unit · 50 SCU")])
+        view.message = message
+        confirm_view = AbandonConfirmView(cog=cog, thread_id=1, parent_view=view)
+
+        await confirm_view.confirm.callback(_FakeInteraction())
+
+        assert view.resolved is False, "the leg must become reportable again"
+        assert all(not item.disabled for item in view.children), "buttons must be re-enabled"
+        assert message.edits[-1]["view"] is view, "the real Discord message must reflect it"
 
     asyncio.run(run())
 
@@ -2310,6 +2464,64 @@ def test_handle_leg_outcome_a_conflicting_second_report_does_not_overwrite_or_re
         assert (1, 10) not in result, (
             "the rejected 'missing' report must never reach terminal_market_state/suppression - "
             "'matched' (the real winner) doesn't suppress anything"
+        )
+
+    asyncio.run(run())
+
+
+def test_handle_leg_outcome_same_report_retry_does_not_clobber_newer_market_data(tmp_path):
+    """Carry-forward defect from the 2026-09-13 audit, still reproducible before this fix:
+    a same-report replay (exactly what a delivery-failure retry, or the durable recovery
+    queue picking the leg back up later, produces) used to reapply ITS OWN report's
+    market-state values unconditionally - even long after something else (another leg's
+    report, a fresh UEX collector snapshot) had already written something genuinely newer
+    for the same (commodity, terminal) pair. Reproduced directly: record the outcome once
+    (the real first write), let a newer snapshot land, then replay the IDENTICAL report a
+    second time - record_route_progression_leg_outcome's own idempotency means this hits
+    the same-report-retried fallthrough, not a fresh write - and confirm the newer data
+    survives untouched instead of reverting to the original report's now-stale price."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await _seed_market_row(db)
+        leg0 = _leg_input(id_terminal=10, id_commodity=1, quoted_price=100.0, quoted_scu=50.0, quoted_status=3)
+        leg1 = _leg_input(
+            side="sell", id_terminal=20, id_commodity=1, terminal_name="Elsewhere",
+            display_label="Sell Gold at Elsewhere", quoted_price=90.0, quoted_scu=40.0, quoted_status=2,
+        )
+        # Two legs, not one - a single-leg thread's first handle_leg_outcome call
+        # completes the route, which calls channel.edit() to archive it; the fake channel
+        # only stubs send(). Reporting only leg 0 here sidesteps that entirely and matches
+        # the conflicting-report test's own established pattern above.
+        await _create_thread_for_legs(db, 1, [leg0, leg1])
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db})()
+        cog._active_legs = {1: [leg0, leg1]}
+        channel = _fake_thread_channel()
+
+        await cog.handle_leg_outcome(channel, 1, 0, leg0, outcome="matched")
+
+        async def _price_buy() -> float:
+            async with db.connect() as conn:
+                cursor = await conn.execute(
+                    "SELECT price_buy FROM terminal_market_state WHERE id_commodity = 1 AND id_terminal = 10"
+                )
+                return (await cursor.fetchone())["price_buy"]
+
+        assert await _price_buy() == 100.0, "the original report's own write must land as usual"
+
+        # Something else updates the SAME pair with a genuinely newer price in the
+        # meantime - a fresh UEX collector snapshot, or a different leg's own report.
+        await db.record_terminal_market_snapshot([dict(
+            id_commodity=1, id_terminal=10, commodity_name="Gold", terminal_name="Area18 TDD",
+            price_buy=999.0, price_sell=90, scu_buy=50, scu_sell=40, status_buy=3, status_sell=2,
+        )])
+
+        # A retry replays the IDENTICAL report.
+        await cog.handle_leg_outcome(channel, 1, 0, leg0, outcome="matched")
+
+        assert await _price_buy() == 999.0, (
+            "the replay must not clobber the newer price with its own now-stale report"
         )
 
     asyncio.run(run())

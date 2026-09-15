@@ -805,6 +805,22 @@ def test_evidence_level_demand_side_ignores_a_live_figure_when_status_confirms_n
     assert level.quantity_scu == 0
 
 
+def test_evidence_level_demand_side_confirms_zero_even_with_no_live_scu_when_status_says_no_demand():
+    """Carry-forward defect from the 2026-09-13 audit: the status-7 override right above
+    used to run ONLY when scu was also present - a MISSING scu_sell let the history
+    fallback below quietly report 'inferred demand, N% historically available' for a
+    terminal UEX itself already confirms has zero real demand right now, exactly the
+    same self-contradiction the live-figure case above exists to prevent. status_sell==7
+    is authoritative on its own, independent of whether a live quantity happens to be
+    reported at all."""
+    level = classify_supply_evidence(
+        scu=None, health=_fresh_health(), history=_long_history(), side="demand", status_sell=7,
+    )
+    assert level.tier == "current", "must be a confirmed zero, not an inferred historical guess"
+    assert level.quantity_scu == 0
+    assert level.historical_availability_pct is None
+
+
 def test_evidence_level_demand_side_trusts_a_live_figure_when_status_does_not_say_no_demand():
     """Only status code 7 is an authoritative zero-demand signal - any other status
     (including unknown/None) must never override a genuinely reported live figure."""

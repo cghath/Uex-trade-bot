@@ -182,10 +182,16 @@ class ActualAmountModal(discord.ui.Modal):
                 raise
             outcome_line = describe_leg_outcome(outcome=outcome, actual_price=actual_price, actual_scu=actual_scu)
             await self.parent_view.disable_in_background(outcome_line)
-            await self.cog._record_leg_outcome_durably(
+            handled = await self.cog._record_leg_outcome_durably(
                 interaction.channel, self.thread_id, self.leg_index, self.leg,
                 outcome=outcome, actual_price=actual_price, actual_scu=actual_scu,
             )
+            if not handled:
+                # Carry-forward audit defect: neither the outcome nor its durable
+                # recovery could be saved - restore the PARENT view's real reportability
+                # (this modal's own ephemeral response already served its purpose).
+                self.parent_view.release_claim()
+                await self.parent_view.reenable_in_background()
         else:
             # "more" still doesn't commit here - MoreOutcomeFollowupView's own buttons are
             # the real commit point for this flow, same reasoning as this modal itself.
@@ -251,10 +257,16 @@ class MoreOutcomeFollowupView(discord.ui.View):
             outcome="more", actual_price=self.actual_price, actual_scu=self.actual_scu, precision="exact",
         )
         await self.parent_view.disable_in_background(outcome_line)
-        await self.cog._record_leg_outcome_durably(
+        handled = await self.cog._record_leg_outcome_durably(
             interaction.channel, self.thread_id, self.leg_index, self.leg,
             outcome="more", actual_price=self.actual_price, actual_scu=self.actual_scu, precision="exact",
         )
+        if not handled:
+            # Carry-forward audit defect: neither the outcome nor its durable recovery
+            # could be saved - restore the PARENT view's real reportability (this
+            # follow-up view's own ephemeral message already served its purpose).
+            self.parent_view.release_claim()
+            await self.parent_view.reenable_in_background()
 
     @discord.ui.button(label="I was capped, more was there", style=discord.ButtonStyle.gray)
     async def capacity_limited(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
@@ -271,10 +283,13 @@ class MoreOutcomeFollowupView(discord.ui.View):
             outcome="more", actual_price=self.actual_price, actual_scu=self.actual_scu, precision="floor",
         )
         await self.parent_view.disable_in_background(outcome_line)
-        await self.cog._record_leg_outcome_durably(
+        handled = await self.cog._record_leg_outcome_durably(
             interaction.channel, self.thread_id, self.leg_index, self.leg,
             outcome="more", actual_price=self.actual_price, actual_scu=self.actual_scu, precision="floor",
         )
+        if not handled:
+            self.parent_view.release_claim()
+            await self.parent_view.reenable_in_background()
 
 
 class LegOutcomeView(discord.ui.View):
@@ -322,13 +337,47 @@ class LegOutcomeView(discord.ui.View):
             item.disabled = False
 
     async def disable_in_background(self, outcome_line: str | None = None) -> None:
+        # Audit-confirmed carry-forward defect: every caller of this (the "less"/"more"
+        # outcome flows and AbandonConfirmView.confirm) invokes it AFTER their own
+        # acknowledgement succeeds but BEFORE the real durable write - so an exception
+        # escaping this purely cosmetic edit doesn't just fail the edit, it skips that
+        # durable call entirely. This used to catch only discord.HTTPException, on the
+        # (correct as far as it went, but incomplete) reasoning that this method itself
+        # holds no claim to release on failure - true, but irrelevant to whether letting a
+        # DIFFERENT exception type escape blocks a REQUIRED next step in every caller.
+        # There's nothing durable riding on this edit actually landing (the real state is
+        # the DB write right after it, and self.resolved is already set by claim() before
+        # this ever runs), so any failure here is safe to just swallow - not just
+        # discord.HTTPException.
         if self.message is not None:
             try:
                 edit_kwargs: dict = {"view": self}
                 if outcome_line is not None and self.message.embeds:
                     edit_kwargs["embed"] = _embed_with_outcome(self.message.embeds[0], outcome_line)
                 await self.message.edit(**edit_kwargs)
-            except discord.HTTPException:
+            except Exception:
+                pass
+
+    async def reenable_in_background(self) -> None:
+        """Carry-forward audit defect: when NEITHER the outcome/abandon write nor its
+        durable recovery could be saved (_record_leg_outcome_durably/_abandon_thread_
+        durably returning False), every caller already calls release_claim() to make the
+        leg reportable again internally - but release_claim() only flips this view's own
+        in-memory state (self.resolved, each item.disabled). The real Discord message
+        still shows whatever disable_in_background last sent it: disabled buttons, since
+        that's what claim() had already set before disable_in_background ever ran. A
+        disabled component on the actual message doesn't dispatch a click at all,
+        regardless of this process's own view state - so telling the user to "report this
+        leg again" was false: the button they'd need to click still looked, and behaved,
+        disabled. Re-sends the view (not the embed - the "Reported: ..."/"Route
+        abandoned." label staying visible alongside newly-clickable buttons is a much
+        smaller, more defensible imperfection than the alternative of guessing whether
+        this Message object's own .embeds has been mutated by an earlier edit, which real
+        discord.py Message objects never do locally but a test double easily could)."""
+        if self.message is not None:
+            try:
+                await self.message.edit(view=self)
+            except Exception:
                 pass
 
     @discord.ui.button(label="Matched quote", style=discord.ButtonStyle.green)
@@ -351,9 +400,15 @@ class LegOutcomeView(discord.ui.View):
             # other transport failure leaves persistence just as un-run.
             self.release_claim()
             raise
-        await self.cog._record_leg_outcome_durably(
+        handled = await self.cog._record_leg_outcome_durably(
             interaction.channel, self.thread_id, self.leg_index, self.leg, outcome="matched"
         )
+        if not handled:
+            # Carry-forward audit defect: neither the outcome nor its durable recovery
+            # could be saved - restore reportability for real, not just internally, or
+            # the recovery notice's own "report this leg again" is a dead-end.
+            self.release_claim()
+            await self.reenable_in_background()
 
     @discord.ui.button(label="Less / not there", style=discord.ButtonStyle.red)
     async def less(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
@@ -428,7 +483,15 @@ class AbandonConfirmView(discord.ui.View):
                 item.disabled = False
             raise
         await self.parent_view.disable_in_background("**Reported:** Route abandoned.")
-        await self.cog._abandon_thread_durably(interaction.channel, self.thread_id, reason="you asked to stop tracking it")
+        handled = await self.cog._abandon_thread_durably(
+            interaction.channel, self.thread_id, reason="you asked to stop tracking it"
+        )
+        if not handled:
+            # Carry-forward audit defect: neither the abandon nor its durable recovery
+            # could be saved - restore the PARENT view's real reportability (this
+            # confirm view's own ephemeral message already served its purpose).
+            self.parent_view.release_claim()
+            await self.parent_view.reenable_in_background()
 
     @discord.ui.button(label="No, keep going", style=discord.ButtonStyle.gray)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
@@ -727,6 +790,11 @@ class RouteProgression(commands.Cog):
             thread_id=thread_id, leg_index=leg_index, outcome=outcome,
             actual_price=actual_price, actual_scu=actual_scu, precision=precision,
         )
+        # False here (the default) whenever `recorded` is True too - the leg's outcome was
+        # never written before THIS call, so nothing could have marked its market update
+        # applied yet either. Only the same-report-retried fallthrough below can set this
+        # True, from the leg row it already had to fetch anyway.
+        market_update_already_applied = False
         if not recorded:
             # record_route_progression_leg_outcome's UPDATE can be rejected for two
             # structurally different reasons (audit-confirmed defect #3's fix added the
@@ -774,13 +842,26 @@ class RouteProgression(commands.Cog):
                     except discord.HTTPException:
                         pass
                 return
-            # Same report, retried - fall through. The market-state re-merge below is a
-            # safe no-op/idempotent re-write of the identical values; the next-leg/
-            # completion step is separately guarded by claim_route_progression_advance,
-            # so this finishes whichever part of the earlier attempt never completed -
-            # including when that earlier attempt already carried the thread all the way
-            # to completion (claim_route_progression_advance/set_route_progression_thread_
-            # status simply no-op again in that case, exactly as before this fix).
+            # Same report, retried - fall through. The next-leg/completion step below is
+            # separately guarded by claim_route_progression_advance, so this finishes
+            # whichever part of the earlier attempt never completed - including when that
+            # earlier attempt already carried the thread all the way to completion
+            # (claim_route_progression_advance/set_route_progression_thread_status simply
+            # no-op again in that case, exactly as before this fix).
+            #
+            # Audit-confirmed carry-forward defect: the market-state re-merge just below is
+            # NOT actually a safe no-op to blindly repeat on a replay, despite reapplying
+            # "the identical values" - terminal_market_state is mutable SHARED state, and
+            # something else (a fresh UEX collector snapshot, a different leg touching the
+            # same commodity/terminal) may have written a genuinely newer value to it in
+            # the time between the original attempt and this replay. Reapplying this
+            # report's own (now possibly stale) values would silently clobber that newer
+            # data. market_update_applied_at is how record_player_report_market_update
+            # marks that it has already run once for this leg - checked here so a replay
+            # skips re-running it, not inside that method, since skipping must also cover
+            # suppress_terminal_market_side (repeated depletion reports would otherwise
+            # keep refreshing the suppression window's expiry to "now" on every replay too).
+            market_update_already_applied = stored["market_update_applied_at"] is not None
 
         update_row = terminal_state_update_for_outcome(
             id_commodity=leg.id_commodity, id_terminal=leg.id_terminal,
@@ -790,13 +871,17 @@ class RouteProgression(commands.Cog):
             actual_price=actual_price, actual_scu=actual_scu, precision=precision,
             market_scu=leg.market_scu,
         )
-        if update_row is not None:
-            await self.bot.db.record_player_report_market_update(update_row)
-        if update_confirms_depletion(update_row, side=leg.side):
-            until = (datetime.now(timezone.utc) + timedelta(hours=SUPPRESSION_HOURS)).strftime("%Y-%m-%d %H:%M:%S")
-            await self.bot.db.suppress_terminal_market_side(
-                id_commodity=leg.id_commodity, id_terminal=leg.id_terminal, side=leg.side, until=until,
+        if update_row is not None and not market_update_already_applied:
+            await self.bot.db.record_player_report_market_update(
+                update_row, thread_id=thread_id, leg_index=leg_index
             )
+            if update_confirms_depletion(update_row, side=leg.side):
+                until = (
+                    datetime.now(timezone.utc) + timedelta(hours=SUPPRESSION_HOURS)
+                ).strftime("%Y-%m-%d %H:%M:%S")
+                await self.bot.db.suppress_terminal_market_side(
+                    id_commodity=leg.id_commodity, id_terminal=leg.id_terminal, side=leg.side, until=until,
+                )
 
         thread_row = await self.bot.db.get_route_progression_thread(thread_id)
         if thread_row is None:
@@ -853,7 +938,7 @@ class RouteProgression(commands.Cog):
         actual_price: float | None = None,
         actual_scu: float | None = None,
         precision: str | None = None,
-    ) -> None:
+    ) -> bool:
         """The real commit point every leg-outcome button/modal calls, in place of
         handle_leg_outcome directly - by the time this runs, the user has already seen
         the leg acknowledged as "reported" (claim() + the Discord edit already
@@ -867,7 +952,15 @@ class RouteProgression(commands.Cog):
         (queue_route_progression_leg_recovery) rather than left to the 48h abandonment
         poller as the only recourse - retry_pending_route_progression_actions keeps
         retrying it on its own short cadence, fully reconstructed from the DB, with no
-        dependency on this process's _active_legs cache."""
+        dependency on this process's _active_legs cache.
+
+        Returns whether the outcome ended up handled at all - either recorded outright,
+        or durably queued for the recovery poller to keep retrying. False only in the
+        audit-confirmed carry-forward case where BOTH fail: nothing was saved, and no
+        recovery was scheduled either - the caller must release the view's claim and
+        restore its buttons in that case, or the "please report this leg again" notice
+        below would be telling the user to do something the button no longer lets them
+        do."""
         last_exc: BaseException | None = None
         for attempt in range(1, POST_ACK_RETRY_ATTEMPTS + 1):
             try:
@@ -875,7 +968,7 @@ class RouteProgression(commands.Cog):
                     channel, thread_id, leg_index, leg,
                     outcome=outcome, actual_price=actual_price, actual_scu=actual_scu, precision=precision,
                 )
-                return
+                return True
             except Exception as exc:
                 last_exc = exc
                 logger.warning(
@@ -921,6 +1014,7 @@ class RouteProgression(commands.Cog):
                 await channel.send(message)
             except discord.HTTPException:
                 pass
+        return queued
 
     async def abandon_thread(
         self, channel: discord.abc.MessageableChannel | None, thread_id: int, *, reason: str
@@ -948,16 +1042,21 @@ class RouteProgression(commands.Cog):
 
     async def _abandon_thread_durably(
         self, channel: discord.abc.MessageableChannel | None, thread_id: int, *, reason: str
-    ) -> None:
+    ) -> bool:
         """Same post-ack retry discipline as _record_leg_outcome_durably, for
         AbandonConfirmView.confirm's own commit point - abandon_thread's DB write is a
         plain idempotent status update, safe to repeat. Exhausted retries queue a durable
-        recovery action the same way (queue_route_progression_abandon_recovery)."""
+        recovery action the same way (queue_route_progression_abandon_recovery).
+
+        Returns whether the abandon ended up handled at all - either recorded outright,
+        or durably queued. False only when BOTH fail - see _record_leg_outcome_durably's
+        own docstring for why the caller must release the claim and restore the view in
+        that case."""
         last_exc: BaseException | None = None
         for attempt in range(1, POST_ACK_RETRY_ATTEMPTS + 1):
             try:
                 await self.abandon_thread(channel, thread_id, reason=reason)
-                return
+                return True
             except Exception as exc:
                 last_exc = exc
                 logger.warning(
@@ -992,6 +1091,7 @@ class RouteProgression(commands.Cog):
                 await channel.send(message)
             except discord.HTTPException:
                 pass
+        return queued
 
     @tasks.loop(hours=ABANDONMENT_POLL_HOURS)
     async def poll_abandoned_threads(self) -> None:

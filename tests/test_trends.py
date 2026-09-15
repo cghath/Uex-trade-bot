@@ -214,6 +214,23 @@ def test_select_available_routes_returns_empty_when_nothing_qualifies():
     assert select_available_routes("Laranite", 1, []) == []
 
 
+def test_select_available_routes_excludes_a_negative_or_zero_profit_route():
+    """Real defect a user hit live: this only checked that `profit` was PRESENT, not that
+    it was actually positive - UEX's own /commodities_routes can include a route where
+    the destination price is below the origin's (a genuine money-losing pairing), and
+    without this check it could still fill a remaining "top N" slot once genuinely
+    profitable candidates ran out, showing a route that loses money as a
+    recommendation."""
+    rows = [
+        _route_row(profit=-92160, price_origin=1760, price_destination=1600, origin_terminal_name="Losing"),
+        _route_row(profit=0, origin_terminal_name="Breakeven"),
+        _route_row(profit=700, origin_terminal_name="Profitable"),
+    ]
+    routes = select_available_routes("Laranite", 1, rows)
+    assert len(routes) == 1
+    assert routes[0].origin_terminal_name == "Profitable"
+
+
 # --- select_in_stock_routes ---
 
 
@@ -234,6 +251,19 @@ def test_select_in_stock_routes_requires_live_destination_demand():
 
 def test_select_in_stock_routes_still_requires_origin_stock():
     assert select_in_stock_routes("Laranite", 1, [_route_row(scu_origin=0)]) == []
+
+
+def test_select_in_stock_routes_excludes_a_negative_or_zero_profit_route():
+    """Same real defect as select_available_routes's own test - this shares the identical
+    profit-present-but-not-positive gap."""
+    rows = [
+        _route_row(profit=-92160, price_origin=1760, price_destination=1600, origin_terminal_name="Losing"),
+        _route_row(profit=0, origin_terminal_name="Breakeven"),
+        _route_row(profit=700, origin_terminal_name="Profitable"),
+    ]
+    routes = select_in_stock_routes("Laranite", 1, rows)
+    assert len(routes) == 1
+    assert routes[0].origin_terminal_name == "Profitable"
 
 
 # --- rank_top_scored_routes ---

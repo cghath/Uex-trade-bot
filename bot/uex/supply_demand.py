@@ -224,10 +224,30 @@ def classify_supply_evidence(
     status (including unknown/None) never overrides a live scu figure - only code 7 is an
     authoritative zero-demand signal, not merely a missing one, so a genuine live report
     with no status information is still trusted as reported.
+
+    Audit-confirmed carry-forward defect: this authoritative status check used to run
+    ONLY when scu was also present (effective_sell_scu itself returns None outright for a
+    missing scu, by design - see its own docstring - since IT is meant to distinguish "no
+    data" from "confirmed zero" for callers that already have a real quantity in hand).
+    But status_sell==7 is authoritative independent of whether a live quantity happens to
+    be reported at all - a MISSING scu must not let the history fallback below quietly
+    override a status that's already confirmed there's no real demand, producing e.g.
+    "inferred demand, 100% historically available" for a terminal UEX itself reports as
+    maximum inventory. Checked directly here, not by loosening effective_sell_scu's own
+    contract (which other callers - e.g. /price's capacity estimate - rely on to tell
+    "confirmed zero" apart from "no data" using scu alone).
     """
     effective_scu = scu
-    if side == "demand" and scu is not None:
-        effective_scu = effective_sell_scu(scu, status_sell)
+    if side == "demand":
+        if scu is not None:
+            effective_scu = effective_sell_scu(scu, status_sell)
+        else:
+            try:
+                status_code = int(float(status_sell)) if status_sell is not None else None
+            except (TypeError, ValueError):
+                status_code = None
+            if status_code == SELL_SIDE_NO_DEMAND_CODE:
+                effective_scu = 0.0
     if effective_scu is not None:
         status = health.status if health is not None else "unknown"
         tier = "current" if status in ("fresh", "recent") else "aging"

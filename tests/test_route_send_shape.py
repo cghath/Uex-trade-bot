@@ -654,6 +654,119 @@ def test_multi_stop_route_flattened_legs_use_side_specific_market_scu_not_the_pa
     asyncio.run(run())
 
 
+def test_best_route_excludes_a_negative_profit_uex_route(tmp_path):
+    """Real defect a user hit live: /best-route's primary branch ranked straight from
+    UEX's own /commodities_routes data by profit descending with no check that profit was
+    actually positive - UEX's own routes endpoint can include a route where the
+    destination price is below the origin's (a genuine money-losing pairing), and once
+    genuinely profitable candidates ran out, one of these could still fill a remaining
+    "top N" slot and be shown as if it were a real recommendation. Two routes here: one
+    profitable, one with price_origin > price_destination (a real negative profit) -
+    only the profitable one must ever be shown."""
+    async def run():
+        db = Database(tmp_path / "best_route_negative_profit.sqlite3", Fernet(Fernet.generate_key()))
+        await db.init()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            path = request.url.path
+            if "commodities_prices" in path:
+                return httpx.Response(200, json={"status": "ok", "data": [
+                    {"id_commodity": 1, "commodity_name": "Gold"}
+                ]})
+            if "commodities_routes" in path:
+                return httpx.Response(200, json={"status": "ok", "data": [
+                    {
+                        "id_terminal_origin": 1, "id_terminal_destination": 101,
+                        "origin_terminal_name": "Good Origin", "destination_terminal_name": "Good Destination",
+                        "price_origin": 100, "price_destination": 200, "price_margin": 100, "price_roi": 100,
+                        "distance": 5, "score": 50, "scu_origin": 10, "scu_destination": 10,
+                        "status_origin": 1, "status_destination": 1, "profit": 1000,
+                    },
+                    {
+                        "id_terminal_origin": 2, "id_terminal_destination": 102,
+                        "origin_terminal_name": "Losing Origin", "destination_terminal_name": "Losing Destination",
+                        "price_origin": 1760, "price_destination": 1600, "price_margin": -160, "price_roi": -9.1,
+                        "distance": 5, "score": 200, "scu_origin": 10, "scu_destination": 10,
+                        "status_origin": 1, "status_destination": 1, "profit": -92160,
+                    },
+                ]})
+            return httpx.Response(200, json={"status": "ok", "data": []})
+
+        client = UexClient(app_token="test", base_url="https://uex.test")
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+        bot = type("FakeBot", (), {})()
+        bot.db = db
+        bot.uex = client
+        bot.get_cog = lambda name: None
+        cog = Prices.__new__(Prices)
+        cog.bot = bot
+        interaction = _FakeInteraction(1)
+
+        try:
+            await cog.best_route.callback(cog, interaction, commodity="Gold")
+        finally:
+            await client.aclose()
+
+        titles = [kwargs["embed"].title for _, kwargs in interaction.followup.sent if "embed" in kwargs]
+        assert "Good Origin → Good Destination" in titles
+        assert "Losing Origin → Losing Destination" not in titles, (
+            "a route that loses money must never be shown as a recommendation"
+        )
+
+    asyncio.run(run())
+
+
+def test_best_route_reports_no_routes_when_every_uex_route_is_unprofitable(tmp_path):
+    """Same defect, the all-fail case: when EVERY route UEX returns is unprofitable or has
+    no real stock, the command must say so plainly, not crash or silently send nothing."""
+    async def run():
+        db = Database(tmp_path / "best_route_all_negative.sqlite3", Fernet(Fernet.generate_key()))
+        await db.init()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            path = request.url.path
+            if "commodities_prices" in path:
+                return httpx.Response(200, json={"status": "ok", "data": [
+                    {"id_commodity": 1, "commodity_name": "Gold"}
+                ]})
+            if "commodities_routes" in path:
+                return httpx.Response(200, json={"status": "ok", "data": [
+                    {
+                        "id_terminal_origin": 2, "id_terminal_destination": 102,
+                        "origin_terminal_name": "Losing Origin", "destination_terminal_name": "Losing Destination",
+                        "price_origin": 1760, "price_destination": 1600, "price_margin": -160, "price_roi": -9.1,
+                        "distance": 5, "score": 200, "scu_origin": 10, "scu_destination": 10,
+                        "status_origin": 1, "status_destination": 1, "profit": -92160,
+                    },
+                ]})
+            return httpx.Response(200, json={"status": "ok", "data": []})
+
+        client = UexClient(app_token="test", base_url="https://uex.test")
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+        bot = type("FakeBot", (), {})()
+        bot.db = db
+        bot.uex = client
+        bot.get_cog = lambda name: None
+        cog = Prices.__new__(Prices)
+        cog.bot = bot
+        interaction = _FakeInteraction(1)
+
+        try:
+            await cog.best_route.callback(cog, interaction, commodity="Gold")
+        finally:
+            await client.aclose()
+
+        assert len(interaction.followup.sent) == 1
+        message = interaction.followup.sent[0][0][0]
+        assert "no profitable routes" in message.lower()
+
+    asyncio.run(run())
+
+
 def test_best_route_discloses_when_routes_are_truncated_for_size(tmp_path, monkeypatch):
     """Second follow-up review finding: /best-route's primary branch (UEX's own
     /commodities_routes data) calls the atomic _add_chunked_fields for each ranked route

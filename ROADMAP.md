@@ -1240,6 +1240,114 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
   live, enforcing index afterward, plus that repeated startups on an already-clean
   database stay a no-op. 2 new tests. Full suite and clean lint reverified. Closes out
   every finding from the 2026-09-15 follow-up audit.
+- [x] **Five Carry-Forward Defects from the 2026-09-13 Audit**: Shipped 2026-09-15. The
+  2026-09-15 audit's own "carry-forward" section pointed at five findings from the
+  EARLIER `2026-09-13-executive-audit-f0fcc40.md` (a different, previously-unreviewed
+  document) that its own rerun still reproduced. Each was independently re-verified
+  against current code first (not trusted from either audit's prose alone - several
+  cited line numbers were long stale after this session's own route_progression.py
+  rewrites), then fixed one at a time with the same before/after-fix test discipline as
+  every other item in this list:
+  - **Same-report replay could overwrite newer market data with a stale price**
+    (audit F02). `record_player_report_market_update` (`bot/db/database.py`) always
+    wrote to `terminal_market_state` unconditionally, including on a same-report retry
+    (a delivery-failure retry, or the durable recovery queue picking a leg back up
+    later) - if anything else (a fresh UEX collector snapshot, a different leg touching
+    the same commodity/terminal) had written something newer in the meantime, the
+    replay silently clobbered it with this report's own now-stale values; repeated
+    depletion reports could also keep refreshing the suppression window's expiry to
+    "now" on every replay. Fixed with a new `route_progression_legs.market_update_
+    applied_at` marker, set ATOMICALLY alongside the market-state write itself (same
+    transaction, same commit) so a write that fails never gets falsely marked applied -
+    `handle_leg_outcome` checks it before ever calling the write again, skipping both the
+    market update and the suppression call on a same-report replay once it's already
+    landed once. 1 new end-to-end test (seed a report, let a newer snapshot land, replay
+    the identical report, confirm the newer price survives).
+  - **A cosmetic Discord edit failure could silently skip a durable database write**
+    (audit F04). `LegOutcomeView.disable_in_background` (a purely cosmetic "grey out the
+    parent message's buttons" edit, called by all four of the "less"/"more"/abandon
+    commit flows AFTER their own acknowledgement succeeds but BEFORE the real durable
+    write) caught only `discord.HTTPException` - a non-HTTPException there (a raw
+    transport timeout) escaped uncaught and skipped the durable call entirely, even
+    though the user's own click was already acknowledged and the leg already claimed. A
+    prior pass in this same session had reviewed this exact call site and left it as-is,
+    reasoning "no claim state to release" - correct as far as it went, but missing that
+    letting the exception escape blocks a REQUIRED next step regardless. Fixed by
+    broadening the catch to `except Exception:`, closing all four call sites through the
+    one shared method at once. 2 new tests (one direct, one end-to-end through
+    `AbandonConfirmView.confirm`), both confirmed failing against the unfixed code first.
+  - **A failed-recovery notice told users to retry a button that no longer worked**
+    (audit F03). When BOTH the outcome/abandon write and its durable recovery queuing
+    failed, `_record_leg_outcome_durably`/`_abandon_thread_durably` told the user to
+    "report this leg again" - but the button was already permanently disabled by
+    `claim()`, and neither method had any reference back to the View to undo that.
+    Fixed by having both methods return whether they actually handled it (True if
+    recorded outright or durably queued, False only when neither worked), with every
+    caller releasing the claim AND re-pushing the now-re-enabled view to Discord
+    (`LegOutcomeView.reenable_in_background`, a new mirror of `disable_in_background`)
+    when False - since a disabled component on the real message doesn't dispatch a
+    click at all regardless of this process's own in-memory view state. Deliberately
+    doesn't also try to revert the "Reported: ..."/"Route abandoned." label text back to
+    its original wording (a smaller, more defensible cosmetic imperfection than relying
+    on whether a `discord.Message` object's own `.embeds` has been mutated by an earlier
+    edit - it hasn't, in the real client, but a test double easily could). 4 new tests,
+    one per call site (`LegOutcomeView.matched`, the "less" modal, `MoreOutcomeFollowup
+    View`, `AbandonConfirmView`), since the fix is independently repeated at each one
+    rather than living in one shared function the way the F04 fix does.
+  - **A missing quantity let historical evidence override a confirmed no-demand status**
+    (audit F05). `classify_supply_evidence` (`bot/uex/supply_demand.py`) only consulted
+    UEX's authoritative sell-side status when a live `scu` was ALSO present - a missing
+    quantity paired with status 7 ("Maximum Inventory, No Demand") fell straight through
+    to the historical fallback, producing e.g. "inferred demand, 100% historically
+    available" for a terminal UEX itself already confirms isn't buying at all. Fixed by
+    checking status 7 directly when `scu is None`, independent of `effective_sell_scu`
+    (which deliberately keeps its own existing "no data" vs "confirmed zero" contract for
+    its other caller, `/price`'s capacity estimate). 1 new test, confirmed failing
+    against the unfixed code first.
+  - **A real zero stock reading was treated as missing data** (audit F06). `/price`
+    parsed current stock through `_positive_float`, which discards zero by design (a real
+    zero-priced transaction isn't meaningful) - but current STOCK is a state reading, not
+    a transaction, and a terminal genuinely holding none right now is real, useful
+    information that `estimate_sell_capacity_from_history` already accepts and uses (a
+    real `0.0` still yields the full historical peak as its estimate). The discarded
+    `None` silently suppressed that estimate entirely for every currently-empty terminal.
+    Fixed with a new `_nonnegative_float` (preserves zero, still rejects inf/nan/negative)
+    used only at this one call site - `_positive_float` itself is untouched, since its
+    exclude-zero contract is correct for the quoted-price figures it's used for elsewhere.
+    Found and fixed the identical "0 is falsy" pitfall one branch further down in the same
+    block too (the plain on-hand-stock fallback silently showed nothing for a genuine
+    zero, same as the estimate did) while already reading this exact code. 2 new tests
+    (the estimate branch, and the no-history fallback branch), both confirmed failing
+    against the unfixed code first.
+
+  10 new tests across `tests/test_route_progression.py` (7), `tests/test_intelligence.py`
+  (1), and `tests/test_price_command.py` (2) - every one confirmed failing against the
+  unfixed code first. Full suite and clean lint reverified. Closes out the last open item
+  from either audit this session investigated.
+- [x] **Route Ranking: Reject Negative-Profit Routes**: Shipped 2026-09-15. User-reported,
+  live: `/routes-from` showed a real route ("Quantum Fuel: Admin - Orbituary → Admin -
+  Ruin Station") with Buy 1760.00 > Sell 1600.00 - a genuine money-losing trade - as its
+  7th-ranked recommendation, run profit -92,160 aUEC. Root cause: `select_available_
+  routes`/`select_in_stock_routes` (`bot/uex/trends.py`, which feed `/top-routes`,
+  `/routes-from`, and `/route-on-the-way` - all three share one background-refreshed
+  candidate pool) required UEX's own `profit` field to be PRESENT but never checked it
+  was actually POSITIVE. When too few genuinely profitable routes exist from a given
+  origin to fill a "top N" list, a route UEX itself returns with a negative profit
+  (destination price below origin price) filled a remaining slot instead of the list
+  just being shorter. While tracing the shared candidate pool, found the identical gap,
+  worse, in `/best-route`'s own primary branch (`bot/cogs/prices.py`) - it ranked
+  straight from UEX's routes with no baseline filter at all, not even real stock at the
+  origin. `best_routes` (`bot/uex/trading.py`, `/best-route`'s own fallback branch when
+  UEX has no route data) and `build_pair_opportunities` (`bot/uex/mixed_routes.py`, used
+  by `/mixed-routes`/`/multi-stop-route`) already required a positive margin - this was
+  confirmed to be the one place in the route-ranking family that didn't, not a
+  codebase-wide pattern. Fixed by requiring `profit > 0` (not just present) in both
+  `trends.py` functions, and adding a real baseline filter (real origin stock AND
+  positive profit) to `/best-route`'s primary branch, matching `select_available_
+  routes`'s own bar. 4 new tests (2 in `test_trends.py` for the shared pool, 2 in
+  `test_route_send_shape.py` for `/best-route`'s own branch - one negative-route-
+  excluded case, one all-routes-unprofitable case), every one confirmed failing against
+  the unfixed code first. Full suite and clean lint reverified.
 - [ ] **Codebase Consolidation** *(complexity: High, ongoing)*: Beyond route rendering,
   organize `bot/db/database.py`'s ~30 tables by feature and keep one authoritative
   description of current behavior. Broader than a single ticket - Centralized Route
