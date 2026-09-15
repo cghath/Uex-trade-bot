@@ -2202,6 +2202,80 @@ def test_queue_route_progression_abandon_recovery_ignores_a_duplicate_for_the_sa
     asyncio.run(run())
 
 
+def test_init_reconciles_legacy_duplicate_pending_actions_instead_of_crashing(tmp_path):
+    """Audit-confirmed defect #4 (2026-09-15 follow-up audit): the two partial UNIQUE
+    indexes above used to be created directly in SCHEMA, which executescript runs BEFORE
+    any migration gets a chance to clean up - a database old enough to have queued a
+    genuine duplicate before this uniqueness guard ever existed (the old, unguarded
+    INSERT this codebase used before it) would crash init() outright with
+    sqlite3.IntegrityError. Reproduces that pre-index state directly - drop the indexes,
+    insert real duplicates the old code allowed - rather than hand-rolling an entire
+    legacy schema just to get there."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        async with db.connect() as conn:
+            await conn.execute("DROP INDEX idx_route_progression_pending_actions_leg_unique")
+            await conn.execute("DROP INDEX idx_route_progression_pending_actions_abandon_unique")
+            await conn.execute(
+                "INSERT INTO route_progression_pending_actions (thread_id, action_kind, leg_index, outcome) "
+                "VALUES (1, 'leg_outcome', 0, 'matched')"
+            )
+            await conn.execute(
+                "INSERT INTO route_progression_pending_actions (thread_id, action_kind, leg_index, outcome) "
+                "VALUES (1, 'leg_outcome', 0, 'missing')"
+            )
+            await conn.execute(
+                "INSERT INTO route_progression_pending_actions (thread_id, action_kind, reason) "
+                "VALUES (2, 'abandon', 'inactive')"
+            )
+            await conn.execute(
+                "INSERT INTO route_progression_pending_actions (thread_id, action_kind, reason) "
+                "VALUES (2, 'abandon', 'inactive (retry)')"
+            )
+            await conn.commit()
+
+        await db.init()  # must not raise sqlite3.IntegrityError
+
+        pending = await db.get_pending_route_progression_actions()
+        leg_outcome_rows = [row for row in pending if row["action_kind"] == "leg_outcome"]
+        abandon_rows = [row for row in pending if row["action_kind"] == "abandon"]
+        assert len(leg_outcome_rows) == 1, "duplicates must be reconciled down to one row per key"
+        assert len(abandon_rows) == 1
+        assert leg_outcome_rows[0]["outcome"] == "missing", "keeps the freshest (highest-id) row"
+        assert abandon_rows[0]["reason"] == "inactive (retry)"
+
+        # The uniqueness guard must be live again after reconciling, not just skipped.
+        with pytest.raises(aiosqlite.IntegrityError):
+            async with db.connect() as conn:
+                await conn.execute(
+                    "INSERT INTO route_progression_pending_actions (thread_id, action_kind, leg_index) "
+                    "VALUES (1, 'leg_outcome', 0)"
+                )
+                await conn.commit()
+
+    asyncio.run(run())
+
+
+def test_init_is_a_no_op_on_an_already_deduplicated_database(tmp_path):
+    """Repeated initialization (every real bot restart) must stay a cheap no-op once no
+    duplicates remain - proven separately from the reconciliation test above, which only
+    covers the first, one-time cleanup."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await db.queue_route_progression_abandon_recovery(thread_id=1, reason="first")
+
+        await db.init()
+        await db.init()
+
+        pending = await db.get_pending_route_progression_actions()
+        assert len(pending) == 1
+        assert pending[0]["reason"] == "first"
+
+    asyncio.run(run())
+
+
 def test_handle_leg_outcome_a_conflicting_second_report_does_not_overwrite_or_repost(tmp_path):
     """The exact scenario the audit named: two live prompts for the same leg (a duplicate
     from a retried handle_leg_outcome) report DIFFERENT outcomes. The second must be

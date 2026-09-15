@@ -1216,6 +1216,30 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
   to risk than a stall in that doubly-rare case), but log at ERROR specifically so it's
   discoverable rather than a silent stall like the naive fix would produce everywhere. 3
   new/rewritten tests covering all three outcomes. Full suite and clean lint reverified.
+- [x] **Route Progression: Recovery-Queue Index Migration Safety**: Shipped 2026-09-15.
+  The same follow-up audit's finding #4, closing out every finding from it. The two
+  partial UNIQUE indexes on `route_progression_pending_actions` (added earlier this
+  session as defense-in-depth, see Recovery-Queue Idempotency above) were created
+  directly in `SCHEMA`, which `init()` runs via `executescript` BEFORE any migration gets
+  a chance to run - a database old enough to have queued a genuine duplicate before this
+  uniqueness guard existed (the old, unguarded `INSERT` this codebase used before that
+  same session's fix) would crash `init()` outright with `sqlite3.IntegrityError`.
+  Confirmed not currently reachable on the live Pi (checked directly), but a real
+  conditional upgrade risk for any database that does carry a legacy duplicate. Fixed by
+  moving both `CREATE UNIQUE INDEX` statements out of `SCHEMA` and issuing them
+  explicitly in `init()` - matching the existing precedent one line above them
+  (`idx_liquidity_scores_id_item`, already deferred past `_run_migrations` for the same
+  reason) - after a new `_migrate_dedupe_route_progression_pending_actions`, which keeps
+  only the highest-`id` (freshest) row per duplicate key and deletes the rest. Not a
+  blind delete: any one surviving row still safely completes the recovery on its own,
+  since `handle_leg_outcome`'s existing conflicting-report guard already tolerates a
+  duplicate being processed after another one already won - so which specific row
+  survives changes nothing about correctness. Reproduced the actual crash first (drop the
+  indexes, insert real duplicates the old code allowed, confirm `init()` raises), then
+  fixed it and confirmed both a no-crash reconciliation down to one row per key AND a
+  live, enforcing index afterward, plus that repeated startups on an already-clean
+  database stay a no-op. 2 new tests. Full suite and clean lint reverified. Closes out
+  every finding from the 2026-09-15 follow-up audit.
 - [ ] **Codebase Consolidation** *(complexity: High, ongoing)*: Beyond route rendering,
   organize `bot/db/database.py`'s ~30 tables by feature and keep one authoritative
   description of current behavior. Broader than a single ticket - Centralized Route

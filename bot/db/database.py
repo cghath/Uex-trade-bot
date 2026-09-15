@@ -636,13 +636,10 @@ CREATE INDEX IF NOT EXISTS idx_route_progression_pending_actions_thread
 -- introduce. Two separate partial indexes, not one combined UNIQUE(thread_id, action_kind,
 -- leg_index): 'leg_outcome' rows key on (thread_id, leg_index), but 'abandon' rows always
 -- have leg_index NULL, and SQLite treats every NULL as distinct for uniqueness purposes -
--- a single combined index would never catch two abandon rows for the same thread.
-CREATE UNIQUE INDEX IF NOT EXISTS idx_route_progression_pending_actions_leg_unique
-    ON route_progression_pending_actions (thread_id, leg_index)
-    WHERE action_kind = 'leg_outcome';
-CREATE UNIQUE INDEX IF NOT EXISTS idx_route_progression_pending_actions_abandon_unique
-    ON route_progression_pending_actions (thread_id)
-    WHERE action_kind = 'abandon';
+-- a single combined index would never catch two abandon rows for the same thread. Not
+-- created here - see _migrate_dedupe_route_progression_pending_actions's docstring for
+-- why these two statements are issued explicitly in init(), after migrations, instead of
+-- living in this executescript'd SCHEMA like every other index in this file.
 """
 
 
@@ -666,6 +663,19 @@ class Database:
             await self._migrate_pricing_strategy_check(db)
             await self._migrate_negotiation_message_seen_scope(db)
             await self._migrate_ship_preference_into_trading_preferences(db)
+            # Must run before the two CREATE UNIQUE INDEX statements below - see
+            # _migrate_dedupe_route_progression_pending_actions's own docstring.
+            await self._migrate_dedupe_route_progression_pending_actions(db)
+            await db.execute(
+                """CREATE UNIQUE INDEX IF NOT EXISTS idx_route_progression_pending_actions_leg_unique
+                   ON route_progression_pending_actions (thread_id, leg_index)
+                   WHERE action_kind = 'leg_outcome'"""
+            )
+            await db.execute(
+                """CREATE UNIQUE INDEX IF NOT EXISTS idx_route_progression_pending_actions_abandon_unique
+                   ON route_progression_pending_actions (thread_id)
+                   WHERE action_kind = 'abandon'"""
+            )
             await db.commit()
 
     async def _migrate_pricing_strategy_check(self, db: aiosqlite.Connection) -> None:
@@ -835,6 +845,47 @@ class Database:
                SELECT user_id, datetime('now') FROM user_ship_preference AS s
                WHERE s.user_id NOT IN (SELECT user_id FROM ship_preference_migrated)"""
         )
+
+    async def _migrate_dedupe_route_progression_pending_actions(self, db: aiosqlite.Connection) -> None:
+        """Audit-confirmed defect #4 (2026-09-15 follow-up audit): the two partial UNIQUE
+        indexes on route_progression_pending_actions (idx_..._leg_unique, idx_...
+        _abandon_unique - added as defense-in-depth, see SCHEMA's own comment above them)
+        used to be created directly in SCHEMA, which executescript runs BEFORE
+        _run_migrations ever gets a chance to run. A database old enough to have queued a
+        genuine duplicate before this uniqueness guard existed would fail CREATE UNIQUE
+        INDEX outright with sqlite3.IntegrityError, crashing init() before startup even
+        completes - confirmed via a standalone repro (a temp DB shaped like the
+        pre-index schema, two abandon rows inserted for one thread, init() raised). Not
+        evidence the live Pi currently has duplicates (it doesn't, checked directly) - a
+        conditional upgrade risk for any database that does.
+
+        Must run after every other migration above and before the two CREATE UNIQUE INDEX
+        statements issued explicitly in init() (not left in SCHEMA - see its own comment).
+        For each action_kind's own uniqueness key, keeps only the highest `id` (the
+        freshest queued attempt - AUTOINCREMENT id is a strict, gap-free ordering, unlike
+        created_at's one-second text resolution) and deletes the rest. Not a blind delete:
+        any one surviving row still safely completes the recovery on its own - handle_leg_
+        outcome's own conflicting-report guard (see record_route_progression_leg_outcome)
+        already tolerates a duplicate being processed after another one already won, so
+        which specific row survives here doesn't change the outcome, only which attempt's
+        queued payload gets replayed. Idempotent and cheap: a no-op once no duplicates
+        remain, which is every ordinary startup from here on.
+        """
+        for action_kind, key_columns in (("leg_outcome", "thread_id, leg_index"), ("abandon", "thread_id")):
+            cursor = await db.execute(
+                f"""DELETE FROM route_progression_pending_actions
+                    WHERE action_kind = ? AND id NOT IN (
+                        SELECT MAX(id) FROM route_progression_pending_actions
+                        WHERE action_kind = ? GROUP BY {key_columns}
+                    )""",
+                (action_kind, action_kind),
+            )
+            if cursor.rowcount > 0:
+                logger.warning(
+                    "Removed %d duplicate '%s' row(s) from route_progression_pending_actions "
+                    "before creating its uniqueness index - each duplicate is already safely "
+                    "covered by whichever row remains", cursor.rowcount, action_kind,
+                )
 
     async def _run_migrations(self, db: aiosqlite.Connection) -> None:
         """Additive-only migrations for columns added to a table after it may have already
