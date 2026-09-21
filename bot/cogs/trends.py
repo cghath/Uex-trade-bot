@@ -423,6 +423,11 @@ class Trends(commands.Cog):
             seen_commodities.add(route.id_commodity)
             deduped_entries.append(route)
         entries = deduped_entries
+        # Captured before truncation - distinguishes "fewer routes exist right now" (this
+        # count) from "more exist but didn't fit the display size" (display_limit itself),
+        # so the footer below can tell a player which one they're looking at instead of
+        # silently showing fewer routes than the usual list with no explanation.
+        qualifying_count = len(entries)
         # Truncate for display only after filtering, not before - the background refresh
         # loop now keeps every candidate it computed specifically so this filter has a
         # real pool to work with (see refresh_trending).
@@ -507,6 +512,12 @@ class Trends(commands.Cog):
         )
         if preferences_note:
             footer += " · " + preferences_note
+        if qualifying_count < display_limit:
+            footer += (
+                f" · only {qualifying_count} route{'s' if qualifying_count != 1 else ''} "
+                f"currently {'qualifies' if qualifying_count == 1 else 'qualify'} "
+                f"(this list shows up to {display_limit}) - more may appear as route data keeps refreshing"
+            )
 
         intro_embed = discord.Embed(title=title, color=discord.Color.green())
         intro_embed.set_footer(text=footer)

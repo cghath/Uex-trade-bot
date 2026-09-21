@@ -5,6 +5,15 @@ the AI bot uses the same commands with an `ai-` prefix (`/price` -> `/ai-price`)
 
 ---
 
+## 2026-09-21 - Short route lists explain themselves
+
+**Changed**
+- `/top-routes`, `/routes-from`, `/route-on-the-way` - When fewer routes qualify than the list normally shows (for example
+  with **auto-load-only** or a star-system filter on), the footer now says how many qualify, such as "only 3 routes currently
+  qualify (this list shows up to 10)", instead of quietly showing a short list.
+
+---
+
 ## 2026-09-21 - Routes ranked by what you can earn
 
 **Changed**
