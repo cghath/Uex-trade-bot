@@ -5,6 +5,16 @@ the AI bot uses the same commands with an `ai-` prefix (`/price` -> `/ai-price`)
 
 ---
 
+## 2026-09-21 - Routes ranked by what you can earn
+
+**Changed**
+- `/top-routes`, `/routes-from`, `/route-on-the-way` - Routes are now ranked by the profit **you can actually earn** with your
+  saved ship and/or budget, not by UEX's headline figure (which assumes unlimited cargo and cash). For example, a route
+  listed at 54.5M profit needed 58M to run and would net only about 314k for a 1,440 SCU ship with a 2M aUEC budget, while
+  a Corundum route listed at only 1.4M would net about 1.3M. Nothing changes until you have saved a ship or a budget.
+
+---
+
 ## 2026-09-21 - Refinery advisor
 
 **Changed**
