@@ -47,6 +47,50 @@ def test_builds_mixed_load_with_stock_demand_ship_and_profit_limits():
     assert route.profit == 2870
 
 
+def _two_origin_market():
+    """Two candidate origins (Bueno=10, Arc=30) each with a 2-commodity load into Levski=20;
+    Arc's load is far more profitable, Bueno's is the small one a pinned search must still find."""
+    return [
+        _row(1, 10, "Stileron", "Bueno", price_buy=100, scu_buy=5),
+        _row(1, 20, "Stileron", "Levski", price_sell=120, scu_sell=50),
+        _row(2, 10, "Cobalt", "Bueno", price_buy=20, scu_buy=5),
+        _row(2, 20, "Cobalt", "Levski", price_sell=30, scu_sell=50),
+        _row(1, 30, "Stileron", "Arc", price_buy=50, scu_buy=50),
+        _row(2, 30, "Cobalt", "Arc", price_buy=10, scu_buy=50),
+    ]
+
+
+def test_origin_terminal_id_pins_results_to_loads_starting_there():
+    rows = _two_origin_market()
+    unpinned = build_mixed_routes(rows, ship_capacity_scu=20)
+    assert {route.origin_id for route in unpinned} == {10, 30}
+
+    pinned = build_mixed_routes(rows, ship_capacity_scu=20, origin_terminal_id=10)
+    assert [route.origin_id for route in pinned] == [10]
+
+
+def test_origin_pin_filters_before_truncating_to_the_limit():
+    """The pinned route must survive limit=1 even though a different, more profitable origin
+    would have taken the single slot - the pin narrows candidates BEFORE the top-N cut, not after."""
+    rows = _two_origin_market()
+    assert build_mixed_routes(rows, ship_capacity_scu=20, limit=1)[0].origin_id == 30
+    (pinned,) = build_mixed_routes(rows, ship_capacity_scu=20, limit=1, origin_terminal_id=10)
+    assert pinned.origin_id == 10
+
+
+def test_origin_pin_with_no_matching_origin_returns_nothing_instead_of_falling_back():
+    assert build_mixed_routes(_two_origin_market(), ship_capacity_scu=20, origin_terminal_id=999) == []
+
+
+def test_destination_terminal_id_pins_results_to_loads_ending_there():
+    rows = _two_origin_market() + [
+        _row(1, 40, "Stileron", "Elsewhere", price_sell=200, scu_sell=50),
+        _row(2, 40, "Cobalt", "Elsewhere", price_sell=100, scu_sell=50),
+    ]
+    pinned = build_mixed_routes(rows, ship_capacity_scu=20, destination_terminal_id=20)
+    assert pinned and all(route.destination_id == 20 for route in pinned)
+
+
 def test_budget_is_a_hard_limit_and_requires_two_allocated_commodities():
     rows = [
         _row(1, 1, "A", "Origin", price_buy=100, scu_buy=4),

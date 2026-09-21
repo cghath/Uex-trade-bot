@@ -489,3 +489,82 @@ def test_find_diminishing_returns_budget_is_none_for_a_still_rising_curve():
 
     points = [BudgetCurvePoint(budget=b, profit=b, investment=b, roi_pct=100, stops=(1, 2, 3)) for b in (5, 15, 45)]
     assert find_diminishing_returns_budget(points) is None
+
+
+def _chain_of_four_hops():
+    """T1 -> T2 -> T3 -> T4 -> T5, each hop a different profitable commodity, so the best chain
+    is only found by a search allowed four legs."""
+    rows = []
+    for k in range(1, 5):
+        rows.append(_row(k, k, f"Goods {k}", f"T{k}", price_buy=100, scu_buy=10))
+        rows.append(_row(k, k + 1, f"Goods {k}", f"T{k + 1}", price_sell=150, scu_sell=10))
+    return rows
+
+
+def test_max_legs_four_finds_a_four_leg_chain_the_default_depth_cannot():
+    rows = _chain_of_four_hops()
+    default = build_multi_stop_routes(rows, ship_capacity_scu=10)
+    deeper = build_multi_stop_routes(rows, ship_capacity_scu=10, max_legs=4)
+
+    assert max(len(route.legs) for route in default) == 3
+    assert deeper[0].stops == (1, 2, 3, 4, 5)
+    assert len(deeper[0].legs) == 4
+    assert deeper[0].profit > default[0].profit
+
+
+def test_the_default_depth_is_unchanged_when_max_legs_is_not_given():
+    rows = _chain_of_four_hops()
+    assert build_multi_stop_routes(rows, ship_capacity_scu=10) == build_multi_stop_routes(
+        rows, ship_capacity_scu=10, max_legs=3
+    )
+
+
+def _fake_route(profit, *, stops=(1, 2, 3)):
+    legs = tuple(
+        MultiStopLeg(
+            origin_id=stops[i], origin_name=f"T{stops[i]}", destination_id=stops[i + 1],
+            destination_name=f"T{stops[i + 1]}", cargo=(), investment=100.0, revenue=100.0 + profit / (len(stops) - 1),
+            profit=profit / (len(stops) - 1), is_exact=True,
+        )
+        for i in range(len(stops) - 1)
+    )
+    return MultiStopRoute(legs=legs, investment=100.0, revenue=100.0 + profit, profit=profit)
+
+
+def test_a_deeper_search_is_never_worse_than_the_default_depth(monkeypatch):
+    """The exploration cap can make a 4-leg search miss a chain the 3-leg search finds (2,347,495 vs
+    2,360,888 on the real snapshot). Hand-picked results stand in for that, since reproducing the exact
+    real-data cutoff synthetically would be guesswork."""
+    calls = []
+    shallow_best = _fake_route(2_360_888)
+    deep_best = _fake_route(2_347_495, stops=(1, 2, 3, 4))
+
+    def fake_search(market_rows, *, max_legs, **options):
+        calls.append(max_legs)
+        return [deep_best] if max_legs == 4 else [shallow_best, _fake_route(1_000_000, stops=(7, 8, 9))]
+
+    monkeypatch.setattr(multi_stop_routes, "_search_multi_stop_routes", fake_search)
+
+    routes = build_multi_stop_routes([], ship_capacity_scu=10, max_legs=4, limit=2)
+
+    assert calls == [4, 3]
+    assert [route.profit for route in routes] == [2_360_888, 2_347_495], "the better shallow chain must win"
+
+
+def test_the_default_depth_runs_a_single_search_and_a_deeper_result_is_not_duplicated(monkeypatch):
+    calls = []
+    shared = _fake_route(500_000)
+
+    def fake_search(market_rows, *, max_legs, **options):
+        calls.append(max_legs)
+        return [shared]
+
+    monkeypatch.setattr(multi_stop_routes, "_search_multi_stop_routes", fake_search)
+
+    build_multi_stop_routes([], ship_capacity_scu=10)
+    assert calls == [3], "the default depth must stay a single search"
+
+    calls.clear()
+    routes = build_multi_stop_routes([], ship_capacity_scu=10, max_legs=4)
+    assert calls == [4, 3]
+    assert routes == [shared], "the same chain found by both searches must appear once"

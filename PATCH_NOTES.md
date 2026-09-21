@@ -5,6 +5,20 @@ the AI bot uses the same commands with an `ai-` prefix (`/price` -> `/ai-price`)
 
 ---
 
+## 2026-09-21 - Pin mixed loads to a terminal, and 4-hop chains
+
+**New**
+- `/mixed-routes` `origin` and `destination` options - Show only the best mixed loads that start at a terminal you choose,
+  end at one, or both, for example "the best load from where I'm standing." Terminal names autocomplete the same way
+  `/route-from-multi`'s location does.
+- `/multi-stop-route` and `/route-from-multi` `max-legs` option - Choose 4 hops instead of the default 3. It can find more
+  profit when your budget allows, but takes about twice as long. Leaving it unset changes nothing.
+
+**Changed**
+- `/mixed-routes` - Its description now explains that it hedges against one item's stock or demand running short.
+
+---
+
 ## 2026-09-21 - Hedge reports in route tracking
 
 **Changed**

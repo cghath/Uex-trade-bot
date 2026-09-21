@@ -1963,3 +1963,154 @@ def test_mixed_routes_fallback_preserves_the_approximation_disclosure(monkeypatc
         assert "approximate" in fallback_text.lower(), fallback_text
 
     asyncio.run(run())
+
+
+# -- /mixed-routes origin + destination pinning, and max-legs on the multi-stop commands --------------
+
+def _market_row(id_commodity, name, id_terminal, terminal, *, buy=None, sell=None, scu=50):
+    return {
+        "id_commodity": id_commodity, "id_terminal": id_terminal, "commodity_name": name,
+        "terminal_name": terminal, "price_buy": buy or 0, "price_sell": sell or 0,
+        "scu_buy": scu if buy else 0, "scu_sell": scu if sell else 0,
+        "status_buy": 1 if buy else None, "status_sell": 1 if sell else None,
+    }
+
+
+# Four terminals, two commodities. Arc is by far the best origin and Elsewhere by far the best
+# destination, so an unpinned search picks Arc -> Elsewhere and only a real pin can surface the rest.
+_PINNING_ROWS = [
+    _market_row(1, "Stileron", 10, "Bueno", buy=100, scu=5),
+    _market_row(2, "Cobalt", 10, "Bueno", buy=20, scu=5),
+    _market_row(1, "Stileron", 30, "Arc", buy=50),
+    _market_row(2, "Cobalt", 30, "Arc", buy=10),
+    _market_row(1, "Stileron", 20, "Levski", sell=120),
+    _market_row(2, "Cobalt", 20, "Levski", sell=30),
+    _market_row(1, "Stileron", 40, "Elsewhere", sell=200),
+    _market_row(2, "Cobalt", 40, "Elsewhere", sell=100),
+]
+_PINNING_TERMINALS = [
+    {"id": 10, "name": "Bueno"}, {"id": 20, "name": "Levski"}, {"id": 30, "name": "Arc"}, {"id": 40, "name": "Elsewhere"},
+]
+
+
+def _titles(interaction):
+    return [kwargs["embed"].title for _, kwargs in interaction.followup.sent if kwargs.get("embed") is not None]
+
+
+def _mixed(tmp_path, name, **options):
+    return _run_command(
+        tmp_path, name, _PINNING_ROWS,
+        lambda cog, interaction: cog.mixed_routes.callback(cog, interaction, ship="TestShip", **options),
+        terminal_reference_rows=_PINNING_TERMINALS,
+    )
+
+
+def test_mixed_routes_origin_option_only_shows_loads_starting_there(tmp_path):
+    async def run():
+        unpinned = await _mixed(tmp_path, "mixed_unpinned.sqlite3")
+        assert "Arc" in _titles(unpinned)[0], "the unpinned best load starts at Arc"
+
+        pinned = await _mixed(tmp_path, "mixed_origin.sqlite3", origin="Bueno")
+        titles = _titles(pinned)
+        assert len(titles) == 2 and all("Bueno →" in title for title in titles), titles
+        footer = next(kw["embed"].footer.text for _, kw in pinned.followup.sent if kw.get("embed") is not None)
+        assert "limited to loads starting at Bueno" in footer, footer
+
+    asyncio.run(run())
+
+
+def test_mixed_routes_destination_option_only_shows_loads_ending_there(tmp_path):
+    async def run():
+        pinned = await _mixed(tmp_path, "mixed_destination.sqlite3", destination="Levski")
+        titles = _titles(pinned)
+        assert len(titles) == 2 and all("→ Levski" in title for title in titles), titles
+
+    asyncio.run(run())
+
+
+def test_mixed_routes_origin_and_destination_together_pin_one_pair(tmp_path):
+    async def run():
+        pinned = await _mixed(tmp_path, "mixed_both.sqlite3", origin="Bueno", destination="Levski")
+        assert _titles(pinned) == ["#1 Bueno → Levski"]
+
+    asyncio.run(run())
+
+
+def test_mixed_routes_says_so_when_an_option_names_no_single_terminal(tmp_path):
+    """Answered before any of the slow work, and never silently falls back to an unpinned search."""
+    async def run():
+        for option in ("origin", "destination"):
+            interaction = await _mixed(tmp_path, f"mixed_unresolved_{option}.sqlite3", **{option: "Nowhere Station"})
+            assert not _titles(interaction), "no route may be shown for an unresolvable terminal"
+            (args, _) = interaction.followup.sent[0]
+            assert "couldn't find a single terminal" in args[0].lower() and "Nowhere Station" in args[0], args[0]
+
+    asyncio.run(run())
+
+
+def test_mixed_routes_empty_pinned_result_names_the_pin(tmp_path):
+    """Levski only buys, so no load can start there - the message must say what was being asked."""
+    async def run():
+        interaction = await _mixed(tmp_path, "mixed_empty_pin.sqlite3", origin="Levski")
+        (args, _) = interaction.followup.sent[0]
+        assert "starting at **Levski**" in args[0] and "TestShip" in args[0], args[0]
+
+    asyncio.run(run())
+
+
+def test_multi_stop_commands_pass_max_legs_to_the_search(monkeypatch, tmp_path):
+    """Default 3 unless the player picks 4 - through both commands, not just the search function."""
+    async def run():
+        four = discord.app_commands.Choice(name="4 (slower)", value=4)
+        for command, extra in (("multi_stop_route", {}), ("route_from_multi", {"location": "Origin"})):
+            for choice, expected in ((None, 3), (four, 4)):
+                seen = {}
+
+                def spy(*args, **kwargs):
+                    seen.update(kwargs)
+                    return []
+
+                monkeypatch.setattr(prices_module, "build_multi_stop_routes", spy)
+                await _run_command(
+                    tmp_path, f"{command}_{expected}.sqlite3", _MULTI_STOP_ROWS,
+                    lambda cog, interaction: getattr(cog, command).callback(
+                        cog, interaction, ship="TestShip", max_legs=choice, **extra
+                    ),
+                    terminal_reference_rows=_MULTI_STOP_TERMINAL_REFERENCE,
+                )
+                assert seen.get("max_legs") == expected, (command, expected, seen)
+
+    asyncio.run(run())
+
+
+def _four_hop_rows():
+    """T1 -> T2 -> T3 -> T4 -> T5, a different profitable commodity on every hop."""
+    rows = []
+    for k in range(1, 5):
+        rows.append(_market_row(k, f"Goods {k}", k, f"T{k}", buy=100, scu=50))
+        rows.append(_market_row(k, f"Goods {k}", k + 1, f"T{k + 1}", sell=150, scu=50))
+    return rows
+
+
+def test_multi_stop_route_shows_a_four_leg_chain_only_when_asked_and_stays_within_discord_limits(tmp_path):
+    async def run():
+        four = discord.app_commands.Choice(name="4 (slower)", value=4)
+        default = await _run_command(
+            tmp_path, "four_hop_default.sqlite3", _four_hop_rows(),
+            lambda cog, interaction: cog.multi_stop_route.callback(cog, interaction, ship="TestShip"),
+        )
+        deeper = await _run_command(
+            tmp_path, "four_hop_deeper.sqlite3", _four_hop_rows(),
+            lambda cog, interaction: cog.multi_stop_route.callback(cog, interaction, ship="TestShip", max_legs=four),
+        )
+
+        def descriptions(interaction):
+            return [kw["embed"].description or "" for _, kw in interaction.followup.sent if kw.get("embed") is not None]
+
+        assert not any("4-leg chain" in text for text in descriptions(default)), "the default must stay at 3 legs"
+        assert any("4-leg chain" in text for text in descriptions(deeper)), descriptions(deeper)
+        for _, kwargs in deeper.followup.sent:
+            if kwargs.get("embed") is not None:
+                assert len(kwargs["embed"]) <= 6000, len(kwargs["embed"])
+
+    asyncio.run(run())

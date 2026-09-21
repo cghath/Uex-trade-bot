@@ -68,7 +68,7 @@ class MultiStopRoute:
         return all(leg.is_exact for leg in self.legs)
 
 
-def build_multi_stop_routes(
+def _search_multi_stop_routes(
     market_rows: list[dict[str, Any]],
     *,
     ship_capacity_scu: float,
@@ -80,8 +80,11 @@ def build_multi_stop_routes(
     auto_load_only: bool = False,
     system: str | None = None,
     start_terminal_id: int | None = None,
+    max_legs: int = MAX_LEGS,
 ) -> list[MultiStopRoute]:
-    """Return the best-profit chains of 2-3 profitable legs (MAX_LEGS).
+    """Return the best-profit chains of 2 to `max_legs` profitable legs (default MAX_LEGS=3;
+    a larger value is the optional deeper request - see build_multi_stop_routes for why that
+    goes through a wrapper rather than being called directly).
 
     A 1-leg result is excluded - that is what /mixed-routes already returns, and this
     command exists specifically for chains longer than a single hop. Candidate terminals
@@ -92,7 +95,7 @@ def build_multi_stop_routes(
     start_terminal_id restricts every returned chain to start at that one terminal
     (/route-from-multi's "from wherever I am" anchor) instead of searching from every
     profit-ranked candidate origin. The requested terminal, and every terminal reachable
-    from it within MAX_LEGS real hops, is force-added to the candidate set regardless of
+    from it within `max_legs` real hops, is force-added to the candidate set regardless of
     global profit ranking - the profit-ranked candidate window is built assuming the
     search can start ANYWHERE, so a real chain anchored at a lower-ranked terminal would
     otherwise be invisible (or silently truncated partway through) to a location-anchored
@@ -207,7 +210,7 @@ def build_multi_stop_routes(
         candidate_terminals.add(destination_id)
 
     if start_terminal_id is not None:
-        # Force in every terminal genuinely reachable from the anchor within MAX_LEGS
+        # Force in every terminal genuinely reachable from the anchor within max_legs
         # real hops - not just the ones that happened to rank in the top
         # MAX_CANDIDATE_EDGES globally. A full 3-leg chain needs its 2nd and 3rd stop to
         # be candidates too, not just the 1st - a single-hop-only version of this fix
@@ -220,7 +223,7 @@ def build_multi_stop_routes(
         # overall market snapshot is.
         reachable = {start_terminal_id}
         frontier = {start_terminal_id}
-        for _ in range(MAX_LEGS):
+        for _ in range(max_legs):
             next_frontier = {
                 destination_id
                 for origin_id, destination_id in opportunities
@@ -291,7 +294,7 @@ def build_multi_stop_routes(
                     profit=profit,
                 )
             )
-        if len(legs) >= MAX_LEGS:
+        if len(legs) >= max_legs:
             return
         for next_stop in graph.get(current, []):
             if next_stop in visited or explored >= MAX_CHAINS_EXPLORED:
@@ -331,6 +334,47 @@ def build_multi_stop_routes(
 
     routes.sort(key=lambda route: (route.profit, route.roi_pct), reverse=True)
     return routes[:limit]
+
+
+def build_multi_stop_routes(
+    market_rows: list[dict[str, Any]],
+    *,
+    ship_capacity_scu: float,
+    budget: float | None = None,
+    limit: int = 5,
+    max_commodities: int = 3,
+    space_only: bool = False,
+    capital_access_only: bool = False,
+    auto_load_only: bool = False,
+    system: str | None = None,
+    start_terminal_id: int | None = None,
+    max_legs: int = MAX_LEGS,
+) -> list[MultiStopRoute]:
+    """Return the best-profit chains of 2 to `max_legs` profitable legs. With the default
+    `max_legs` this is exactly the search documented on _search_multi_stop_routes.
+
+    A deeper request (`max_legs` above MAX_LEGS) is a bounded heuristic that can come back
+    WORSE than the default depth on real data: measured on the real collected snapshot, a 576
+    SCU ship on a 2,000,000 aUEC budget found a best chain of 2,347,495 at 4 legs but
+    2,360,888 at 3 - the deeper walk spends MAX_CHAINS_EXPLORED before reaching every shorter
+    chain. A chain of up to MAX_LEGS legs is also a perfectly valid answer to a deeper
+    request, so those results are merged in: asking for more legs can never come back worse
+    than not asking, the same invariant sweep_budget_curve enforces for budget. The default
+    depth runs one search, exactly as before; only a deeper request pays for the second."""
+    options = dict(
+        ship_capacity_scu=ship_capacity_scu, budget=budget, limit=limit, max_commodities=max_commodities,
+        space_only=space_only, capital_access_only=capital_access_only, auto_load_only=auto_load_only,
+        system=system, start_terminal_id=start_terminal_id,
+    )
+    routes = _search_multi_stop_routes(market_rows, max_legs=max_legs, **options)
+    if max_legs <= MAX_LEGS:
+        return routes
+    merged = list(routes)
+    for route in _search_multi_stop_routes(market_rows, max_legs=MAX_LEGS, **options):
+        if route not in merged:
+            merged.append(route)
+    merged.sort(key=lambda route: (route.profit, route.roi_pct), reverse=True)
+    return merged[:limit]
 
 
 @dataclass(frozen=True)
