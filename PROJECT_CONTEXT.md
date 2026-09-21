@@ -2233,6 +2233,57 @@ they're in sync).
     for the stated reasons; the repeat-report test is a regression guard for the reordering
     and passes either way.
 
+67. **`/mixed-routes` origin/destination pinning and `max-legs` on both multi-stop commands -
+    new slash options, built from capabilities aiv2 only exposed to its AI tool.** aiv2's
+    `build_mixed_routes(origin_terminal_id=..., destination_terminal_id=...)` and
+    `build_multi_stop_routes(max_legs=...)` had no slash command in aiv2 either (its own
+    docstring says "no slash command exposes this"), so unlike entries 61-66 this is a product
+    decision, made with the user: both multi-stop commands get `max-legs` (3 default, 4 opt-in),
+    and `/mixed-routes` gets both `origin` and `destination`.
+
+    **Pinning**: the two ids narrow `build_mixed_routes`' candidate (origin, destination)
+    pairs after the shared safety filters and BEFORE cargo allocation and the `limit` cut, so the
+    result is the true top five among pinned loads rather than the pinned subset of an
+    already-truncated global top five (the "filter before truncating" convention), and the
+    expensive allocation is skipped for pairs about to be discarded. The command resolves each
+    name with `resolve_terminal_id_by_name` (the same resolver and wording as
+    `/route-from-multi`'s `location`, with the same terminal autocomplete) before any slow work,
+    never silently falls back to an unpinned search on a bad name, names the pin in the empty
+    result message, and discloses it in the footer.
+
+    **`max-legs`, and a defect measured before shipping**: aiv2's own docstring says the deeper
+    search "hasn't been measured against real data." It was, on a copy of the real local
+    snapshot (2,595 rows), and two things came out. Time: 4 legs takes 4-10 s against 1.6-10 s for
+    3, acceptable since the search already runs in a worker thread. Correctness: with a 2,000,000
+    aUEC budget a 576 SCU ship's best chain was 2,347,495 at 4 legs but 2,360,888 at 3 (1,440 SCU:
+    3,328,622 vs 3,338,672) - allowing more legs made the answer WORSE, which cannot be true of an
+    exact search, because every 3-leg chain is also a valid 4-leg chain. The deeper walk spends
+    `MAX_CHAINS_EXPLORED` before reaching every shorter chain. Same family as the budget-sweep
+    monotonicity fix: enforce the invariant instead of trusting the heuristic. The search became
+    the private `_search_multi_stop_routes(max_legs=...)`, and the public
+    `build_multi_stop_routes` merges the default-depth results in whenever a deeper request is
+    made, so asking for more legs can never come back worse. Re-measured with the guard on the
+    same snapshot: both regressed cases now tie the 3-leg result exactly, no case is worse, and
+    the no-budget cases find 16-22% more profit (24 SCU: 587,616 vs 482,012; 1,440 SCU: 6,338,320
+    vs 5,444,760), while budget-limited cases tie. The cost is that a 4-leg request runs two searches, about twice as long
+    (6-16 s). The default depth still runs exactly one search, unchanged.
+
+    **Other notes**: `max-legs` is a two-choice option (3, 4), not a free number, so an
+    unmeasured depth like 5 cannot be requested. `/mixed-routes` also took aiv2's description
+    change ("hedges against one item's stock or demand running short"). Tracking a 4-hop chain
+    creates more tracked legs than a 3-hop one; there is no per-route leg cap in
+    `route_progression`, only a cap on how many routes one message offers. Not deployed.
+
+    **Verification**: 4 pin tests ported from aiv2 plus 4 new tests for the depth option and its
+    guard (a 4-leg chain only a deeper search finds; the default unchanged; the never-worse
+    guard and the single-search default, both with hand-picked results standing in for the
+    real-data cutoff, which would be guesswork to reproduce synthetically), and 7 tests through
+    the real commands: pin by origin, by destination, by both, an unresolvable terminal named,
+    an empty pinned result naming the pin, `max-legs` reaching the search from both multi-stop
+    commands, and a real 4-leg chain rendered within Discord's 6000-character limit. Six of
+    those seven fail if the commands stop passing the new arguments through; the seventh
+    (terminal lookup, which happens before the search) passes either way by design.
+
 ## Where to look for what
 
 Five docs, deliberately scoped so they don't duplicate each other:

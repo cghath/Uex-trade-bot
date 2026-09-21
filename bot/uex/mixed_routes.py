@@ -454,6 +454,8 @@ def build_mixed_routes(
     capital_access_only: bool = False,
     auto_load_only: bool = False,
     system: str | None = None,
+    origin_terminal_id: int | None = None,
+    destination_terminal_id: int | None = None,
 ) -> list[MixedRoute]:
     """Return profitable same-origin/same-destination mixed loads.
 
@@ -467,6 +469,15 @@ def build_mixed_routes(
     *before* origins/destinations are split out of it, so every candidate on both sides
     is already confirmed, and a route built from this filtered pool can never pair a
     passing origin with a failing destination.
+
+    ``origin_terminal_id`` / ``destination_terminal_id`` (both optional) pin the route to a
+    specific terminal - "the best mixed load from where I'm standing." They narrow the
+    candidate (origin, destination) pairs AFTER the shared safety filters above and BEFORE
+    cargo allocation and the ``limit`` cut, so the result is the true top ``limit`` among
+    pinned routes, never the pinned subset of an already-truncated global top-N (this
+    codebase's "filter before truncating" convention). Skipping non-matching pairs before
+    allocation also avoids running the expensive cargo search on routes about to be
+    discarded.
     """
     capacity = math.floor(float(ship_capacity_scu or 0))
     if capacity <= 0 or limit <= 0 or max_commodities < 2:
@@ -483,6 +494,10 @@ def build_mixed_routes(
 
     routes: list[MixedRoute] = []
     for (origin_id, destination_id), pairs in opportunities.items():
+        if origin_terminal_id is not None and origin_id != origin_terminal_id:
+            continue
+        if destination_terminal_id is not None and destination_id != destination_terminal_id:
+            continue
         cargo = allocate_pair_cargo(
             pairs, capacity=capacity, budget=capital, max_commodities=max_commodities, min_commodities=2
         )

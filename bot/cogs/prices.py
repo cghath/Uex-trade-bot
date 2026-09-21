@@ -32,7 +32,12 @@ from bot.uex.ships import estimate_route_cargo, resolve_ship
 from bot.uex.status import build_status_lookup, resolve_status_label
 from bot.uex.trading import best_buy_locations, best_routes, best_sell_locations
 from bot.uex.mixed_routes import build_mixed_routes, find_hedge_cargo, requires_capital_cargo_access
-from bot.uex.multi_stop_routes import build_multi_stop_routes, find_diminishing_returns_budget, sweep_budget_curve
+from bot.uex.multi_stop_routes import (
+    MAX_LEGS,
+    build_multi_stop_routes,
+    find_diminishing_returns_budget,
+    sweep_budget_curve,
+)
 from bot.uex.charts import render_budget_curve_chart
 from bot.uex.trading_preferences import describe_active_preferences
 from bot.cogs.route_progression import RouteLegInput, RouteTrackingView, TrackableRoute
@@ -61,6 +66,15 @@ SYSTEM_CHOICES = [
     app_commands.Choice(name="Pyro", value="Pyro"),
     app_commands.Choice(name="Nyx", value="Nyx"),
 ]
+
+# The multi-stop search defaults to MAX_LEGS (3) hops; 4 is opt-in because it roughly doubles the
+# search time (a guard merges the 3-hop results in so a 4-hop request is never worse - see
+# build_multi_stop_routes).
+MAX_LEGS_CHOICES = [
+    app_commands.Choice(name="3 (default)", value=MAX_LEGS),
+    app_commands.Choice(name="4 (slower)", value=MAX_LEGS + 1),
+]
+MAX_LEGS_DESCRIPTION = "Optional: chain up to 4 hops instead of 3 - finds more profit but takes about twice as long"
 
 # Re-exported under their historical names: bot/cogs/trends.py imports these from here,
 # and several tests monkeypatch bot.cogs.prices._add_chunked_fields/_chunk_lines directly -
@@ -991,7 +1005,7 @@ class Prices(commands.Cog):
 
     @app_commands.command(
         name="mixed-routes",
-        description="Find the five best two- or three-commodity loads for your ship and budget.",
+        description="Find the five best 2-3 commodity loads - hedges against one item's stock or demand running short.",
     )
     @app_commands.describe(
         ship="Optional: use a specific ship instead of your saved default",
@@ -999,10 +1013,14 @@ class Prices(commands.Cog):
         space_only="Exclude surface terminals; require both ends to be confirmed space stations",
         auto_load_only="Only show loads where both the origin and destination terminal offer UEX's auto-load",
         system="Optional: require both ends of the load to be in this star system",
+        origin="Optional: only show loads that start at this terminal, e.g. where you are now",
+        destination="Optional: only show loads that end at this terminal",
     )
     @app_commands.rename(space_only="space-only", auto_load_only="auto-load-only")
     @app_commands.choices(system=SYSTEM_CHOICES)
-    @app_commands.autocomplete(ship=ship_name_autocomplete)
+    @app_commands.autocomplete(
+        ship=ship_name_autocomplete, origin=terminal_name_autocomplete, destination=terminal_name_autocomplete
+    )
     async def mixed_routes(
         self,
         interaction: discord.Interaction,
@@ -1011,8 +1029,30 @@ class Prices(commands.Cog):
         space_only: bool | None = None,
         auto_load_only: bool | None = None,
         system: app_commands.Choice[str] | None = None,
+        origin: str | None = None,
+        destination: str | None = None,
     ) -> None:
         await interaction.response.defer()
+        # Resolved first - a typo'd terminal is answered immediately, before any of the slow work below.
+        origin_id = origin_name = destination_id = destination_name = None
+        if origin:
+            resolved = await self.bot.db.resolve_terminal_id_by_name(origin)
+            if resolved is None:
+                await interaction.followup.send(
+                    f"Couldn't find a single terminal matching '{origin}' - pick one from the "
+                    "autocomplete list to make sure it's unambiguous."
+                )
+                return
+            origin_id, origin_name = resolved
+        if destination:
+            resolved = await self.bot.db.resolve_terminal_id_by_name(destination)
+            if resolved is None:
+                await interaction.followup.send(
+                    f"Couldn't find a single terminal matching '{destination}' - pick one from the "
+                    "autocomplete list to make sure it's unambiguous."
+                )
+                return
+            destination_id, destination_name = resolved
         prefs = await self.bot.db.get_trading_preferences(interaction.user.id)
         if space_only is None:
             space_only = prefs["space_only"]
@@ -1082,6 +1122,8 @@ class Prices(commands.Cog):
             capital_access_only=capital_access_only,
             auto_load_only=auto_load_only,
             system=system_value,
+            origin_terminal_id=origin_id,
+            destination_terminal_id=destination_id,
         )
         if not routes:
             budget_note = " within that budget" if budget is not None else ""
@@ -1089,8 +1131,16 @@ class Prices(commands.Cog):
             access_note = " with confirmed capital-ship cargo access" if capital_access_only else ""
             auto_load_note = " with auto-load at the origin" if auto_load_only else ""
             system_note = f" entirely within {system_value}" if system_value else ""
+            if origin_name and destination_name:
+                pin_note = f" from **{origin_name}** to **{destination_name}**"
+            elif origin_name:
+                pin_note = f" starting at **{origin_name}**"
+            elif destination_name:
+                pin_note = f" ending at **{destination_name}**"
+            else:
+                pin_note = ""
             await interaction.followup.send(
-                f"No two- or three-commodity loads fit **{ship_vehicle.get('name', ship_query)}**"
+                f"No two- or three-commodity loads{pin_note} fit **{ship_vehicle.get('name', ship_query)}**"
                 f"{budget_note}{safety_note}{access_note}{auto_load_note}{system_note} right now."
             )
             return
@@ -1141,6 +1191,10 @@ class Prices(commands.Cog):
                 footer += " · surface terminals excluded"
             if capital_access_only:
                 footer += " · capital access confirmed at both ends"
+            if origin_name:
+                footer += f" · limited to loads starting at {origin_name}"
+            if destination_name:
+                footer += f" · limited to loads ending at {destination_name}"
             if note := approximation_note(route.is_exact):
                 footer += f" · {note}"
 
@@ -1234,7 +1288,7 @@ class Prices(commands.Cog):
 
     @app_commands.command(
         name="multi-stop-route",
-        description="Chain 2-3 profitable hops across multiple stops for your ship and budget.",
+        description="Chain 2-3 (or up to 4) profitable hops across multiple stops for your ship and budget.",
     )
     @app_commands.describe(
         ship="Optional: use a specific ship instead of your saved default",
@@ -1242,9 +1296,10 @@ class Prices(commands.Cog):
         space_only="Exclude surface terminals; require every stop to be a confirmed space station",
         auto_load_only="Only show chains where every stop offers UEX's auto-load",
         system="Optional: require every stop in the chain to be in this star system",
+        max_legs=MAX_LEGS_DESCRIPTION,
     )
-    @app_commands.rename(space_only="space-only", auto_load_only="auto-load-only")
-    @app_commands.choices(system=SYSTEM_CHOICES)
+    @app_commands.rename(space_only="space-only", auto_load_only="auto-load-only", max_legs="max-legs")
+    @app_commands.choices(system=SYSTEM_CHOICES, max_legs=MAX_LEGS_CHOICES)
     @app_commands.autocomplete(ship=ship_name_autocomplete)
     async def multi_stop_route(
         self,
@@ -1254,6 +1309,7 @@ class Prices(commands.Cog):
         space_only: bool | None = None,
         auto_load_only: bool | None = None,
         system: app_commands.Choice[str] | None = None,
+        max_legs: app_commands.Choice[int] | None = None,
     ) -> None:
         await interaction.response.defer()
         prefs = await self.bot.db.get_trading_preferences(interaction.user.id)
@@ -1324,6 +1380,7 @@ class Prices(commands.Cog):
             capital_access_only=capital_access_only,
             auto_load_only=auto_load_only,
             system=system_value,
+            max_legs=max_legs.value if max_legs else MAX_LEGS,
         )
         if not routes:
             budget_note = " within that budget" if budget is not None else ""
@@ -1560,7 +1617,7 @@ class Prices(commands.Cog):
 
     @app_commands.command(
         name="route-from-multi",
-        description="Chain 2-3 profitable hops starting from your current location.",
+        description="Chain 2-3 (or up to 4) profitable hops starting from your current location.",
     )
     @app_commands.describe(
         location="Terminal you're currently at, e.g. 'Area18' or 'Port Tressler'",
@@ -1569,9 +1626,10 @@ class Prices(commands.Cog):
         space_only="Exclude surface terminals; require every stop to be a confirmed space station",
         auto_load_only="Only show chains where every stop offers UEX's auto-load",
         system="Optional: require every stop in the chain to be in this star system",
+        max_legs=MAX_LEGS_DESCRIPTION,
     )
-    @app_commands.rename(space_only="space-only", auto_load_only="auto-load-only")
-    @app_commands.choices(system=SYSTEM_CHOICES)
+    @app_commands.rename(space_only="space-only", auto_load_only="auto-load-only", max_legs="max-legs")
+    @app_commands.choices(system=SYSTEM_CHOICES, max_legs=MAX_LEGS_CHOICES)
     @app_commands.autocomplete(ship=ship_name_autocomplete, location=terminal_name_autocomplete)
     async def route_from_multi(
         self,
@@ -1582,6 +1640,7 @@ class Prices(commands.Cog):
         space_only: bool | None = None,
         auto_load_only: bool | None = None,
         system: app_commands.Choice[str] | None = None,
+        max_legs: app_commands.Choice[int] | None = None,
     ) -> None:
         # Deferred before ANY slow await, including the location lookup itself - the real
         # search (get_vehicles, market rows, build_multi_stop_routes) is always slow
@@ -1661,6 +1720,7 @@ class Prices(commands.Cog):
             auto_load_only=auto_load_only,
             system=system_value,
             start_terminal_id=origin_id,
+            max_legs=max_legs.value if max_legs else MAX_LEGS,
         )
         if not routes:
             budget_note = " within that budget" if budget is not None else ""
