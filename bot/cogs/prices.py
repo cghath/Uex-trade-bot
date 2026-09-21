@@ -51,6 +51,7 @@ from bot.uex.route_presentation import (
     chunk_lines,
     format_evidence_note,
     side_health_warnings,
+    hedge_room,
     stock_headroom_warning,
     travel_warning,
     worst_confidence,
@@ -667,16 +668,14 @@ class Prices(commands.Cog):
                     value_lines.append(cargo_line)
                     if headroom_note := stock_headroom_warning(cargo.limited_by):
                         value_lines.append(f"⚠️ {headroom_note}")
-                        remaining_capacity = (ship_cargo_scu or 0) - cargo.max_scu
-                        if (
-                            ship_cargo_scu is not None and remaining_capacity > 0
-                            and origin_id is not None and destination_id is not None
-                        ):
+                        room = hedge_room(cargo, ship_cargo_scu=ship_cargo_scu)
+                        if room is not None and origin_id is not None and destination_id is not None:
                             if market_rows is None:
                                 market_rows = await self.bot.db.get_mixed_route_market_rows()
                             for hedge_item in find_hedge_cargo(
                                 market_rows, origin_terminal_id=origin_id, destination_terminal_id=destination_id,
-                                exclude_commodity_id=id_commodity, remaining_capacity_scu=remaining_capacity,
+                                exclude_commodity_id=id_commodity, remaining_capacity_scu=room.capacity_scu,
+                                remaining_budget=room.budget,
                             ):
                                 value_lines.append(f"Hedge: {cargo_item_line(hedge_item)}")
                 elif not ship_vehicle:
@@ -938,17 +937,15 @@ class Prices(commands.Cog):
                 value_lines.append(cargo_line)
                 if headroom_note := stock_headroom_warning(cargo.limited_by):
                     value_lines.append(f"⚠️ {headroom_note}")
-                    remaining_capacity = (ship_cargo_scu or 0) - cargo.max_scu
-                    if (
-                        ship_cargo_scu is not None and remaining_capacity > 0
-                        and route.buy_terminal_id is not None and route.sell_terminal_id is not None
-                    ):
+                    room = hedge_room(cargo, ship_cargo_scu=ship_cargo_scu)
+                    if room is not None and route.buy_terminal_id is not None and route.sell_terminal_id is not None:
                         if market_rows is None:
                             market_rows = await self.bot.db.get_mixed_route_market_rows()
                         for hedge_item in find_hedge_cargo(
                             market_rows, origin_terminal_id=route.buy_terminal_id,
                             destination_terminal_id=route.sell_terminal_id,
-                            exclude_commodity_id=id_commodity, remaining_capacity_scu=remaining_capacity,
+                            exclude_commodity_id=id_commodity, remaining_capacity_scu=room.capacity_scu,
+                            remaining_budget=room.budget,
                         ):
                             value_lines.append(f"Hedge: {cargo_item_line(hedge_item)}")
             elif not ship_vehicle:
