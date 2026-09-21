@@ -1450,7 +1450,7 @@ def _all_embed_text(interaction) -> str:
 
 def test_best_route_fallback_branch_warns_and_suggests_a_hedge_when_stock_is_the_binding_limit(tmp_path):
     """/best-route has TWO places that show a cargo estimate (UEX's own routes, and this
-    fallback pairing of raw price rows); aiv2's tests only reach the first, so the fallback
+    fallback pairing of raw price rows); the primary-branch tests above only reach the first, so the fallback
     call site needs its own proof. 21 SCU of Taranite against a 1,440 SCU hold is stock-limited,
     and Cobalt seeded at the same terminal pair should surface as the hedge."""
     async def run():
