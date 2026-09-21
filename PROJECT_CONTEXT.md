@@ -2084,6 +2084,40 @@ they're in sync).
     the failed-lookup and single-ore cases). The ported command body differs from aiv2's
     only by that missing extraction and comment wording.
 
+63. **`/top-routes`, `/routes-from` and `/route-on-the-way` rank by the profit the player can
+    actually earn - ported from the aiv2 experiment.** UEX's `profit` field is computed at
+    unlimited cargo and budget, so a route can outrank another purely because of a basis no
+    player has. Fixture numbers modeled on real data: Waste is listed at 54,500,000 aUEC
+    (250,000 SCU, a 58,000,000 aUEC investment) ahead of Corundum at 1,385,120 aUEC
+    (787 SCU), but a 1,440 SCU ship with a 2,000,000 aUEC budget realizes 313,920 from Waste
+    and 1,333,333 from Corundum - over 4x more, the reverse of UEX's order.
+
+    **What changed**: `rank_by_achievable_profit` (`bot/uex/trends.py`) re-sorts candidates
+    by `estimate_route_cargo`'s `run_profit` for the player's ship cargo and/or budget, with
+    `price_roi` as the tie-breaker. It is called in `Trends._send_ranked_routes`
+    (`bot/cogs/trends.py`) after the auto-load/system filters and BEFORE the per-commodity
+    dedupe and the display truncation - the ordering matters twice over: dedupe keeps the
+    first route per commodity, so ranking after it would keep UEX's pick rather than the
+    player's; and ranking after truncation could drop the better route before it was ever
+    seen. All three commands share that method, so one call covers them. It is a no-op until
+    a ship or a budget is known (nothing meaningful to re-rank by without either), and a route
+    whose cargo estimate can't be computed ranks last rather than being dropped.
+
+    **What was deliberately not ported**: aiv2 bundled this into a refactor of the method
+    into `build_ranked_route_messages` plus an AI-only `get_top_routes_snapshot`; neither has
+    a consumer here, so only the ranking call was ported into the existing structure. The same
+    aiv2 diff also adds a footer note ("only N routes currently qualify") that is a separate
+    player-visible change nobody asked for here - left out and flagged instead.
+
+    **Verification**: 3 pure tests ported from aiv2 (`tests/test_trends.py`) plus 3 new tests
+    that drive `_send_ranked_routes` end to end (`tests/test_trends_embed_budget.py`), since
+    the pure tests can't prove the caller passes the right arguments in the right place:
+    the order flips with a ship and budget, is unchanged without them, and holds when the
+    display size is 1. Both behavioural tests were run against the pre-fix cog and failed for
+    the stated reason (Waste first, and Waste as the only route shown). aiv2's Corundum
+    figure in its own comments (~1.1M, and a 1,333,323 typo) did not match what
+    `estimate_route_cargo` returns for the fixture; the comments here use the computed value.
+
 ## Where to look for what
 
 Five docs, deliberately scoped so they don't duplicate each other:

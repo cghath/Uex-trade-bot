@@ -7,6 +7,7 @@ from bot.uex.trends import (
     TrendingEntry,
     aggregate_commodity_trips,
     compute_movers,
+    rank_by_achievable_profit,
     rank_top_scored_routes,
     rank_trending,
     select_available_routes,
@@ -282,6 +283,73 @@ def test_rank_top_scored_routes_uses_roi_as_a_tie_breaker():
         _scored("HighROI", profit=500, price_roi=50.0),
     ]
     ranked = rank_top_scored_routes(entries, limit=10)
+    assert [e.commodity_name for e in ranked] == ["HighROI", "LowROI"]
+
+
+# --- rank_by_achievable_profit ---
+# Fixture numbers are modeled on real live UEX data: a Waste route UEX itself reports
+# at 54,500,000 aUEC theoretical profit (250,000 SCU, needing a 58,000,000 aUEC
+# investment no real player has) outranked a Corundum route UEX reports at only
+# 1,385,120 aUEC (787 SCU) - purely because of UEX's own unlimited-cargo/budget basis.
+
+
+def _real_route(*, commodity_name: str, price_origin: float, price_destination: float,
+                 scu_origin: float, scu_destination: float, profit: float, price_roi: float = 0.0) -> ScoredRouteEntry:
+    return ScoredRouteEntry(
+        commodity_name=commodity_name,
+        id_commodity=hash(commodity_name) % 1000,
+        origin_terminal_name="Origin",
+        destination_terminal_name="Destination",
+        price_origin=price_origin,
+        price_destination=price_destination,
+        price_margin=None,
+        price_roi=price_roi,
+        distance=None,
+        score=None,
+        scu_origin=scu_origin,
+        scu_destination=scu_destination,
+        status_origin=None,
+        status_destination=None,
+        profit=profit,
+    )
+
+
+def _waste_and_corundum() -> list[ScoredRouteEntry]:
+    waste = _real_route(
+        commodity_name="Waste", price_origin=232, price_destination=450,
+        scu_origin=250_000, scu_destination=250_000, profit=54_500_000,
+    )
+    corundum = _real_route(
+        commodity_name="Corundum", price_origin=2640, price_destination=4400,
+        scu_origin=787, scu_destination=787, profit=1_385_120,
+    )
+    return [waste, corundum]
+
+
+def test_rank_by_achievable_profit_is_a_noop_without_ship_or_budget():
+    entries = _waste_and_corundum()
+    assert rank_by_achievable_profit(entries, ship_cargo_scu=None, budget=None) == entries
+
+
+def test_rank_by_achievable_profit_favors_what_a_real_ship_and_budget_can_realize():
+    # A 1,440 SCU ship and a 2,000,000 aUEC budget can only ever haul ~313,920 aUEC of
+    # profit out of Waste (ship-capped at 1,440 SCU) but ~1,333,333 aUEC out of
+    # Corundum (budget-capped at ~757.6 SCU, still under its own 787 SCU stock) - over
+    # 4x more, the reverse of UEX's own raw-profit ordering.
+    ranked = rank_by_achievable_profit(_waste_and_corundum(), ship_cargo_scu=1440, budget=2_000_000)
+    assert [e.commodity_name for e in ranked] == ["Corundum", "Waste"]
+
+
+def test_rank_by_achievable_profit_uses_roi_as_a_tie_breaker():
+    low_roi = _real_route(
+        commodity_name="LowROI", price_origin=100, price_destination=200,
+        scu_origin=500, scu_destination=500, profit=1000, price_roi=10.0,
+    )
+    high_roi = _real_route(
+        commodity_name="HighROI", price_origin=100, price_destination=200,
+        scu_origin=500, scu_destination=500, profit=1000, price_roi=50.0,
+    )
+    ranked = rank_by_achievable_profit([low_roi, high_roi], ship_cargo_scu=100, budget=None)
     assert [e.commodity_name for e in ranked] == ["HighROI", "LowROI"]
 
 

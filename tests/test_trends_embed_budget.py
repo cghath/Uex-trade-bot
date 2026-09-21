@@ -436,3 +436,82 @@ def test_top_routes_shows_investment():
         assert "Investment:" in combined, combined
 
     asyncio.run(run())
+
+
+def _waste_and_corundum_entries() -> list[ScoredRouteEntry]:
+    """Modeled on real live UEX data: UEX reports Waste at 54,500,000 aUEC theoretical profit
+    (250,000 SCU, a 58,000,000 aUEC investment) ahead of Corundum at 1,385,120 aUEC (787 SCU),
+    but a 1,440 SCU ship with a 2,000,000 aUEC budget can only realize ~313,920 aUEC from Waste
+    versus ~1,333,333 from Corundum. Listed in UEX's own (profit-descending) order."""
+    def entry(name, id_commodity, price_origin, price_destination, scu, profit):
+        return ScoredRouteEntry(
+            commodity_name=name, id_commodity=id_commodity,
+            origin_terminal_name=f"Origin {id_commodity}", destination_terminal_name=f"Destination {id_commodity}",
+            price_origin=price_origin, price_destination=price_destination, price_margin=50, price_roi=100,
+            distance=10, score=100, scu_origin=scu, scu_destination=scu, status_origin=1,
+            status_destination=1, origin_terminal_id=2 * id_commodity - 1,
+            destination_terminal_id=2 * id_commodity, profit=profit,
+        )
+
+    return [
+        entry("Waste", 1, 232, 450, 250_000, 54_500_000),
+        entry("Corundum", 2, 2640, 4400, 787, 1_385_120),
+    ]
+
+
+def _route_titles(inter) -> list[str]:
+    return [call.kwargs["embed"].title for call in _route_embed_calls(inter.followup.send)]
+
+
+def test_top_routes_ranks_by_what_the_players_ship_and_budget_can_realize():
+    """Through the real command path (not just rank_by_achievable_profit in isolation): a
+    saved 1,440 SCU ship plus a 2,000,000 aUEC budget must put Corundum ahead of Waste, the
+    reverse of the order UEX's own unlimited-cargo profit figure gives them."""
+    async def run():
+        cog, db = _make_cog(2)
+        db.get_default_ship = AsyncMock(return_value="Big Ship")
+        cog.bot.uex.get_vehicles = AsyncMock(return_value=[dict(name="Big Ship", scu=1440)])
+        inter = _interaction()
+        await cog._send_ranked_routes(
+            inter, entries=_waste_and_corundum_entries(), updated_at=None, ship=None,
+            title="Top routes", footer_note="Collected data", log_label="test", display_limit=10,
+            budget=2_000_000,
+        )
+        titles = _route_titles(inter)
+        assert len(titles) == 2 and "Corundum" in titles[0] and "Waste" in titles[1], titles
+
+    asyncio.run(run())
+
+
+def test_top_routes_keeps_uex_ordering_when_there_is_no_ship_or_budget():
+    async def run():
+        cog, db = _make_cog(2)
+        db.get_default_ship = AsyncMock(return_value=None)
+        inter = _interaction()
+        await cog._send_ranked_routes(
+            inter, entries=_waste_and_corundum_entries(), updated_at=None, ship=None,
+            title="Top routes", footer_note="Collected data", log_label="test", display_limit=10,
+        )
+        titles = _route_titles(inter)
+        assert len(titles) == 2 and "Waste" in titles[0] and "Corundum" in titles[1], titles
+
+    asyncio.run(run())
+
+
+def test_top_routes_re_ranks_before_truncating_to_the_display_size():
+    """If ranking ran after truncation, a display size of 1 would keep UEX's first pick (Waste)
+    and the better-for-this-player route would never be seen."""
+    async def run():
+        cog, db = _make_cog(2)
+        db.get_default_ship = AsyncMock(return_value="Big Ship")
+        cog.bot.uex.get_vehicles = AsyncMock(return_value=[dict(name="Big Ship", scu=1440)])
+        inter = _interaction()
+        await cog._send_ranked_routes(
+            inter, entries=_waste_and_corundum_entries(), updated_at=None, ship=None,
+            title="Top routes", footer_note="Collected data", log_label="test", display_limit=1,
+            budget=2_000_000,
+        )
+        titles = _route_titles(inter)
+        assert len(titles) == 1 and "Corundum" in titles[0], titles
+
+    asyncio.run(run())

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from bot.uex.ships import estimate_route_cargo
 from bot.uex.supply_demand import SELL_SIDE_NO_DEMAND_CODE as SELL_SIDE_NO_DEMAND_CODE
 from bot.uex.supply_demand import has_sell_side_demand
 
@@ -220,6 +221,43 @@ def rank_top_scored_routes(entries: list[ScoredRouteEntry], limit: int = 10) -> 
     display happens later, in bot/cogs/trends.py:_send_ranked_routes, after a user's
     filters have had a chance to pick among a commodity's alternatives."""
     return sorted(entries, key=_profit_rank_key, reverse=True)[:limit]
+
+
+def rank_by_achievable_profit(
+    entries: list[ScoredRouteEntry],
+    *,
+    ship_cargo_scu: float | None,
+    budget: float | None,
+) -> list[ScoredRouteEntry]:
+    """Re-ranks candidates by profit actually achievable within a real player's ship cargo
+    and/or budget, instead of _profit_rank_key's UEX-reported 'profit' (computed at
+    unlimited cargo/budget - see that field's own docstring on ScoredRouteEntry).
+    Confirmed on real live data: UEX's /commodities_routes reports a Waste route's
+    theoretical profit at 54,500,000 aUEC, requiring a 58,000,000 aUEC investment no real
+    player has, ranking it above a Corundum route whose theoretical profit is only
+    1,385,120 aUEC - but a player with a 1,440 SCU ship and a 2,000,000 aUEC budget can
+    only ever realize 313,920 aUEC from the Waste route, while the Corundum route nets
+    them 1,105,220 aUEC, over 3x more. Without a ship or budget to constrain against,
+    there's nothing meaningful to re-rank by (real stock alone rarely diverges from UEX's
+    own basis), so the original ordering is left untouched - this only changes anything
+    once a player has a ship and/or budget set, the same trigger this feature's own
+    missing-preferences nudge (bot/uex/trading_preferences.py) already looks for."""
+    if ship_cargo_scu is None and budget is None:
+        return entries
+
+    def achievable_key(entry: ScoredRouteEntry) -> tuple[float, float]:
+        cargo = estimate_route_cargo(
+            per_unit_profit=entry.price_destination - entry.price_origin,
+            origin_scu_available=entry.scu_origin,
+            destination_scu_wanted=entry.scu_destination,
+            ship_cargo_scu=ship_cargo_scu,
+            price_origin=entry.price_origin,
+            budget=budget,
+        )
+        run_profit = cargo.run_profit if cargo is not None else 0.0
+        return (run_profit, entry.price_roi or 0.0)
+
+    return sorted(entries, key=achievable_key, reverse=True)
 
 
 # UEX's own /commodities_status defines sell-side code 7 (86-100% inventory band) as

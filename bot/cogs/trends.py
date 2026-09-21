@@ -56,6 +56,7 @@ from bot.uex.trends import (
     TrendingEntry,
     aggregate_commodity_trips,
     compute_movers,
+    rank_by_achievable_profit,
     rank_top_scored_routes,
     rank_trending,
     select_available_routes,
@@ -401,12 +402,19 @@ class Trends(commands.Cog):
                     f"No routes confirmed entirely within {system} found right now."
                 )
                 return
+        # Re-rank by what THIS player can actually haul/afford before dedup/truncation,
+        # not UEX's own unlimited-cargo/budget 'profit' figure the candidates arrived
+        # sorted by - see rank_by_achievable_profit's docstring for the real Waste-vs-
+        # Corundum numbers that motivated this. A no-op until a ship and/or budget is
+        # known for this player.
+        entries = rank_by_achievable_profit(entries, ship_cargo_scu=ship_cargo_scu, budget=budget)
         # Dedupe back to one route per commodity - entries can now carry several
         # candidates per commodity (see select_available_routes), so a same-commodity
         # alternative survives being filtered here instead of the whole commodity
-        # disappearing when only its top-scored route is checked. entries is still
-        # score-sorted overall at this point, so keeping the first occurrence per
-        # commodity keeps the highest-scoring surviving one.
+        # disappearing when only its top-scored route is checked. entries is now sorted
+        # by achievable profit (or still UEX profit, if neither ship nor budget is set) at
+        # this point, so keeping the first occurrence per commodity keeps the best
+        # surviving one either way.
         seen_commodities: set[int] = set()
         deduped_entries: list[ScoredRouteEntry] = []
         for route in entries:
