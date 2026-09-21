@@ -4,6 +4,7 @@ leg-outcome View/Modal claim logic in bot/cogs/route_progression.py."""
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock, Mock
@@ -16,6 +17,8 @@ import pytest
 from bot.cogs.route_progression import (
     AbandonConfirmView,
     ActualAmountModal,
+    HedgeReportModal,
+    HedgeReportView,
     LegOutcomeView,
     MoreOutcomeFollowupView,
     RouteLegInput,
@@ -2564,6 +2567,557 @@ def test_handle_leg_outcome_a_conflicting_second_report_does_not_overwrite_or_re
             "the rejected 'missing' report must never reach terminal_market_state/suppression - "
             "'matched' (the real winner) doesn't suppress anything"
         )
+
+    asyncio.run(run())
+
+
+def test_handle_leg_outcome_a_buy_side_shortfall_suggests_a_hedge_in_the_thread(tmp_path):
+    """The tracking-thread counterpart to find_hedge_cargo's own unit tests: a 'missing'
+    report on a buy leg should post a hedge suggestion for a real complementary
+    commodity at the SAME origin/destination pair, in addition to (not instead of) the
+    next leg's prompt."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await _seed_market_row(db)
+        await db.record_terminal_market_snapshot([
+            {"id_commodity": 2, "id_terminal": 10, "commodity_name": "Cobalt", "terminal_name": "Area18 TDD",
+             "price_buy": 20, "price_sell": 0, "scu_buy": 95, "scu_sell": 0, "status_buy": 1, "status_sell": None},
+            {"id_commodity": 2, "id_terminal": 20, "commodity_name": "Cobalt", "terminal_name": "Elsewhere",
+             "price_buy": 0, "price_sell": 50, "scu_buy": 0, "scu_sell": 80, "status_buy": None, "status_sell": 1},
+        ])
+        leg0 = _leg_input(id_terminal=10, id_commodity=1, quoted_price=100.0, quoted_scu=50.0, quoted_status=3)
+        leg1 = _leg_input(
+            side="sell", id_terminal=20, id_commodity=1, terminal_name="Elsewhere",
+            display_label="Sell Gold at Elsewhere", quoted_price=90.0, quoted_scu=40.0, quoted_status=2,
+        )
+        await _create_thread_for_legs(db, 1, [leg0, leg1])
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db})()
+        cog._active_legs = {1: [leg0, leg1]}
+        channel = _fake_thread_channel()
+
+        await cog.handle_leg_outcome(channel, 1, 0, leg0, outcome="missing")
+
+        assert channel.send.await_count == 2, "expected the hedge suggestion plus leg 2's prompt"
+        hedge_message = channel.send.call_args_list[0].args[0]
+        assert "Cobalt" in hedge_message, hedge_message
+
+    asyncio.run(run())
+
+
+def test_handle_leg_outcome_no_hedge_available_only_sends_the_next_leg_prompt(tmp_path):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await _seed_market_row(db)
+        leg0 = _leg_input(id_terminal=10, id_commodity=1, quoted_price=100.0, quoted_scu=50.0, quoted_status=3)
+        leg1 = _leg_input(
+            side="sell", id_terminal=20, id_commodity=1, terminal_name="Elsewhere",
+            display_label="Sell Gold at Elsewhere", quoted_price=90.0, quoted_scu=40.0, quoted_status=2,
+        )
+        await _create_thread_for_legs(db, 1, [leg0, leg1])
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db})()
+        cog._active_legs = {1: [leg0, leg1]}
+        channel = _fake_thread_channel()
+
+        await cog.handle_leg_outcome(channel, 1, 0, leg0, outcome="missing")
+
+        assert channel.send.await_count == 1, "no complementary commodity exists - only the leg-2 prompt should post"
+
+    asyncio.run(run())
+
+
+def test_handle_leg_outcome_a_sell_side_shortfall_does_not_suggest_a_hedge(tmp_path):
+    """A sell-side shortfall means demand ran short, not stock - the player still has
+    unsold cargo, a different problem (find another buyer) than 'cargo space opened up',
+    so this must stay silent even with a real complementary commodity available. Uses a
+    3-leg thread so the tested (sell) leg isn't the LAST one - reporting the final leg
+    would complete and archive the thread, which _FakeThreadChannel doesn't support."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await _seed_market_row(db)
+        await db.record_terminal_market_snapshot([
+            {"id_commodity": 2, "id_terminal": 10, "commodity_name": "Cobalt", "terminal_name": "Area18 TDD",
+             "price_buy": 20, "price_sell": 0, "scu_buy": 95, "scu_sell": 0, "status_buy": 1, "status_sell": None},
+            {"id_commodity": 2, "id_terminal": 20, "commodity_name": "Cobalt", "terminal_name": "Elsewhere",
+             "price_buy": 0, "price_sell": 50, "scu_buy": 0, "scu_sell": 80, "status_buy": None, "status_sell": 1},
+        ])
+        leg0 = _leg_input(id_terminal=10, id_commodity=1, quoted_price=100.0, quoted_scu=50.0, quoted_status=3)
+        leg1 = _leg_input(
+            side="sell", id_terminal=20, id_commodity=1, terminal_name="Elsewhere",
+            display_label="Sell Gold at Elsewhere", quoted_price=90.0, quoted_scu=40.0, quoted_status=2,
+        )
+        leg2 = _leg_input(
+            side="buy", id_terminal=30, id_commodity=3, terminal_name="Third Stop",
+            commodity_name="Iron", display_label="Buy Iron at Third Stop",
+            quoted_price=10.0, quoted_scu=20.0, quoted_status=3,
+        )
+        await _create_thread_for_legs(db, 1, [leg0, leg1, leg2])
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db})()
+        cog._active_legs = {1: [leg0, leg1, leg2]}
+        channel = _fake_thread_channel()
+
+        await cog.handle_leg_outcome(channel, 1, 1, leg1, outcome="missing")
+
+        assert channel.send.await_count == 1, "expected only leg 3's prompt, no hedge suggestion"
+
+    asyncio.run(run())
+
+
+def test_handle_leg_outcome_a_matched_outcome_does_not_suggest_a_hedge(tmp_path):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await _seed_market_row(db)
+        await db.record_terminal_market_snapshot([
+            {"id_commodity": 2, "id_terminal": 10, "commodity_name": "Cobalt", "terminal_name": "Area18 TDD",
+             "price_buy": 20, "price_sell": 0, "scu_buy": 95, "scu_sell": 0, "status_buy": 1, "status_sell": None},
+            {"id_commodity": 2, "id_terminal": 20, "commodity_name": "Cobalt", "terminal_name": "Elsewhere",
+             "price_buy": 0, "price_sell": 50, "scu_buy": 0, "scu_sell": 80, "status_buy": None, "status_sell": 1},
+        ])
+        leg0 = _leg_input(id_terminal=10, id_commodity=1, quoted_price=100.0, quoted_scu=50.0, quoted_status=3)
+        leg1 = _leg_input(
+            side="sell", id_terminal=20, id_commodity=1, terminal_name="Elsewhere",
+            display_label="Sell Gold at Elsewhere", quoted_price=90.0, quoted_scu=40.0, quoted_status=2,
+        )
+        await _create_thread_for_legs(db, 1, [leg0, leg1])
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db})()
+        cog._active_legs = {1: [leg0, leg1]}
+        channel = _fake_thread_channel()
+
+        await cog.handle_leg_outcome(channel, 1, 0, leg0, outcome="matched")
+
+        assert channel.send.await_count == 1, "expected only leg 2's prompt, no hedge suggestion"
+
+    asyncio.run(run())
+
+
+# -- Hedge reporting: route_progression_hedges, _record_hedge_report, _post_pending_hedge_sell_prompt --
+
+async def _seed_hedge(db: Database, **overrides) -> int:
+    fields = dict(
+        thread_id=1, origin_leg_index=0, destination_leg_index=1,
+        id_commodity=2, commodity_name="Cobalt",
+        id_terminal_origin=10, terminal_name_origin="Area18 TDD",
+        id_terminal_destination=20, terminal_name_destination="Elsewhere",
+        quoted_price_buy=20.0, quoted_scu=80.0, quoted_price_sell=50.0,
+        market_scu_buy=95.0, market_scu_sell=80.0,
+        status_buy=1, status_sell=1,
+    )
+    fields.update(overrides)
+    return await db.create_route_progression_hedge(**fields)
+
+
+def test_record_hedge_report_writes_a_less_outcome_and_marks_the_hedge(tmp_path):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        hedge_id = await _seed_hedge(db)
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db})()
+
+        recorded = await cog._record_hedge_report(
+            hedge_id=hedge_id, side="buy", actual_price=22.0, actual_scu=50.0
+        )
+
+        assert recorded is True
+        hedge = await db.get_route_progression_hedge(hedge_id)
+        assert hedge["buy_outcome"] == "less"
+        assert hedge["buy_actual_scu"] == 50.0
+        assert hedge["buy_reported_at"] is not None
+        assert hedge["sell_outcome"] is None
+
+        async with db.connect() as conn:
+            cursor = await conn.execute(
+                "SELECT * FROM terminal_market_state WHERE id_commodity = 2 AND id_terminal = 10"
+            )
+            state = dict(await cursor.fetchone())
+        assert state["source"] == "player_report"
+
+    asyncio.run(run())
+
+
+def test_record_hedge_report_is_idempotent_per_side(tmp_path):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        hedge_id = await _seed_hedge(db)
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db})()
+
+        first = await cog._record_hedge_report(hedge_id=hedge_id, side="buy", actual_price=22.0, actual_scu=50.0)
+        second = await cog._record_hedge_report(hedge_id=hedge_id, side="buy", actual_price=99.0, actual_scu=1.0)
+
+        assert first is True
+        assert second is False, "a second report for the same side must be rejected"
+        hedge = await db.get_route_progression_hedge(hedge_id)
+        assert hedge["buy_actual_scu"] == 50.0, "the winning report must not be overwritten"
+
+    asyncio.run(run())
+
+
+def test_record_hedge_report_a_zero_scu_is_missing(tmp_path):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        hedge_id = await _seed_hedge(db)
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db})()
+
+        await cog._record_hedge_report(hedge_id=hedge_id, side="buy", actual_price=None, actual_scu=0.0)
+
+        hedge = await db.get_route_progression_hedge(hedge_id)
+        assert hedge["buy_outcome"] == "missing"
+
+    asyncio.run(run())
+
+
+def test_record_hedge_report_buy_and_sell_are_independent_sides(tmp_path):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        hedge_id = await _seed_hedge(db)
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db})()
+
+        await cog._record_hedge_report(hedge_id=hedge_id, side="buy", actual_price=20.0, actual_scu=80.0)
+        recorded_sell = await cog._record_hedge_report(hedge_id=hedge_id, side="sell", actual_price=50.0, actual_scu=80.0)
+
+        assert recorded_sell is True
+        hedge = await db.get_route_progression_hedge(hedge_id)
+        assert hedge["buy_outcome"] == "matched"
+        assert hedge["sell_outcome"] == "matched"
+
+        async with db.connect() as conn:
+            cursor = await conn.execute(
+                "SELECT * FROM terminal_market_state WHERE id_commodity = 2 AND id_terminal = 20"
+            )
+            state = dict(await cursor.fetchone())
+        assert state["price_sell"] == 50.0
+
+    asyncio.run(run())
+
+
+def test_record_hedge_report_a_confirmed_empty_sell_suppresses_that_side(tmp_path):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        hedge_id = await _seed_hedge(db)
+        await db.record_terminal_market_snapshot([
+            {"id_commodity": 2, "id_terminal": 20, "commodity_name": "Cobalt", "terminal_name": "Elsewhere",
+             "price_buy": 0, "price_sell": 50, "scu_buy": 0, "scu_sell": 80, "status_buy": None, "status_sell": 1},
+        ])
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db})()
+
+        await cog._record_hedge_report(hedge_id=hedge_id, side="sell", actual_price=None, actual_scu=0.0)
+
+        result = await db.get_suppressed_sides_by_ids([(2, 20)], now=_now())
+        assert result == {(2, 20): {"buy": False, "sell": True}}
+
+    asyncio.run(run())
+
+
+def test_record_hedge_report_a_positive_sell_does_not_suppress(tmp_path):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        hedge_id = await _seed_hedge(db)
+        await db.record_terminal_market_snapshot([
+            {"id_commodity": 2, "id_terminal": 20, "commodity_name": "Cobalt", "terminal_name": "Elsewhere",
+             "price_buy": 0, "price_sell": 50, "scu_buy": 0, "scu_sell": 80, "status_buy": None, "status_sell": 1},
+        ])
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db})()
+
+        await cog._record_hedge_report(hedge_id=hedge_id, side="sell", actual_price=50.0, actual_scu=80.0)
+
+        result = await db.get_suppressed_sides_by_ids([(2, 20)], now=_now())
+        assert (2, 20) not in result
+
+    asyncio.run(run())
+
+
+def test_suppress_hedge_market_side_never_marks_the_anchor_legs_own_suppression_marker(tmp_path):
+    """The exact bug suppress_hedge_market_side's own docstring warns against: reusing
+    suppress_terminal_market_side with the anchor route's destination_leg_index would
+    incorrectly mark THAT leg's suppression_applied_at for a suppression that's really
+    about the hedge's own commodity/terminal, not the anchor's."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        leg0 = _leg_input(id_terminal=10, id_commodity=1, quoted_price=100.0, quoted_scu=50.0, quoted_status=3)
+        leg1 = _leg_input(
+            side="sell", id_terminal=20, id_commodity=1, terminal_name="Elsewhere",
+            display_label="Sell Gold at Elsewhere", quoted_price=90.0, quoted_scu=40.0, quoted_status=2,
+        )
+        await _create_thread_for_legs(db, 1, [leg0, leg1])
+        hedge_id = await _seed_hedge(db, destination_leg_index=1)
+        await db.record_terminal_market_snapshot([
+            {"id_commodity": 2, "id_terminal": 20, "commodity_name": "Cobalt", "terminal_name": "Elsewhere",
+             "price_buy": 0, "price_sell": 50, "scu_buy": 0, "scu_sell": 80, "status_buy": None, "status_sell": 1},
+        ])
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db})()
+
+        await cog._record_hedge_report(hedge_id=hedge_id, side="sell", actual_price=None, actual_scu=0.0)
+
+        anchor_leg = await db.get_route_progression_leg(1, 1)
+        assert anchor_leg["suppression_applied_at"] is None, (
+            "the hedge's suppression must never mark the anchor's OWN leg row"
+        )
+
+    asyncio.run(run())
+
+
+def test_get_pending_hedge_sell_for_leg_requires_a_confirmed_buy_side(tmp_path):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        hedge_id = await _seed_hedge(db)
+
+        assert await db.get_pending_hedge_sell_for_leg(1, 1) is None, "buy side not yet confirmed"
+
+        await db.record_hedge_side_outcome(hedge_id, "buy", outcome="matched", actual_price=20.0, actual_scu=80.0)
+        pending = await db.get_pending_hedge_sell_for_leg(1, 1)
+        assert pending is not None and pending["id"] == hedge_id
+
+        await db.record_hedge_side_outcome(hedge_id, "sell", outcome="matched", actual_price=50.0, actual_scu=80.0)
+        assert await db.get_pending_hedge_sell_for_leg(1, 1) is None, "sell side already confirmed"
+
+    asyncio.run(run())
+
+
+def test_post_pending_hedge_sell_prompt_posts_a_companion_message(tmp_path):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        hedge_id = await _seed_hedge(db)
+        await db.record_hedge_side_outcome(hedge_id, "buy", outcome="matched", actual_price=20.0, actual_scu=80.0)
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db})()
+        channel = _fake_thread_channel()
+
+        await cog._post_pending_hedge_sell_prompt(channel, 1, 1)
+
+        assert channel.send.await_count == 1
+        message_text = channel.send.call_args_list[0].args[0]
+        assert "Cobalt" in message_text
+        view = channel.send.call_args_list[0].kwargs["view"]
+        assert view.side == "sell"
+        assert view.hedge_id == hedge_id
+
+    asyncio.run(run())
+
+
+def test_post_pending_hedge_sell_prompt_silent_without_a_confirmed_buy(tmp_path):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await _seed_hedge(db)
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db})()
+        channel = _fake_thread_channel()
+
+        await cog._post_pending_hedge_sell_prompt(channel, 1, 1)
+
+        assert channel.send.await_count == 0
+
+    asyncio.run(run())
+
+
+def _fake_message():
+    return NS(edit=AsyncMock())
+
+
+def test_record_hedge_report_a_failed_market_write_leaves_the_side_retryable(tmp_path):
+    """One transient failure in the market write (a database lock, say) must not cost the player
+    their report. The side is only marked reported AFTER that write lands, so a retry succeeds;
+    marking it first meant every retry was told 'already reported' with nothing ever recorded."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        hedge_id = await _seed_hedge(db)
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db})()
+
+        real_write = db.record_hedge_report_market_update
+        calls = {"n": 0}
+
+        async def flaky(row):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise sqlite3.OperationalError("database is locked")
+            return await real_write(row)
+
+        db.record_hedge_report_market_update = flaky
+
+        with pytest.raises(sqlite3.OperationalError):
+            await cog._record_hedge_report(hedge_id=hedge_id, side="buy", actual_price=22.0, actual_scu=50.0)
+        assert (await db.get_route_progression_hedge(hedge_id))["buy_outcome"] is None, "must stay reportable"
+
+        retried = await cog._record_hedge_report(hedge_id=hedge_id, side="buy", actual_price=22.0, actual_scu=50.0)
+        assert retried is True
+        hedge = await db.get_route_progression_hedge(hedge_id)
+        assert hedge["buy_outcome"] == "less" and hedge["buy_actual_scu"] == 50.0
+        async with db.connect() as conn:
+            cursor = await conn.execute(
+                "SELECT * FROM terminal_market_state WHERE id_commodity = 2 AND id_terminal = 10"
+            )
+            state = dict(await cursor.fetchone())
+        assert state["source"] == "player_report"
+
+    asyncio.run(run())
+
+
+def test_record_hedge_report_a_repeat_report_never_rewrites_market_data(tmp_path):
+    """The early 'already reported' check must come BEFORE any market write - otherwise a second
+    submit with different numbers would overwrite shared market state and only then be told no."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        hedge_id = await _seed_hedge(db)
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db})()
+
+        await cog._record_hedge_report(hedge_id=hedge_id, side="buy", actual_price=22.0, actual_scu=50.0)
+        writes = []
+        real_write = db.record_hedge_report_market_update
+
+        async def spy(row):
+            writes.append(row)
+            return await real_write(row)
+
+        db.record_hedge_report_market_update = spy
+        second = await cog._record_hedge_report(hedge_id=hedge_id, side="buy", actual_price=99.0, actual_scu=1.0)
+
+        assert second is False
+        assert writes == [], "a rejected repeat report must not touch market state"
+
+    asyncio.run(run())
+
+
+def test_the_hedge_suggestion_view_is_given_its_message_so_the_button_can_be_disabled(tmp_path):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await _seed_market_row(db)
+        await db.record_terminal_market_snapshot([
+            {"id_commodity": 2, "id_terminal": 10, "commodity_name": "Cobalt", "terminal_name": "Area18 TDD",
+             "price_buy": 20, "price_sell": 0, "scu_buy": 95, "scu_sell": 0, "status_buy": 1, "status_sell": None},
+            {"id_commodity": 2, "id_terminal": 20, "commodity_name": "Cobalt", "terminal_name": "Elsewhere",
+             "price_buy": 0, "price_sell": 50, "scu_buy": 0, "scu_sell": 80, "status_buy": None, "status_sell": 1},
+        ])
+        leg0 = _leg_input(id_terminal=10, id_commodity=1, quoted_price=100.0, quoted_scu=50.0, quoted_status=3)
+        leg1 = _leg_input(
+            side="sell", id_terminal=20, id_commodity=1, terminal_name="Elsewhere",
+            display_label="Sell Gold at Elsewhere", quoted_price=90.0, quoted_scu=40.0, quoted_status=2,
+        )
+        await _create_thread_for_legs(db, 1, [leg0, leg1])
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db})()
+        cog._active_legs = {1: [leg0, leg1]}
+        channel = _fake_thread_channel()
+        hedge_message, prompt_message = _fake_message(), _fake_message()
+        channel.send.side_effect = [hedge_message, prompt_message]
+
+        await cog.handle_leg_outcome(channel, 1, 0, leg0, outcome="missing")
+
+        hedge_view = channel.send.call_args_list[0].kwargs["view"]
+        assert isinstance(hedge_view, HedgeReportView)
+        assert hedge_view.message is hedge_message, "without its message the view can never disable its button"
+        await hedge_view.disable_in_background()
+        hedge_message.edit.assert_awaited_once()
+        assert all(item.disabled for item in hedge_view.children)
+
+    asyncio.run(run())
+
+
+def test_the_pending_hedge_sell_prompt_view_is_given_its_message(tmp_path):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        hedge_id = await _seed_hedge(db)
+        await db.record_hedge_side_outcome(hedge_id, "buy", outcome="matched", actual_price=20.0, actual_scu=80.0)
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db})()
+        channel = _fake_thread_channel()
+        message = _fake_message()
+        channel.send.return_value = message
+
+        await cog._post_pending_hedge_sell_prompt(channel, 1, 1)
+
+        assert channel.send.call_args_list[0].kwargs["view"].message is message
+
+    asyncio.run(run())
+
+
+def test_hedge_report_view_disable_swallows_any_exception_not_just_http():
+    """Matches LegOutcomeView's own audited behaviour: the report is already recorded by the time
+    this cosmetic edit runs, so nothing non-HTTP going wrong in it may escape."""
+    async def run():
+        view = HedgeReportView(cog=None, hedge_id=1, side="buy")
+        view.message = NS(edit=AsyncMock(side_effect=RuntimeError("boom")))
+        await view.disable_in_background()  # must not raise
+        assert all(item.disabled for item in view.children)
+
+    asyncio.run(run())
+
+
+def _hedge_modal(cog, hedge_id, *, scu, price=""):
+    view = HedgeReportView(cog=cog, hedge_id=hedge_id, side="buy")
+    modal = HedgeReportModal(cog=cog, hedge_id=hedge_id, side="buy", view=view)
+    modal.scu_input._value = scu
+    modal.price_input._value = price
+    interaction = NS(response=NS(send_message=AsyncMock()))
+    return modal, interaction
+
+
+def test_hedge_report_modal_rejects_input_that_is_not_a_safe_number_and_writes_nothing(tmp_path):
+    """Player-typed numbers go straight into shared market state, so float() parses that are valid
+    but unsafe (inf, nan, negatives) must be rejected here, the same way ActualAmountModal does."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        hedge_id = await _seed_hedge(db)
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db})()
+
+        for scu, price in (("abc", ""), ("inf", ""), ("nan", ""), ("-5", ""), ("10", "abc"), ("10", "-1"), ("10", "inf")):
+            modal, interaction = _hedge_modal(cog, hedge_id, scu=scu, price=price)
+            await modal.on_submit(interaction)
+            interaction.response.send_message.assert_awaited_once()
+            assert interaction.response.send_message.call_args.kwargs.get("ephemeral") is True, (scu, price)
+            assert "try again" in interaction.response.send_message.call_args.args[0], (scu, price)
+
+        assert (await db.get_route_progression_hedge(hedge_id))["buy_outcome"] is None, "nothing may be recorded"
+
+    asyncio.run(run())
+
+
+def test_hedge_report_modal_records_a_valid_report_and_confirms_it(tmp_path):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        hedge_id = await _seed_hedge(db)
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db})()
+
+        modal, interaction = _hedge_modal(cog, hedge_id, scu="50", price="22")
+        await modal.on_submit(interaction)
+
+        assert "thanks" in interaction.response.send_message.call_args.args[0].lower()
+        hedge = await db.get_route_progression_hedge(hedge_id)
+        assert hedge["buy_outcome"] == "less" and hedge["buy_actual_scu"] == 50.0
+
+        again, interaction2 = _hedge_modal(cog, hedge_id, scu="70")
+        await again.on_submit(interaction2)
+        assert "already reported" in interaction2.response.send_message.call_args.args[0]
 
     asyncio.run(run())
 

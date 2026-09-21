@@ -595,6 +595,52 @@ CREATE TABLE IF NOT EXISTS route_progression_legs (
 CREATE INDEX IF NOT EXISTS idx_route_progression_legs_thread
     ON route_progression_legs (thread_id, leg_index);
 
+-- A hedge suggested reactively in a tracking thread (bot.uex.mixed_routes.find_hedge_cargo,
+-- triggered by a buy-side shortfall - see RouteProgression._suggest_shortfall_hedge)
+-- lives HERE, deliberately separate from route_progression_legs: it was never part of the
+-- route the player asked to track, has no claimed leg_index of its own, and must never
+-- interact with claim_route_progression_advance/total_legs - those exist to make the
+-- tracked route's OWN sequence idempotent across retries, a guarantee a hedge has no need
+-- of and no business risking. destination_leg_index is the anchor route's own paired sell
+-- leg (matched on id_commodity in route_progression_legs at suggestion time) - purely a
+-- lookup key for "when that leg's prompt posts, also ask about this hedge's sale," not a
+-- real position in the tracked sequence.
+CREATE TABLE IF NOT EXISTS route_progression_hedges (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    thread_id INTEGER NOT NULL,
+    origin_leg_index INTEGER NOT NULL,
+    destination_leg_index INTEGER NOT NULL,
+    id_commodity INTEGER NOT NULL,
+    commodity_name TEXT NOT NULL,
+    id_terminal_origin INTEGER NOT NULL,
+    terminal_name_origin TEXT NOT NULL,
+    id_terminal_destination INTEGER NOT NULL,
+    terminal_name_destination TEXT NOT NULL,
+    quoted_price_buy REAL,
+    quoted_scu REAL,
+    quoted_price_sell REAL,
+    -- The terminal's REAL quoted stock/demand at suggestion time (MixedCargoItem.source/
+    -- .destination's own scu_buy/scu_sell) - kept separate from quoted_scu (the PLANNED
+    -- allocation find_hedge_cargo capped to the shortfall), matching
+    -- terminal_state_update_for_outcome's own market_scu parameter and its documented
+    -- reasoning (see that function's docstring in bot/uex/route_progression.py).
+    market_scu_buy REAL,
+    market_scu_sell REAL,
+    status_buy INTEGER,
+    status_sell INTEGER,
+    buy_outcome TEXT CHECK (buy_outcome IN ('matched', 'less', 'more', 'missing')),
+    buy_actual_price REAL,
+    buy_actual_scu REAL,
+    buy_reported_at TEXT,
+    sell_outcome TEXT CHECK (sell_outcome IN ('matched', 'less', 'more', 'missing')),
+    sell_actual_price REAL,
+    sell_actual_scu REAL,
+    sell_reported_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_route_progression_hedges_thread
+    ON route_progression_hedges (thread_id, destination_leg_index);
+
 -- Durable recovery queue for a post-ack action (a leg outcome or an abandon) whose
 -- retry attempts (POST_ACK_RETRY_ATTEMPTS in bot/cogs/route_progression.py) were all
 -- exhausted - fully self-contained (carries every field handle_leg_outcome/abandon_thread
@@ -1394,6 +1440,186 @@ class Database:
                 """UPDATE route_progression_legs SET suppression_applied_at = datetime('now')
                    WHERE thread_id = ? AND leg_index = ? AND suppression_applied_at IS NULL""",
                 (thread_id, leg_index),
+            )
+            await db.commit()
+
+    async def record_hedge_report_market_update(self, row: dict[str, Any]) -> None:
+        """The hedge-report counterpart to record_player_report_market_update, for a
+        route_progression_hedges row instead of a route_progression_legs one - a
+        suggested hedge was never part of the route the player asked to track, so there
+        is no real (thread_id, leg_index) to mark, and this deliberately never touches
+        route_progression_legs at all (unlike the sibling method, which always does).
+        Kept as its own copy of the merge/write logic rather than sharing code with that
+        method, specifically so a change to the tracked-route path can never accidentally
+        alter hedge-report behavior (or vice versa) as a side effect - if the two ever
+        need to diverge (e.g. a different idempotency rule for hedges), that already
+        matches the intent, not an oversight. Any change to the SQL/merge semantics here
+        should be checked against record_player_report_market_update's own docstring for
+        whether the same reasoning applies there too, and vice versa.
+        """
+        id_commodity = self._integer(row.get("id_commodity"))
+        id_terminal = self._integer(row.get("id_terminal"))
+        commodity_name = row.get("commodity_name")
+        terminal_name = row.get("terminal_name")
+        if id_commodity is None or id_terminal is None or not commodity_name or not terminal_name:
+            return
+
+        present_columns = [c for c in self._PLAYER_REPORT_OPTIONAL_COLUMNS if c in row]
+        if not present_columns:
+            return
+
+        def _normalize(column: str, value: Any) -> Any:
+            return self._integer(value) if column in ("status_buy", "status_sell") else self._number(value)
+
+        async with self.connect() as db:
+            cursor = await db.execute(
+                "SELECT * FROM terminal_market_state WHERE id_commodity = ? AND id_terminal = ?",
+                (id_commodity, id_terminal),
+            )
+            existing_row = await cursor.fetchone()
+            existing = dict(existing_row) if existing_row is not None else None
+
+            merged = {column: (existing.get(column) if existing else None) for column in self._PLAYER_REPORT_OPTIONAL_COLUMNS}
+            for column in present_columns:
+                merged[column] = _normalize(column, row[column])
+
+            changed = existing is None or any(
+                merged[column] != existing.get(column) for column in self._PLAYER_REPORT_OPTIONAL_COLUMNS
+            )
+
+            set_clause = ", ".join(f"{column}=excluded.{column}" for column in present_columns)
+            await db.execute(
+                f"""INSERT INTO terminal_market_state
+                    (id_commodity, id_terminal, commodity_name, terminal_name,
+                     price_buy, price_sell, scu_buy, scu_sell, status_buy, status_sell,
+                     last_seen, source)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), 'player_report')
+                    ON CONFLICT(id_commodity, id_terminal) DO UPDATE SET
+                        commodity_name=excluded.commodity_name, terminal_name=excluded.terminal_name,
+                        {set_clause}, last_seen=datetime('now'), source='player_report'""",
+                (
+                    id_commodity, id_terminal, str(commodity_name), str(terminal_name),
+                    merged["price_buy"], merged["price_sell"], merged["scu_buy"], merged["scu_sell"],
+                    merged["status_buy"], merged["status_sell"],
+                ),
+            )
+            if changed:
+                await db.execute(
+                    """INSERT INTO terminal_market_observations
+                       (id_commodity, id_terminal, commodity_name, terminal_name, price_buy, price_sell,
+                        scu_buy, scu_sell, status_buy, status_sell, quality, volatility_buy,
+                        volatility_sell, buy_report_count, sell_report_count, source)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'player_report')""",
+                    (
+                        id_commodity, id_terminal, str(commodity_name), str(terminal_name),
+                        merged["price_buy"], merged["price_sell"], merged["scu_buy"], merged["scu_sell"],
+                        merged["status_buy"], merged["status_sell"],
+                        existing.get("quality") if existing else None,
+                        existing.get("volatility_buy") if existing else None,
+                        existing.get("volatility_sell") if existing else None,
+                        existing.get("buy_report_count") if existing else None,
+                        existing.get("sell_report_count") if existing else None,
+                    ),
+                )
+            await db.commit()
+
+    async def create_route_progression_hedge(
+        self, *,
+        thread_id: int, origin_leg_index: int, destination_leg_index: int,
+        id_commodity: int, commodity_name: str,
+        id_terminal_origin: int, terminal_name_origin: str,
+        id_terminal_destination: int, terminal_name_destination: str,
+        quoted_price_buy: float | None, quoted_scu: float | None, quoted_price_sell: float | None,
+        market_scu_buy: float | None, market_scu_sell: float | None,
+        status_buy: int | None, status_sell: int | None,
+    ) -> int:
+        """Records a hedge suggestion (bot.uex.mixed_routes.find_hedge_cargo) so its
+        buy/sell confirmations can be collected later - see route_progression_hedges'
+        own schema comment for why this is a separate table, not a route_progression_legs
+        row. Returns the new hedge's id."""
+        async with self.connect() as db:
+            cursor = await db.execute(
+                """INSERT INTO route_progression_hedges
+                   (thread_id, origin_leg_index, destination_leg_index, id_commodity, commodity_name,
+                    id_terminal_origin, terminal_name_origin, id_terminal_destination, terminal_name_destination,
+                    quoted_price_buy, quoted_scu, quoted_price_sell, market_scu_buy, market_scu_sell,
+                    status_buy, status_sell)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    thread_id, origin_leg_index, destination_leg_index, id_commodity, commodity_name,
+                    id_terminal_origin, terminal_name_origin, id_terminal_destination, terminal_name_destination,
+                    quoted_price_buy, quoted_scu, quoted_price_sell, market_scu_buy, market_scu_sell,
+                    status_buy, status_sell,
+                ),
+            )
+            await db.commit()
+            return cursor.lastrowid
+
+    async def get_route_progression_hedge(self, hedge_id: int) -> dict[str, Any] | None:
+        async with self.connect() as db:
+            cursor = await db.execute("SELECT * FROM route_progression_hedges WHERE id = ?", (hedge_id,))
+            row = await cursor.fetchone()
+        return dict(row) if row is not None else None
+
+    async def get_pending_hedge_sell_for_leg(
+        self, thread_id: int, destination_leg_index: int
+    ) -> dict[str, Any] | None:
+        """The hedge (if any) whose buy side is already confirmed and whose sell side
+        isn't yet, for the anchor leg about to be prompted - used to piggyback a hedge
+        sale confirmation onto that leg's own prompt. A hedge whose buy side was never
+        confirmed has nothing to ask about yet (the player may never have gone through
+        with it), so it's deliberately excluded here, not just left for later."""
+        async with self.connect() as db:
+            cursor = await db.execute(
+                """SELECT * FROM route_progression_hedges
+                   WHERE thread_id = ? AND destination_leg_index = ?
+                     AND buy_outcome IS NOT NULL AND sell_outcome IS NULL
+                   ORDER BY id LIMIT 1""",
+                (thread_id, destination_leg_index),
+            )
+            row = await cursor.fetchone()
+        return dict(row) if row is not None else None
+
+    async def record_hedge_side_outcome(
+        self, hedge_id: int, side: str, *,
+        outcome: str, actual_price: float | None, actual_scu: float | None,
+    ) -> bool:
+        """Idempotent, matching record_route_progression_leg_outcome's own WHERE-guarded
+        UPDATE - only the first report for a given side actually commits; a retry or a
+        second click sees 0 rows affected and returns False."""
+        if side not in ("buy", "sell"):
+            raise ValueError(f"side must be 'buy' or 'sell', got {side!r}")
+        outcome_column = f"{side}_outcome"
+        price_column = f"{side}_actual_price"
+        scu_column = f"{side}_actual_scu"
+        reported_column = f"{side}_reported_at"
+        async with self.connect() as db:
+            cursor = await db.execute(
+                f"""UPDATE route_progression_hedges
+                    SET {outcome_column} = ?, {price_column} = ?, {scu_column} = ?,
+                        {reported_column} = datetime('now')
+                    WHERE id = ? AND {outcome_column} IS NULL""",
+                (outcome, actual_price, actual_scu, hedge_id),
+            )
+            await db.commit()
+            return cursor.rowcount > 0
+
+    async def suppress_hedge_market_side(
+        self, *, id_commodity: int, id_terminal: int, side: str, until: str
+    ) -> None:
+        """The hedge-report counterpart to suppress_terminal_market_side, for the same
+        reason record_hedge_report_market_update exists separately from
+        record_player_report_market_update: a hedge has no real route_progression_legs
+        row of its own. Critically, this must NEVER reuse the sibling method by passing
+        the anchor route's own destination_leg_index - that would mark the ANCHOR leg's
+        suppression_applied_at for a suppression that's actually about the hedge's
+        commodity/terminal, silently causing a later, genuine suppression need for that
+        anchor leg to be skipped as 'already applied' when it never was."""
+        column = "buy_suppressed_until" if side == "buy" else "sell_suppressed_until"
+        async with self.connect() as db:
+            await db.execute(
+                f"UPDATE terminal_market_state SET {column} = ? WHERE id_commodity = ? AND id_terminal = ?",
+                (until, id_commodity, id_terminal),
             )
             await db.commit()
 

@@ -22,6 +22,8 @@ import logging
 import discord
 from discord.ext import commands, tasks
 
+from bot.uex.mixed_routes import find_hedge_cargo
+from bot.uex.route_presentation import cargo_item_line
 from bot.uex.route_progression import (
     SUPPRESSION_HOURS,
     describe_leg_outcome,
@@ -500,6 +502,98 @@ class AbandonConfirmView(discord.ui.View):
         await interaction.response.edit_message(content="Continuing to track this route.", view=self)
 
 
+class HedgeReportModal(discord.ui.Modal):
+    """A single number, not the three-button matched/less/more flow LegOutcomeView uses -
+    a hedge is a best-effort side note, not the route the player explicitly asked to
+    track, so it doesn't need that flow's precision (e.g. an over-quote here is always
+    treated as a conservative 'floor', never asserted as an exact drain - see
+    RouteProgression._record_hedge_report)."""
+    scu_input = discord.ui.TextInput(label="Actual SCU", placeholder="e.g. 16", required=True, max_length=10)
+    price_input = discord.ui.TextInput(
+        label="Actual price per unit (optional)", required=False, max_length=12
+    )
+
+    def __init__(self, *, cog: "RouteProgression", hedge_id: int, side: str, view: "HedgeReportView") -> None:
+        verb = "buy" if side == "buy" else "sell"
+        super().__init__(title=f"How much did you {verb}?")
+        self.cog = cog
+        self.hedge_id = hedge_id
+        self.side = side
+        self.parent_view = view
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        try:
+            actual_scu = float(str(self.scu_input.value).strip())
+        except ValueError:
+            await interaction.response.send_message("That SCU value isn't a number - try again.", ephemeral=True)
+            return
+        if not is_reportable_amount(actual_scu):
+            await interaction.response.send_message(
+                "That SCU value has to be a real, non-negative number - try again.", ephemeral=True
+            )
+            return
+        actual_price: float | None = None
+        price_text = str(self.price_input.value).strip()
+        if price_text:
+            try:
+                actual_price = float(price_text)
+            except ValueError:
+                await interaction.response.send_message("That price isn't a number - try again.", ephemeral=True)
+                return
+            if not is_reportable_amount(actual_price):
+                await interaction.response.send_message(
+                    "That price has to be a real, non-negative number - try again.", ephemeral=True
+                )
+                return
+
+        recorded = await self.cog._record_hedge_report(
+            hedge_id=self.hedge_id, side=self.side, actual_price=actual_price, actual_scu=actual_scu,
+        )
+        if not recorded:
+            await interaction.response.send_message("This was already reported.", ephemeral=True)
+            return
+        await interaction.response.send_message("Got it, thanks for reporting.", ephemeral=True)
+        await self.parent_view.disable_in_background()
+
+
+class HedgeReportView(discord.ui.View):
+    """Deliberately has no claim()/release_claim() dance like LegOutcomeView - a hedge
+    report is a best-effort side note, never part of the tracked route's own
+    idempotency-critical sequence, and Database.record_hedge_side_outcome's own
+    WHERE-guarded UPDATE already makes a double-submit a harmless no-op at the DB level.
+    The button is still disabled after a successful report so the UI doesn't invite a
+    pointless second click. No timeout (unlike LegOutcomeView's implicit default) since a
+    hedge's sell side may only become reportable much later, when the player reaches the
+    destination leg."""
+    message: discord.Message | None = None
+
+    def __init__(self, *, cog: "RouteProgression", hedge_id: int, side: str) -> None:
+        super().__init__(timeout=None)
+        self.cog = cog
+        self.hedge_id = hedge_id
+        self.side = side
+        verb = "bought" if side == "buy" else "sold"
+        self.report_button.label = f"Report what I {verb}"
+
+    @discord.ui.button(label="Report", style=discord.ButtonStyle.blurple)
+    async def report_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await interaction.response.send_modal(
+            HedgeReportModal(cog=self.cog, hedge_id=self.hedge_id, side=self.side, view=self)
+        )
+
+    async def disable_in_background(self) -> None:
+        for item in self.children:
+            item.disabled = True
+        if self.message is not None:
+            try:
+                await self.message.edit(view=self)
+            except Exception:
+                # Purely cosmetic - by now the report is already recorded, so nothing durable rides
+                # on this edit landing. Not just HTTPException: LegOutcomeView's own copy of this
+                # was widened for the same reason by the 2026-09-13 audit.
+                logger.info("Could not disable a hedge report button (non-critical)", exc_info=True)
+
+
 class RouteTrackingView(discord.ui.View):
     """Attach to a route-recommendation embed - one 'Track' button per route (up to
     MAX_TRACKABLE_ROUTES), each opening its own private thread. Built with plain
@@ -802,6 +896,168 @@ class RouteProgression(commands.Cog):
         except Exception:
             return False, None
 
+    async def _suggest_shortfall_hedge(
+        self, channel: discord.abc.MessageableChannel, thread_id: int, leg_index: int,
+        leg: RouteLegInput, shortfall_scu: float,
+    ) -> None:
+        """Best-effort only - never allowed to affect handle_leg_outcome's own critical
+        path (leg persistence, market update, suppression, next-leg advance are all
+        already committed by the time this runs). Suggests a commodity to fill the
+        cargo space a buy-side shortfall just opened up, at the SAME origin/destination
+        pair the player is already partway through - the anchored counterpart to
+        stock_headroom_warning's pre-trip nudge (bot.uex.route_presentation), surfaced
+        reactively once a shortfall has actually happened instead of only warned about
+        in advance. The paired sell leg is read fresh from route_progression_legs (not
+        self._active_legs) so this still works after a bot restart, unlike most of this
+        file's in-memory state - see the module docstring's own known limitation.
+
+        max_commodities=1 on the search below caps this at a single suggestion - a real
+        UX finding (not just a simplification): showing the hedge as plain text with no
+        way to actually track it left the player's confirmed-empty commodity as the only
+        thing the thread would ever ask about again, silently dropping the hedge's own
+        data back into the void. Recording it as a route_progression_hedges row (see that
+        table's schema comment) and attaching a HedgeReportView lets the player confirm
+        what actually happened, feeding real data back the same way a tracked leg does -
+        capping it at one suggestion keeps that trackable via a single button instead of
+        needing a button per commodity."""
+        if shortfall_scu <= 0 or not isinstance(channel, discord.Thread):
+            return
+        try:
+            legs = await self.bot.db.get_route_progression_legs(thread_id)
+            paired_sell = next(
+                (row for row in legs if row["side"] == "sell" and row["id_commodity"] == leg.id_commodity), None,
+            )
+            if paired_sell is None:
+                return
+            remaining_budget = (leg.quoted_price * shortfall_scu) if leg.quoted_price else None
+            market_rows = await self.bot.db.get_mixed_route_market_rows()
+            hedge = find_hedge_cargo(
+                market_rows,
+                origin_terminal_id=leg.id_terminal,
+                destination_terminal_id=paired_sell["id_terminal"],
+                exclude_commodity_id=leg.id_commodity,
+                remaining_capacity_scu=shortfall_scu,
+                remaining_budget=remaining_budget,
+                max_commodities=1,
+            )
+            if not hedge:
+                return
+            item = hedge[0]
+            hedge_id = await self.bot.db.create_route_progression_hedge(
+                thread_id=thread_id, origin_leg_index=leg_index, destination_leg_index=paired_sell["leg_index"],
+                id_commodity=item.id_commodity, commodity_name=item.commodity_name,
+                id_terminal_origin=leg.id_terminal, terminal_name_origin=leg.terminal_name,
+                id_terminal_destination=paired_sell["id_terminal"],
+                terminal_name_destination=str(item.destination.get("terminal_name") or "Unknown"),
+                quoted_price_buy=item.buy_price, quoted_scu=item.quantity_scu, quoted_price_sell=item.sell_price,
+                market_scu_buy=item.source.get("scu_buy"), market_scu_sell=item.destination.get("scu_sell"),
+                status_buy=item.source.get("status_buy"), status_sell=item.destination.get("status_sell"),
+            )
+            view = HedgeReportView(cog=self, hedge_id=hedge_id, side="buy")
+            view.message = await channel.send(
+                f"That shortfall left ~{shortfall_scu:,.0f} SCU of cargo space unused - while "
+                f"you're still at **{leg.terminal_name}**, this could fill it:\n{cargo_item_line(item)}",
+                view=view,
+            )
+        except Exception:
+            logger.info(
+                "Shortfall-hedge suggestion failed for thread %s (non-critical, leg outcome already recorded)",
+                thread_id, exc_info=True,
+            )
+
+    async def _post_pending_hedge_sell_prompt(
+        self, channel: discord.abc.MessageableChannel, thread_id: int, leg_index: int,
+    ) -> None:
+        """Best-effort, additive only - same guarantee as _suggest_shortfall_hedge.
+        Piggybacks a hedge's sell-side confirmation onto the anchor route's OWN next leg
+        prompt, once that leg is the hedge's recorded destination and its buy side is
+        already confirmed - deliberately a separate message with its own view, never
+        merged into LegOutcomeView itself, so this can't affect that view's own claim
+        logic."""
+        if not isinstance(channel, discord.Thread):
+            return
+        try:
+            hedge = await self.bot.db.get_pending_hedge_sell_for_leg(thread_id, leg_index)
+            if hedge is None:
+                return
+            view = HedgeReportView(cog=self, hedge_id=hedge["id"], side="sell")
+            view.message = await channel.send(
+                f"Also - while you're at **{hedge['terminal_name_destination']}**, did you sell the "
+                f"**{hedge['commodity_name']}** from that earlier hedge?",
+                view=view,
+            )
+        except Exception:
+            logger.info(
+                "Pending hedge-sell prompt failed for thread %s leg %d (non-critical)",
+                thread_id, leg_index, exc_info=True,
+            )
+
+    async def _record_hedge_report(
+        self, *, hedge_id: int, side: str, actual_price: float | None, actual_scu: float,
+    ) -> bool:
+        """The hedge counterpart to handle_leg_outcome's outcome handling - infers
+        matched/less/more/missing from a single reported SCU figure (see
+        HedgeReportModal's own docstring for why this doesn't need LegOutcomeView's
+        three-button precision), then writes back through record_hedge_report_market_update
+        (never record_player_report_market_update - a hedge has no real route_progression_legs
+        row to mark). Returns False when this side was already reported (mirrors
+        record_route_progression_leg_outcome's own idempotency), true otherwise."""
+        hedge = await self.bot.db.get_route_progression_hedge(hedge_id)
+        if hedge is None:
+            return False
+        if hedge[f"{side}_outcome"] is not None:
+            return False  # already reported - never write the same side's market data a second time
+        quoted_scu = hedge["quoted_scu"] or 0
+        precision: str | None = None
+        if actual_scu <= 0:
+            outcome = "missing"
+        elif actual_scu < quoted_scu:
+            outcome = "less"
+        elif actual_scu == quoted_scu:
+            outcome = "matched"
+        else:
+            # Conservative by construction: a single reported number can't distinguish
+            # "the terminal was fully drained" from "I just stopped there" the way
+            # MoreOutcomeFollowupView's two buttons do for a tracked leg - 'floor' never
+            # overwrites terminal_market_state with a claimed-exact figure (see
+            # terminal_state_update_for_outcome's own docstring).
+            outcome, precision = "more", "floor"
+        if side == "buy":
+            id_terminal, terminal_name = hedge["id_terminal_origin"], hedge["terminal_name_origin"]
+            quoted_price, quoted_status, market_scu = (
+                hedge["quoted_price_buy"], hedge["status_buy"], hedge["market_scu_buy"],
+            )
+        else:
+            id_terminal, terminal_name = hedge["id_terminal_destination"], hedge["terminal_name_destination"]
+            quoted_price, quoted_status, market_scu = (
+                hedge["quoted_price_sell"], hedge["status_sell"], hedge["market_scu_sell"],
+            )
+        update_row = terminal_state_update_for_outcome(
+            id_commodity=hedge["id_commodity"], id_terminal=id_terminal,
+            commodity_name=hedge["commodity_name"], terminal_name=terminal_name,
+            side=side, outcome=outcome,
+            quoted_price=quoted_price, quoted_scu=quoted_scu, quoted_status=quoted_status,
+            actual_price=actual_price, actual_scu=actual_scu, precision=precision,
+            market_scu=market_scu,
+        )
+        if update_row is not None:
+            await self.bot.db.record_hedge_report_market_update(update_row)
+            if update_confirms_depletion(update_row, side=side):
+                until = (
+                    datetime.now(timezone.utc) + timedelta(hours=SUPPRESSION_HOURS)
+                ).strftime("%Y-%m-%d %H:%M:%S")
+                await self.bot.db.suppress_hedge_market_side(
+                    id_commodity=hedge["id_commodity"], id_terminal=id_terminal, side=side, until=until,
+                )
+        # Marked reported LAST, after the market write has landed. The other order (mark first,
+        # then write) meant one transient failure in the market write - a database lock, say -
+        # left this side permanently "already reported" with the player's data never recorded,
+        # and every retry just said so. Both market writes are idempotent upserts, so a retry
+        # after a failure here simply repeats them harmlessly.
+        return await self.bot.db.record_hedge_side_outcome(
+            hedge_id, side, outcome=outcome, actual_price=actual_price, actual_scu=actual_scu,
+        )
+
     async def handle_leg_outcome(
         self,
         channel: discord.abc.MessageableChannel,
@@ -930,6 +1186,16 @@ class RouteProgression(commands.Cog):
                 thread_id=thread_id, leg_index=leg_index,
             )
 
+        # Additive only, never on the critical path above (leg persistence, market update,
+        # suppression already committed by this point) - gated on market_update_already_applied
+        # the same way suppression is, so a replay of an already-recorded report doesn't post a
+        # duplicate suggestion. Only a buy-side shortfall gets one: a sell-side "less"/"missing"
+        # means demand ran short, not stock - the player still has unsold cargo, which is a
+        # different problem (find another buyer) than "cargo space just opened up."
+        if not market_update_already_applied and leg.side == "buy" and outcome in ("missing", "less"):
+            shortfall_scu = (leg.quoted_scu or 0) - (actual_scu or 0)
+            await self._suggest_shortfall_hedge(channel, thread_id, leg_index, leg, shortfall_scu)
+
         thread_row = await self.bot.db.get_route_progression_thread(thread_id)
         if thread_row is None:
             return
@@ -973,6 +1239,7 @@ class RouteProgression(commands.Cog):
         next_leg = await self._get_leg(thread_id, next_index)
         if next_leg is not None and isinstance(channel, discord.Thread):
             await self._post_leg_prompt(channel, thread_id, next_index, next_leg)
+            await self._post_pending_hedge_sell_prompt(channel, thread_id, next_index)
 
     async def _record_leg_outcome_durably(
         self,

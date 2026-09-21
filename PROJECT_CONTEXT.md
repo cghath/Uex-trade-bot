@@ -2161,6 +2161,62 @@ they're in sync).
     every embed stays within Discord's 6000-character limit. The three behavioural end-to-end
     tests fail against the pre-change cog.
 
+66. **Route-tracking hedge reports - a buy-side shortfall in a tracking thread suggests one hedge
+    commodity, with Report buttons that feed the outcome back like a tracked leg - ported from
+    the aiv2 experiment.** Builds on entry 65: `find_hedge_cargo` is the same search, called
+    reactively once a shortfall has actually happened rather than warned about in advance.
+
+    **What it does**: `RouteProgression.handle_leg_outcome` (`bot/cogs/route_progression.py`)
+    calls `_suggest_shortfall_hedge` after a buy-leg "missing"/"less" outcome. It reads the
+    thread's paired sell leg fresh from `route_progression_legs` (so it works after a restart),
+    runs `find_hedge_cargo(max_commodities=1)` for the freed-up cargo space, stores the
+    suggestion, and posts it with a `HedgeReportView`. The Report button opens a
+    `HedgeReportModal` (SCU, optional price); `_record_hedge_report` maps that single figure to
+    matched/less/more/missing, writes the market update, and suppresses a confirmed-empty side.
+    When the anchor route's paired sell leg is prompted, `_post_pending_hedge_sell_prompt`
+    asks about the hedge's sale too, only if its buy side was confirmed. Only a buy-side
+    shortfall gets a suggestion - a sell-side one means demand ran short, not stock.
+
+    **Storage**: new table `route_progression_hedges` plus six `Database` methods, additive
+    only. Deliberately separate from `route_progression_legs`: a hedge was never part of the
+    route the player asked to track, has no claimed `leg_index`, and must never touch the
+    idempotency machinery (`claim_route_progression_advance`, the per-leg markers) that makes
+    the tracked route's own sequence retry-safe. `record_hedge_report_market_update` and
+    `suppress_hedge_market_side` are their own copies of the tracked-leg writes for the same
+    reason - in particular the suppression one must never reuse the tracked-leg version with
+    the anchor's `destination_leg_index`, which would mark the ANCHOR leg's
+    `suppression_applied_at` for a suppression that is really about the hedge.
+
+    **Three defects in aiv2's version, fixed here rather than ported** (worth telling the aiv2
+    chat): (1) `_record_hedge_report` marked the side reported BEFORE its market write, so one
+    transient failure in that write - a database lock, say - left the side permanently
+    "already reported" with the player's data never recorded, and every retry just said so.
+    It now checks for a prior report first, writes the market update and any suppression,
+    and marks the side reported LAST; both writes are idempotent upserts, so a retry repeats
+    them harmlessly. The general rule: a "done" marker must not be set before the work it
+    claims is done - the mirror image of the recovery-flag rule, where a "the risky step has
+    begun" marker must be set BEFORE that step.
+    (2) `HedgeReportView.message` was never assigned after `channel.send`, so
+    `disable_in_background` skipped its edit every time and the Report button never
+    disabled, despite its own docstring saying it does - production's other views assign
+    `view.message = await thread.send(...)`. (3) `disable_in_background` caught only
+    `discord.HTTPException`, the exact narrowing the 2026-09-13 audit already widened for
+    `LegOutcomeView` because it runs after the report is recorded.
+
+    **Known limitations, not new**: the buttons are ordinary (non-persistent) views, so they
+    stop responding after a bot restart just as the tracked-leg buttons do; a hedge suggestion
+    is one commodity, not several. Timing checked against a copy of the real local snapshot
+    (2,595 rows): a hedge search takes about 4 ms, so it does not need moving off the event
+    loop.
+
+    **Verification**: 13 tests ported from aiv2 plus 7 new ones - a retry after a failed
+    market write, a repeat report never rewriting market data, both views being given their
+    message, `disable_in_background` never raising, and the modal's input validation
+    (inf/nan/negative/non-numeric rejected with nothing written; a valid report recorded and a
+    repeat refused), which aiv2 never tested. Four of those fail against aiv2's original code
+    for the stated reasons; the repeat-report test is a regression guard for the reordering
+    and passes either way.
+
 ## Where to look for what
 
 Five docs, deliberately scoped so they don't duplicate each other:
