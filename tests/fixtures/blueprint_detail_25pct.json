@@ -1,0 +1,14 @@
+{
+ "uuid": "910b675f-2030-42e6-a301-de9c09894460",
+ "output_name": "Prism Laser Shotgun Battery (20 cap)",
+ "ingredient_count": 2,
+ "unlocking_missions": [
+  {
+   "title": "Additional Resources For Research",
+   "debug_name": "Rayari_Rank3_IrradiatedPearls",
+   "reward_scope": "Recovery",
+   "chance": 0.25,
+   "web_url": "https://api.star-citizen.wiki/missions/9bd0c215-ece8-42b6-9145-f50664b252d1"
+  }
+ ]
+}

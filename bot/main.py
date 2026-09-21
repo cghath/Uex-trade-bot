@@ -44,6 +44,7 @@ INITIAL_COGS = (
     "bot.cogs.route_progression",
     "bot.cogs.refinery",
     "bot.cogs.mining_locations",
+    "bot.cogs.blueprints",
 )
 
 

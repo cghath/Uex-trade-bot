@@ -1,0 +1,764 @@
+{
+  "uuid": "e3097998-28ef-48ad-a220-2ddaa1a85ce3",
+  "key": "BP_CRAFT_none_rifle_multi_01",
+  "category_uuid": "f9ccf95d-ad0e-4c33-97e0-e56c847a7e37",
+  "output_item_uuid": "c098e722-902a-435b-83f8-a96cec36a012",
+  "output_name": "Killshot Rifle",
+  "output_class": "none_rifle_multi_01",
+  "craft_time_seconds": 150,
+  "craft_time_label": "2 minutes 30 seconds",
+  "is_available_by_default": false,
+  "game_version": "4.10.0-LIVE.12519617",
+  "ingredient_count": 3,
+  "unlocking_missions_count": 3,
+  "ingredients": [
+    {
+      "name": "Iron",
+      "kind": "resource",
+      "resource_type_uuid": "f386a33c-ac9a-400a-a7b8-fe1fc7c8d270",
+      "item_uuid": null,
+      "quantity_scu": 0.06,
+      "quantity": null,
+      "link": "https://api.star-citizen.wiki/api/commodities/32c57a12-5de5-49b1-827a-9fd80278fbc4",
+      "web_url": "https://api.star-citizen.wiki/commodities/32c57a12-5de5-49b1-827a-9fd80278fbc4"
+    },
+    {
+      "name": "Hephaestanite",
+      "kind": "resource",
+      "resource_type_uuid": "61189578-ed7a-4491-9774-37ae2f82b8b0",
+      "item_uuid": null,
+      "quantity_scu": 0.02,
+      "quantity": null,
+      "link": "https://api.star-citizen.wiki/api/commodities/cad319d9-e0e5-420d-bbfd-dd62a0362d05",
+      "web_url": "https://api.star-citizen.wiki/commodities/cad319d9-e0e5-420d-bbfd-dd62a0362d05"
+    }
+  ],
+  "dismantle_returns": [
+    {
+      "name": "Hephaestanite",
+      "resource_type_uuid": "61189578-ed7a-4491-9774-37ae2f82b8b0",
+      "quantity_scu": 0.01,
+      "link": "https://api.star-citizen.wiki/api/commodities/61189578-ed7a-4491-9774-37ae2f82b8b0",
+      "web_url": "https://api.star-citizen.wiki/commodities/61189578-ed7a-4491-9774-37ae2f82b8b0"
+    },
+    {
+      "name": "Iron",
+      "resource_type_uuid": "f386a33c-ac9a-400a-a7b8-fe1fc7c8d270",
+      "quantity_scu": 0.01,
+      "link": "https://api.star-citizen.wiki/api/commodities/f386a33c-ac9a-400a-a7b8-fe1fc7c8d270",
+      "web_url": "https://api.star-citizen.wiki/commodities/f386a33c-ac9a-400a-a7b8-fe1fc7c8d270"
+    }
+  ],
+  "output": {
+    "uuid": "c098e722-902a-435b-83f8-a96cec36a012",
+    "name": "Killshot Rifle",
+    "class": "none_rifle_multi_01",
+    "type": "WeaponPersonal",
+    "type_label": "FPS Weapon",
+    "sub_type": "Medium",
+    "subtype": "Medium",
+    "grade": "1",
+    "item_web_url": "https://api.star-citizen.wiki/items/c098e722-902a-435b-83f8-a96cec36a012"
+  },
+  "web_url": "https://api.star-citizen.wiki/blueprints/killshot-rifle",
+  "output_item_web_url": "https://api.star-citizen.wiki/items/c098e722-902a-435b-83f8-a96cec36a012",
+  "dismantle": {
+    "time_seconds": 15,
+    "time_label": "15 seconds",
+    "efficiency": 0.5
+  },
+  "requirement_groups": [
+    {
+      "key": "FRAME",
+      "name": "Frame",
+      "kind": "group",
+      "required_count": 1,
+      "modifiers": [
+        {
+          "property_key": "weapon_recoil_smoothness",
+          "property_uuid": null,
+          "label": "Recoil Smoothness",
+          "better_when": "lower",
+          "quality_range": {
+            "min": 0,
+            "max": 1000
+          },
+          "modifier_range": {
+            "at_min_quality": 1.2,
+            "at_max_quality": 0.8
+          },
+          "value_range_type": "linear",
+          "value_segments": null
+        },
+        {
+          "property_key": "weapon_recoil_handling",
+          "property_uuid": null,
+          "label": "Recoil Handling",
+          "better_when": "lower",
+          "quality_range": {
+            "min": 0,
+            "max": 1000
+          },
+          "modifier_range": {
+            "at_min_quality": 1.2,
+            "at_max_quality": 0.8
+          },
+          "value_range_type": "linear",
+          "value_segments": null
+        },
+        {
+          "property_key": "weapon_recoil_kick",
+          "property_uuid": null,
+          "label": "Recoil Kick",
+          "better_when": "lower",
+          "quality_range": {
+            "min": 0,
+            "max": 1000
+          },
+          "modifier_range": {
+            "at_min_quality": 1.2,
+            "at_max_quality": 0.8
+          },
+          "value_range_type": "linear",
+          "value_segments": null
+        }
+      ],
+      "children": [
+        {
+          "key": null,
+          "kind": "resource",
+          "uuid": "f386a33c-ac9a-400a-a7b8-fe1fc7c8d270",
+          "name": "Iron",
+          "required_count": null,
+          "quantity": null,
+          "quantity_scu": 0.04,
+          "min_quality": 0,
+          "modifiers": [],
+          "ore_uuid": "32c57a12-5de5-49b1-827a-9fd80278fbc4"
+        }
+      ]
+    },
+    {
+      "key": "STOCK:",
+      "name": "Stock",
+      "kind": "group",
+      "required_count": 1,
+      "modifiers": [
+        {
+          "property_key": "weapon_recoil_smoothness",
+          "property_uuid": null,
+          "label": "Recoil Smoothness",
+          "better_when": "lower",
+          "quality_range": {
+            "min": 0,
+            "max": 1000
+          },
+          "modifier_range": {
+            "at_min_quality": 1.2,
+            "at_max_quality": 0.8
+          },
+          "value_range_type": "linear",
+          "value_segments": null
+        },
+        {
+          "property_key": "weapon_recoil_handling",
+          "property_uuid": null,
+          "label": "Recoil Handling",
+          "better_when": "lower",
+          "quality_range": {
+            "min": 0,
+            "max": 1000
+          },
+          "modifier_range": {
+            "at_min_quality": 1.2,
+            "at_max_quality": 0.8
+          },
+          "value_range_type": "linear",
+          "value_segments": null
+        },
+        {
+          "property_key": "weapon_recoil_kick",
+          "property_uuid": null,
+          "label": "Recoil Kick",
+          "better_when": "lower",
+          "quality_range": {
+            "min": 0,
+            "max": 1000
+          },
+          "modifier_range": {
+            "at_min_quality": 1.2,
+            "at_max_quality": 0.8
+          },
+          "value_range_type": "linear",
+          "value_segments": null
+        }
+      ],
+      "children": [
+        {
+          "key": null,
+          "kind": "resource",
+          "uuid": "61189578-ed7a-4491-9774-37ae2f82b8b0",
+          "name": "Hephaestanite",
+          "required_count": null,
+          "quantity": null,
+          "quantity_scu": 0.02,
+          "min_quality": 0,
+          "modifiers": [],
+          "ore_uuid": "cad319d9-e0e5-420d-bbfd-dd62a0362d05"
+        }
+      ]
+    },
+    {
+      "key": "BARREL:",
+      "name": "Barrel",
+      "kind": "group",
+      "required_count": 1,
+      "modifiers": [
+        {
+          "property_key": "weapon_damage",
+          "property_uuid": null,
+          "label": "Impact Force",
+          "better_when": "higher",
+          "quality_range": {
+            "min": 0,
+            "max": 1000
+          },
+          "modifier_range": {
+            "at_min_quality": 0.925,
+            "at_max_quality": 1.075
+          },
+          "value_range_type": "linear",
+          "value_segments": null
+        },
+        {
+          "property_key": "weapon_firerate",
+          "property_uuid": null,
+          "label": "Fire Rate",
+          "better_when": "higher",
+          "quality_range": {
+            "min": 0,
+            "max": 1000
+          },
+          "modifier_range": {
+            "at_min_quality": 0.88,
+            "at_max_quality": 1.12
+          },
+          "value_range_type": "linear",
+          "value_segments": null
+        }
+      ],
+      "children": [
+        {
+          "key": null,
+          "kind": "resource",
+          "uuid": "f386a33c-ac9a-400a-a7b8-fe1fc7c8d270",
+          "name": "Iron",
+          "required_count": null,
+          "quantity": null,
+          "quantity_scu": 0.02,
+          "min_quality": 0,
+          "modifiers": [],
+          "ore_uuid": "32c57a12-5de5-49b1-827a-9fd80278fbc4"
+        }
+      ]
+    }
+  ],
+  "summary_properties": [
+    {
+      "property_key": "weapon_recoil_smoothness",
+      "property_uuid": null,
+      "label": "Recoil Smoothness",
+      "better_when": "lower"
+    },
+    {
+      "property_key": "weapon_recoil_handling",
+      "property_uuid": null,
+      "label": "Recoil Handling",
+      "better_when": "lower"
+    },
+    {
+      "property_key": "weapon_recoil_kick",
+      "property_uuid": null,
+      "label": "Recoil Kick",
+      "better_when": "lower"
+    },
+    {
+      "property_key": "weapon_damage",
+      "property_uuid": null,
+      "label": "Impact Force",
+      "better_when": "higher"
+    },
+    {
+      "property_key": "weapon_firerate",
+      "property_uuid": null,
+      "label": "Fire Rate",
+      "better_when": "higher"
+    }
+  ],
+  "unlocking_missions": [
+    {
+      "title": "A Challenging Contract",
+      "debug_name": "Vaughn_ReaserchFacilitySide_RegionA_EliminateSpecific",
+      "reward_scope": "Assassination",
+      "chance": 1,
+      "web_url": "https://api.star-citizen.wiki/missions/f0274151-6591-4bab-b6db-bd01536f9f28"
+    },
+    {
+      "title": "A Challenging Contract",
+      "debug_name": "Vaughn_ReaserchFacilitySide_RegionA_EliminateSpecific",
+      "reward_scope": "Assassination",
+      "chance": 1,
+      "web_url": "https://api.star-citizen.wiki/missions/f5affede-fed9-4d8b-a1ad-80f29f4ff216"
+    },
+    {
+      "title": "All Things Come To An End",
+      "debug_name": "Vaughn_Stanton1_EliminateSpecific_EliminateCompetionWorkers",
+      "reward_scope": "Assassination",
+      "chance": 1,
+      "web_url": "https://api.star-citizen.wiki/missions/41d02f67-3abc-4a67-86bc-7037c2c4b2bd"
+    }
+  ],
+  "unlocking_missions_grouped": [
+    {
+      "label": "Guaranteed",
+      "chance": 1,
+      "missions": [
+        {
+          "title": "A Challenging Contract",
+          "reward_scope": "Assassination",
+          "count": 2,
+          "web_url": "https://api.star-citizen.wiki/missions/f0274151-6591-4bab-b6db-bd01536f9f28"
+        },
+        {
+          "title": "All Things Come To An End",
+          "reward_scope": "Assassination",
+          "count": 1,
+          "web_url": "https://api.star-citizen.wiki/missions/41d02f67-3abc-4a67-86bc-7037c2c4b2bd"
+        }
+      ]
+    }
+  ],
+  "aspects": {
+    "aspects": [
+      {
+        "key": "FRAME",
+        "name": "Frame",
+        "required_count": 1,
+        "selection_group": null,
+        "input": {
+          "kind": "resource",
+          "uuid": "f386a33c-ac9a-400a-a7b8-fe1fc7c8d270",
+          "name": "Iron",
+          "quantity": null,
+          "quantity_scu": 0.04,
+          "min_quality": 0,
+          "web_url": "https://api.star-citizen.wiki/commodities/32c57a12-5de5-49b1-827a-9fd80278fbc4"
+        },
+        "modifiers": [
+          {
+            "property_key": "weapon_recoil_smoothness",
+            "property_uuid": null,
+            "label": "Recoil Smoothness",
+            "better_when": "lower",
+            "quality_range": {
+              "min": 0,
+              "max": 1000
+            },
+            "modifier_range": {
+              "at_min_quality": 1.2,
+              "at_max_quality": 0.8
+            },
+            "value_range_type": "linear",
+            "value_segments": null
+          },
+          {
+            "property_key": "weapon_recoil_handling",
+            "property_uuid": null,
+            "label": "Recoil Handling",
+            "better_when": "lower",
+            "quality_range": {
+              "min": 0,
+              "max": 1000
+            },
+            "modifier_range": {
+              "at_min_quality": 1.2,
+              "at_max_quality": 0.8
+            },
+            "value_range_type": "linear",
+            "value_segments": null
+          },
+          {
+            "property_key": "weapon_recoil_kick",
+            "property_uuid": null,
+            "label": "Recoil Kick",
+            "better_when": "lower",
+            "quality_range": {
+              "min": 0,
+              "max": 1000
+            },
+            "modifier_range": {
+              "at_min_quality": 1.2,
+              "at_max_quality": 0.8
+            },
+            "value_range_type": "linear",
+            "value_segments": null
+          }
+        ],
+        "initial_quality": 500,
+        "slider_min": 0,
+        "slider_max": 1000,
+        "has_modifiers": true,
+        "has_dynamic_modifiers": true,
+        "is_selected": true
+      },
+      {
+        "key": "STOCK:",
+        "name": "Stock",
+        "required_count": 1,
+        "selection_group": null,
+        "input": {
+          "kind": "resource",
+          "uuid": "61189578-ed7a-4491-9774-37ae2f82b8b0",
+          "name": "Hephaestanite",
+          "quantity": null,
+          "quantity_scu": 0.02,
+          "min_quality": 0,
+          "web_url": "https://api.star-citizen.wiki/commodities/cad319d9-e0e5-420d-bbfd-dd62a0362d05"
+        },
+        "modifiers": [
+          {
+            "property_key": "weapon_recoil_smoothness",
+            "property_uuid": null,
+            "label": "Recoil Smoothness",
+            "better_when": "lower",
+            "quality_range": {
+              "min": 0,
+              "max": 1000
+            },
+            "modifier_range": {
+              "at_min_quality": 1.2,
+              "at_max_quality": 0.8
+            },
+            "value_range_type": "linear",
+            "value_segments": null
+          },
+          {
+            "property_key": "weapon_recoil_handling",
+            "property_uuid": null,
+            "label": "Recoil Handling",
+            "better_when": "lower",
+            "quality_range": {
+              "min": 0,
+              "max": 1000
+            },
+            "modifier_range": {
+              "at_min_quality": 1.2,
+              "at_max_quality": 0.8
+            },
+            "value_range_type": "linear",
+            "value_segments": null
+          },
+          {
+            "property_key": "weapon_recoil_kick",
+            "property_uuid": null,
+            "label": "Recoil Kick",
+            "better_when": "lower",
+            "quality_range": {
+              "min": 0,
+              "max": 1000
+            },
+            "modifier_range": {
+              "at_min_quality": 1.2,
+              "at_max_quality": 0.8
+            },
+            "value_range_type": "linear",
+            "value_segments": null
+          }
+        ],
+        "initial_quality": 500,
+        "slider_min": 0,
+        "slider_max": 1000,
+        "has_modifiers": true,
+        "has_dynamic_modifiers": true,
+        "is_selected": true
+      },
+      {
+        "key": "BARREL:",
+        "name": "Barrel",
+        "required_count": 1,
+        "selection_group": null,
+        "input": {
+          "kind": "resource",
+          "uuid": "f386a33c-ac9a-400a-a7b8-fe1fc7c8d270",
+          "name": "Iron",
+          "quantity": null,
+          "quantity_scu": 0.02,
+          "min_quality": 0,
+          "web_url": "https://api.star-citizen.wiki/commodities/32c57a12-5de5-49b1-827a-9fd80278fbc4"
+        },
+        "modifiers": [
+          {
+            "property_key": "weapon_damage",
+            "property_uuid": null,
+            "label": "Impact Force",
+            "better_when": "higher",
+            "quality_range": {
+              "min": 0,
+              "max": 1000
+            },
+            "modifier_range": {
+              "at_min_quality": 0.925,
+              "at_max_quality": 1.075
+            },
+            "value_range_type": "linear",
+            "value_segments": null
+          },
+          {
+            "property_key": "weapon_firerate",
+            "property_uuid": null,
+            "label": "Fire Rate",
+            "better_when": "higher",
+            "quality_range": {
+              "min": 0,
+              "max": 1000
+            },
+            "modifier_range": {
+              "at_min_quality": 0.88,
+              "at_max_quality": 1.12
+            },
+            "value_range_type": "linear",
+            "value_segments": null
+          }
+        ],
+        "initial_quality": 500,
+        "slider_min": 0,
+        "slider_max": 1000,
+        "has_modifiers": true,
+        "has_dynamic_modifiers": true,
+        "is_selected": true
+      }
+    ],
+    "aspect_groups": [
+      {
+        "key": "__aspect_0",
+        "name": "Frame",
+        "display_name": "Frame",
+        "required_count": 1,
+        "option_count": 1,
+        "is_choice_group": false,
+        "selected_count": 1,
+        "aspect_indexes": [
+          0
+        ]
+      },
+      {
+        "key": "__aspect_1",
+        "name": "Stock",
+        "display_name": "Stock",
+        "required_count": 1,
+        "option_count": 1,
+        "is_choice_group": false,
+        "selected_count": 1,
+        "aspect_indexes": [
+          1
+        ]
+      },
+      {
+        "key": "__aspect_2",
+        "name": "Barrel",
+        "display_name": "Barrel",
+        "required_count": 1,
+        "option_count": 1,
+        "is_choice_group": false,
+        "selected_count": 1,
+        "aspect_indexes": [
+          2
+        ]
+      }
+    ],
+    "has_interactive_aspects": true
+  },
+  "tiers": [
+    {
+      "tier_index": 0,
+      "requirements": {
+        "kind": "root",
+        "children": [
+          {
+            "key": "FRAME",
+            "kind": "group",
+            "name": "Frame",
+            "children": [
+              {
+                "kind": "resource",
+                "name": "Iron",
+                "uuid": "f386a33c-ac9a-400a-a7b8-fe1fc7c8d270",
+                "min_quality": 0,
+                "quantity_scu": 0.04
+              }
+            ],
+            "modifiers": [
+              {
+                "key": "weapon_recoil_smoothness",
+                "name": "Recoil Smoothness",
+                "uuid": "1156716c-b01e-4228-8136-7430be5bb9b8",
+                "unit_format": "%+.2f %%",
+                "quality_range": {
+                  "max": 1000,
+                  "min": 0
+                },
+                "modifier_range": {
+                  "at_max_quality": 0.8,
+                  "at_min_quality": 1.2
+                },
+                "value_range_type": "linear"
+              },
+              {
+                "key": "weapon_recoil_handling",
+                "name": "Recoil Handling",
+                "uuid": "037ea34c-e564-492e-b575-3e5aac5895e4",
+                "unit_format": "%+.2f %%",
+                "quality_range": {
+                  "max": 1000,
+                  "min": 0
+                },
+                "modifier_range": {
+                  "at_max_quality": 0.8,
+                  "at_min_quality": 1.2
+                },
+                "value_range_type": "linear"
+              },
+              {
+                "key": "weapon_recoil_kick",
+                "name": "Recoil Kick",
+                "uuid": "f68f87d6-1981-4c22-bed6-ce352922cb34",
+                "unit_format": "%+.2f %%",
+                "quality_range": {
+                  "max": 1000,
+                  "min": 0
+                },
+                "modifier_range": {
+                  "at_max_quality": 0.8,
+                  "at_min_quality": 1.2
+                },
+                "value_range_type": "linear"
+              }
+            ],
+            "required_count": 1
+          },
+          {
+            "key": "STOCK:",
+            "kind": "group",
+            "name": "Stock",
+            "children": [
+              {
+                "kind": "resource",
+                "name": "Hephaestanite",
+                "uuid": "61189578-ed7a-4491-9774-37ae2f82b8b0",
+                "min_quality": 0,
+                "quantity_scu": 0.02
+              }
+            ],
+            "modifiers": [
+              {
+                "key": "weapon_recoil_smoothness",
+                "name": "Recoil Smoothness",
+                "uuid": "1156716c-b01e-4228-8136-7430be5bb9b8",
+                "unit_format": "%+.2f %%",
+                "quality_range": {
+                  "max": 1000,
+                  "min": 0
+                },
+                "modifier_range": {
+                  "at_max_quality": 0.8,
+                  "at_min_quality": 1.2
+                },
+                "value_range_type": "linear"
+              },
+              {
+                "key": "weapon_recoil_handling",
+                "name": "Recoil Handling",
+                "uuid": "037ea34c-e564-492e-b575-3e5aac5895e4",
+                "unit_format": "%+.2f %%",
+                "quality_range": {
+                  "max": 1000,
+                  "min": 0
+                },
+                "modifier_range": {
+                  "at_max_quality": 0.8,
+                  "at_min_quality": 1.2
+                },
+                "value_range_type": "linear"
+              },
+              {
+                "key": "weapon_recoil_kick",
+                "name": "Recoil Kick",
+                "uuid": "f68f87d6-1981-4c22-bed6-ce352922cb34",
+                "unit_format": "%+.2f %%",
+                "quality_range": {
+                  "max": 1000,
+                  "min": 0
+                },
+                "modifier_range": {
+                  "at_max_quality": 0.8,
+                  "at_min_quality": 1.2
+                },
+                "value_range_type": "linear"
+              }
+            ],
+            "required_count": 1
+          },
+          {
+            "key": "BARREL:",
+            "kind": "group",
+            "name": "Barrel",
+            "children": [
+              {
+                "kind": "resource",
+                "name": "Iron",
+                "uuid": "f386a33c-ac9a-400a-a7b8-fe1fc7c8d270",
+                "min_quality": 0,
+                "quantity_scu": 0.02
+              }
+            ],
+            "modifiers": [
+              {
+                "key": "weapon_damage",
+                "name": "Impact Force",
+                "uuid": "cfc129ce-488a-46f2-92f7-9272cd0cfdfb",
+                "unit_format": "%+.2f %%",
+                "quality_range": {
+                  "max": 1000,
+                  "min": 0
+                },
+                "modifier_range": {
+                  "at_max_quality": 1.075,
+                  "at_min_quality": 0.925
+                },
+                "value_range_type": "linear"
+              },
+              {
+                "key": "weapon_firerate",
+                "name": "Fire Rate",
+                "uuid": "551b651c-8a34-438f-9d19-93fdffe56246",
+                "unit_format": "%.2f RPM",
+                "quality_range": {
+                  "max": 1000,
+                  "min": 0
+                },
+                "modifier_range": {
+                  "at_max_quality": 1.12,
+                  "at_min_quality": 0.88
+                },
+                "value_range_type": "linear"
+              }
+            ],
+            "required_count": 1
+          }
+        ]
+      },
+      "craft_time_seconds": 150
+    }
+  ],
+  "link": "https://api.star-citizen.wiki/api/blueprints/e3097998-28ef-48ad-a220-2ddaa1a85ce3"
+}

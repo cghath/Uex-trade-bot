@@ -48,6 +48,9 @@ CATEGORIES: list[tuple[str, str, list[str]]] = [
         "inventory-sell", "inventory-post-now",
         "inventory-confirm-sale", "inventory-cancel-post", "inventory-resolve-floor",
     ]),
+    ("🧩 Blueprints", "Find blueprint contracts, configure crafting materials, and keep a private combined list.", [
+        "blueprint-search", "blueprint-list",
+    ]),
     ("🔥 Sellability Ratings", "The bot's own 0-100 sellability score (not UEX's raw activity numbers) — rankings and history for all items, plus quality-matched raw-material deal scans.", [
         "liquidity-rank", "liquidity-trends", "scan-now", "scanner-status", "set-scanner-channel",
     ]),

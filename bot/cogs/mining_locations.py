@@ -43,18 +43,25 @@ class MiningLocations(commands.Cog):
     @app_commands.autocomplete(ore=mineable_commodity_autocomplete)
     async def where_to_mine(self, interaction: discord.Interaction, ore: str) -> None:
         await interaction.response.defer()
+        embed, error = await self.build_where_to_mine_embed(ore)
+        if error:
+            await interaction.followup.send(error)
+            return
+        await interaction.followup.send(embed=embed)
+
+    async def build_where_to_mine_embed(self, ore: str) -> tuple[discord.Embed | None, str | None]:
+        """Builds the exact embed /where-to-mine sends, so other features (the blueprint
+        planner's "Mine <ore>" buttons) can post the same real output. Returns (embed, None)
+        on success, (None, error_message) when the material can't be resolved or a UEX
+        fetch fails."""
         try:
             commodities = await self.bot.uex.get_commodities()
         except UexApiError as exc:
-            await interaction.followup.send(describe_uex_api_error(exc))
-            return
+            return None, describe_uex_api_error(exc)
 
         commodity = resolve_mineable_commodity(commodities, ore)
         if commodity is None:
-            await interaction.followup.send(
-                f"Couldn't find a raw material matching '{ore}' - pick from the autocomplete suggestions."
-            )
-            return
+            return None, f"Couldn't find a raw material matching '{ore}' - pick from the autocomplete suggestions."
 
         try:
             star_systems, planets, moons, pois = await asyncio.gather(
@@ -64,8 +71,7 @@ class MiningLocations(commands.Cog):
                 self.bot.uex.get_poi(),
             )
         except UexApiError as exc:
-            await interaction.followup.send(describe_uex_api_error(exc))
-            return
+            return None, describe_uex_api_error(exc)
 
         info = describe_mining_locations(
             commodity,
@@ -132,7 +138,7 @@ class MiningLocations(commands.Cog):
         if omitted_sections:
             embed.set_footer(text=f"{embed.footer.text}\n{', '.join(omitted_sections)} omitted - message size limit")
 
-        await interaction.followup.send(embed=embed)
+        return embed, None
 
 
 async def setup(bot: commands.Bot) -> None:
