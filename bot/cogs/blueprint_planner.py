@@ -155,7 +155,16 @@ class ShoppingService:
         if thread is None or interaction.guild_id is None:
             await interaction.followup.send("I couldn't open a private blueprint thread from this channel.", ephemeral=True)
             return
-        await self.refresh(thread, interaction.user.id, interaction.guild_id)
+        try:
+            await self.refresh(thread, interaction.user.id, interaction.guild_id)
+        except Exception:
+            # After the defer, an unanswered interaction reads as "the application did not respond", so a
+            # Discord permission/HTTP failure (or anything else) must still get a reply.
+            logger.exception("Could not open the blueprint list")
+            await interaction.followup.send(
+                f"I couldn't update {thread.mention}. Check that I can send and edit messages in that thread, "
+                "then try again.", ephemeral=True)
+            return
         await interaction.followup.send(f"Your blueprint list is in {thread.mention}.", ephemeral=True)
 
 
@@ -178,7 +187,14 @@ class ShoppingView(discord.ui.View):
         row = await self._owner(interaction)
         if row:
             await interaction.response.defer(ephemeral=True)
-            await self.service.refresh(interaction.channel, row["user_id"], row["guild_id"])
+            try:
+                await self.service.refresh(interaction.channel, row["user_id"], row["guild_id"])
+            except Exception:
+                logger.exception("Could not refresh the blueprint list")
+                await interaction.followup.send(
+                    "I couldn't refresh the list. Check that I can edit messages in this thread, then try again.",
+                    ephemeral=True)
+                return
             await interaction.followup.send("List refreshed.", ephemeral=True)
 
     @discord.ui.button(label="Clear list", style=discord.ButtonStyle.danger,
@@ -187,8 +203,21 @@ class ShoppingView(discord.ui.View):
         row = await self._owner(interaction)
         if row:
             await interaction.response.defer(ephemeral=True)
-            await self.service.bot.db.clear_blueprint_plans(row["user_id"], row["guild_id"])
-            await self.service.refresh(interaction.channel, row["user_id"], row["guild_id"])
+            try:
+                await self.service.bot.db.clear_blueprint_plans(row["user_id"], row["guild_id"])
+            except Exception:
+                logger.exception("Could not clear the blueprint list")
+                await interaction.followup.send(
+                    "I couldn't clear your list. Nothing was changed; please try again.", ephemeral=True)
+                return
+            try:
+                await self.service.refresh(interaction.channel, row["user_id"], row["guild_id"])
+            except Exception:
+                logger.exception("Blueprint list cleared but the Discord refresh failed")
+                await interaction.followup.send(
+                    "Your list was cleared, but I couldn't update this message. Press Refresh list to redraw it.",
+                    ephemeral=True)
+                return
             await interaction.followup.send("Blueprint list cleared.", ephemeral=True)
 
 
@@ -227,6 +256,11 @@ class ChoiceSelect(discord.ui.Select):
         await self.parent_view.update(interaction)
 
 
+# Discord allows five rows per message and a select menu takes a whole row. The buttons share row 0, so
+# four selectors fit per page; a recipe with more is paged rather than having controls silently dropped.
+SELECTORS_PER_PAGE = 4
+
+
 class CraftConfigView(discord.ui.View):
     def __init__(self, cog: "Blueprints", recipe: Recipe, count: int,
                  quality_options: dict[str, tuple[int, ...]]) -> None:
@@ -234,22 +268,43 @@ class CraftConfigView(discord.ui.View):
         self.cog, self.recipe, self.count = cog, recipe, count
         self.choices: dict[str, list[int]] = {}
         self.qualities: dict[str, int] = {}
+        # Required material choices first: a plan can't be built without them, while a quality is optional.
+        self.selectors: list[discord.ui.Select] = []
         for group in recipe.groups:
-            if group.required < len(group.children) and len(self.children) < 4:
-                self.add_item(ChoiceSelect(self, group))
+            if group.required < len(group.children):
+                self.selectors.append(ChoiceSelect(self, group))
         for item in recipe.inputs:
             values = tuple(value for value in quality_options.get(item.path, ())
                            if Decimal(value) >= item.min_quality)
-            if item.modifiers and values and len(self.children) < 4:
-                self.add_item(QualitySelect(self, item.path, f"{item.aspect} - {item.name}", values))
+            if item.modifiers and values:
+                self.selectors.append(QualitySelect(self, item.path, f"{item.aspect} - {item.name}", values))
+        self.page = 0
+        self.page_count = max(1, -(-len(self.selectors) // SELECTORS_PER_PAGE))
+        if self.page_count == 1:
+            self.remove_item(self.previous_button)
+            self.remove_item(self.next_button)
+        self._show_page()
+
+    def _show_page(self) -> None:
+        for child in [child for child in self.children if isinstance(child, discord.ui.Select)]:
+            self.remove_item(child)
+        start = self.page * SELECTORS_PER_PAGE
+        for selector in self.selectors[start:start + SELECTORS_PER_PAGE]:
+            self.add_item(selector)
+        if self.page_count > 1:
+            self.previous_button.disabled = self.page == 0
+            self.next_button.disabled = self.page >= self.page_count - 1
 
     def text(self) -> str:
-        return "\n".join(self.recipe.lines(self.count, self.choices, self.qualities))[:1900]
+        body = "\n".join(self.recipe.lines(self.count, self.choices, self.qualities))[:1900]
+        if self.page_count > 1:
+            return f"Options page {self.page + 1} of {self.page_count} - use Previous/Next to reach every choice.\n{body}"
+        return body
 
     async def update(self, interaction: discord.Interaction) -> None:
         await interaction.response.edit_message(content=self.text(), view=self, allowed_mentions=NO_MENTIONS)
 
-    @discord.ui.button(label="Add configured plan", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="Add configured plan", style=discord.ButtonStyle.success, row=0)
     async def add_button(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
         try:
             plan = self.recipe.plan(self.count, self.choices, self.qualities)
@@ -258,6 +313,18 @@ class CraftConfigView(discord.ui.View):
             return
         await interaction.response.defer(ephemeral=True)
         await self.cog.shopping.add(interaction, plan)
+
+    @discord.ui.button(label="Previous options", style=discord.ButtonStyle.secondary, row=0)
+    async def previous_button(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        self.page = max(0, self.page - 1)
+        self._show_page()
+        await self.update(interaction)
+
+    @discord.ui.button(label="Next options", style=discord.ButtonStyle.secondary, row=0)
+    async def next_button(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        self.page = min(self.page_count - 1, self.page + 1)
+        self._show_page()
+        await self.update(interaction)
 
 
 class CraftLaunchView(discord.ui.View):
