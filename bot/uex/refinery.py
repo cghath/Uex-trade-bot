@@ -67,10 +67,76 @@ class TerminalYield:
     # commodity_name -> yield_bonus at this terminal; a commodity absent here means this
     # terminal has no recorded yield-bonus data for it, not a confirmed 0% bonus.
     per_commodity: dict[str, int] = field(default_factory=dict)
+    # Whether this terminal's own star system is one of the requested ore(s)' real mining
+    # system(s) - None when the caller didn't supply mining_star_systems to
+    # rank_refinery_terminals (unknown/not evaluated), True/False once it was. User-reported
+    # real case: Quantainium's own highest-yield refinery (Levski, Nyx, +5%) outranks every
+    # Stanton refinery by raw yield bonus alone, even though Quantainium can only be mined in
+    # Stanton - ranking purely on yield can recommend a multi-system flight for cargo the
+    # player could only have picked up somewhere else entirely. Never used to EXCLUDE a
+    # terminal, only to sort in-system options first and let the caller disclose the rest - a
+    # refinery in another system is still a real, usable option once the ore is actually in
+    # your cargo hold, so hiding it would trade one bad recommendation for a missing one.
+    in_mining_system: bool | None = None
+
+
+@dataclass(frozen=True)
+class HaulSystems:
+    """Which star systems a haul's refineries are judged against, and what (if anything) the player should be
+    told about how that was decided."""
+    systems: frozenset[str]  # empty = nothing to judge by, so ranking is by yield alone
+    note: str | None = None
+
+
+def combine_mining_systems(systems_by_ore: dict[str, set[str]]) -> HaulSystems:
+    """The systems a MULTI-ORE haul's refineries should be judged against.
+
+    Judging against the UNION of every ore's mining systems (the original behaviour) flagged a refinery as
+    fine if it sat near ANY of the ores, so for a haul of Quantainium (Stanton only) and an ore mined in Pyro
+    a Pyro refinery went unflagged even though the Quantainium could never have been picked up there. What a
+    player can actually plan around is a system where every ore of the haul is mined, so that intersection is
+    used whenever it isn't empty. When the ores share no system there is no single mining trip for the whole
+    haul: the union is used (a refinery is still usable once the cargo is in the hold) and the disparity is
+    stated instead of silently blurred. An ore with no mining-location data can't narrow anything - unknown
+    is not "mined nowhere" - so it is left out and named in the note.
+
+    One ore (or none with data) behaves exactly as before, with no note."""
+    known = {ore: set(systems) for ore, systems in systems_by_ore.items() if systems}
+    unknown = [ore for ore, systems in systems_by_ore.items() if not systems]
+    if not known:
+        return HaulSystems(frozenset())
+    union = frozenset().union(*known.values())
+    common = frozenset.intersection(*(frozenset(s) for s in known.values()))
+    notes: list[str] = []
+    if len(known) == 1:
+        systems = union
+    elif common:
+        systems = common
+        if common != union:
+            notes.append(
+                f"For this combined haul ⚠️ is judged against {', '.join(sorted(common))}, the only "
+                f"system{'s' if len(common) != 1 else ''} where every one of these ores is mined."
+            )
+    else:
+        systems = union
+        listing = "; ".join(f"{ore}: {', '.join(sorted(s))}" for ore, s in sorted(known.items()))
+        notes.append(
+            f"These ores aren't mined in a common system ({listing}), so no single mining trip covers the "
+            "whole haul - ⚠️ only marks refineries outside all of those systems."
+        )
+    if unknown:
+        notes.append(
+            f"No mining-location data for {', '.join(sorted(unknown))}, so ⚠️ only reflects where "
+            f"{', '.join(sorted(known))} {'is' if len(known) == 1 else 'are'} mined."
+        )
+    return HaulSystems(systems, " ".join(notes) or None)
 
 
 def rank_refinery_terminals(
-    yield_rows_by_commodity: dict[str, list[dict[str, Any]]], *, limit: int = 5
+    yield_rows_by_commodity: dict[str, list[dict[str, Any]]],
+    *,
+    limit: int | None = 5,
+    mining_star_systems: set[str] | None = None,
 ) -> list[TerminalYield]:
     """Combines per-commodity refinery-yield-bonus rows (one list per requested commodity,
     each row shaped like refinery_yield_observations: id_terminal/terminal_name/yield_bonus)
@@ -80,8 +146,17 @@ def rank_refinery_terminals(
     still ranked on its smaller sum, not excluded outright, since dropping it entirely would
     hide the single best stop for a 2-of-3 match. This is a simple additive approximation
     (not weighted by how much of each ore was actually mined, which this advisor doesn't
-    ask for), good enough to compare "best overall stop" candidates. Ties broken by
-    terminal name for determinism."""
+    ask for), good enough to compare "best overall stop" candidates.
+
+    `mining_star_systems` (the systems the haul is judged against - see combine_mining_systems for
+    how several ores are combined - from the same ids_star_systems data /where-to-mine reads) is
+    optional and additive:
+    when given (and non-empty), every terminal is tagged in_mining_system and a terminal
+    whose own system ISN'T in that set is ranked after every in-system terminal, regardless
+    of yield bonus - ties within each group still broken by yield bonus then terminal name.
+    Omitting it (or passing an empty set, e.g. no ids_star_systems data exists for any
+    requested ore) preserves the original pure-yield ordering exactly, and leaves every
+    terminal's in_mining_system as None (unknown, not "confirmed out of system")."""
     by_terminal: dict[int, TerminalYield] = {}
     for commodity_name, rows in yield_rows_by_commodity.items():
         for row in rows:
@@ -100,5 +175,47 @@ def rank_refinery_terminals(
             )
             terminal.per_commodity[commodity_name] = bonus
             terminal.combined_score += bonus
-    ranked = sorted(by_terminal.values(), key=lambda t: (-t.combined_score, t.terminal_name))
-    return ranked[:limit]
+
+    if mining_star_systems:
+        for terminal in by_terminal.values():
+            terminal.in_mining_system = terminal.star_system_name in mining_star_systems
+        sort_key = lambda t: (0 if t.in_mining_system else 1, -t.combined_score, t.terminal_name)
+    else:
+        sort_key = lambda t: (-t.combined_score, t.terminal_name)
+
+    ranked = sorted(by_terminal.values(), key=sort_key)
+    return ranked if limit is None else ranked[:limit]
+
+
+def select_terminals_to_show(
+    ranked: list[TerminalYield],
+    *,
+    min_shown: int,
+    max_in_system: int,
+    min_out_of_system: int = 1,
+) -> list[TerminalYield]:
+    """Picks which of an already-ranked, UNTRUNCATED terminal list to display. A flat top-N
+    cut (the original behavior) silently drops real in-system refineries once an ore has
+    more than N of them - confirmed on real data: Quantainium has 6 Stanton refineries but
+    the advisor only showed 5, and Corundum has 11. Since the ranking already sorts every
+    in-mining-system terminal first, this shows all of them (capped at `max_in_system` so a
+    pathological ore can't flood the embed), then fills with the next-best terminals so at
+    least `min_shown` appear in total, and always keeps at least `min_out_of_system` of the
+    best-yield terminals from another system when any exist - that's the flagged
+    "there's a higher yield elsewhere, but it's outside where this ore is mined" tradeoff
+    the caller discloses with a warning marker, so the higher-yield option is visible
+    rather than silently absent. When mining systems aren't known (in_mining_system is
+    None everywhere) nothing counts as in- or out-of-system, and this degrades to the plain
+    top `min_shown` of the yield-ordered list.
+
+    Only ever trims from the far end of the ranking, never reorders - the result is always
+    a prefix of `ranked` plus, at most, the best out-of-system terminals appended after it.
+    """
+    in_system = [t for t in ranked if t.in_mining_system is True]
+    if not in_system:
+        return ranked[:min_shown]
+
+    shown = in_system[:max_in_system]
+    out_of_system = [t for t in ranked if t.in_mining_system is not True]
+    fill = max(min_out_of_system, min_shown - len(shown), 0)
+    return shown + out_of_system[:fill]
