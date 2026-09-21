@@ -5,6 +5,15 @@ the AI bot uses the same commands with an `ai-` prefix (`/price` -> `/ai-price`)
 
 ---
 
+## 2026-09-21 - Hedge reports in route tracking
+
+**Changed**
+- Route tracking threads - After you report a buy-side shortfall, the thread suggests one hedge commodity for the same trip.
+  Press **Report** and enter how much you actually bought (and, optionally, the price). At the destination it asks whether
+  you sold it. Your reports feed the bot's market data the same way tracked legs do.
+
+---
+
 ## 2026-09-21 - Stock warnings and hedges on /best-route
 
 **Changed**
