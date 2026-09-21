@@ -1238,6 +1238,273 @@ def test_best_route_primary_branch_shows_investment(tmp_path):
     asyncio.run(run())
 
 
+def test_best_route_primary_branch_warns_when_stock_is_the_binding_limit(tmp_path):
+    """Real stock (10 SCU) far smaller than the resolved ship's hold (576 SCU) means the
+    cargo estimate is capped by stock, not the ship - stock_headroom_warning should fire
+    since the player is planning to buy out the entire currently-reported amount."""
+    async def run():
+        db = Database(tmp_path / "best_route_stock_headroom_warns.sqlite3", Fernet(Fernet.generate_key()))
+        await db.init()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            path = request.url.path
+            if "commodities_prices" in path:
+                return httpx.Response(200, json={"status": "ok", "data": [
+                    {"id_commodity": 1, "commodity_name": "Gold"}
+                ]})
+            if "commodities_routes" in path:
+                return httpx.Response(200, json={"status": "ok", "data": [
+                    {
+                        "id_terminal_origin": 1, "id_terminal_destination": 101,
+                        "origin_terminal_name": "Origin 1", "destination_terminal_name": "Destination 1",
+                        "price_origin": 100, "price_destination": 200, "price_margin": 50, "price_roi": 100,
+                        "distance": 5, "score": 100, "scu_origin": 10, "scu_destination": 10,
+                        "status_origin": 1, "status_destination": 1, "profit": 100,
+                    }
+                ]})
+            if "vehicles" in path:
+                return httpx.Response(200, json={"status": "ok", "data": [
+                    {"name": "Polaris", "scu": 576},
+                ]})
+            return httpx.Response(200, json={"status": "ok", "data": []})
+
+        client = UexClient(app_token="test", base_url="https://uex.test")
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+        bot = type("FakeBot", (), {})()
+        bot.db = db
+        bot.uex = client
+        bot.get_cog = lambda name: None
+        cog = Prices.__new__(Prices)
+        cog.bot = bot
+        interaction = _FakeInteraction(1)
+
+        try:
+            await cog.best_route.callback(cog, interaction, commodity="Gold", ship="Polaris")
+        finally:
+            await client.aclose()
+
+        _, kwargs = interaction.followup.sent[1]
+        embed = kwargs["embed"]
+        combined = "\n".join(f.value or "" for f in embed.fields)
+        assert "/mixed-routes" in combined, combined
+
+    asyncio.run(run())
+
+
+def test_best_route_primary_branch_does_not_warn_when_the_ship_is_the_binding_limit(tmp_path):
+    """The mirror case: real stock (1000 SCU) far exceeds the resolved ship's hold (576
+    SCU), so the ship is the binding limit, not stock - there's real headroom against a
+    stock dip, and stock_headroom_warning must stay silent."""
+    async def run():
+        db = Database(tmp_path / "best_route_stock_headroom_silent.sqlite3", Fernet(Fernet.generate_key()))
+        await db.init()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            path = request.url.path
+            if "commodities_prices" in path:
+                return httpx.Response(200, json={"status": "ok", "data": [
+                    {"id_commodity": 1, "commodity_name": "Gold"}
+                ]})
+            if "commodities_routes" in path:
+                return httpx.Response(200, json={"status": "ok", "data": [
+                    {
+                        "id_terminal_origin": 1, "id_terminal_destination": 101,
+                        "origin_terminal_name": "Origin 1", "destination_terminal_name": "Destination 1",
+                        "price_origin": 100, "price_destination": 200, "price_margin": 50, "price_roi": 100,
+                        "distance": 5, "score": 100, "scu_origin": 1000, "scu_destination": 1000,
+                        "status_origin": 1, "status_destination": 1, "profit": 1000,
+                    }
+                ]})
+            if "vehicles" in path:
+                return httpx.Response(200, json={"status": "ok", "data": [
+                    {"name": "Polaris", "scu": 576},
+                ]})
+            return httpx.Response(200, json={"status": "ok", "data": []})
+
+        client = UexClient(app_token="test", base_url="https://uex.test")
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+        bot = type("FakeBot", (), {})()
+        bot.db = db
+        bot.uex = client
+        bot.get_cog = lambda name: None
+        cog = Prices.__new__(Prices)
+        cog.bot = bot
+        interaction = _FakeInteraction(1)
+
+        try:
+            await cog.best_route.callback(cog, interaction, commodity="Gold", ship="Polaris")
+        finally:
+            await client.aclose()
+
+        _, kwargs = interaction.followup.sent[1]
+        embed = kwargs["embed"]
+        combined = "\n".join(f.value or "" for f in embed.fields)
+        assert "/mixed-routes" not in combined, combined
+
+    asyncio.run(run())
+
+
+def test_best_route_primary_branch_suggests_a_hedge_at_the_same_terminal_pair(tmp_path):
+    """The anchored counterpart to find_hedge_cargo's unit tests: a real stock-limited
+    /best-route recommendation (21 SCU Taranite, 1440 SCU ship) should surface Cobalt
+    as a hedge - real stock/demand for Cobalt at the SAME origin/destination terminals is
+    seeded via record_terminal_market_snapshot, the same table find_hedge_cargo reads
+    through get_mixed_route_market_rows."""
+    async def run():
+        db = Database(tmp_path / "best_route_hedge_suggestion.sqlite3", Fernet(Fernet.generate_key()))
+        await db.init()
+        await db.record_terminal_market_snapshot([
+            {"id_commodity": 2, "id_terminal": 1, "commodity_name": "Cobalt", "terminal_name": "Origin 1",
+             "price_buy": 20, "price_sell": 0, "scu_buy": 95, "scu_sell": 0, "status_buy": 1, "status_sell": None},
+            {"id_commodity": 2, "id_terminal": 101, "commodity_name": "Cobalt", "terminal_name": "Destination 1",
+             "price_buy": 0, "price_sell": 50, "scu_buy": 0, "scu_sell": 80, "status_buy": None, "status_sell": 1},
+        ])
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            path = request.url.path
+            if "commodities_prices" in path:
+                return httpx.Response(200, json={"status": "ok", "data": [
+                    {"id_commodity": 1, "commodity_name": "Taranite"}
+                ]})
+            if "commodities_routes" in path:
+                return httpx.Response(200, json={"status": "ok", "data": [
+                    {
+                        "id_terminal_origin": 1, "id_terminal_destination": 101,
+                        "origin_terminal_name": "Origin 1", "destination_terminal_name": "Destination 1",
+                        "price_origin": 100, "price_destination": 200, "price_margin": 50, "price_roi": 100,
+                        "distance": 5, "score": 100, "scu_origin": 21, "scu_destination": 21,
+                        "status_origin": 1, "status_destination": 1, "profit": 100,
+                    }
+                ]})
+            if "vehicles" in path:
+                return httpx.Response(200, json={"status": "ok", "data": [
+                    {"name": "Ironclad Assault", "scu": 1440},
+                ]})
+            return httpx.Response(200, json={"status": "ok", "data": []})
+
+        client = UexClient(app_token="test", base_url="https://uex.test")
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+        bot = type("FakeBot", (), {})()
+        bot.db = db
+        bot.uex = client
+        bot.get_cog = lambda name: None
+        cog = Prices.__new__(Prices)
+        cog.bot = bot
+        interaction = _FakeInteraction(1)
+
+        try:
+            await cog.best_route.callback(cog, interaction, commodity="Taranite", ship="Ironclad Assault")
+        finally:
+            await client.aclose()
+
+        _, kwargs = interaction.followup.sent[1]
+        embed = kwargs["embed"]
+        combined = "\n".join(f.value or "" for f in embed.fields)
+        assert "Hedge:" in combined, combined
+        assert "Cobalt" in combined, combined
+
+    asyncio.run(run())
+
+
+def _fallback_best_route_cog(db, *, vehicles, buy_scu, sell_scu):
+    """A real /best-route fallback-branch setup: UEX has no precomputed routes for the commodity,
+    so the route is paired from its raw buy/sell price rows (Buy A id 1 -> Sell A id 3)."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if "commodities_prices" in path:
+            return httpx.Response(200, json={"status": "ok", "data": [
+                {"id_commodity": 1, "commodity_name": "Taranite", "id_terminal": 1, "terminal_name": "Buy A",
+                 "price_buy": 100, "price_sell": 0, "scu_buy": buy_scu, "scu_sell": 0,
+                 "status_buy": 3, "status_sell": None},
+                {"id_commodity": 1, "commodity_name": "Taranite", "id_terminal": 3, "terminal_name": "Sell A",
+                 "price_buy": 0, "price_sell": 200, "scu_buy": 0, "scu_sell": sell_scu,
+                 "status_buy": None, "status_sell": 5},
+            ]})
+        if "vehicles" in path:
+            return httpx.Response(200, json={"status": "ok", "data": vehicles})
+        return httpx.Response(200, json={"status": "ok", "data": []})
+
+    client = UexClient(app_token="test", base_url="https://uex.test")
+    bot = type("FakeBot", (), {})()
+    bot.db = db
+    bot.uex = client
+    bot.get_cog = lambda name: None
+    cog = Prices.__new__(Prices)
+    cog.bot = bot
+    return cog, client, handler
+
+
+def _all_embed_text(interaction) -> str:
+    return "\n".join(
+        field.value or ""
+        for _, kwargs in interaction.followup.sent if kwargs.get("embed") is not None
+        for field in kwargs["embed"].fields
+    )
+
+
+def test_best_route_fallback_branch_warns_and_suggests_a_hedge_when_stock_is_the_binding_limit(tmp_path):
+    """/best-route has TWO places that show a cargo estimate (UEX's own routes, and this
+    fallback pairing of raw price rows); the primary-branch tests above only reach the first, so the fallback
+    call site needs its own proof. 21 SCU of Taranite against a 1,440 SCU hold is stock-limited,
+    and Cobalt seeded at the same terminal pair should surface as the hedge."""
+    async def run():
+        db = Database(tmp_path / "best_route_fallback_hedge.sqlite3", Fernet(Fernet.generate_key()))
+        await db.init()
+        await db.record_terminal_market_snapshot([
+            {"id_commodity": 2, "id_terminal": 1, "commodity_name": "Cobalt", "terminal_name": "Buy A",
+             "price_buy": 20, "price_sell": 0, "scu_buy": 95, "scu_sell": 0, "status_buy": 1, "status_sell": None},
+            {"id_commodity": 2, "id_terminal": 3, "commodity_name": "Cobalt", "terminal_name": "Sell A",
+             "price_buy": 0, "price_sell": 50, "scu_buy": 0, "scu_sell": 80, "status_buy": None, "status_sell": 1},
+        ])
+        cog, client, handler = _fallback_best_route_cog(
+            db, vehicles=[{"name": "Ironclad Assault", "scu": 1440}], buy_scu=21, sell_scu=21,
+        )
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        interaction = _FakeInteraction(1)
+        try:
+            await cog.best_route.callback(cog, interaction, commodity="Taranite", ship="Ironclad Assault")
+        finally:
+            await client.aclose()
+
+        combined = _all_embed_text(interaction)
+        assert "/mixed-routes" in combined, combined
+        assert "Hedge:" in combined and "Cobalt" in combined, combined
+        for _, kwargs in interaction.followup.sent:
+            if kwargs.get("embed") is not None:
+                assert len(kwargs["embed"]) <= 6000, len(kwargs["embed"])
+
+    asyncio.run(run())
+
+
+def test_best_route_fallback_branch_does_not_warn_when_the_ship_is_the_binding_limit(tmp_path):
+    async def run():
+        db = Database(tmp_path / "best_route_fallback_silent.sqlite3", Fernet(Fernet.generate_key()))
+        await db.init()
+        cog, client, handler = _fallback_best_route_cog(
+            db, vehicles=[{"name": "Polaris", "scu": 576}], buy_scu=1000, sell_scu=1000,
+        )
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        interaction = _FakeInteraction(1)
+        try:
+            await cog.best_route.callback(cog, interaction, commodity="Taranite", ship="Polaris")
+        finally:
+            await client.aclose()
+
+        combined = _all_embed_text(interaction)
+        assert "Cargo:" in combined, combined
+        assert "/mixed-routes" not in combined and "Hedge:" not in combined, combined
+
+    asyncio.run(run())
+
+
 def test_best_route_fallback_branch_anchors_history_to_last_seen_not_wall_clock(tmp_path):
     """Audit fix: the 'inferred' tier used to anchor observation coverage to wall-clock
     now() instead of the collector's own terminal_market_state.last_seen - a pair with

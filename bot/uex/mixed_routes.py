@@ -509,6 +509,57 @@ def build_mixed_routes(
     return routes[:limit]
 
 
+def find_hedge_cargo(
+    market_rows: list[dict[str, Any]],
+    *,
+    origin_terminal_id: int,
+    destination_terminal_id: int,
+    exclude_commodity_id: int,
+    remaining_capacity_scu: float,
+    remaining_budget: float | None = None,
+    max_commodities: int = 2,
+    space_only: bool = False,
+    capital_access_only: bool = False,
+    auto_load_only: bool = False,
+    system: str | None = None,
+) -> list[MixedCargoItem]:
+    """Find a commodity (or two) to fill whatever ship capacity/budget a single-commodity
+    recommendation's own real stock/demand couldn't use, at that SAME origin/destination
+    pair - the anchored counterpart to build_mixed_routes' whole-market search. Where
+    build_mixed_routes asks "what's the single most profitable 2-3-commodity load
+    anywhere," this asks "given the trip a player already has planned, what else fits in
+    what's left over" - a direct hedge against stock_headroom_warning's own scenario
+    (bot.uex.route_presentation): the anchor commodity's real stock/demand fell short of
+    the ship/budget, so cargo space or capital is sitting unused.
+
+    min_commodities=1 (unlike build_mixed_routes' 2) because the anchor commodity is
+    already accounted for separately by the caller - a single complementary commodity
+    filling the gap is a complete answer here, not a partial one. exclude_commodity_id
+    keeps the anchor itself from being suggested as its own hedge (its own real stock is
+    exactly what came up short in the first place).
+    """
+    if remaining_capacity_scu <= 0:
+        return []
+    opportunities = build_pair_opportunities(
+        market_rows,
+        space_only=space_only,
+        capital_access_only=capital_access_only,
+        auto_load_only=auto_load_only,
+        system=system,
+    )
+    pairs = [
+        (source, destination)
+        for source, destination in opportunities.get((origin_terminal_id, destination_terminal_id), [])
+        if _integer(source.get("id_commodity")) != exclude_commodity_id
+    ]
+    if not pairs:
+        return []
+    budget = math.inf if remaining_budget is None else max(0.0, remaining_budget)
+    return allocate_pair_cargo(
+        pairs, capacity=remaining_capacity_scu, budget=budget, max_commodities=max_commodities, min_commodities=1,
+    )
+
+
 def is_space_terminal(terminal: dict[str, Any]) -> bool:
     """Return true only for a terminal explicitly tied to a UEX space station.
 

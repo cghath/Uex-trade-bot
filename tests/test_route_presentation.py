@@ -23,6 +23,7 @@ from bot.uex.route_presentation import (
     cargo_item_warnings,
     format_evidence_note,
     side_health_warnings,
+    stock_headroom_warning,
     travel_warning,
     worst_confidence,
 )
@@ -195,6 +196,23 @@ def test_approximation_note_distinguishes_per_leg_from_whole_route():
     whole_route = approximation_note(False, per_leg=False)
     assert "cargo allocation" in whole_route
     assert "per-leg" not in whole_route
+
+
+def test_stock_headroom_warning_fires_only_when_stock_is_the_binding_limit():
+    assert stock_headroom_warning("stock") is not None
+    assert stock_headroom_warning("ship") is None
+    assert stock_headroom_warning("budget") is None
+
+
+def test_stock_headroom_warning_points_at_mixed_routes_as_the_hedge():
+    warning = stock_headroom_warning("stock")
+    assert "/mixed-routes" in warning
+
+
+def test_stock_headroom_warning_command_name_is_overridable():
+    warning = stock_headroom_warning("stock", mixed_routes_command="/some-other-command")
+    assert "/some-other-command" in warning
+    assert "/mixed-routes" not in warning
 
 
 def test_format_evidence_note_shows_confirmed_zero_distinctly_from_no_information():

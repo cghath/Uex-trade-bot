@@ -31,7 +31,7 @@ from bot.uex.supply_demand import (
 from bot.uex.ships import estimate_route_cargo, resolve_ship
 from bot.uex.status import build_status_lookup, resolve_status_label
 from bot.uex.trading import best_buy_locations, best_routes, best_sell_locations
-from bot.uex.mixed_routes import build_mixed_routes, requires_capital_cargo_access
+from bot.uex.mixed_routes import build_mixed_routes, find_hedge_cargo, requires_capital_cargo_access
 from bot.uex.multi_stop_routes import build_multi_stop_routes, find_diminishing_returns_budget, sweep_budget_curve
 from bot.uex.charts import render_budget_curve_chart
 from bot.uex.trading_preferences import describe_active_preferences
@@ -46,6 +46,7 @@ from bot.uex.route_presentation import (
     chunk_lines,
     format_evidence_note,
     side_health_warnings,
+    stock_headroom_warning,
     travel_warning,
     worst_confidence,
 )
@@ -438,6 +439,10 @@ class Prices(commands.Cog):
             commodity_references = await self.bot.db.get_commodity_references([int(id_commodity)])
             risk_warning = format_commodity_risk(commodity_references.get(int(id_commodity)))
 
+        # Loaded lazily, only when a route turns out to be stock-limited with room to spare
+        # (see stock_headroom_warning) - most /best-route calls never need it.
+        market_rows: list[dict] | None = None
+
         # Prefer UEX's own precomputed routes (real inter-terminal distance, ROI, profit,
         # and a UEX quality score) over our own buy/sell pairing, which has no distance data.
         uex_routes: list[dict] = []
@@ -646,6 +651,20 @@ class Prices(commands.Cog):
                     if cargo.run_profit is not None:
                         cargo_line += f" · Run profit: **{cargo.run_profit:,.0f} aUEC** for this haul"
                     value_lines.append(cargo_line)
+                    if headroom_note := stock_headroom_warning(cargo.limited_by):
+                        value_lines.append(f"⚠️ {headroom_note}")
+                        remaining_capacity = (ship_cargo_scu or 0) - cargo.max_scu
+                        if (
+                            ship_cargo_scu is not None and remaining_capacity > 0
+                            and origin_id is not None and destination_id is not None
+                        ):
+                            if market_rows is None:
+                                market_rows = await self.bot.db.get_mixed_route_market_rows()
+                            for hedge_item in find_hedge_cargo(
+                                market_rows, origin_terminal_id=origin_id, destination_terminal_id=destination_id,
+                                exclude_commodity_id=id_commodity, remaining_capacity_scu=remaining_capacity,
+                            ):
+                                value_lines.append(f"Hedge: {cargo_item_line(hedge_item)}")
                 elif not ship_vehicle:
                     value_lines.append("Cargo: unknown (set a ship with /set-default-ship to see haulable SCU)")
 
@@ -903,6 +922,21 @@ class Prices(commands.Cog):
                 if cargo.run_profit is not None:
                     cargo_line += f" · Run profit: **{cargo.run_profit:,.0f} aUEC** for this haul"
                 value_lines.append(cargo_line)
+                if headroom_note := stock_headroom_warning(cargo.limited_by):
+                    value_lines.append(f"⚠️ {headroom_note}")
+                    remaining_capacity = (ship_cargo_scu or 0) - cargo.max_scu
+                    if (
+                        ship_cargo_scu is not None and remaining_capacity > 0
+                        and route.buy_terminal_id is not None and route.sell_terminal_id is not None
+                    ):
+                        if market_rows is None:
+                            market_rows = await self.bot.db.get_mixed_route_market_rows()
+                        for hedge_item in find_hedge_cargo(
+                            market_rows, origin_terminal_id=route.buy_terminal_id,
+                            destination_terminal_id=route.sell_terminal_id,
+                            exclude_commodity_id=id_commodity, remaining_capacity_scu=remaining_capacity,
+                        ):
+                            value_lines.append(f"Hedge: {cargo_item_line(hedge_item)}")
             elif not ship_vehicle:
                 value_lines.append("Cargo: unknown (set a ship with /set-default-ship to see haulable SCU)")
 
