@@ -33,6 +33,7 @@ from bot.cogs.prices import (
 )
 from bot.cogs.route_progression import RouteLegInput, RouteTrackingView, TrackableRoute
 from bot.cogs.ships import ship_name_autocomplete
+from bot.discord_ui import add_backup_button
 from bot.uex.charts import render_price_history_chart
 from bot.uex.exceptions import UexApiError, describe_uex_api_error
 from bot.uex.data_health import classify_terminal_health, format_health_note
@@ -40,7 +41,8 @@ from bot.uex.route_confidence import compute_route_confidence, track_record_modi
 from bot.uex.route_progression import SUPPRESSION_HOURS
 from bot.uex.practical_routes import route_in_system, route_practical_notes, route_supports_auto_load
 from bot.uex.commodity_risk import format_commodity_risk
-from bot.uex.mixed_routes import find_hedge_cargo
+from bot.uex.backup_routes import BackupContext
+from bot.uex.mixed_routes import find_hedge_cargo, requires_capital_cargo_access
 from bot.uex.route_presentation import (
     cargo_item_line,
     format_evidence_note,
@@ -97,9 +99,11 @@ def _build_route_field(
     destination_evidence: EvidenceLevel,
     budget: float | None = None,
     hedge_items: list | None = None,
+    has_backup_button: bool = False,
 ) -> tuple[str, str]:
     """Build one route field for /top-routes. hedge_items are find_hedge_cargo's suggestions for a
-    stock-limited route, already looked up by the caller - this function does no I/O."""
+    stock-limited route, already looked up by the caller - this function does no I/O. has_backup_button
+    says the route's message will carry a Backup route button, which the warning then points at."""
     per_unit_profit = r.price_destination - r.price_origin
     value_lines = [f"Buy {r.price_origin:.2f} / Sell {r.price_destination:.2f} (+{per_unit_profit:.2f} aUEC/unit)"]
 
@@ -135,7 +139,7 @@ def _build_route_field(
         if cargo.run_profit is not None:
             cargo_line += f" · Run profit: **{cargo.run_profit:,.0f} aUEC** for this haul"
         value_lines.append(cargo_line)
-        if headroom_note := stock_headroom_warning(cargo.limited_by):
+        if headroom_note := stock_headroom_warning(cargo.limited_by, has_backup_button=has_backup_button):
             value_lines.append(f"⚠️ {headroom_note}")
             for hedge_item in hedge_items or ():
                 value_lines.append(f"Hedge: {cargo_item_line(hedge_item)}")
@@ -562,16 +566,21 @@ class Trends(commands.Cog):
         # cargo space idle, so the market snapshot is loaded at most once, and only if some
         # shown route actually needs it. Additive - a failure here costs the player the
         # hedge suggestions, never their routes.
+        # The same routes get a Backup route button (bot.discord_ui.BackupRouteButton), decided here,
+        # before any lookup, so a failing market lookup can never take the button away.
+        stock_limited: dict[int, tuple] = {}
+        for i, r in enumerate(entries, start=1):
+            if r.origin_terminal_id is None or r.destination_terminal_id is None:
+                continue
+            cargo = _route_cargo_estimate(r, ship_cargo_scu, budget)
+            room = hedge_room(cargo, ship_cargo_scu=ship_cargo_scu, budget=budget) if cargo is not None else None
+            if room is not None:
+                stock_limited[i] = (cargo, room)
         hedge_items_by_route: dict[int, list] = {}
         try:
             market_rows = None
-            for i, r in enumerate(entries, start=1):
-                if r.origin_terminal_id is None or r.destination_terminal_id is None:
-                    continue
-                cargo = _route_cargo_estimate(r, ship_cargo_scu, budget)
-                room = hedge_room(cargo, ship_cargo_scu=ship_cargo_scu, budget=budget) if cargo is not None else None
-                if room is None:
-                    continue
+            for i, (cargo, room) in stock_limited.items():
+                r = entries[i - 1]
                 if market_rows is None:
                     market_rows = await self.bot.db.get_mixed_route_market_rows()
                 hedge_items_by_route[i] = find_hedge_cargo(
@@ -582,6 +591,7 @@ class Trends(commands.Cog):
         except Exception:
             logger.warning("Hedge suggestions unavailable for %s", log_label, exc_info=True)
             hedge_items_by_route = {}
+        capital_access_only = requires_capital_cargo_access(ship_vehicle) if ship_vehicle else False
 
         routes_shown = 0
         for i, r in enumerate(entries, start=1):
@@ -601,7 +611,7 @@ class Trends(commands.Cog):
             )
             name, value = _build_route_field(
                 i, r, ship_vehicle, ship_cargo_scu, status_lookup, origin_evidence, destination_evidence,
-                budget=budget, hedge_items=hedge_items_by_route.get(i),
+                budget=budget, hedge_items=hedge_items_by_route.get(i), has_backup_button=i in stock_limited,
             )
             warnings = []
             for side, terminal_id in (
@@ -686,6 +696,20 @@ class Trends(commands.Cog):
                     ],
                 )
                 view = RouteTrackingView(tracking_cog, [trackable_route])
+
+            if i in stock_limited:
+                view = add_backup_button(
+                    view, owner_id=interaction.user.id, db=self.bot.db,
+                    context=BackupContext(
+                        origin_terminal_id=r.origin_terminal_id, origin_name=r.origin_terminal_name,
+                        destination_terminal_id=r.destination_terminal_id, destination_name=r.destination_terminal_name,
+                        anchor_commodity_id=r.id_commodity, anchor_name=r.commodity_name,
+                        anchor_scu=stock_limited[i][0].max_scu, anchor_buy_price=r.price_origin,
+                        ship_capacity_scu=ship_cargo_scu,
+                        ship_name=ship_vehicle.get("name") if ship_vehicle else None, budget=budget,
+                        capital_access_only=capital_access_only, auto_load_only=auto_load_only, system=system,
+                    ),
+                )
 
             if view is not None:
                 await interaction.followup.send(embed=route_embed, view=view)

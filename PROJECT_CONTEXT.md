@@ -2332,6 +2332,60 @@ they're in sync).
     the `limited_by` check was redundant for every case tested except the rounding one), and
     both tests were strengthened until the mutations failed. Not deployed.
 
+69. **The Backup route button - a private plan B for stock-limited routes that keeps the commodity the
+    player may already hold (the second half of entry 68's answer to "hedge protection on all
+    routes that would benefit").** Entry 68 measured that a same-pair hedge exists for only about one
+    warned route in five, so the user asked for something better than a warning: a button, not
+    another command; the alternative should KEEP the original commodity in case it is already
+    bought; and when nothing can be found, say so and tell the player to continue as planned.
+
+    **What was checked before designing**: `RouteTrackingView` is a plain `discord.ui.View(timeout=900)`
+    with plain `Button`s in row 0, no owner check, not persistent (buttons die after 15 minutes or a
+    restart), and it is only created when the tracking cog is loaded and the terminal ids are known -
+    so `bot.discord_ui.add_backup_button` creates a bare view when there is none and puts the button
+    in row 1. `/best-route`'s fallback branch is out of scope: it sends ONE shared embed with no
+    per-route messages and no view. The `/mixed-routes` embed is built inline in the command, so it
+    could not be reused; the answer is a compact embed built from the shared presentation helpers.
+    The button is owner-only through the same `interaction_check` pattern the marketplace and
+    inventory views use (Track has none, but this answer depends on the requester's ship, budget and
+    filters). The search runs in a worker thread on freshly read market rows.
+
+    **The search (`bot/uex/backup_routes.py`)** answers three separate questions, each `None` unless it
+    is clearly better: (1) SAME trip, fuller hold - the held commodity plus up to two others at the
+    same terminals, when they add profit; (2) a DIFFERENT destination for the held commodity, only
+    when at least `MIN_DETOUR_GAIN_PCT` (10%) better than not detouring, because travel time is in no
+    profit figure here; (3) "if you haven't bought it yet" - the best mixed load from that origin
+    without it, only when 10% better than every option that keeps it. Rather than asking "have you
+    bought it?", the message shows the sections that apply, and when only (3) exists it adds an
+    explicit "Already bought X? Nothing I can find beats continuing to Y as planned" so a player who
+    holds the commodity always gets an answer for their own situation.
+
+    **Two design flaws found by the tests I wrote, in my own first version**: it needed stock still on
+    record at the origin for the original commodity - but a player who bought the whole stock leaves
+    the origin at 0, so the commodity being kept vanished exactly when it mattered (and, with no row,
+    it told them the route "no longer looks profitable"). Fixed by modelling the anchor as cargo the
+    player HOLDS (`anchor_scu` bought at `anchor_buy_price`, the price the list showed), reading only
+    the destination side from the market rows, charging the full cost of any units a destination
+    cannot absorb, and reporting an unpriceable original route honestly as "no demand" versus "I
+    don't have a current price". `eligible_market_rows` was extracted from `build_pair_opportunities`
+    (behaviour unchanged) so the anchor destinations honour exactly the same system/auto-load/dock
+    filters. The list passes its own ship, budget and filters into the button's context.
+
+    **What real data says** (a copy of the local snapshot, 576 SCU ship, the 32 best routes that hit
+    the stock-limited warning): 15 have something to offer (6 fuller hold, 3 different destination,
+    9 "if you haven't bought yet" - overlapping) and 17 correctly say nothing beats the plan;
+    emptying the origin's stock of the held commodity changed a keep-the-commodity answer in 0 of
+    32; a press takes about 20 ms (38 ms worst). The earlier prototype figure of 11 of 32 was before
+    the 10% margin (different destinations dropped from 5 to 3).
+
+    **Verification**: 18 unit tests for the search and message (including a 150-market random
+    invariant: whatever keeps the commodity earns at least what continuing would, and dropping it is
+    only offered when clearly better), 14 tests through the real ranked-list send path and the real
+    button callback (layout beside Track, owner-only, off-loop thread, failure handling, no-data
+    and bought-everything cases, filters carried through), and the `/best-route` main-branch test
+    now asserts the button and its context. Mutation-checked: 22 deliberate breakages, all caught.
+    Not deployed.
+
 ## Where to look for what
 
 Five docs, deliberately scoped so they don't duplicate each other:

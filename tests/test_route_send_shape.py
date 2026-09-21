@@ -1288,7 +1288,12 @@ def test_best_route_primary_branch_warns_when_stock_is_the_binding_limit(tmp_pat
         _, kwargs = interaction.followup.sent[1]
         embed = kwargs["embed"]
         combined = "\n".join(f.value or "" for f in embed.fields)
-        assert "/mixed-routes" in combined, combined
+        assert "Press **Backup route** below" in combined, combined
+        assert "/mixed-routes" not in combined, "points at the button, not at a separate command"
+        buttons = [c for c in kwargs["view"].children if getattr(c, "label", "") == "Backup route"]
+        assert len(buttons) == 1, "a stock-limited route message carries exactly one Backup route button"
+        context = buttons[0].context
+        assert (context.origin_terminal_id, context.anchor_scu, context.ship_capacity_scu) == (1, 10, 576)
 
     asyncio.run(run())
 
