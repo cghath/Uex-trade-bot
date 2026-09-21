@@ -2044,6 +2044,46 @@ they're in sync).
     logging in, since the local `.env` holds a real bot token and a second live gateway
     session would race the Pi. Both commands still need a real run in Discord.
 
+62. **`/refinery-advisor` ranks in-system refineries first, shows every one of them, and
+    judges a multi-ore haul by the systems where every ore is mined - ported from the aiv2
+    experiment.** User-reported real case: Quantainium's highest-yield refinery is in Nyx,
+    but Quantainium is only mined in Stanton, so a pure yield-bonus ranking could send a
+    player planning a multi-system flight for cargo they could only have picked up
+    elsewhere. Also confirmed on real data that the flat top-5 cut dropped real in-system
+    refineries (Quantainium has 6 in Stanton, Corundum 11).
+
+    **What changed**: a refinery's own star system is compared against the systems the
+    ore(s) are mined in (the same `ids_star_systems` data `/where-to-mine` reads, not a
+    second lookup). In-system refineries sort first, ties broken by yield bonus then name.
+    Nothing is ever excluded - an out-of-system refinery is still a real option once the ore
+    is in the hold - so it stays visible, marked with a warning sign, with the reason spelled
+    out once in the footer rather than per line. `select_terminals_to_show` displays every
+    in-system refinery (capped at `MAX_IN_SYSTEM_TERMINALS = 12` so a pathological ore can't
+    flood the embed), fills to `MAX_TERMINALS = 5`, and always keeps the best out-of-system
+    option visible; the footer says "Showing N of M" when it trims. A failed star-system
+    lookup degrades to the original yield-only ordering instead of breaking the command.
+
+    **Multi-ore hauls** (`combine_mining_systems`): judging against the union of every ore's
+    systems let a refinery near ore B pass unflagged for ore A, so the intersection is used
+    whenever it is non-empty and the footer says so. When the ores share no system it falls
+    back to the union and states that no single mining trip covers the haul. An ore with no
+    mining-location data can't narrow anything (unknown is not "mined nowhere") and is named
+    in the note. One ore behaves exactly as before, with no note.
+
+    **Files**: `bot/uex/refinery.py` (`rank_refinery_terminals` gained `limit=None` and
+    `mining_star_systems`, plus `HaulSystems`, `combine_mining_systems`,
+    `select_terminals_to_show`), `bot/cogs/refinery.py`, and `bot/uex/mining_locations.py`
+    (`_names_for_ids` made public as `names_for_ids`, no other reference to the old name
+    existed). aiv2 additionally extracted `build_refinery_advisor_embed` from the command so
+    its AI chat tool could reuse it; nothing here would consume that, so the behaviour was
+    ported inline into the existing command body instead. Known gap left on purpose: no
+    awareness of the player's current system.
+
+    **Verification**: 21 new tests in `tests/test_refinery.py` (ranking, trimming, haul
+    combination, and the command end to end through `refinery_advisor.callback`, including
+    the failed-lookup and single-ore cases). The ported command body differs from aiv2's
+    only by that missing extraction and comment wording.
+
 ## Where to look for what
 
 Five docs, deliberately scoped so they don't duplicate each other:

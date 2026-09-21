@@ -9,19 +9,25 @@ from discord import app_commands
 from discord.ext import commands
 
 from bot.uex.exceptions import UexApiError, describe_uex_api_error
+from bot.uex.mining_locations import names_for_ids
 from bot.uex.refinery import (
     COST_LABELS,
     SPEED_LABELS,
+    combine_mining_systems,
     display_terminal_name,
     high_yield_refining_methods,
     rank_refinery_terminals,
     resolve_raw_commodity,
+    select_terminals_to_show,
 )
 from bot.uex.route_presentation import add_chunked_fields
 from bot.uex.trading import best_sell_locations
 
 MAX_SELL_LOCATIONS = 3
+# Minimum refineries shown; every refinery in the ore's own mining system is shown even
+# past this (up to MAX_IN_SYSTEM_TERMINALS) - see select_terminals_to_show.
 MAX_TERMINALS = 5
+MAX_IN_SYSTEM_TERMINALS = 12
 
 
 async def raw_commodity_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
@@ -101,7 +107,38 @@ class Refinery(commands.Cog):
         for commodity in resolved:
             rows = await self.bot.db.get_latest_refinery_yields_for_commodity(commodity["id"])
             yield_rows_by_commodity[commodity["name"]] = rows
-        ranked_terminals = rank_refinery_terminals(yield_rows_by_commodity, limit=MAX_TERMINALS)
+
+        # A refinery's own highest yield bonus for an ore can be in a star system where that
+        # ore isn't even mineable (Quantainium's top yield is a Nyx refinery, but Quantainium
+        # is Stanton-only) - a pure yield-bonus ranking can send a player planning a
+        # multi-system flight for cargo they could only ever have picked up somewhere else.
+        # Same ids_star_systems data /where-to-mine already reads, not a second lookup - a
+        # failed fetch here just degrades to the original yield-only ordering, not a broken
+        # command.
+        systems_by_ore: dict[str, set[str]] = {}
+        try:
+            star_systems = await self.bot.uex.get_star_systems()
+            star_systems_by_id = {s["id"]: s["name"] for s in star_systems}
+            for commodity in resolved:
+                systems_by_ore[commodity["name"]] = set(
+                    names_for_ids(commodity.get("ids_star_systems"), star_systems_by_id)
+                )
+        except UexApiError:
+            pass  # combine_mining_systems gets {} and ranking stays by yield alone
+        # Several ores are judged against the systems where ALL of them are mined, not the
+        # union (see combine_mining_systems) - a union let a refinery near ore B's system
+        # pass unflagged for ore A.
+        haul_systems = combine_mining_systems(systems_by_ore)
+        mining_star_systems = set(haul_systems.systems)
+
+        # Ranked untruncated, then trimmed by select_terminals_to_show - a flat top-N cut
+        # dropped real in-system refineries (Quantainium has 6 in Stanton, Corundum 11).
+        all_ranked = rank_refinery_terminals(
+            yield_rows_by_commodity, limit=None, mining_star_systems=mining_star_systems or None,
+        )
+        ranked_terminals = select_terminals_to_show(
+            all_ranked, min_shown=MAX_TERMINALS, max_in_system=MAX_IN_SYSTEM_TERMINALS,
+        )
 
         try:
             methods = await self.bot.uex.get_refineries_methods()
@@ -116,11 +153,26 @@ class Refinery(commands.Cog):
 
         # Footer set BEFORE any field is added, not after - add_chunked_fields' own
         # len(embed) budget check needs the real footer already counted, matching this
-        # codebase's established ordering (see /price's identical fix).
-        embed.set_footer(
-            text="Refinery yield bonus collected periodically · sell prices live from UEX · "
+        # codebase's established ordering (see /price's identical fix). The cross-system
+        # disclosure is computed here too, for the same reason - it's a genuinely different
+        # notice than "no data for this ore" (below), so it's spelled out once rather than
+        # repeated per flagged terminal.
+        footer_text = (
+            "Refinery yield bonus collected periodically · sell prices live from UEX · "
             "methods apply at any refinery, not tied to a specific terminal."
         )
+        if any(t.in_mining_system is False for t in ranked_terminals):
+            footer_text += (
+                " · ⚠️ marks a terminal outside where this ore is actually mined - still "
+                "usable once the ore is in your cargo hold, just ranked behind reachable options."
+            )
+        if haul_systems.note:
+            footer_text += f" · {haul_systems.note}"
+        if len(all_ranked) > len(ranked_terminals):
+            footer_text += (
+                f" · Showing {len(ranked_terminals)} of {len(all_ranked)} refineries with yield data."
+            )
+        embed.set_footer(text=footer_text)
         omitted_sections: list[str] = []
 
         if ranked_terminals:
@@ -131,8 +183,9 @@ class Refinery(commands.Cog):
                 )
                 missing = [c["name"] for c in resolved if c["name"] not in terminal.per_commodity]
                 missing_note = f" (no data: {', '.join(missing)})" if missing else ""
+                cross_system_note = " ⚠️" if terminal.in_mining_system is False else ""
                 name = display_terminal_name(terminal.terminal_name, terminal.star_system_name)
-                lines.append(f"**{name}** — {per_commodity}{missing_note}")
+                lines.append(f"**{name}**{cross_system_note} — {per_commodity}{missing_note}")
             if not add_chunked_fields(embed, name="Best refineries by yield bonus", lines=lines):
                 omitted_sections.append("refinery list")
         else:

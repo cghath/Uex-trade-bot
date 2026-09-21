@@ -60,7 +60,10 @@ def _parse_ids(ids_str: str | None) -> list[int]:
     return result
 
 
-def _names_for_ids(ids_str: str | None, by_id: dict[int, str]) -> list[str]:
+def names_for_ids(ids_str: str | None, by_id: dict[int, str]) -> list[str]:
+    """Resolves a UEX comma-separated id list (ids_star_systems/ids_planets/ids_moons/etc.)
+    to real names via a reference table - public since bot/cogs/refinery.py also uses it
+    directly, on ids_star_systems, to find which system(s) an ore is actually mined in."""
     names = [by_id[commodity_id] for commodity_id in _parse_ids(ids_str) if commodity_id in by_id]
     return sorted(set(names))
 
@@ -131,9 +134,9 @@ def describe_mining_locations(
             poi_lines.append(label)
     return MiningLocationInfo(
         commodity_name=commodity.get("name") or "Unknown",
-        star_systems=_names_for_ids(commodity.get("ids_star_systems"), star_systems_by_id),
-        planets=_names_for_ids(commodity.get("ids_planets"), planets_by_id),
-        moons=_names_for_ids(commodity.get("ids_moons"), moons_by_id),
+        star_systems=names_for_ids(commodity.get("ids_star_systems"), star_systems_by_id),
+        planets=names_for_ids(commodity.get("ids_planets"), planets_by_id),
+        moons=names_for_ids(commodity.get("ids_moons"), moons_by_id),
         mining_pois=sorted(set(poi_lines)),
         difficulty=get_mining_difficulty(commodity.get("name") or ""),
         mining_profile=get_mining_profile(commodity.get("name") or ""),

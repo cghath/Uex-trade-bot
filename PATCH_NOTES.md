@@ -5,6 +5,19 @@ the AI bot uses the same commands with an `ai-` prefix (`/price` -> `/ai-price`)
 
 ---
 
+## 2026-09-21 - Refinery advisor
+
+**Changed**
+- `/refinery-advisor` - Refineries in the ore's own mining system now come first, and **every** refinery in that system is
+  shown (up to 12) instead of a flat top 5. Before, the best yield could be in a system where you can't mine the ore at all
+  (Quantainium's top yield is a Nyx refinery, but it is only mined in Stanton). Refineries outside the mining system are
+  still listed, marked with a warning sign, and the footer explains why. When you enter several ores, refineries are judged
+  against the star systems where **every** ore is mined, not where any one of them is. If no system mines all of them, it
+  falls back to any of them and says so. An ore whose mining systems aren't known is left out of that judgement and named
+  in the note.
+
+---
+
 ## 2026-09-21 - Blueprints
 
 **New**
