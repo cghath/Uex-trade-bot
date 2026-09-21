@@ -5,6 +5,17 @@ the AI bot uses the same commands with an `ai-` prefix (`/price` -> `/ai-price`)
 
 ---
 
+## 2026-09-21 - Stock warnings and hedges on route lists
+
+**Changed**
+- `/top-routes`, `/routes-from`, `/route-on-the-way` - A route that would use **all** the stock or demand currently on
+  record now shows the same warning `/best-route` does, and, if your ship has room left over (and your budget covers it),
+  a `Hedge:` line suggesting another commodity for the same trip. A hedge only appears when a second commodity actually
+  trades between those same two terminals, which is uncommon, so expect the warning far more often than the hedge line.
+  Routes limited by your ship or budget are unchanged.
+
+---
+
 ## 2026-09-21 - Pin mixed loads to a terminal, and 4-hop chains
 
 **New**

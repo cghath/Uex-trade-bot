@@ -14,6 +14,7 @@ import discord
 
 from bot.uex.data_health import classify_terminal_health
 from bot.uex.mixed_routes import MixedCargoItem
+from bot.uex.ships import CargoEstimate, estimate_route_cargo
 from bot.uex.route_presentation import (
     add_chunked_fields,
     approximation_note,
@@ -22,6 +23,7 @@ from bot.uex.route_presentation import (
     cargo_item_line,
     cargo_item_warnings,
     format_evidence_note,
+    hedge_room,
     side_health_warnings,
     stock_headroom_warning,
     travel_warning,
@@ -251,3 +253,57 @@ def test_add_chunked_fields_is_the_canonical_home_for_the_atomic_budget_check():
     embed = discord.Embed(title="Test")
     assert add_chunked_fields(embed, name="Route", lines=["a short line"]) is True
     assert len(embed.fields) == 1
+
+
+
+# -- hedge_room: the one definition of when a route deserves a hedge suggestion ----------------
+
+def _cargo(max_scu, limited_by, investment=None):
+    return CargoEstimate(max_scu=max_scu, limited_by=limited_by, run_profit=1.0, investment=investment)
+
+
+def test_hedge_room_is_the_spare_hold_of_a_stock_limited_haul():
+    room = hedge_room(_cargo(21, "stock"), ship_cargo_scu=100)
+    assert room is not None and room.capacity_scu == 79 and room.budget is None
+
+
+def test_hedge_room_is_none_when_the_ship_or_budget_was_the_limit():
+    assert hedge_room(_cargo(100, "ship"), ship_cargo_scu=100) is None
+    assert hedge_room(_cargo(21, "budget", investment=2100), ship_cargo_scu=100, budget=2100) is None
+
+
+def test_hedge_room_is_none_without_a_ship_capacity_to_measure_spare_room_against():
+    assert hedge_room(_cargo(21, "stock"), ship_cargo_scu=None) is None
+
+
+def test_hedge_room_is_none_when_stock_exactly_fills_the_hold():
+    assert hedge_room(_cargo(100, "stock"), ship_cargo_scu=100) is None
+
+
+def test_hedge_room_reports_spare_budget_when_one_is_set():
+    room = hedge_room(_cargo(21, "stock", investment=2100), ship_cargo_scu=100, budget=2300)
+    assert room is not None and room.capacity_scu == 79 and room.budget == 200
+
+
+def test_hedge_room_is_none_when_the_anchor_already_spends_the_whole_budget():
+    assert hedge_room(_cargo(21, "stock", investment=2100), ship_cargo_scu=100, budget=2100) is None
+    assert hedge_room(_cargo(21, "stock", investment=2100), ship_cargo_scu=100, budget=1500) is None
+
+
+def test_hedge_room_does_not_cap_by_money_when_the_investment_is_unknown():
+    """No price on record means no investment figure - that is 'unknown', never 'zero budget'."""
+    room = hedge_room(_cargo(21, "stock", investment=None), ship_cargo_scu=100, budget=2300)
+    assert room is not None and room.budget is None
+
+
+def test_hedge_room_ignores_a_sliver_of_budget_left_by_rounding_on_a_budget_limited_haul():
+    """estimate_route_cargo rounds investment to 2 decimals, so a budget-limited haul can
+    leave a fraction of a cent 'spare' (budget 100.004 -> investment 100.00). That is still a
+    budget-limited haul with nothing to hedge, not a stock-limited one with room to fill."""
+    cargo = estimate_route_cargo(
+        per_unit_profit=100, origin_scu_available=500, destination_scu_wanted=500,
+        ship_cargo_scu=1000, price_origin=1.0, budget=100.004,
+    )
+    assert cargo.limited_by == "budget" and cargo.investment < 100.004
+    assert hedge_room(cargo, ship_cargo_scu=1000, budget=100.004) is None
+

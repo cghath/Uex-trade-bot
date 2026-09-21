@@ -40,7 +40,14 @@ from bot.uex.route_confidence import compute_route_confidence, track_record_modi
 from bot.uex.route_progression import SUPPRESSION_HOURS
 from bot.uex.practical_routes import route_in_system, route_practical_notes, route_supports_auto_load
 from bot.uex.commodity_risk import format_commodity_risk
-from bot.uex.route_presentation import format_evidence_note, travel_warning
+from bot.uex.mixed_routes import find_hedge_cargo
+from bot.uex.route_presentation import (
+    cargo_item_line,
+    format_evidence_note,
+    hedge_room,
+    stock_headroom_warning,
+    travel_warning,
+)
 from bot.uex.ships import estimate_route_cargo, resolve_ship
 from bot.uex.status import build_status_lookup, resolve_status_label
 from bot.uex.supply_demand import (
@@ -66,6 +73,20 @@ from bot.uex.trends import (
 logger = logging.getLogger("uexbot.trends")
 
 
+def _route_cargo_estimate(r: ScoredRouteEntry, ship_cargo_scu: float | None, budget: float | None):
+    """The one place a ranked-list route's haulable cargo is estimated, so the field builder
+    and the hedge pre-pass in _send_ranked_routes can never disagree about whether a route
+    is stock-limited."""
+    return estimate_route_cargo(
+        per_unit_profit=r.price_destination - r.price_origin,
+        origin_scu_available=r.scu_origin,
+        destination_scu_wanted=r.scu_destination,
+        ship_cargo_scu=ship_cargo_scu,
+        price_origin=r.price_origin,
+        budget=budget,
+    )
+
+
 def _build_route_field(
     i: int,
     r: ScoredRouteEntry,
@@ -75,8 +96,10 @@ def _build_route_field(
     origin_evidence: EvidenceLevel,
     destination_evidence: EvidenceLevel,
     budget: float | None = None,
+    hedge_items: list | None = None,
 ) -> tuple[str, str]:
-    """Build one route field for /top-routes."""
+    """Build one route field for /top-routes. hedge_items are find_hedge_cargo's suggestions for a
+    stock-limited route, already looked up by the caller - this function does no I/O."""
     per_unit_profit = r.price_destination - r.price_origin
     value_lines = [f"Buy {r.price_origin:.2f} / Sell {r.price_destination:.2f} (+{per_unit_profit:.2f} aUEC/unit)"]
 
@@ -97,14 +120,7 @@ def _build_route_field(
     value_lines.append(format_evidence_note(origin_evidence, label="Stock"))
     value_lines.append(format_evidence_note(destination_evidence, label="Demand"))
 
-    cargo = estimate_route_cargo(
-        per_unit_profit=per_unit_profit,
-        origin_scu_available=r.scu_origin,
-        destination_scu_wanted=r.scu_destination,
-        ship_cargo_scu=ship_cargo_scu,
-        price_origin=r.price_origin,
-        budget=budget,
-    )
+    cargo = _route_cargo_estimate(r, ship_cargo_scu, budget)
     if cargo is not None:
         limit_note = {
             "ship": f"limited by {ship_vehicle.get('name')}'s cargo hold" if ship_vehicle else "limited by ship capacity",
@@ -119,6 +135,10 @@ def _build_route_field(
         if cargo.run_profit is not None:
             cargo_line += f" · Run profit: **{cargo.run_profit:,.0f} aUEC** for this haul"
         value_lines.append(cargo_line)
+        if headroom_note := stock_headroom_warning(cargo.limited_by):
+            value_lines.append(f"⚠️ {headroom_note}")
+            for hedge_item in hedge_items or ():
+                value_lines.append(f"Hedge: {cargo_item_line(hedge_item)}")
     elif not ship_vehicle:
         value_lines.append("Cargo: unknown (set a ship with /set-default-ship to see haulable SCU)")
 
@@ -538,6 +558,31 @@ class Trends(commands.Cog):
         # own result.
         tracking_cog = self.bot.get_cog("RouteProgression")
 
+        # Hedge protection (route_presentation.hedge_room): only a stock-limited haul leaves
+        # cargo space idle, so the market snapshot is loaded at most once, and only if some
+        # shown route actually needs it. Additive - a failure here costs the player the
+        # hedge suggestions, never their routes.
+        hedge_items_by_route: dict[int, list] = {}
+        try:
+            market_rows = None
+            for i, r in enumerate(entries, start=1):
+                if r.origin_terminal_id is None or r.destination_terminal_id is None:
+                    continue
+                cargo = _route_cargo_estimate(r, ship_cargo_scu, budget)
+                room = hedge_room(cargo, ship_cargo_scu=ship_cargo_scu, budget=budget) if cargo is not None else None
+                if room is None:
+                    continue
+                if market_rows is None:
+                    market_rows = await self.bot.db.get_mixed_route_market_rows()
+                hedge_items_by_route[i] = find_hedge_cargo(
+                    market_rows, origin_terminal_id=r.origin_terminal_id,
+                    destination_terminal_id=r.destination_terminal_id, exclude_commodity_id=r.id_commodity,
+                    remaining_capacity_scu=room.capacity_scu, remaining_budget=room.budget,
+                )
+        except Exception:
+            logger.warning("Hedge suggestions unavailable for %s", log_label, exc_info=True)
+            hedge_items_by_route = {}
+
         routes_shown = 0
         for i, r in enumerate(entries, start=1):
             origin_health = classify_terminal_health(health_rows[r.origin_terminal_id]) if r.origin_terminal_id in health_rows else None
@@ -556,7 +601,7 @@ class Trends(commands.Cog):
             )
             name, value = _build_route_field(
                 i, r, ship_vehicle, ship_cargo_scu, status_lookup, origin_evidence, destination_evidence,
-                budget=budget,
+                budget=budget, hedge_items=hedge_items_by_route.get(i),
             )
             warnings = []
             for side, terminal_id in (

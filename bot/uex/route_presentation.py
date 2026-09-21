@@ -12,7 +12,7 @@ vs. standalone line), this module only decides what the text says.
 """
 from __future__ import annotations
 
-from typing import Any, Iterable, Protocol
+from typing import Any, Iterable, NamedTuple, Protocol
 
 from bot.uex.commodity_risk import format_commodity_risk
 from bot.uex.data_health import TerminalDataHealth, format_health_note
@@ -254,6 +254,44 @@ def stock_headroom_warning(limited_by: str, *, mixed_routes_command: str = "/mix
         f"Uses the entire stock/demand currently on record - if it's lower on arrival, "
         f"{mixed_routes_command} can hedge with a second commodity so your hold isn't left half-empty"
     )
+
+
+class HedgeRoom(NamedTuple):
+    """Spare cargo space (and, if the player set a budget, spare money) a hedge could fill."""
+
+    capacity_scu: float
+    budget: float | None
+
+
+def hedge_room(cargo: Any, *, ship_cargo_scu: float | None, budget: float | None = None) -> HedgeRoom | None:
+    """The single definition of when a route deserves a hedge suggestion (see
+    bot.uex.mixed_routes.find_hedge_cargo) and how much room the hedge has to work with.
+    `cargo` is a bot.uex.ships.estimate_route_cargo result.
+
+    Only a stock-limited haul (limited_by == "stock", the same condition
+    stock_headroom_warning warns on) leaves anything idle: the anchor commodity's real
+    stock/demand ran out before the ship's hold or the player's budget did. A ship- or
+    budget-limited haul already used everything of that kind, so there is nothing to fill.
+    Returns None whenever no hedge is warranted - not stock-limited, no ship capacity on
+    record to measure spare room against, or no spare capacity/budget left - so callers can
+    use `is None` to skip the market lookup entirely.
+
+    Shared by /best-route and the ranked route lists (/top-routes, /routes-from,
+    /route-on-the-way) so the rule lives in one place rather than being re-derived per
+    command. budget is None for a command with no budget concept (/best-route), and
+    also when the route's own investment couldn't be computed - both mean "don't cap the
+    hedge by money", never "the budget is zero"."""
+    if cargo.limited_by != "stock" or ship_cargo_scu is None:
+        return None
+    spare_capacity = ship_cargo_scu - cargo.max_scu
+    if spare_capacity <= 0:
+        return None
+    if budget is None or cargo.investment is None:
+        return HedgeRoom(spare_capacity, None)
+    spare_budget = budget - cargo.investment
+    if spare_budget <= 0:
+        return None
+    return HedgeRoom(spare_capacity, spare_budget)
 
 
 def approximation_note(is_exact: bool, *, per_leg: bool = False) -> str | None:

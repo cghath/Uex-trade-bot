@@ -2284,6 +2284,54 @@ they're in sync).
     those seven fail if the commands stop passing the new arguments through; the seventh
     (terminal lookup, which happens before the search) passes either way by design.
 
+68. **Stock-limited warnings and same-pair hedges on the ranked route lists (`/top-routes`,
+    `/routes-from`, `/route-on-the-way`) - the coverage gap left after entries 65-66.** The user's
+    ask was "hedge protection on all routes that would benefit," so the first step was a survey of
+    every route-producing command. Already covered: `/best-route`'s main branch (entry 65),
+    route-tracking threads (entry 66, reactive), and `/mixed-routes`, both multi-stop commands
+    and `/intelligence-brief`, which are multi-commodity by construction (their allocator already
+    fills spare hold space). The gap was the three ranked lists, which share one send path,
+    `Trends._send_ranked_routes`, and showed the same stock-limited numbers with no warning and no
+    hedge. `/best-route`'s fallback branch (UEX has no precomputed routes) is deliberately left out:
+    it sends ONE shared embed with every route as a field and has no per-route messages or Track
+    button, so it would need a restructure first.
+
+    **One rule, one home**: `route_presentation.hedge_room(cargo, ship_cargo_scu=..., budget=...)`
+    is now the single definition of when a hedge is warranted (only a `stock`-limited haul leaves
+    anything idle, and only if spare cargo space and, when a budget is set, spare money remain),
+    returning `None` so callers can skip the market lookup entirely. `/best-route`'s two hedge
+    sites were rewritten to call it (behaviour unchanged - its existing hedge tests still pass) instead
+    of leaving a third hand-copied version of the same conditions. The lists call it from a
+    pre-pass in `_send_ranked_routes` that loads `get_mixed_route_market_rows()` at most once and
+    only if some shown route needs it, passes the remaining budget to `find_hedge_cargo`, and is
+    wrapped so a failure there costs the player the hedge lines and never their routes.
+    `_route_cargo_estimate` is the one place a list route's cargo is estimated, so the field
+    builder and the pre-pass can never disagree about which routes are stock-limited. Each list
+    route is its own embed, so the added lines don't touch the combined-embed budget.
+
+    **What real data says, before this was called done**: on a copy of the local snapshot (2,595
+    rows, 58 commodities with a profitable route), only about one warned route in five has a
+    same-pair hedge - 576 SCU ship: 6 of 32; 1,440 SCU: 9 of 39; 96 SCU: 3 of 17 - and the count
+    of routes with ANY other commodity trading at the pair equalled the hedges shown in every case,
+    so the scarcity is the data (most terminal pairs have one profitable commodity), not a bug.
+    The top 10 routes for a 576 SCU ship: 6 stock-limited, 1 hedged. Cost: 10 routes in about
+    100 ms including one 45 ms market load. The PATCH_NOTES entry says plainly that the warning
+    will appear far more often than the hedge line. The follow-up that addresses the scarcity is an
+    on-demand "Backup route" button (a load from the same origin that keeps the original
+    commodity), prototyped at 11 of 32 for the same ship - a separate PR.
+
+    **Verification**: 8 unit tests for `hedge_room` (including a real `estimate_route_cargo`
+    result where rounding leaves a fraction of a cent "spare" on a budget-limited haul) and 10
+    end-to-end tests through `_send_ranked_routes` against a real `Database` (plus the real
+    `/top-routes` callback): warns and hedges at the same pair, never suggests the anchor itself,
+    ship- and budget-limited routes get nothing and never load the market, one market load for
+    several routes, a budget caps the hedge quantity, a lookup failure still sends every route.
+    Mutation-checked: 7 deliberate breakages, all caught - but two were MISSED on the first
+    pass, which exposed weak tests rather than weak code (the fixture never put the anchor
+    commodity on record at the pair, so "the anchor may not be its own hedge" was untestable;
+    the `limited_by` check was redundant for every case tested except the rounding one), and
+    both tests were strengthened until the mutations failed. Not deployed.
+
 ## Where to look for what
 
 Five docs, deliberately scoped so they don't duplicate each other:
