@@ -20,6 +20,8 @@ the AI bot uses the same commands with an `ai-` prefix (`/price` -> `/ai-price`)
 - The stock warning on those routes now points at the button. A `/best-route` result built from its price-row fallback has no
   per-route buttons, so it still points at `/mixed-routes`.
 
+_Ref: f06758a_
+
 ---
 
 ## 2026-09-21 - Stock warnings and hedges on route lists
@@ -30,6 +32,8 @@ the AI bot uses the same commands with an `ai-` prefix (`/price` -> `/ai-price`)
   a `Hedge:` line suggesting another commodity for the same trip. A hedge only appears when a second commodity actually
   trades between those same two terminals, which is uncommon, so expect the warning far more often than the hedge line.
   Routes limited by your ship or budget are unchanged.
+
+_Ref: b5ec596_
 
 ---
 
