@@ -2018,6 +2018,22 @@ they're in sync).
     itself); the first `/blueprint-search` after a start triggers one full sync, roughly
     9 requests.
 
+    **Outside-audit follow-up (2026-09-21)**: three findings were confirmed and fixed. (1)
+    `CraftConfigView` capped its children at four INCLUDING the Add button, so at most three
+    selectors were ever shown and any others were silently dropped - Discord allows four
+    selects plus a button row. It now pages selectors four at a time behind Previous/Next
+    buttons, required material choices first (a plan can't be built without them), so every
+    control is reachable. Measured first: the fixture plus 12 randomly sampled real blueprints
+    needed at most three, so this is latent rather than live, but a bigger recipe would have
+    lost controls with no message. (2) `ShoppingService.open` and the Refresh/Clear buttons had
+    no error handling after deferring, so a Discord permission or HTTP failure left the player
+    at "the application did not respond"; each now replies, and Clear distinguishes "nothing
+    was changed" from "cleared, but I couldn't update the message". (3) Stale references to
+    the removed AI tool in `blueprints.py` comments. Two other audit findings were not defects
+    in this change: the deploy script defaulting to `TestBranch` (the features only ship once
+    merged there), and `bot/main.py` requesting `message_content` while the README says no
+    privileged intents (both already true on `TestBranch`; untouched here).
+
     **Verification**: 712 -> 852 tests (140 ported: `test_blueprints*.py`,
     `test_blueprint_crafting*.py`, `test_blueprint_planner.py`,
     `test_blueprint_shopping_db.py`, `test_wiki_api.py`, plus four fixtures in
