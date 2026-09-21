@@ -21,6 +21,7 @@ logger = logging.getLogger("uexbot.database")
 
 from bot.uex.marketplace import compute_liquidity_score
 from bot.uex.route_confidence import coalesce_report_count
+from bot.uex.blueprints import BlueprintMission, BlueprintRef, SnapshotState
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS price_alerts (
@@ -642,6 +643,58 @@ CREATE INDEX IF NOT EXISTS idx_route_progression_pending_actions_thread
 -- created here - see _migrate_dedupe_route_progression_pending_actions's docstring for
 -- why these two statements are issued explicitly in init(), after migrations, instead of
 -- living in this executescript'd SCHEMA like every other index in this file.
+CREATE TABLE IF NOT EXISTS blueprint_shopping_entries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    guild_id INTEGER NOT NULL,
+    request_id TEXT NOT NULL,
+    plan_json TEXT NOT NULL,
+    UNIQUE(user_id, guild_id, request_id)
+);
+CREATE INDEX IF NOT EXISTS idx_blueprint_shopping_owner
+    ON blueprint_shopping_entries (user_id, guild_id, id);
+CREATE TABLE IF NOT EXISTS blueprint_shopping_threads (
+    user_id INTEGER NOT NULL,
+    guild_id INTEGER NOT NULL,
+    thread_id INTEGER NOT NULL UNIQUE,
+    message_id INTEGER,
+    PRIMARY KEY(user_id, guild_id)
+);
+
+-- Blueprint search: one snapshot of the Star Citizen Wiki API's blueprint-bearing contracts,
+-- replaced wholesale (never patched in place) by replace_blueprint_snapshot in one transaction,
+-- so a failed or partial sync can never leave a half-old, half-new mix. blueprint_snapshot_state
+-- is a single row (id = 1) recording which game version the rows came from and when.
+CREATE TABLE IF NOT EXISTS blueprint_snapshot_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    game_version TEXT NOT NULL,
+    synced_at TEXT NOT NULL,
+    mission_count INTEGER NOT NULL,
+    blueprint_count INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS blueprint_missions (
+    mission_uuid TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    giver TEXT NOT NULL,
+    debug_name TEXT,
+    rank_name TEXT,
+    rank_index INTEGER,
+    reputation INTEGER,
+    star_systems TEXT NOT NULL DEFAULT '[]',
+    illegal INTEGER NOT NULL DEFAULT 0,
+    reward_scope TEXT,
+    game_version TEXT
+);
+
+CREATE TABLE IF NOT EXISTS blueprint_pool_entries (
+    mission_uuid TEXT NOT NULL,
+    blueprint_uuid TEXT NOT NULL,
+    blueprint_name TEXT NOT NULL,
+    PRIMARY KEY (mission_uuid, blueprint_uuid)
+);
+
+CREATE INDEX IF NOT EXISTS idx_blueprint_pool_by_blueprint ON blueprint_pool_entries (blueprint_uuid);
 """
 
 
@@ -3789,5 +3842,176 @@ class Database:
             await db.execute(
                 "INSERT OR IGNORE INTO scanner_seen_listings (user_id, listing_id) VALUES (?, ?)",
                 (user_id, listing_id),
+            )
+            await db.commit()
+
+    # -- Blueprint search snapshot ------------------------------------------------------------
+
+    async def replace_blueprint_snapshot(
+        self, missions: list[BlueprintMission], *, game_version: str, synced_at: datetime | None = None,
+    ) -> tuple[int, int]:
+        """Replace the whole blueprint snapshot with `missions` in ONE transaction: a failure at any
+        point (a bad row, a full disk, a lock timeout) rolls everything back, leaving the previous
+        snapshot fully intact - never a half-old, half-new mix, never an empty table. Returns
+        ``(mission_count, distinct_blueprint_count)``. An empty list is refused outright: replacing a
+        good snapshot with nothing is a wipe, whatever the caller thought it fetched."""
+        if not missions:
+            raise ValueError("refusing to replace the blueprint snapshot with zero missions")
+        stamp = (synced_at or datetime.now(timezone.utc)).replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S")
+        blueprint_ids = {ref.uuid for mission in missions for ref in mission.pool}
+        async with self.connect() as db:
+            try:
+                await db.execute("DELETE FROM blueprint_pool_entries")
+                await db.execute("DELETE FROM blueprint_missions")
+                await db.executemany(
+                    """INSERT INTO blueprint_missions
+                       (mission_uuid, title, giver, debug_name, rank_name, rank_index, reputation,
+                        star_systems, illegal, reward_scope, game_version)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    [
+                        (m.uuid, m.title, m.giver, m.debug_name, m.rank_name, m.rank_index, m.reputation,
+                         json.dumps(list(m.star_systems)), 1 if m.illegal else 0, m.reward_scope, m.game_version)
+                        for m in missions
+                    ],
+                )
+                await db.executemany(
+                    "INSERT INTO blueprint_pool_entries (mission_uuid, blueprint_uuid, blueprint_name) VALUES (?, ?, ?)",
+                    [(m.uuid, ref.uuid, ref.name) for m in missions for ref in m.pool],
+                )
+                await db.execute(
+                    """INSERT INTO blueprint_snapshot_state (id, game_version, synced_at, mission_count, blueprint_count)
+                       VALUES (1, ?, ?, ?, ?)
+                       ON CONFLICT(id) DO UPDATE SET game_version = excluded.game_version,
+                           synced_at = excluded.synced_at, mission_count = excluded.mission_count,
+                           blueprint_count = excluded.blueprint_count""",
+                    (game_version, stamp, len(missions), len(blueprint_ids)),
+                )
+                await db.commit()
+            except BaseException:
+                await db.rollback()
+                raise
+        return len(missions), len(blueprint_ids)
+
+    async def get_blueprint_snapshot_state(self) -> SnapshotState | None:
+        async with self.connect() as db:
+            cursor = await db.execute(
+                "SELECT game_version, synced_at, mission_count, blueprint_count FROM blueprint_snapshot_state WHERE id = 1"
+            )
+            row = await cursor.fetchone()
+        if row is None:
+            return None
+        return SnapshotState(
+            game_version=row["game_version"],
+            synced_at=datetime.strptime(row["synced_at"], "%Y-%m-%d %H:%M:%S"),
+            mission_count=row["mission_count"],
+            blueprint_count=row["blueprint_count"],
+        )
+
+    async def get_blueprint_refs(self) -> list[BlueprintRef]:
+        """Every distinct blueprint any stored mission can award - the autocomplete/matching universe."""
+        async with self.connect() as db:
+            cursor = await db.execute(
+                "SELECT DISTINCT blueprint_uuid, blueprint_name FROM blueprint_pool_entries ORDER BY blueprint_name, blueprint_uuid"
+            )
+            return [BlueprintRef(row["blueprint_uuid"], row["blueprint_name"]) for row in await cursor.fetchall()]
+
+    async def get_blueprint_missions(self, blueprint_uuids: list[str]) -> list[BlueprintMission]:
+        """Every stored mission whose pool contains any of `blueprint_uuids`, each with its FULL pool
+        (pool size and composition matter for telling look-alike contracts apart)."""
+        if not blueprint_uuids:
+            return []
+        marks = ",".join("?" for _ in blueprint_uuids)
+        async with self.connect() as db:
+            cursor = await db.execute(
+                f"SELECT DISTINCT mission_uuid FROM blueprint_pool_entries WHERE blueprint_uuid IN ({marks})",
+                blueprint_uuids,
+            )
+            mission_ids = [row["mission_uuid"] for row in await cursor.fetchall()]
+            missions: list[BlueprintMission] = []
+            # SQLite's default variable cap is 999; chunk so a very common blueprint can't exceed it.
+            for start in range(0, len(mission_ids), 500):
+                chunk = mission_ids[start:start + 500]
+                chunk_marks = ",".join("?" for _ in chunk)
+                pool_rows = await (await db.execute(
+                    f"""SELECT mission_uuid, blueprint_uuid, blueprint_name FROM blueprint_pool_entries
+                        WHERE mission_uuid IN ({chunk_marks}) ORDER BY blueprint_name, blueprint_uuid""",
+                    chunk,
+                )).fetchall()
+                pools: dict[str, list[BlueprintRef]] = {}
+                for row in pool_rows:
+                    pools.setdefault(row["mission_uuid"], []).append(BlueprintRef(row["blueprint_uuid"], row["blueprint_name"]))
+                mission_rows = await (await db.execute(
+                    f"SELECT * FROM blueprint_missions WHERE mission_uuid IN ({chunk_marks})", chunk,
+                )).fetchall()
+                for row in mission_rows:
+                    missions.append(BlueprintMission(
+                        uuid=row["mission_uuid"], title=row["title"], giver=row["giver"],
+                        debug_name=row["debug_name"], rank_name=row["rank_name"], rank_index=row["rank_index"],
+                        reputation=row["reputation"], star_systems=tuple(json.loads(row["star_systems"] or "[]")),
+                        illegal=bool(row["illegal"]), reward_scope=row["reward_scope"],
+                        game_version=row["game_version"], pool=tuple(pools.get(row["mission_uuid"], ())),
+                    ))
+        return sorted(missions, key=lambda m: (m.giver.lower(), m.title.lower(), m.uuid))
+
+    # -- Blueprint shopping plans: immutable per-add snapshots, owner/guild scoped --
+
+    async def add_blueprint_plan(self, user_id: int, guild_id: int, request_id: str, plan: dict) -> None:
+        payload = json.dumps(plan, allow_nan=False, sort_keys=True)
+        async with self.connect() as db:
+            await db.execute(
+                "INSERT OR IGNORE INTO blueprint_shopping_entries (user_id, guild_id, request_id, plan_json) VALUES (?, ?, ?, ?)",
+                (user_id, guild_id, request_id, payload),
+            )
+            await db.commit()
+
+    async def get_blueprint_plans(self, user_id: int, guild_id: int) -> list[dict]:
+        async with self.connect() as db:
+            rows = await (await db.execute(
+                "SELECT id, plan_json FROM blueprint_shopping_entries WHERE user_id=? AND guild_id=? ORDER BY id",
+                (user_id, guild_id),
+            )).fetchall()
+        return [{"id": row["id"], "plan": json.loads(row["plan_json"])} for row in rows]
+
+    async def remove_blueprint_plan(self, user_id: int, guild_id: int, entry_id: int) -> bool:
+        async with self.connect() as db:
+            cursor = await db.execute(
+                "DELETE FROM blueprint_shopping_entries WHERE user_id=? AND guild_id=? AND id=?",
+                (user_id, guild_id, entry_id),
+            )
+            await db.commit()
+            return cursor.rowcount > 0
+
+    async def clear_blueprint_plans(self, user_id: int, guild_id: int) -> None:
+        async with self.connect() as db:
+            await db.execute("DELETE FROM blueprint_shopping_entries WHERE user_id=? AND guild_id=?", (user_id, guild_id))
+            await db.commit()
+
+    async def get_blueprint_thread(self, user_id: int, guild_id: int) -> dict | None:
+        async with self.connect() as db:
+            row = await (await db.execute(
+                "SELECT * FROM blueprint_shopping_threads WHERE user_id=? AND guild_id=?", (user_id, guild_id),
+            )).fetchone()
+            return dict(row) if row else None
+
+    async def get_blueprint_thread_owner(self, thread_id: int) -> dict | None:
+        async with self.connect() as db:
+            row = await (await db.execute(
+                "SELECT * FROM blueprint_shopping_threads WHERE thread_id=?", (thread_id,),
+            )).fetchone()
+            return dict(row) if row else None
+
+    async def set_blueprint_thread(self, user_id: int, guild_id: int, thread_id: int, message_id: int | None) -> None:
+        async with self.connect() as db:
+            await db.execute(
+                """INSERT INTO blueprint_shopping_threads (user_id, guild_id, thread_id, message_id) VALUES (?, ?, ?, ?)
+                   ON CONFLICT(user_id, guild_id) DO UPDATE SET thread_id=excluded.thread_id, message_id=excluded.message_id""",
+                (user_id, guild_id, thread_id, message_id),
+            )
+            await db.commit()
+
+    async def delete_blueprint_thread(self, user_id: int, guild_id: int) -> None:
+        async with self.connect() as db:
+            await db.execute(
+                "DELETE FROM blueprint_shopping_threads WHERE user_id=? AND guild_id=?", (user_id, guild_id),
             )
             await db.commit()

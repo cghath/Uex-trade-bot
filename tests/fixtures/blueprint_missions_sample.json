@@ -1,0 +1,893 @@
+[
+ {
+  "uuid": "41231c57-f186-4c5e-ae51-524fc1e1d9a3",
+  "title": "Clipper Fight Now",
+  "mission_giver": "Wikelo",
+  "debug_name": "TheCollector_Vehicle_DrakeClipper",
+  "rank_index": null,
+  "min_standing_name": null,
+  "reputation_amount": null,
+  "star_systems": [],
+  "legality_label": "Legal",
+  "illegal": false,
+  "reward_scope": "Other",
+  "game_version": "4.10.0-LIVE.12519617",
+  "has_blueprints": true,
+  "reward_min": null,
+  "reward_max": null,
+  "reward_currency": null,
+  "faction": {
+   "name": "Wikelo Emporium"
+  },
+  "blueprints": [
+   {
+    "name": "Metamaterial Test #152",
+    "uuid": "8fbead8a-4e5b-4d63-bb80-442151e29094",
+    "link": "https://api.star-citizen.wiki/api/blueprints/d31e71e2-38f1-4773-8c4f-2507ca0470db"
+   }
+  ]
+ },
+ {
+  "uuid": "4d46a0e8-74ac-4bb2-a0f9-a28c9ff6b21c",
+  "title": "Lrg. Purchase Order: Ship Mined Ore",
+  "mission_giver": "Shubin Interstellar",
+  "debug_name": "Shubin_RG_Discovery_ShipMining_Pyro_Torite_Beryl",
+  "rank_index": 4,
+  "min_standing_name": "Veteran Contractor",
+  "reputation_amount": 200,
+  "star_systems": [
+   "Pyro"
+  ],
+  "legality_label": "Legal",
+  "illegal": false,
+  "reward_scope": "Mining",
+  "game_version": "4.10.0-LIVE.12519617",
+  "has_blueprints": true,
+  "reward_min": null,
+  "reward_max": null,
+  "reward_currency": null,
+  "faction": {
+   "name": null
+  },
+  "blueprints": [
+   {
+    "name": "Arclight \"Stormfall\" Pistol",
+    "uuid": "d1d33afb-779f-4d4d-977a-5ce26f384cf0",
+    "link": "https://api.star-citizen.wiki/api/blueprints/4597b977-ae88-49c4-9667-5681d3c67319"
+   },
+   {
+    "name": "Arclight Pistol",
+    "uuid": "0ff9144c-970d-4861-ae27-b27ee3c969a9",
+    "link": "https://api.star-citizen.wiki/api/blueprints/84c3ded1-19f0-43bb-bd49-ceb517e7264b"
+   },
+   {
+    "name": "Venture Arms",
+    "uuid": "28cea84c-30bb-4381-8d0f-d009d6cb51f8",
+    "link": "https://api.star-citizen.wiki/api/blueprints/dabddb4f-e559-4991-ba80-95a3a70a1fef"
+   },
+   {
+    "name": "Venture Core",
+    "uuid": "dc079d73-0014-41ff-8c00-3adf0eabbc3b",
+    "link": "https://api.star-citizen.wiki/api/blueprints/1b1c4e5e-2a8b-4180-9857-1fe1b3322093"
+   },
+   {
+    "name": "Venture Legs",
+    "uuid": "70f6dd3a-790c-4b8b-b355-c256e09af19f",
+    "link": "https://api.star-citizen.wiki/api/blueprints/f1b95cd0-5dde-4b32-9efb-dd87f2aa5567"
+   },
+   {
+    "name": "Horizon Helmet",
+    "uuid": "8845a66f-ec8c-49a5-9c23-4a5c00db7603",
+    "link": "https://api.star-citizen.wiki/api/blueprints/23451667-daed-476c-9eb8-b25e174929d6"
+   },
+   {
+    "name": "Arclight Pistol Battery (30 cap)",
+    "uuid": "e15e874d-a0c1-4f91-939b-b04bf7a9e839",
+    "link": "https://api.star-citizen.wiki/api/blueprints/743efa96-8a73-40a7-ae6a-0890f34a3731"
+   },
+   {
+    "name": "Arbor MH2 Mining Laser",
+    "uuid": "4435898e-a6cc-4f51-ab2a-805d0cf1a44a",
+    "link": "https://api.star-citizen.wiki/api/blueprints/e8e41bb2-0fd2-47a3-99ea-5dbe2abe4b92"
+   },
+   {
+    "name": "Lancet MH2 Mining Laser",
+    "uuid": "c2006c91-f8f7-4bda-ae38-e0ca5af5c737",
+    "link": "https://api.star-citizen.wiki/api/blueprints/959c2d65-301a-4b8c-88f1-d72c617cd405"
+   },
+   {
+    "name": "Hofstede-S2 Mining Laser",
+    "uuid": "b422bcf8-b553-4b09-b2be-e92ab2f80e9a",
+    "link": "https://api.star-citizen.wiki/api/blueprints/0b6cf9a1-ef55-47ee-ab8d-c734d4f3b073"
+   },
+   {
+    "name": "Klein-S2 Mining Laser",
+    "uuid": "41850766-d4a8-4255-be75-0d24af7280b0",
+    "link": "https://api.star-citizen.wiki/api/blueprints/6da71823-7178-4110-b8ff-79e9b22e11fa"
+   },
+   {
+    "name": "Helix II Mining Laser",
+    "uuid": "3bcde69d-3e3a-4f78-b2cb-8189b349e4d2",
+    "link": "https://api.star-citizen.wiki/api/blueprints/18f54363-88cd-420a-9ab3-979256db55a2"
+   },
+   {
+    "name": "Impact II Mining Laser",
+    "uuid": "30545178-b09e-495d-a8b8-c6267ce2b495",
+    "link": "https://api.star-citizen.wiki/api/blueprints/46c4b9c1-b7a8-423d-af4a-2e32b199bc02"
+   },
+   {
+    "name": "FullSpec-Go",
+    "uuid": "a4412aa5-2593-4139-b2d8-88b6bd05df07",
+    "link": "https://api.star-citizen.wiki/api/blueprints/2bd502c9-cb83-4505-855e-0788b38325c9"
+   },
+   {
+    "name": "FullSpec",
+    "uuid": "4e802779-f88e-41d0-b3ba-4dcdd352cd75",
+    "link": "https://api.star-citizen.wiki/api/blueprints/ba0b2f00-7790-4bbf-ae83-2fafceb32d4b"
+   },
+   {
+    "name": "FullSpec-Max",
+    "uuid": "6bd2ac52-cb7d-43b8-8f92-efe11079d914",
+    "link": "https://api.star-citizen.wiki/api/blueprints/e239f19b-e846-411d-ac57-b877a7d30d76"
+   },
+   {
+    "name": "Arbor MHV Mining Laser",
+    "uuid": "0982203d-579f-4c3c-8b7a-c5f1c4a7ddd6",
+    "link": "https://api.star-citizen.wiki/api/blueprints/93dbf337-be86-4c3b-80ba-015955b8b9b8"
+   },
+   {
+    "name": "S00 Hofstede",
+    "uuid": "1c2bab01-941b-4515-a6a4-5845aaa95696",
+    "link": "https://api.star-citizen.wiki/api/blueprints/35f1121b-c021-4230-b68d-93e2cd578320"
+   },
+   {
+    "name": "Lawson Mining Laser",
+    "uuid": "40bd6a85-5695-409c-9d6c-ae1babde416a",
+    "link": "https://api.star-citizen.wiki/api/blueprints/1cc19fca-84a3-4e7f-8084-350e7bb31d42"
+   },
+   {
+    "name": "S0 Helix",
+    "uuid": "8c95c978-9e47-46ec-88e3-a0662c13d76a",
+    "link": "https://api.star-citizen.wiki/api/blueprints/7a37ef95-bc0f-4a3b-93a2-05b9f160ee31"
+   },
+   {
+    "name": "Surveyor-Go",
+    "uuid": "e5bccaed-85de-483b-b4b8-dfb62f085b43",
+    "link": "https://api.star-citizen.wiki/api/blueprints/b2bb2f91-d5de-4ea0-882d-013032f8a655"
+   },
+   {
+    "name": "Surveyor-Lite",
+    "uuid": "87008b2d-438a-4091-8ae4-303be47190d8",
+    "link": "https://api.star-citizen.wiki/api/blueprints/86654362-5907-4139-a706-8ba6dcfd207f"
+   },
+   {
+    "name": "Surveyor",
+    "uuid": "3260e018-64ca-42e9-b85a-8b80d24d5375",
+    "link": "https://api.star-citizen.wiki/api/blueprints/47f1994d-373b-4ade-b03e-c62f1eaa3538"
+   },
+   {
+    "name": "Surveyor-Max",
+    "uuid": "d055fbff-ec64-4a81-8d0b-c6ffcbd2b83e",
+    "link": "https://api.star-citizen.wiki/api/blueprints/81f42807-1595-4dde-b88c-dc2578e8bf99"
+   },
+   {
+    "name": "Pitman Mining Laser",
+    "uuid": "5a704f96-c339-43e7-b918-7fc9957673ed",
+    "link": "https://api.star-citizen.wiki/api/blueprints/bfb86b0e-d262-450f-a6ad-396ead48c40a"
+   },
+   {
+    "name": "Hofstede-S1 Mining Laser",
+    "uuid": "077a4a94-6296-4a83-a6c4-f215f7efd1df",
+    "link": "https://api.star-citizen.wiki/api/blueprints/ccbb801a-ad5e-4e15-a842-ad315f43dd4e"
+   },
+   {
+    "name": "Klein-S1 Mining Laser",
+    "uuid": "e6b284b9-456a-4444-b5fc-7c33bf5a6945",
+    "link": "https://api.star-citizen.wiki/api/blueprints/04f1af4c-e8ed-4b99-8413-61622bdfcb30"
+   },
+   {
+    "name": "Helix I Mining Laser",
+    "uuid": "81e1a10a-c7bd-401f-92e1-284115dcd6e1",
+    "link": "https://api.star-citizen.wiki/api/blueprints/7ba597a6-b5c2-4513-b38c-62acd4cb138e"
+   },
+   {
+    "name": "Impact I Mining Laser",
+    "uuid": "6429e3d3-c813-4dfc-bc68-c95b54123722",
+    "link": "https://api.star-citizen.wiki/api/blueprints/20789dfa-a83c-4e00-8c43-e5828d65dfdd"
+   },
+   {
+    "name": "Arbor MH1 Mining Laser",
+    "uuid": "8bfc261a-6c67-4bec-b5b5-71407e086ec9",
+    "link": "https://api.star-citizen.wiki/api/blueprints/3a4ba1b4-a688-4c5a-ba88-e82929d384b0"
+   },
+   {
+    "name": "Lancet MH1 Mining Laser",
+    "uuid": "ba94a262-bc0a-4484-9bbd-a4be7a2ec3e7",
+    "link": "https://api.star-citizen.wiki/api/blueprints/9105536e-507d-49c8-8d90-b6d778d95ce0"
+   },
+   {
+    "name": "BroadSpec-Go",
+    "uuid": "ad6617d1-ccbf-45e4-9ac3-8bd0bc6b8ff5",
+    "link": "https://api.star-citizen.wiki/api/blueprints/b9380740-dc8d-41f5-b402-819d40230fba"
+   },
+   {
+    "name": "BroadSpec",
+    "uuid": "42fb9080-c177-466a-b843-d3f0e82e1633",
+    "link": "https://api.star-citizen.wiki/api/blueprints/42097046-f08d-4202-aee0-5b5921ccacb9"
+   },
+   {
+    "name": "BroadSpec",
+    "uuid": "c802e513-66a1-462f-bfef-a4faa1ab5f1a",
+    "link": "https://api.star-citizen.wiki/api/blueprints/394c971b-2056-4c5b-9503-0c6efbe595ff"
+   },
+   {
+    "name": "BroadSpec-Max",
+    "uuid": "441e0d9d-f432-4e7a-825f-6c4c5e10d9da",
+    "link": "https://api.star-citizen.wiki/api/blueprints/2c09e00e-2250-479d-bbcd-713b1a411ce1"
+   }
+  ]
+ },
+ {
+  "uuid": "f5affede-fed9-4d8b-a1ad-80f29f4ff216",
+  "title": "A Challenging Contract",
+  "mission_giver": "Vaughn",
+  "debug_name": "Vaughn_ReaserchFacilitySide_RegionA_EliminateSpecific",
+  "rank_index": 1,
+  "min_standing_name": "Jr. Contractor",
+  "reputation_amount": 100,
+  "star_systems": [],
+  "legality_label": "Illegal",
+  "illegal": true,
+  "reward_scope": "Assassination",
+  "game_version": "4.10.0-LIVE.12519617",
+  "has_blueprints": true,
+  "reward_min": null,
+  "reward_max": null,
+  "reward_currency": null,
+  "faction": {
+   "name": "Vaughn"
+  },
+  "blueprints": [
+   {
+    "name": "Killshot Rifle",
+    "uuid": "c098e722-902a-435b-83f8-a96cec36a012",
+    "link": "https://api.star-citizen.wiki/api/blueprints/e3097998-28ef-48ad-a220-2ddaa1a85ce3"
+   },
+   {
+    "name": "Deadrig Shotgun",
+    "uuid": "7b17e697-ad38-4999-87e4-14f5a6bee3ac",
+    "link": "https://api.star-citizen.wiki/api/blueprints/950e8099-037e-4d73-86fe-6266a08b02d1"
+   },
+   {
+    "name": "Overlord Arms Supernova",
+    "uuid": "20001b62-0d2f-4045-a61d-5d38de1038f8",
+    "link": "https://api.star-citizen.wiki/api/blueprints/1cc4c8ad-6bfe-4cfc-aa4f-f8af0bf871ea"
+   },
+   {
+    "name": "Overlord Core Supernova",
+    "uuid": "28bfe788-0d3d-41f5-a749-d35bf7f7fa0d",
+    "link": "https://api.star-citizen.wiki/api/blueprints/ccc84b06-ce85-4f82-9c7d-8b5eda13ea95"
+   },
+   {
+    "name": "Overlord Legs Supernova",
+    "uuid": "4fd216ed-b7b4-4c42-b6bf-ba12040a996a",
+    "link": "https://api.star-citizen.wiki/api/blueprints/ec377312-4b4c-4fbd-854c-ff45cb66229f"
+   },
+   {
+    "name": "Overlord Helmet Supernova",
+    "uuid": "a173cc6f-4c6d-4f31-8ce7-67b9b6a0fe37",
+    "link": "https://api.star-citizen.wiki/api/blueprints/0c04c0d4-e289-4571-84f5-ffae7e6994d9"
+   },
+   {
+    "name": "Piecemeal Armor Arms",
+    "uuid": "21e26536-0dfd-4d43-8247-679ce76ce06a",
+    "link": "https://api.star-citizen.wiki/api/blueprints/bcadaa79-db0f-40cd-a9c7-5015500a2a51"
+   },
+   {
+    "name": "Piecemeal Armor Core",
+    "uuid": "9b2d97da-d08f-4df8-99bb-7af97983bd5c",
+    "link": "https://api.star-citizen.wiki/api/blueprints/e51e3af6-9fb6-41bb-bb34-b0b35750dccc"
+   },
+   {
+    "name": "Piecemeal Armor Legs",
+    "uuid": "36200c80-ecf8-472f-9cbe-4994e11ecbab",
+    "link": "https://api.star-citizen.wiki/api/blueprints/4dbe4a9c-cce5-4679-9975-329c95eab9a1"
+   },
+   {
+    "name": "Badami Helmet",
+    "uuid": "305c8b36-61a3-4065-b514-199719de9ac0",
+    "link": "https://api.star-citizen.wiki/api/blueprints/850ad61b-2bd1-4c0c-be77-84a7133ce899"
+   },
+   {
+    "name": "Killshot Rifle Magazine (45 Cap)",
+    "uuid": "c40b7e8e-0f04-43d7-ac3a-7ffb8df071d8",
+    "link": "https://api.star-citizen.wiki/api/blueprints/6ddb93d8-7f93-4086-9609-4520f06f7d9b"
+   },
+   {
+    "name": "Deadrig Shotgun Magazine (8 cap)",
+    "uuid": "1b00b884-79eb-4b3b-916f-1b3ebe4c7c76",
+    "link": "https://api.star-citizen.wiki/api/blueprints/a10bfaff-76a7-47c9-8535-44e982442cbd"
+   }
+  ]
+ },
+ {
+  "uuid": "eacc9ce4-1675-4dad-b419-cab6b94e93b7",
+  "title": "Assist People's Alliance Vessel Tranquility",
+  "mission_giver": "InterSec Defense Solutions",
+  "debug_name": "InterSec_Nyx_TSG_Solo_AssistShipInCombat",
+  "rank_index": null,
+  "min_standing_name": null,
+  "reputation_amount": 200,
+  "star_systems": [],
+  "legality_label": "Legal",
+  "illegal": false,
+  "reward_scope": "Other",
+  "game_version": "4.10.0-LIVE.12519617",
+  "has_blueprints": true,
+  "reward_min": null,
+  "reward_max": null,
+  "reward_currency": null,
+  "faction": {
+   "name": "InterSec Defense Solutions"
+  },
+  "blueprints": [
+   {
+    "name": "Deadbolt I Cannon",
+    "uuid": "3727a5ce-bf98-43a7-a96e-c0ffedd071d0",
+    "link": "https://api.star-citizen.wiki/api/blueprints/fca087e5-c043-4638-99e8-3c0bd668ab89"
+   },
+   {
+    "name": "Deadbolt II Cannon",
+    "uuid": "92f60837-933a-42dc-a7b0-473a337ffc13",
+    "link": "https://api.star-citizen.wiki/api/blueprints/82b2cc9d-aa04-4dfa-8bc1-bd972c17276d"
+   },
+   {
+    "name": "Deadbolt III Cannon",
+    "uuid": "370e4728-924a-4791-9297-a71b25ff08e9",
+    "link": "https://api.star-citizen.wiki/api/blueprints/d5e2dda5-e104-4e50-887e-10a583b6064d"
+   },
+   {
+    "name": "ForceWall",
+    "uuid": "b66a64ca-9c53-40e7-8618-3b66b10a021c",
+    "link": "https://api.star-citizen.wiki/api/blueprints/55c76311-f8ea-462a-94c4-3156a8707279"
+   },
+   {
+    "name": "CoverAll",
+    "uuid": "b14fb966-10f0-4207-8a41-2317798deccc",
+    "link": "https://api.star-citizen.wiki/api/blueprints/968d85a2-6ee1-494e-b528-3ddae793a808"
+   },
+   {
+    "name": "FullBlock",
+    "uuid": "6a4d4eb2-dacd-4b04-b17f-e7a02ea7e744",
+    "link": "https://api.star-citizen.wiki/api/blueprints/dd81d455-8f3d-4552-9082-98de9333991f"
+   },
+   {
+    "name": "Tailwind Flight Suit",
+    "uuid": "e7ba6337-2972-46db-b122-df73c4176027",
+    "link": "https://api.star-citizen.wiki/api/blueprints/4a8393d9-81a5-43da-86a1-0257d810ade4"
+   },
+   {
+    "name": "Tailwind Flight Helmet Green Streak",
+    "uuid": "69ac7a79-6546-450f-9a02-b35180030e05",
+    "link": "https://api.star-citizen.wiki/api/blueprints/59464ab4-fff9-4727-9013-1bccf176f612"
+   },
+   {
+    "name": "Tailwind Flight Helmet Blackbolt",
+    "uuid": "718b049c-3c47-432d-8b68-d1dcf3d8371f",
+    "link": "https://api.star-citizen.wiki/api/blueprints/61ec59f2-84dd-4ede-8751-49820e8bb126"
+   }
+  ]
+ },
+ {
+  "uuid": "d300992a-88ab-479c-b1d9-f135b2092b5b",
+  "title": "Alert: [Location] under attack",
+  "mission_giver": "Citizens for Prosperity",
+  "debug_name": "CFP_Pyro_RegionB_E_ChainElimAll_1Cluster_ElimSpec",
+  "rank_index": 3,
+  "min_standing_name": "Sr. Contractor",
+  "reputation_amount": 300,
+  "star_systems": [
+   "Pyro"
+  ],
+  "legality_label": "Legal",
+  "illegal": false,
+  "reward_scope": "Assassination",
+  "game_version": "4.10.0-LIVE.12519617",
+  "has_blueprints": true,
+  "reward_min": null,
+  "reward_max": null,
+  "reward_currency": null,
+  "faction": {
+   "name": "Citizens For Prosperity"
+  },
+  "blueprints": [
+   {
+    "name": "Karna \"Brimstone\" Rifle",
+    "uuid": "b5a8e588-4d57-410f-a784-99403cf65fc4",
+    "link": "https://api.star-citizen.wiki/api/blueprints/daa57ef9-0e2d-46f0-84e7-ca8dcc06b963"
+   },
+   {
+    "name": "Artimex Core Lodestone",
+    "uuid": "3226d127-fc32-4ebb-83b8-1864b6f42c6d",
+    "link": "https://api.star-citizen.wiki/api/blueprints/951446c7-10fb-4023-ac29-c2e29b29b886"
+   },
+   {
+    "name": "Artimex Arms Lodestone",
+    "uuid": "be146639-a34c-4280-89db-36e8a4d9f4da",
+    "link": "https://api.star-citizen.wiki/api/blueprints/34dd7fd6-d539-475b-81a8-0d64c0453b8a"
+   },
+   {
+    "name": "Artimex Legs Lodestone",
+    "uuid": "559b8809-100e-4d9c-852d-ff40b9503939",
+    "link": "https://api.star-citizen.wiki/api/blueprints/bdd0799a-eb8e-4b38-94ee-80dd4e570525"
+   },
+   {
+    "name": "Artimex Helmet Lodestone",
+    "uuid": "e05f523f-2879-46a1-9d8e-5f236d18d46d",
+    "link": "https://api.star-citizen.wiki/api/blueprints/9b2c039f-d345-4abd-b800-d76d5ed78076"
+   },
+   {
+    "name": "Karna Rifle Battery (35 cap)",
+    "uuid": "91cfb7dc-660b-4505-b86a-6028c9a3f54d",
+    "link": "https://api.star-citizen.wiki/api/blueprints/e3596782-22aa-4d83-a50b-b70e7c4f418e"
+   }
+  ]
+ },
+ {
+  "uuid": "9bd0c215-ece8-42b6-9145-f50664b252d1",
+  "title": "Additional Resources For Research",
+  "mission_giver": "Rayari Incorporated",
+  "debug_name": "Rayari_Rank3_IrradiatedPearls",
+  "rank_index": 3,
+  "min_standing_name": "Sr. Contractor",
+  "reputation_amount": 200,
+  "star_systems": [],
+  "legality_label": "Legal",
+  "illegal": false,
+  "reward_scope": "Recovery",
+  "game_version": "4.10.0-LIVE.12519617",
+  "has_blueprints": true,
+  "reward_min": null,
+  "reward_max": null,
+  "reward_currency": null,
+  "faction": {
+   "name": "Rayari Incorporated"
+  },
+  "blueprints": [
+   {
+    "name": "Prism \"Deep Sea\" Laser Shotgun",
+    "uuid": "ca19298f-a111-46ed-bc88-870148c6d2b7",
+    "link": "https://api.star-citizen.wiki/api/blueprints/d0d3aa5c-0db2-4f62-af6a-b6976e202b87"
+   },
+   {
+    "name": "Prism \"Bonedust\" Laser Shotgun",
+    "uuid": "2085a682-db46-4fa4-a00c-16925aaa26a4",
+    "link": "https://api.star-citizen.wiki/api/blueprints/82f6965b-39ec-42fb-8286-ac543c4fa904"
+   },
+   {
+    "name": "Prism \"Firesteel\" Laser Shotgun",
+    "uuid": "bc328b41-ebc6-4d85-aba1-9e04cb752fa7",
+    "link": "https://api.star-citizen.wiki/api/blueprints/0f23d221-eae2-462a-87cf-560942e515ef"
+   },
+   {
+    "name": "Prism Laser Shotgun",
+    "uuid": "7dd1988f-77cf-40f0-a29e-dac5e2186aad",
+    "link": "https://api.star-citizen.wiki/api/blueprints/fc036002-09f5-4bb8-8f3d-8bddc54272e4"
+   },
+   {
+    "name": "Stirling Exploration Suit",
+    "uuid": "711208e1-0378-42f3-a503-cdac8ee56e31",
+    "link": "https://api.star-citizen.wiki/api/blueprints/12f9225e-98ec-4546-ba0a-4386c86100a9"
+   },
+   {
+    "name": "Siebe Helmet",
+    "uuid": "06cbc938-0b97-4c1b-a4e1-8c5334152deb",
+    "link": "https://api.star-citizen.wiki/api/blueprints/f74b672f-684a-4735-be47-71d8f1d24c32"
+   },
+   {
+    "name": "Prism Laser Shotgun Battery (20 cap)",
+    "uuid": "14e12fed-37fd-4c75-b61e-1b21d1bbade7",
+    "link": "https://api.star-citizen.wiki/api/blueprints/910b675f-2030-42e6-a301-de9c09894460"
+   }
+  ]
+ },
+ {
+  "uuid": "115dab47-1987-4317-8a8f-b9466976a7b6",
+  "title": "Additional Resources For Research",
+  "mission_giver": "Rayari Incorporated",
+  "debug_name": "Rayari_Rank3_YormandiEyes",
+  "rank_index": 3,
+  "min_standing_name": "Sr. Contractor",
+  "reputation_amount": 200,
+  "star_systems": [],
+  "legality_label": "Legal",
+  "illegal": false,
+  "reward_scope": "Recovery",
+  "game_version": "4.10.0-LIVE.12519617",
+  "has_blueprints": true,
+  "reward_min": null,
+  "reward_max": null,
+  "reward_currency": null,
+  "faction": {
+   "name": "Rayari Incorporated"
+  },
+  "blueprints": [
+   {
+    "name": "P8-AR Rifle",
+    "uuid": "53042ca6-a9ba-4b0e-8c36-a11a5f47feb9",
+    "link": "https://api.star-citizen.wiki/api/blueprints/510d2cc3-9836-435b-bbd7-47f8e81a47ae"
+   },
+   {
+    "name": "Palatino Arms",
+    "uuid": "018cf498-5ff0-4382-9549-372dc92c6a9c",
+    "link": "https://api.star-citizen.wiki/api/blueprints/77f68dc2-627b-4759-959e-4412868eea74"
+   },
+   {
+    "name": "Palatino Core",
+    "uuid": "cef54c0b-81d1-4ccb-a67f-f7304f198184",
+    "link": "https://api.star-citizen.wiki/api/blueprints/82cb5508-47ad-4cdc-8e8d-1af302c7a3c7"
+   },
+   {
+    "name": "Palatino Legs",
+    "uuid": "987c74f3-73bc-40fa-b3ba-71fc6379321d",
+    "link": "https://api.star-citizen.wiki/api/blueprints/d61972a1-b0eb-4f33-8a2f-2dd1c62bedf9"
+   },
+   {
+    "name": "Palatino Helmet",
+    "uuid": "138ffa9b-26b2-4b6f-b831-425948234fb2",
+    "link": "https://api.star-citizen.wiki/api/blueprints/947f8d7f-9101-48e4-b5c4-95bda222c03c"
+   },
+   {
+    "name": "Palatino Arms Moonfall",
+    "uuid": "bcadecab-e062-4b97-8d82-8b52e795bdec",
+    "link": "https://api.star-citizen.wiki/api/blueprints/369ff871-956f-4c6a-923b-1f49984f7e07"
+   },
+   {
+    "name": "Palatino Core Moonfall",
+    "uuid": "a554ed13-c5d6-46df-a7b0-dce25cefe9d2",
+    "link": "https://api.star-citizen.wiki/api/blueprints/88ec9807-6a6e-4739-ac55-6c61b1787135"
+   },
+   {
+    "name": "Palatino Legs Moonfall",
+    "uuid": "80f66f6f-8b0b-4517-87e9-8f094dcb2b55",
+    "link": "https://api.star-citizen.wiki/api/blueprints/ed5cb4c0-a292-4913-a977-da104950fb07"
+   },
+   {
+    "name": "Palatino Helmet Moonfall",
+    "uuid": "4f7a0a87-41f7-4157-bd67-faf15c29934b",
+    "link": "https://api.star-citizen.wiki/api/blueprints/db07e633-0281-4f0e-8209-d151e62f9269"
+   },
+   {
+    "name": "P8-AR Rifle Magazine (15 Cap)",
+    "uuid": "dd21edb8-a0ba-42ab-a02a-bec325e96c87",
+    "link": "https://api.star-citizen.wiki/api/blueprints/edcf3145-e9a9-471a-baa2-12f54da9ed26"
+   }
+  ]
+ },
+ {
+  "uuid": "0542532c-804e-43d5-87ee-592dab1782e0",
+  "title": "Orange Level Contract: [Ship] Needs Assistance",
+  "mission_giver": "Foxwell Enforcement",
+  "debug_name": "FoxwellEnforcement_Stanton_DefendShipNamed_M",
+  "rank_index": 1,
+  "min_standing_name": "Jr. Contractor",
+  "reputation_amount": 150,
+  "star_systems": [
+   "Stanton",
+   "Nyx"
+  ],
+  "legality_label": "Legal",
+  "illegal": false,
+  "reward_scope": "Security",
+  "game_version": "4.10.0-LIVE.12519617",
+  "has_blueprints": true,
+  "reward_min": null,
+  "reward_max": null,
+  "reward_currency": null,
+  "faction": {
+   "name": "Foxwell Enforcement"
+  },
+  "blueprints": [
+   {
+    "name": "Antium Arms Maroon",
+    "uuid": "572a21b6-4c39-4311-89af-93bbfefbef6a",
+    "link": "https://api.star-citizen.wiki/api/blueprints/cdd236fa-56b9-4913-90cf-be7f4e6ca5a7"
+   },
+   {
+    "name": "Antium Core Maroon",
+    "uuid": "dc04cecd-1e9d-4e9d-b64e-8b1c5867de1c",
+    "link": "https://api.star-citizen.wiki/api/blueprints/197066ae-86df-40a1-a10b-1b927a43cbe7"
+   },
+   {
+    "name": "Antium Legs Maroon",
+    "uuid": "bf7b7917-961c-42df-b8a0-cde68286250b",
+    "link": "https://api.star-citizen.wiki/api/blueprints/d68aeaa3-cb28-48ed-8233-a83439e3adad"
+   },
+   {
+    "name": "Antium Helmet Maroon",
+    "uuid": "9a87b121-6acb-40c8-a40e-303e2f4d2fe4",
+    "link": "https://api.star-citizen.wiki/api/blueprints/0f184cb6-2404-4a12-b12f-54ed9d6997ce"
+   },
+   {
+    "name": "Antium Helmet Moss Camo",
+    "uuid": "f0139701-4e14-46c1-a92a-e79a768dc788",
+    "link": "https://api.star-citizen.wiki/api/blueprints/46a6c1ed-8109-4cc3-9a82-9cd46337b3e5"
+   },
+   {
+    "name": "Antium Arms Moss Camo",
+    "uuid": "15074483-7839-4581-a257-e8a367bf81b2",
+    "link": "https://api.star-citizen.wiki/api/blueprints/dbecb53a-9eaa-4f11-acd3-54690d502fe9"
+   },
+   {
+    "name": "Antium Core Moss Camo",
+    "uuid": "cd3e2da2-98cc-48a3-9f75-9bc0ea075858",
+    "link": "https://api.star-citizen.wiki/api/blueprints/dafc406f-d828-4904-bbed-4964158c09e3"
+   },
+   {
+    "name": "Antium Legs Moss Camo",
+    "uuid": "1f5e4a0d-ca1b-449b-b2ad-f165df283c91",
+    "link": "https://api.star-citizen.wiki/api/blueprints/828aaaf9-03fb-4baf-bee5-26cefced3ddd"
+   }
+  ]
+ },
+ {
+  "uuid": "dfd28b43-114a-4e1f-9257-0e6c07f36c53",
+  "title": "Orange Level Contract: [Ship] Needs Assistance",
+  "mission_giver": "Foxwell Enforcement",
+  "debug_name": "FoxwellEnforcement_Stanton_DefendShipNamed_M_NearLocation",
+  "rank_index": 2,
+  "min_standing_name": "Contractor",
+  "reputation_amount": 150,
+  "star_systems": [
+   "Nyx"
+  ],
+  "legality_label": "Legal",
+  "illegal": false,
+  "reward_scope": "Security",
+  "game_version": "4.10.0-LIVE.12519617",
+  "has_blueprints": true,
+  "reward_min": null,
+  "reward_max": null,
+  "reward_currency": null,
+  "faction": {
+   "name": "Foxwell Enforcement"
+  },
+  "blueprints": [
+   {
+    "name": "Antium Arms Maroon",
+    "uuid": "572a21b6-4c39-4311-89af-93bbfefbef6a",
+    "link": "https://api.star-citizen.wiki/api/blueprints/cdd236fa-56b9-4913-90cf-be7f4e6ca5a7"
+   },
+   {
+    "name": "Antium Core Maroon",
+    "uuid": "dc04cecd-1e9d-4e9d-b64e-8b1c5867de1c",
+    "link": "https://api.star-citizen.wiki/api/blueprints/197066ae-86df-40a1-a10b-1b927a43cbe7"
+   },
+   {
+    "name": "Antium Legs Maroon",
+    "uuid": "bf7b7917-961c-42df-b8a0-cde68286250b",
+    "link": "https://api.star-citizen.wiki/api/blueprints/d68aeaa3-cb28-48ed-8233-a83439e3adad"
+   },
+   {
+    "name": "Antium Helmet Maroon",
+    "uuid": "9a87b121-6acb-40c8-a40e-303e2f4d2fe4",
+    "link": "https://api.star-citizen.wiki/api/blueprints/0f184cb6-2404-4a12-b12f-54ed9d6997ce"
+   },
+   {
+    "name": "Antium Helmet Moss Camo",
+    "uuid": "f0139701-4e14-46c1-a92a-e79a768dc788",
+    "link": "https://api.star-citizen.wiki/api/blueprints/46a6c1ed-8109-4cc3-9a82-9cd46337b3e5"
+   },
+   {
+    "name": "Antium Arms Moss Camo",
+    "uuid": "15074483-7839-4581-a257-e8a367bf81b2",
+    "link": "https://api.star-citizen.wiki/api/blueprints/dbecb53a-9eaa-4f11-acd3-54690d502fe9"
+   },
+   {
+    "name": "Antium Core Moss Camo",
+    "uuid": "cd3e2da2-98cc-48a3-9f75-9bc0ea075858",
+    "link": "https://api.star-citizen.wiki/api/blueprints/dafc406f-d828-4904-bbed-4964158c09e3"
+   },
+   {
+    "name": "Antium Legs Moss Camo",
+    "uuid": "1f5e4a0d-ca1b-449b-b2ad-f165df283c91",
+    "link": "https://api.star-citizen.wiki/api/blueprints/828aaaf9-03fb-4baf-bee5-26cefced3ddd"
+   }
+  ]
+ },
+ {
+  "uuid": "b0bfeb75-4f5c-458b-80e1-814526892916",
+  "title": "Orange Level Contract: [Ship] Needs Assistance",
+  "mission_giver": "Foxwell Enforcement",
+  "debug_name": "FoxwellEnforcement_Nyx_DefendShipNamed_M",
+  "rank_index": 1,
+  "min_standing_name": "Jr. Contractor",
+  "reputation_amount": 150,
+  "star_systems": [
+   "Nyx"
+  ],
+  "legality_label": "Legal",
+  "illegal": false,
+  "reward_scope": "Security",
+  "game_version": "4.10.0-LIVE.12519617",
+  "has_blueprints": true,
+  "reward_min": null,
+  "reward_max": null,
+  "reward_currency": null,
+  "faction": {
+   "name": "Foxwell Enforcement"
+  },
+  "blueprints": [
+   {
+    "name": "Antium Arms Maroon",
+    "uuid": "572a21b6-4c39-4311-89af-93bbfefbef6a",
+    "link": "https://api.star-citizen.wiki/api/blueprints/cdd236fa-56b9-4913-90cf-be7f4e6ca5a7"
+   },
+   {
+    "name": "Antium Core Maroon",
+    "uuid": "dc04cecd-1e9d-4e9d-b64e-8b1c5867de1c",
+    "link": "https://api.star-citizen.wiki/api/blueprints/197066ae-86df-40a1-a10b-1b927a43cbe7"
+   },
+   {
+    "name": "Antium Legs Maroon",
+    "uuid": "bf7b7917-961c-42df-b8a0-cde68286250b",
+    "link": "https://api.star-citizen.wiki/api/blueprints/d68aeaa3-cb28-48ed-8233-a83439e3adad"
+   },
+   {
+    "name": "Antium Helmet Maroon",
+    "uuid": "9a87b121-6acb-40c8-a40e-303e2f4d2fe4",
+    "link": "https://api.star-citizen.wiki/api/blueprints/0f184cb6-2404-4a12-b12f-54ed9d6997ce"
+   },
+   {
+    "name": "Antium Helmet Moss Camo",
+    "uuid": "f0139701-4e14-46c1-a92a-e79a768dc788",
+    "link": "https://api.star-citizen.wiki/api/blueprints/46a6c1ed-8109-4cc3-9a82-9cd46337b3e5"
+   },
+   {
+    "name": "Antium Arms Moss Camo",
+    "uuid": "15074483-7839-4581-a257-e8a367bf81b2",
+    "link": "https://api.star-citizen.wiki/api/blueprints/dbecb53a-9eaa-4f11-acd3-54690d502fe9"
+   },
+   {
+    "name": "Antium Core Moss Camo",
+    "uuid": "cd3e2da2-98cc-48a3-9f75-9bc0ea075858",
+    "link": "https://api.star-citizen.wiki/api/blueprints/dafc406f-d828-4904-bbed-4964158c09e3"
+   },
+   {
+    "name": "Antium Legs Moss Camo",
+    "uuid": "1f5e4a0d-ca1b-449b-b2ad-f165df283c91",
+    "link": "https://api.star-citizen.wiki/api/blueprints/828aaaf9-03fb-4baf-bee5-26cefced3ddd"
+   }
+  ]
+ },
+ {
+  "uuid": "0d2baa66-a46a-4d03-8c8f-c242343565c4",
+  "title": "Orange Level Contract: [Ship] Needs Assistance",
+  "mission_giver": "Foxwell Enforcement",
+  "debug_name": "FoxwellEnforcement_Pyro_DefendShipNamed_M",
+  "rank_index": 1,
+  "min_standing_name": "Jr. Contractor",
+  "reputation_amount": 150,
+  "star_systems": [
+   "Pyro"
+  ],
+  "legality_label": "Legal",
+  "illegal": false,
+  "reward_scope": "Security",
+  "game_version": "4.10.0-LIVE.12519617",
+  "has_blueprints": true,
+  "reward_min": null,
+  "reward_max": null,
+  "reward_currency": null,
+  "faction": {
+   "name": "Foxwell Enforcement"
+  },
+  "blueprints": [
+   {
+    "name": "Antium Arms Maroon",
+    "uuid": "572a21b6-4c39-4311-89af-93bbfefbef6a",
+    "link": "https://api.star-citizen.wiki/api/blueprints/cdd236fa-56b9-4913-90cf-be7f4e6ca5a7"
+   },
+   {
+    "name": "Antium Core Maroon",
+    "uuid": "dc04cecd-1e9d-4e9d-b64e-8b1c5867de1c",
+    "link": "https://api.star-citizen.wiki/api/blueprints/197066ae-86df-40a1-a10b-1b927a43cbe7"
+   },
+   {
+    "name": "Antium Legs Maroon",
+    "uuid": "bf7b7917-961c-42df-b8a0-cde68286250b",
+    "link": "https://api.star-citizen.wiki/api/blueprints/d68aeaa3-cb28-48ed-8233-a83439e3adad"
+   },
+   {
+    "name": "Antium Helmet Maroon",
+    "uuid": "9a87b121-6acb-40c8-a40e-303e2f4d2fe4",
+    "link": "https://api.star-citizen.wiki/api/blueprints/0f184cb6-2404-4a12-b12f-54ed9d6997ce"
+   },
+   {
+    "name": "Antium Helmet Moss Camo",
+    "uuid": "f0139701-4e14-46c1-a92a-e79a768dc788",
+    "link": "https://api.star-citizen.wiki/api/blueprints/46a6c1ed-8109-4cc3-9a82-9cd46337b3e5"
+   },
+   {
+    "name": "Antium Arms Moss Camo",
+    "uuid": "15074483-7839-4581-a257-e8a367bf81b2",
+    "link": "https://api.star-citizen.wiki/api/blueprints/dbecb53a-9eaa-4f11-acd3-54690d502fe9"
+   },
+   {
+    "name": "Antium Core Moss Camo",
+    "uuid": "cd3e2da2-98cc-48a3-9f75-9bc0ea075858",
+    "link": "https://api.star-citizen.wiki/api/blueprints/dafc406f-d828-4904-bbed-4964158c09e3"
+   },
+   {
+    "name": "Antium Legs Moss Camo",
+    "uuid": "1f5e4a0d-ca1b-449b-b2ad-f165df283c91",
+    "link": "https://api.star-citizen.wiki/api/blueprints/828aaaf9-03fb-4baf-bee5-26cefced3ddd"
+   }
+  ]
+ },
+ {
+  "uuid": "a33c1bf7-2685-4fe8-96d2-aaf33c2fce12",
+  "title": "Carefully Clear Site",
+  "mission_giver": "Foxwell Enforcement",
+  "debug_name": "FoxwellEnforcement_EliminateAll_NonHostiles",
+  "rank_index": 3,
+  "min_standing_name": "Sr. Contractor",
+  "reputation_amount": 200,
+  "star_systems": [
+   "Stanton"
+  ],
+  "legality_label": "Legal",
+  "illegal": false,
+  "reward_scope": "Assassination",
+  "game_version": "4.10.0-LIVE.12519617",
+  "has_blueprints": true,
+  "reward_min": null,
+  "reward_max": null,
+  "reward_currency": null,
+  "faction": {
+   "name": "Foxwell Enforcement"
+  },
+  "blueprints": [
+   {
+    "name": "Antium Arms Maroon",
+    "uuid": "572a21b6-4c39-4311-89af-93bbfefbef6a",
+    "link": "https://api.star-citizen.wiki/api/blueprints/cdd236fa-56b9-4913-90cf-be7f4e6ca5a7"
+   },
+   {
+    "name": "Antium Core Maroon",
+    "uuid": "dc04cecd-1e9d-4e9d-b64e-8b1c5867de1c",
+    "link": "https://api.star-citizen.wiki/api/blueprints/197066ae-86df-40a1-a10b-1b927a43cbe7"
+   },
+   {
+    "name": "Antium Legs Maroon",
+    "uuid": "bf7b7917-961c-42df-b8a0-cde68286250b",
+    "link": "https://api.star-citizen.wiki/api/blueprints/d68aeaa3-cb28-48ed-8233-a83439e3adad"
+   },
+   {
+    "name": "Antium Helmet Maroon",
+    "uuid": "9a87b121-6acb-40c8-a40e-303e2f4d2fe4",
+    "link": "https://api.star-citizen.wiki/api/blueprints/0f184cb6-2404-4a12-b12f-54ed9d6997ce"
+   },
+   {
+    "name": "Antium Helmet Moss Camo",
+    "uuid": "f0139701-4e14-46c1-a92a-e79a768dc788",
+    "link": "https://api.star-citizen.wiki/api/blueprints/46a6c1ed-8109-4cc3-9a82-9cd46337b3e5"
+   },
+   {
+    "name": "Antium Arms Moss Camo",
+    "uuid": "15074483-7839-4581-a257-e8a367bf81b2",
+    "link": "https://api.star-citizen.wiki/api/blueprints/dbecb53a-9eaa-4f11-acd3-54690d502fe9"
+   },
+   {
+    "name": "Antium Core Moss Camo",
+    "uuid": "cd3e2da2-98cc-48a3-9f75-9bc0ea075858",
+    "link": "https://api.star-citizen.wiki/api/blueprints/dafc406f-d828-4904-bbed-4964158c09e3"
+   },
+   {
+    "name": "Antium Legs Moss Camo",
+    "uuid": "1f5e4a0d-ca1b-449b-b2ad-f165df283c91",
+    "link": "https://api.star-citizen.wiki/api/blueprints/828aaaf9-03fb-4baf-bee5-26cefced3ddd"
+   }
+  ]
+ }
+]

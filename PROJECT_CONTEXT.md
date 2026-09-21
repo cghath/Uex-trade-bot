@@ -1972,6 +1972,62 @@ they're in sync).
     command name/option/description changed; all four modified modules re-verified to
     parse cleanly.
 
+61. **Blueprint Search and Crafting Planner (`/blueprint-search`, `/blueprint-list`) ported
+    from the aiv2 experiment - the first feature built in `aiv2` and brought here.**
+    `aiv2` (`cghath/aiv2`, a full clone of this bot at `734b637` plus an AI chat layer)
+    is where new features get built first; this entry ports its blueprint feature without
+    any of the AI code (`bot/ai/`, `bot/cogs/ai_chat.py`, and the one aiv2 test that
+    exercised the AI tool were deliberately left behind). Every aiv2 command is
+    registered `/ai-<name>`; production has no prefix, so `ai-` was stripped on the way
+    over.
+
+    **What players get**: `/blueprint-search blueprint:<name> [craft_quantity]` shows
+    which contracts award a crafting blueprint (typo-tolerant, drop chance where the
+    Star Citizen Wiki API has it) plus the crafting recipe scaled to `craft_quantity`
+    (1-10000), with *Configure crafting*, *Add to shopping list*, and *Mine <ore>*
+    buttons. `/blueprint-list` opens the player's private thread holding one combined
+    shopping list. Full player-facing wording is in `PATCH_NOTES.md` (new in this same
+    change).
+
+    **New external dependency**: the Star Citizen Wiki API (`api.star-citizen.wiki`),
+    unauthenticated and volunteer-run, so `bot/wiki_api.py` is kept separate from
+    `UexClient` on purpose (different etiquette, no shared cache/rate-limit rules). It
+    fails closed - a partial download, missing pagination metadata, or a mix of game
+    versions is rejected rather than shown as a plausible-looking snapshot. Its
+    `User-Agent` was changed from aiv2's copy (which named the AI bot and its repo) to
+    identify this bot and this repo.
+
+    **Files**: new `bot/wiki_api.py`, `bot/uex/blueprints.py` and
+    `bot/uex/blueprint_crafting.py` (pure logic), `bot/cogs/blueprints.py` (registered in
+    `INITIAL_COGS`) and `bot/cogs/blueprint_planner.py` (the crafting-config/shopping-list
+    views the cog imports - not a separate cog). `bot/cogs/help.py` gained a Blueprints
+    category. `bot/cogs/mining_locations.py` had `build_where_to_mine_embed(ore)`
+    extracted from `/where-to-mine` (the *Mine <ore>* buttons need it) - a pure refactor,
+    the slash command's behaviour is unchanged.
+
+    **Database (additive only)**: five new tables - `blueprint_snapshot_state`,
+    `blueprint_missions`, `blueprint_pool_entries`, `blueprint_shopping_entries`,
+    `blueprint_shopping_threads` - plus their indexes, and twelve `Database` methods.
+    The snapshot is replaced wholesale in one transaction (never patched in place), and
+    an empty replacement is refused outright, so a bad sync can't wipe a good snapshot.
+    Nothing here uses `INSERT ... SELECT ... ON CONFLICT` (this project's SQLite rejects
+    it - see the ship-preference migration note above).
+
+    **Pi footprint**: about 9.2k rows in total (784 missions + 8,450 pool entries), well
+    under 1 MB. The snapshot refreshes every 12 hours (the API caches for 12 hours
+    itself); the first `/blueprint-search` after a start triggers one full sync, roughly
+    9 requests.
+
+    **Verification**: 712 -> 852 tests (140 ported: `test_blueprints*.py`,
+    `test_blueprint_crafting*.py`, `test_blueprint_planner.py`,
+    `test_blueprint_shopping_db.py`, `test_wiki_api.py`, plus four fixtures in
+    `tests/fixtures/`, which did not exist before). `ruff --select F` clean (three
+    unused imports in the ported tests fixed). All 23 cogs load with no failures and the
+    command surface goes 65 -> 67 with no name/description length violations, checked by
+    loading every cog offline against a throwaway database - deliberately without
+    logging in, since the local `.env` holds a real bot token and a second live gateway
+    session would race the Pi. Both commands still need a real run in Discord.
+
 ## Where to look for what
 
 Five docs, deliberately scoped so they don't duplicate each other:
