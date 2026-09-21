@@ -17,6 +17,8 @@ the AI bot uses the same commands with an `ai-` prefix (`/price` -> `/ai-price`)
 **Changed**
 - `/mixed-routes` - Its description now explains that it hedges against one item's stock or demand running short.
 
+_Ref: d036daf_
+
 ---
 
 ## 2026-09-21 - Hedge reports in route tracking
@@ -25,6 +27,8 @@ the AI bot uses the same commands with an `ai-` prefix (`/price` -> `/ai-price`)
 - Route tracking threads - After you report a buy-side shortfall, the thread suggests one hedge commodity for the same trip.
   Press **Report** and enter how much you actually bought (and, optionally, the price). At the destination it asks whether
   you sold it. Your reports feed the bot's market data the same way tracked legs do.
+
+_Ref: 2386e9a_
 
 ---
 
@@ -35,6 +39,8 @@ the AI bot uses the same commands with an `ai-` prefix (`/price` -> `/ai-price`)
   amount is lower when you arrive, your hold is left half empty) and, if your ship has room left over, adds a `Hedge:` line
   suggesting another commodity for the same trip. Nothing changes when your ship or budget is what limits the haul.
 
+_Ref: 72941af_
+
 ---
 
 ## 2026-09-21 - Short route lists explain themselves
@@ -43,6 +49,8 @@ the AI bot uses the same commands with an `ai-` prefix (`/price` -> `/ai-price`)
 - `/top-routes`, `/routes-from`, `/route-on-the-way` - When fewer routes qualify than the list normally shows (for example
   with **auto-load-only** or a star-system filter on), the footer now says how many qualify, such as "only 3 routes currently
   qualify (this list shows up to 10)", instead of quietly showing a short list.
+
+_Ref: 5f5b3ea_
 
 ---
 
@@ -53,6 +61,8 @@ the AI bot uses the same commands with an `ai-` prefix (`/price` -> `/ai-price`)
   saved ship and/or budget, not by UEX's headline figure (which assumes unlimited cargo and cash). For example, a route
   listed at 54.5M profit needed 58M to run and would net only about 314k for a 1,440 SCU ship with a 2M aUEC budget, while
   a Corundum route listed at only 1.4M would net about 1.3M. Nothing changes until you have saved a ship or a budget.
+
+_Ref: cb98740_
 
 ---
 
@@ -66,6 +76,8 @@ the AI bot uses the same commands with an `ai-` prefix (`/price` -> `/ai-price`)
   against the star systems where **every** ore is mined, not where any one of them is. If no system mines all of them, it
   falls back to any of them and says so. An ore whose mining systems aren't known is left out of that judgement and named
   in the note.
+
+_Ref: c34f469_
 
 ---
 
@@ -86,3 +98,5 @@ the AI bot uses the same commands with an `ai-` prefix (`/price` -> `/ai-price`)
 
 **Changed**
 - `/intro` - The guide has a new Blueprints section listing the two commands above.
+
+_Ref: 3c392a0_
