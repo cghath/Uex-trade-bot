@@ -1,12 +1,15 @@
 import asyncio
 import copy
+import dataclasses
 import json
 from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock
 
-from bot.cogs.blueprint_planner import CraftConfigView, CraftLaunchView, MineButton, QualitySelect
-from bot.uex.blueprint_crafting import Recipe, UNAVAILABLE
+import discord
+
+from bot.cogs.blueprint_planner import ChoiceSelect, CraftConfigView, CraftLaunchView, MineButton, QualitySelect
+from bot.uex.blueprint_crafting import Group, Recipe, UNAVAILABLE
 from tests.test_blueprints_cog import FakeWiki, _make
 
 
@@ -97,3 +100,121 @@ def test_item_aspect_quality_landmarks_create_a_dropdown_without_an_ore_uuid():
     controls = [child for child in view.children if isinstance(child, QualitySelect)]
     carinite = next(control for control in controls if 'Carinite' in control.placeholder)
     assert [option.value for option in carinite.options] == ['none', *[str(value) for value in range(0, 1001, 50)]]
+
+
+# -- selectors beyond what one Discord message can hold are paged, never silently dropped -----------------
+
+def _many_input_recipe(inputs: int, *, choice_groups: int = 0) -> tuple[Recipe, dict]:
+    """The real rifle recipe with `inputs` quality-capable inputs (cloned from its first one) and optional
+    required-choice groups over them, plus obtainable qualities for every input."""
+    base = Recipe.parse(_detail())
+    template = base.inputs[0]
+    cloned = tuple(
+        dataclasses.replace(template, path=f"{template.path}-x{k}", name=f"{template.name} {k}") for k in range(inputs)
+    )
+    groups = tuple(
+        Group(path=f"group-{k}", name=f"Pick {k}", required=1, children=(cloned[0].path, cloned[1].path))
+        for k in range(choice_groups)
+    )
+    recipe = dataclasses.replace(base, inputs=cloned, groups=groups)
+    return recipe, {item.path: (0, 500, 1000) for item in cloned}
+
+
+def _selectors(view):
+    return [child for child in view.children if isinstance(child, discord.ui.Select)]
+
+
+def _nav(view):
+    return [child for child in view.children if getattr(child, "label", "") in ("Previous options", "Next options")]
+
+
+def _interaction():
+    return NS(response=NS(edit_message=AsyncMock()))
+
+
+def test_four_selectors_fit_one_page_with_no_paging_controls(monkeypatch):
+    """Discord fits five rows: four selects plus the button row. The old cap counted the button among
+    four children, so a fourth selector was dropped even though it fit."""
+    monkeypatch.setattr(Recipe, "lines", lambda self, count, choices=None, qualities=None: ["config"])
+
+    async def run():
+        recipe, options = _many_input_recipe(4)
+        view = CraftConfigView(NS(), recipe, 1, options)
+        assert len(_selectors(view)) == 4 and view.page_count == 1 and not _nav(view)
+        assert view.text() == "config", "no page header when everything fits"
+
+    asyncio.run(run())
+
+
+def test_more_selectors_than_fit_are_paged_and_every_one_is_reachable(monkeypatch):
+    monkeypatch.setattr(Recipe, "lines", lambda self, count, choices=None, qualities=None: ["config"])
+
+    async def run():
+        recipe, options = _many_input_recipe(6)
+        view = CraftConfigView(NS(), recipe, 1, options)
+        seen = {select.path for select in _selectors(view)}
+        assert len(_selectors(view)) == 4 and view.page_count == 2
+        previous, following = _nav(view)
+        assert previous.disabled and not following.disabled
+        assert view.text().startswith("Options page 1 of 2")
+
+        interaction = _interaction()
+        await view.next_button.callback(interaction)
+        interaction.response.edit_message.assert_awaited_once()
+        seen |= {select.path for select in _selectors(view)}
+        assert len(_selectors(view)) == 2 and view.text().startswith("Options page 2 of 2")
+        assert not previous.disabled and following.disabled
+
+        await view.previous_button.callback(_interaction())
+        assert len(_selectors(view)) == 4 and previous.disabled
+        assert seen == {item.path for item in recipe.inputs}, "no selector may be unreachable"
+
+    asyncio.run(run())
+
+
+def test_a_quality_chosen_on_a_later_page_is_kept_when_paging_back(monkeypatch):
+    monkeypatch.setattr(Recipe, "lines", lambda self, count, choices=None, qualities=None: ["config"])
+
+    async def run():
+        recipe, options = _many_input_recipe(6)
+        view = CraftConfigView(NS(), recipe, 1, options)
+        await view.next_button.callback(_interaction())
+        chosen = _selectors(view)[0]
+        chosen._values = ["500"]  # what discord.py fills in from the interaction payload
+        await chosen.callback(_interaction())
+        await view.previous_button.callback(_interaction())
+        await view.next_button.callback(_interaction())
+        assert view.qualities == {chosen.path: 500}
+
+    asyncio.run(run())
+
+
+def test_required_material_choices_come_before_optional_quality_selectors(monkeypatch):
+    """A plan can't be built without its required choices, so if anything is pushed to a later page it
+    must be an optional quality selector, never a required choice."""
+    monkeypatch.setattr(Recipe, "lines", lambda self, count, choices=None, qualities=None: ["config"])
+
+    async def run():
+        recipe, options = _many_input_recipe(6, choice_groups=2)
+        view = CraftConfigView(NS(), recipe, 1, options)
+        first_page = _selectors(view)
+        assert view.page_count == 2 and len(view.selectors) == 8
+        assert all(isinstance(select, ChoiceSelect) for select in first_page[:2])
+        assert not any(isinstance(select, ChoiceSelect) for select in view.selectors[2:])
+
+    asyncio.run(run())
+
+
+def test_a_very_large_recipe_still_builds_and_pages_within_discords_layout_limits(monkeypatch):
+    """discord.py raises if a page ever needs more than five rows, so simply walking every page proves it."""
+    monkeypatch.setattr(Recipe, "lines", lambda self, count, choices=None, qualities=None: ["config"])
+
+    async def run():
+        recipe, options = _many_input_recipe(13)
+        view = CraftConfigView(NS(), recipe, 1, options)
+        assert view.page_count == 4
+        for _ in range(view.page_count - 1):
+            await view.next_button.callback(_interaction())
+        assert len(_selectors(view)) == 1 and view.next_button.disabled
+
+    asyncio.run(run())

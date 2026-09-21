@@ -7,8 +7,7 @@ old (bot/uex/blueprints.py snapshot_is_current). The snapshot lives in SQLite so
 re-download it and so a failed sync can never lose good data (Database.replace_blueprint_snapshot is
 all-or-nothing, and sync_result_is_plausible refuses a truncated response before it gets that far).
 
-`search` is the one entry point; the slash command and the AI chat tool (bot/cogs/ai_chat.py
-search_blueprints) both call it, so a chat request posts exactly what the command would.
+`search` is the one entry point the slash command calls.
 """
 from __future__ import annotations
 
@@ -74,13 +73,13 @@ class SnapshotRejected(Exception):
 @dataclass(frozen=True)
 class SearchResult:
     """`pages` is ALWAYS the complete plain-text rendering (each page fits one Discord message), so
-    it doubles as the fallback when the embed is too large or its send fails, and as what the AI
-    tool reads. `embed` exists only for a `found` result that fit Discord's limits."""
+    it doubles as the fallback when the embed is too large or its send fails. `embed` exists only
+    for a `found` result that fit Discord's limits."""
     status: Literal["found", "ambiguous", "none", "unavailable"]
     pages: tuple[str, ...]
     name: str | None = None
     embed: discord.Embed | None = None
-    # Structured extras so callers (the AI tool) never have to parse `pages` back apart: for
+    # Structured extras so callers never have to parse `pages` back apart: for
     # "ambiguous" the ranked candidate names and how many more matched; for "none" the near-miss
     # suggestions (possibly empty).
     candidates: tuple[str, ...] = ()
@@ -330,7 +329,7 @@ class Blueprints(commands.Cog):
             return chunk_lines(lines, TEXT_PAGE_LIMIT)
 
         # Everything if it fits; otherwise the LARGEST prefix of the list that fits, with an explicit "showing X
-        # of Y". Never silently drop the middle: the summary and the model's tool text both claim what was shown.
+        # of Y". Never silently drop the middle: the summary claims what was shown.
         shown = len(entries)
         pages = assemble(shown)
         if len(pages) > MAX_TEXT_PAGES:
