@@ -9,6 +9,7 @@ though no single field is anywhere near its own 1024-char cap.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import datetime, timezone
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock
@@ -513,5 +514,85 @@ def test_top_routes_re_ranks_before_truncating_to_the_display_size():
         )
         titles = _route_titles(inter)
         assert len(titles) == 1 and "Corundum" in titles[0], titles
+
+    asyncio.run(run())
+
+
+def _intro_footer(inter) -> str:
+    return inter.followup.send.call_args_list[0].kwargs["embed"].footer.text
+
+
+async def _send(cog, inter, entries, **overrides):
+    kwargs = dict(
+        entries=entries, updated_at=None, ship=None, title="Top routes",
+        footer_note="Collected data", log_label="test", display_limit=10,
+    )
+    kwargs.update(overrides)
+    await cog._send_ranked_routes(inter, **kwargs)
+
+
+def test_footer_explains_when_fewer_routes_qualify_than_the_display_size():
+    """Filters (auto-load-only, system, suppression) can leave far fewer routes than the usual
+    list; without a note that reads as a broken command rather than "nothing else qualifies"."""
+    async def run():
+        cog, _ = _make_cog(3)
+        inter = _interaction()
+        await _send(cog, inter, _routes(3))
+        footer = _intro_footer(inter)
+        assert "only 3 routes currently qualify (this list shows up to 10)" in footer, footer
+
+    asyncio.run(run())
+
+
+def test_footer_uses_singular_grammar_for_a_single_qualifying_route():
+    async def run():
+        cog, _ = _make_cog(1)
+        inter = _interaction()
+        await _send(cog, inter, _routes(1))
+        footer = _intro_footer(inter)
+        assert "only 1 route currently qualifies (this list shows up to 10)" in footer, footer
+
+    asyncio.run(run())
+
+
+def test_footer_says_nothing_when_the_list_is_full_or_was_truncated_for_display():
+    """Exactly the display size, and more than it (cut to 10 for display), both mean there was
+    no shortage of routes - the note must not appear."""
+    async def run():
+        for count in (10, 12):
+            cog, _ = _make_cog(count)
+            inter = _interaction()
+            await _send(cog, inter, _routes(count))
+            footer = _intro_footer(inter)
+            assert "currently qualif" not in footer, (count, footer)
+
+    asyncio.run(run())
+
+
+def test_footer_counts_routes_after_the_one_per_commodity_dedupe():
+    """A second route for an already-listed commodity is not an extra route the player will see,
+    so it must not count toward how many qualify."""
+    async def run():
+        cog, _ = _make_cog(4)
+        inter = _interaction()
+        entries = _routes(4) + [replace(_routes(1)[0], origin_terminal_name="A Second Origin")]
+        await _send(cog, inter, entries)
+        footer = _intro_footer(inter)
+        assert "only 4 routes currently qualify" in footer, footer
+        assert len(_route_embed_calls(inter.followup.send)) == 4
+
+    asyncio.run(run())
+
+
+def test_footer_stays_within_discords_footer_limit_with_the_note_and_every_other_part_present():
+    async def run():
+        cog, _ = _make_cog(1)
+        inter = _interaction()
+        await _send(
+            cog, inter, _routes(1), footer_note="x" * 200,
+            updated_at=datetime.now(timezone.utc), budget=1_000_000_000.0,
+        )
+        footer = _intro_footer(inter)
+        assert "currently qualifies" in footer and len(footer) <= 2048, len(footer)
 
     asyncio.run(run())

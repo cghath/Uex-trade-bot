@@ -2118,6 +2118,29 @@ they're in sync).
     figure in its own comments (~1.1M, and a 1,333,323 typo) did not match what
     `estimate_route_cargo` returns for the fixture; the comments here use the computed value.
 
+64. **`/top-routes`, `/routes-from` and `/route-on-the-way` footers say how many routes
+    qualify when it is fewer than the list shows - ported from the aiv2 experiment.** With
+    `auto-load-only`, a system filter, or suppression removing candidates, these commands
+    could return far fewer than their usual 10 routes with nothing to distinguish "nothing
+    else qualifies" from a fault. `Trends._send_ranked_routes` now captures
+    `qualifying_count = len(entries)` after the filters and the one-per-commodity dedupe but
+    BEFORE truncation to `display_limit`, and appends a footer sentence when it is lower.
+    Counting after the dedupe matters: a second route for an already-listed commodity is not
+    one the player will see. The note is part of the intro embed's footer, built before any
+    field is added, so it counts toward the embed budget like the rest of the footer.
+
+    **Deliberate differences from aiv2's version**: `display_limit` is a fixed constant here
+    (`TOP_SCORED_ROUTES_KEEP` / `TOP_IN_STOCK_ROUTES_KEEP`, both 10) and none of the three
+    commands lets the player choose a count, so aiv2's wording "(requested up to N)" implied
+    a request nobody made; it reads "(this list shows up to N)" here. aiv2 also produced
+    "only 1 route currently qualify"; the singular now reads "qualifies".
+
+    **Verification**: 5 tests through `_send_ranked_routes` in
+    `tests/test_trends_embed_budget.py` (fewer qualify, singular grammar, silent when the
+    list is full or was truncated, counted after the dedupe, footer within Discord's
+    2048-character limit with every other footer part present). Four of the five fail against
+    the pre-change cog; the fifth is a regression guard that passes either way by design.
+
 ## Where to look for what
 
 Five docs, deliberately scoped so they don't duplicate each other:
