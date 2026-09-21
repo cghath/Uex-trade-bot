@@ -5,6 +5,7 @@ from bot.uex.mixed_routes import (
     allocate_pair_cargo,
     allocation_is_exact,
     build_mixed_routes,
+    find_hedge_cargo,
     format_limiting_factors,
     is_space_terminal,
     requires_capital_cargo_access,
@@ -59,6 +60,79 @@ def test_budget_is_a_hard_limit_and_requires_two_allocated_commodities():
     (route,) = build_mixed_routes(rows, ship_capacity_scu=10, budget=420)
     assert route.investment <= 420
     assert len(route.cargo) == 2
+
+
+def test_find_hedge_cargo_fills_remaining_capacity_with_a_second_commodity():
+    rows = [
+        _row(1, 10, "Taranite", "Origin", price_buy=100, scu_buy=21),
+        _row(1, 20, "Taranite", "Destination", price_sell=200, scu_sell=21),
+        _row(2, 10, "Cobalt", "Origin", price_buy=20, scu_buy=95),
+        _row(2, 20, "Cobalt", "Destination", price_sell=50, scu_sell=80),
+    ]
+    # Anchor (Taranite) already used 21 of a 1440 SCU ship - the hedge search only needs
+    # to fill the leftover 1419 SCU, and must never re-suggest Taranite itself.
+    hedge = find_hedge_cargo(
+        rows, origin_terminal_id=10, destination_terminal_id=20,
+        exclude_commodity_id=1, remaining_capacity_scu=1419,
+    )
+    assert [item.commodity_name for item in hedge] == ["Cobalt"]
+    assert hedge[0].quantity_scu == 80  # capped by real destination demand, not the 1419 SCU room
+
+
+def test_find_hedge_cargo_never_suggests_the_anchor_commodity_itself():
+    rows = [
+        _row(1, 10, "Taranite", "Origin", price_buy=100, scu_buy=1000),
+        _row(1, 20, "Taranite", "Destination", price_sell=200, scu_sell=1000),
+    ]
+    hedge = find_hedge_cargo(
+        rows, origin_terminal_id=10, destination_terminal_id=20,
+        exclude_commodity_id=1, remaining_capacity_scu=500,
+    )
+    assert hedge == []
+
+
+def test_find_hedge_cargo_only_searches_the_exact_anchor_pair():
+    rows = [
+        _row(1, 10, "Taranite", "Origin", price_buy=100, scu_buy=21),
+        _row(1, 20, "Taranite", "Destination", price_sell=200, scu_sell=21),
+        # Far more profitable, but at a completely different origin/destination pair -
+        # the hedge is anchored to the player's actual planned trip, not the galaxy's
+        # best opportunity (that's build_mixed_routes' job).
+        _row(2, 30, "Gold", "Elsewhere Origin", price_buy=10, scu_buy=100),
+        _row(2, 40, "Gold", "Elsewhere Destination", price_sell=1000, scu_sell=100),
+    ]
+    hedge = find_hedge_cargo(
+        rows, origin_terminal_id=10, destination_terminal_id=20,
+        exclude_commodity_id=1, remaining_capacity_scu=500,
+    )
+    assert hedge == []
+
+
+def test_find_hedge_cargo_respects_remaining_budget():
+    rows = [
+        _row(1, 10, "Taranite", "Origin", price_buy=100, scu_buy=21),
+        _row(1, 20, "Taranite", "Destination", price_sell=200, scu_sell=21),
+        _row(2, 10, "Cobalt", "Origin", price_buy=20, scu_buy=95),
+        _row(2, 20, "Cobalt", "Destination", price_sell=50, scu_sell=80),
+    ]
+    hedge = find_hedge_cargo(
+        rows, origin_terminal_id=10, destination_terminal_id=20,
+        exclude_commodity_id=1, remaining_capacity_scu=1419, remaining_budget=100,
+    )
+    assert hedge[0].quantity_scu == 5  # 100 aUEC / 20 aUEC-per-unit, not the full 80 SCU of demand
+
+
+def test_find_hedge_cargo_is_a_noop_with_no_remaining_capacity():
+    rows = [
+        _row(1, 10, "Taranite", "Origin", price_buy=100, scu_buy=21),
+        _row(1, 20, "Taranite", "Destination", price_sell=200, scu_sell=21),
+        _row(2, 10, "Cobalt", "Origin", price_buy=20, scu_buy=95),
+        _row(2, 20, "Cobalt", "Destination", price_sell=50, scu_sell=80),
+    ]
+    assert find_hedge_cargo(
+        rows, origin_terminal_id=10, destination_terminal_id=20,
+        exclude_commodity_id=1, remaining_capacity_scu=0,
+    ) == []
 
 
 def test_allocate_pair_cargo_finds_the_true_optimum_within_the_exact_search_thresholds():

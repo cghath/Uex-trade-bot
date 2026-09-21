@@ -2125,6 +2125,42 @@ they're in sync).
     2048-character limit with every other footer part present). Four of the five fail against
     the pre-change cog; the fifth is a regression guard that passes either way by design.
 
+65. **`/best-route` warns when a route would use ALL the stock/demand on record and suggests
+    a `Hedge:` commodity for the leftover hold - ported from the aiv2 experiment.** When
+    `estimate_route_cargo` reports `limited_by == "stock"`, the plan is to buy out the entire
+    quantity UEX currently shows; if that figure is slightly stale, or someone else buys or
+    sells into it first, the player arrives to less than planned and a half-empty hold.
+    `limited_by` of "ship" or "budget" is the opposite case - the player's own limit already
+    leaves headroom - so nothing is shown.
+
+    **What changed**: `stock_headroom_warning` (`bot/uex/route_presentation.py`) returns the
+    warning only for a stock-limited estimate, and `find_hedge_cargo`
+    (`bot/uex/mixed_routes.py`) finds a commodity (or two) to fill the leftover capacity at
+    the SAME origin/destination pair - the anchored counterpart to `build_mixed_routes`'
+    whole-market search, with `min_commodities=1` because the anchor is accounted for
+    separately and the anchor commodity itself is excluded. Both `/best-route` cargo sites
+    (`bot/cogs/prices.py`: the UEX-routes branch and the fallback price-row pairing) call
+    them. The market rows come from `get_mixed_route_market_rows()`, loaded lazily on the
+    first stock-limited route only, so ordinary calls pay nothing.
+
+    **Two `ai-` traps hit while porting**: `stock_headroom_warning`'s default command name is
+    `/ai-mixed-routes` in aiv2's source, so a verbatim copy would tell production players to
+    run a command that doesn't exist here (caught by calling it, not by reading a normalised
+    diff - the normalisation had hidden it). And aiv2's "command name is overridable" test
+    reads as self-contradictory once `ai-` is stripped mechanically (`in warning` and
+    `not in warning` for the same string), so it was rewritten with a neutral override name.
+
+    **What was deliberately not ported**: aiv2's `build_mixed_routes` also gained
+    `origin_terminal_id`/`destination_terminal_id` pinning in the same diff - that is a new
+    slash-command capability, tracked separately.
+
+    **Verification**: 3 headroom tests and 5 `find_hedge_cargo` tests ported, plus 3 end-to-end
+    `/best-route` tests from aiv2 (primary branch only) and 2 added here for the fallback
+    branch, which aiv2 never exercised - `/best-route` has two independent cargo sites, so a
+    test that reaches one proves nothing about the other. The fallback hedge test also asserts
+    every embed stays within Discord's 6000-character limit. The three behavioural end-to-end
+    tests fail against the pre-change cog.
+
 ## Where to look for what
 
 Five docs, deliberately scoped so they don't duplicate each other:

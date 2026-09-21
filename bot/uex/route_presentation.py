@@ -238,6 +238,24 @@ def format_evidence_note(level: EvidenceLevel, *, label: str) -> str:
     return f"{label}: no information reported - not the same as confirmed zero"
 
 
+def stock_headroom_warning(limited_by: str, *, mixed_routes_command: str = "/mixed-routes") -> str | None:
+    """A cargo estimate capped by real stock/demand (limited_by == "stock", from
+    bot.uex.ships.estimate_route_cargo) is planning to use the ENTIRE quantity UEX
+    currently reports, not a portion of it - if that figure is even slightly stale, or
+    someone else buys/sells into it first, the player gets less than planned the moment
+    they arrive. limited_by == "ship" or "budget" means the opposite: the player's own
+    ship/budget capped them below the full reported amount, so there's already real
+    headroom against exactly this kind of drift, and nothing to warn about. Framed as a
+    nudge toward mixed-routes hedging with a second commodity, not a hard error, since a
+    stock-limited route is still the single best option available - it's just fragile."""
+    if limited_by != "stock":
+        return None
+    return (
+        f"Uses the entire stock/demand currently on record - if it's lower on arrival, "
+        f"{mixed_routes_command} can hedge with a second commodity so your hold isn't left half-empty"
+    )
+
+
 def approximation_note(is_exact: bool, *, per_leg: bool = False) -> str | None:
     """Lowercase, footer-joinable fragment (e.g. append after ' · '); None when the
     allocation is exact. A caller needing a standalone warning line instead of a footer

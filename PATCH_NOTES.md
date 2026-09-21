@@ -5,6 +5,15 @@ the AI bot uses the same commands with an `ai-` prefix (`/price` -> `/ai-price`)
 
 ---
 
+## 2026-09-21 - Stock warnings and hedges on /best-route
+
+**Changed**
+- `/best-route` - When a route would use **all** the stock or demand currently on record, it now warns you (if the real
+  amount is lower when you arrive, your hold is left half empty) and, if your ship has room left over, adds a `Hedge:` line
+  suggesting another commodity for the same trip. Nothing changes when your ship or budget is what limits the haul.
+
+---
+
 ## 2026-09-21 - Short route lists explain themselves
 
 **Changed**
