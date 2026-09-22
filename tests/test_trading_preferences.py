@@ -20,6 +20,7 @@ from bot.cogs import trends as trends_module
 from bot.cogs.prices import Prices
 from bot.cogs.trading_preferences import TradingPreferences
 from bot.db.database import Database
+from bot.uex.exceptions import UexApiError
 from bot.uex.trading_preferences import (
     DEFAULT_TRADING_PREFERENCES,
     describe_active_preferences,
@@ -89,6 +90,21 @@ def test_format_trading_preferences_shows_default_budget_as_not_set():
 def test_format_trading_preferences_shows_a_saved_budget():
     text = format_trading_preferences(dict(DEFAULT_TRADING_PREFERENCES, budget=500_000.0))
     assert "Default budget: **500,000 aUEC**" in text
+
+
+def test_format_trading_preferences_appends_ship_detail_when_given():
+    prefs = dict(DEFAULT_TRADING_PREFERENCES, ship_name="Cutlass Black")
+    text = format_trading_preferences(prefs, ship_detail="(46 SCU)")
+    assert "Default ship: **Cutlass Black** (46 SCU)" in text
+
+
+def test_format_trading_preferences_omits_ship_detail_by_default():
+    """No live UEX lookup happens inside this pure function - a caller that doesn't pass
+    ship_detail gets exactly the old bare-name behavior."""
+    prefs = dict(DEFAULT_TRADING_PREFERENCES, ship_name="Cutlass Black")
+    text = format_trading_preferences(prefs)
+    assert "Default ship: **Cutlass Black**" in text
+    assert "(" not in text.splitlines()[0]
 
 
 # -- DB round-trip ----------------------------------------------------------------
@@ -508,7 +524,7 @@ def test_set_trading_preferences_command_sets_ship_with_validation(tmp_path):
         assert "Default ship: **Cutlass Black**" in message
         prefs = await db.get_trading_preferences(1)
         assert prefs["ship_name"] == "Cutlass Black"
-        # /set-default-ship and /my-ship read the same underlying value.
+        # /set-default-ship and /my-trading-preferences read the same underlying value.
         assert await db.get_default_ship(1) == "Cutlass Black"
 
     asyncio.run(run())
@@ -591,6 +607,70 @@ def test_my_trading_preferences_command_shows_current_state(tmp_path):
         await cog.my_trading_preferences.callback(cog, interaction)
         message = interaction.response.send_message.call_args.args[0]
         assert "Auto-load only: **Yes**" in message
+        # No ship saved - must not touch bot.uex at all (cog.bot has none set here; an
+        # AttributeError would fail this test if it tried).
+        interaction.response.defer.assert_not_awaited()
+
+    asyncio.run(run())
+
+
+def test_my_trading_preferences_command_shows_live_cargo_capacity_for_a_saved_ship(tmp_path):
+    """Absorbs the former /my-ship's unique value: a live SCU lookup against UEX's current
+    vehicle list, not just the bare saved name format_trading_preferences alone would show."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        uex = NS(get_vehicles=AsyncMock(return_value=[dict(name="Cutlass Black", scu=46)]))
+        cog = TradingPreferences.__new__(TradingPreferences)
+        cog.bot = NS(db=db, uex=uex)
+        await db.set_trading_preferences(1, ship_name="Cutlass Black")
+        interaction = _FakeInteraction(1)
+
+        await cog.my_trading_preferences.callback(cog, interaction)
+
+        interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+        message = interaction.followup.send.call_args.args[0]
+        assert "Default ship: **Cutlass Black** (46 SCU)" in message, message
+
+    asyncio.run(run())
+
+
+def test_my_trading_preferences_command_flags_a_ship_that_no_longer_resolves(tmp_path):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        # UEX's current vehicle list no longer has this ship (renamed/removed).
+        uex = NS(get_vehicles=AsyncMock(return_value=[dict(name="Some Other Ship", scu=10)]))
+        cog = TradingPreferences.__new__(TradingPreferences)
+        cog.bot = NS(db=db, uex=uex)
+        await db.set_trading_preferences(1, ship_name="Retired Ship")
+        interaction = _FakeInteraction(1)
+
+        await cog.my_trading_preferences.callback(cog, interaction)
+
+        message = interaction.followup.send.call_args.args[0]
+        assert "Default ship: **Retired Ship**" in message
+        assert "couldn't be matched" in message
+
+    asyncio.run(run())
+
+
+def test_my_trading_preferences_command_a_uex_failure_still_shows_the_bare_ship_name(tmp_path):
+    """UexApiError during the live lookup must not crash the command - the rest of the
+    preferences (and at least the bare saved ship name) still matter even if UEX is down."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        uex = NS(get_vehicles=AsyncMock(side_effect=UexApiError("down")))
+        cog = TradingPreferences.__new__(TradingPreferences)
+        cog.bot = NS(db=db, uex=uex)
+        await db.set_trading_preferences(1, ship_name="Cutlass Black")
+        interaction = _FakeInteraction(1)
+
+        await cog.my_trading_preferences.callback(cog, interaction)
+
+        message = interaction.followup.send.call_args.args[0]
+        assert "Default ship: **Cutlass Black**" in message
 
     asyncio.run(run())
 

@@ -2,7 +2,19 @@
 
 What changed for players, newest first. Command names are shown as on the production bot;
 the AI bot uses the same commands with an `ai-` prefix (`/price` -> `/ai-price`). Each entry
-bumps the minor version by one (2.0 is the oldest entry below); the next new entry is 2.9.
+bumps the minor version by one (2.0 is the oldest entry below); the next new entry is 2.10.
+
+---
+
+## 2.9 - 2026-09-22 - /my-ship folded into /my-trading-preferences
+
+**Changed**
+- `/my-trading-preferences` - Now shows your saved ship's live cargo capacity (SCU), or a note if it no longer
+  matches UEX's current ship list (renamed or removed), the same detail `/my-ship` used to show.
+
+**Removed**
+- `/my-ship` - Use `/my-trading-preferences` instead, which now shows the same ship detail alongside your other
+  saved defaults.
 
 ---
 

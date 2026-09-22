@@ -2580,6 +2580,30 @@ they're in sync).
     to the pre-existing `marketplace-index-status` - "implementation health checks rather
     than normal player tools," per that set's own comment - so it doesn't add noise to
     `/intro` for a first-time user, which is the entire point of building it.
+75. **First command-surface trim (of the new-user-friendliness push entry 74 exists to
+    inform): `/my-ship` removed - but only after checking it wasn't a clean duplicate.** A
+    background survey ranked `/my-ship` as "medium-high confidence, shows strictly less than
+    /my-trading-preferences" - checking the actual code before deleting anything (this
+    project's own "verify empirically, don't infer" convention) found that claim wrong:
+    `format_trading_preferences` printed only the bare saved ship NAME, while `/my-ship`
+    additionally re-resolved it live against UEX's current vehicle list to show real SCU
+    cargo capacity, plus a specific "couldn't be matched, maybe renamed" note when a saved
+    ship no longer resolves. Removing it outright would have been a real regression, not a
+    dedup. Fixed by absorbing that value into `/my-trading-preferences` first, then deleting
+    `/my-ship` for real: `format_trading_preferences` (`bot/uex/trading_preferences.py`)
+    gained an optional `ship_detail: str | None` parameter appended to the ship line - kept
+    the function itself pure/no-I/O per its own docstring, with the live UEX lookup done by
+    the caller and passed in as already-resolved text, never fetched inside the formatter.
+    `/my-trading-preferences` (`bot/cogs/trading_preferences.py`) only defers and hits
+    `get_vehicles()` when a ship is actually saved (mirroring `/my-ship`'s own conditional
+    lookup, not paying for a network call when there's nothing to resolve), and treats a
+    `UexApiError` during that lookup the same way `/my-ship` did - degrade to the bare name
+    rather than fail the whole command. `/set-trading-preferences`' own confirmation message
+    still calls `format_trading_preferences` without `ship_detail` (no live re-lookup
+    immediately after having just resolved/set the ship - redundant work). Generalizes past
+    this one command: a survey or audit's "looks redundant" call is a starting hypothesis to
+    verify against the actual code, not a finding to act on directly - the smaller, cheaper
+    check (read `/my-ship`'s ~20 lines) caught a real information loss before it shipped.
 
 ## Where to look for what
 

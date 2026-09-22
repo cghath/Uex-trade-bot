@@ -140,13 +140,39 @@ class TradingPreferences(commands.Cog):
     )
     async def my_trading_preferences(self, interaction: discord.Interaction) -> None:
         prefs = await self.bot.db.get_trading_preferences(interaction.user.id)
-        await interaction.response.send_message(
+        ship_name = prefs.get("ship_name")
+        ship_detail: str | None = None
+        # Only defer/hit UEX when there's actually a ship to resolve - matches the former
+        # /my-ship's own conditional lookup rather than always paying for a network call.
+        # Absorbs /my-ship's unique value (live SCU capacity, a staleness check for a
+        # since-renamed ship) into this command so /my-ship can be removed outright instead
+        # of just deleted with a real loss of information.
+        if ship_name:
+            await interaction.response.defer(ephemeral=True)
+            try:
+                vehicles = await self.bot.uex.get_vehicles()
+                vehicle = resolve_ship(vehicles, ship_name)
+            except UexApiError:
+                vehicle = None
+            if vehicle is None:
+                ship_detail = (
+                    "(couldn't be matched against UEX's current ship list - maybe renamed; "
+                    "try /set-default-ship again)"
+                )
+            else:
+                scu = vehicle.get("scu")
+                ship_detail = f"({scu:,.0f} SCU)" if scu else "(unknown cargo capacity)"
+
+        body = (
             "**Your trading preferences**\n"
-            f"{format_trading_preferences(prefs)}\n\n"
+            f"{format_trading_preferences(prefs, ship_detail=ship_detail)}\n\n"
             "Applied automatically whenever you don't pass the matching option yourself. "
-            "Set with /set-trading-preferences, reset with /clear-trading-preferences.",
-            ephemeral=True,
+            "Set with /set-trading-preferences, reset with /clear-trading-preferences."
         )
+        if ship_name:
+            await interaction.followup.send(body, ephemeral=True)
+        else:
+            await interaction.response.send_message(body, ephemeral=True)
 
 
 async def setup(bot: commands.Bot) -> None:
