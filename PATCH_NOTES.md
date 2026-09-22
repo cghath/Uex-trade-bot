@@ -1,11 +1,12 @@
 # Patch Notes
 
 What changed for players, newest first. Command names are shown as on the production bot;
-the AI bot uses the same commands with an `ai-` prefix (`/price` -> `/ai-price`).
+the AI bot uses the same commands with an `ai-` prefix (`/price` -> `/ai-price`). Each entry
+bumps the minor version by one (2.0 is the oldest entry below); the next new entry is 2.9.
 
 ---
 
-## 2026-09-22 - Reroute suggestions when a sale falls short
+## 2.8 - 2026-09-22 - Reroute suggestions when a sale falls short
 
 **Changed**
 - Route tracking threads - After you report a sell-side shortfall (the destination bought less than quoted), the
@@ -16,7 +17,7 @@ the AI bot uses the same commands with an `ai-` prefix (`/price` -> `/ai-price`)
 
 ---
 
-## 2026-09-21 - Stock warnings and hedges on route lists
+## 2.7 - 2026-09-21 - Stock warnings and hedges on route lists
 
 **Changed**
 - `/top-routes`, `/routes-from`, `/route-on-the-way` - A route that would use **all** the stock or demand currently on
@@ -29,7 +30,7 @@ _Ref: b5ec596_
 
 ---
 
-## 2026-09-21 - Pin mixed loads to a terminal, and 4-hop chains
+## 2.6 - 2026-09-21 - Pin mixed loads to a terminal, and 4-hop chains
 
 **New**
 - `/mixed-routes` `origin` and `destination` options - Show only the best mixed loads that start at a terminal you choose,
@@ -45,7 +46,7 @@ _Ref: d036daf_
 
 ---
 
-## 2026-09-21 - Hedge reports in route tracking
+## 2.5 - 2026-09-21 - Hedge reports in route tracking
 
 **Changed**
 - Route tracking threads - After you report a buy-side shortfall, the thread suggests one hedge commodity for the same trip.
@@ -56,7 +57,7 @@ _Ref: 2386e9a_
 
 ---
 
-## 2026-09-21 - Stock warnings and hedges on /best-route
+## 2.4 - 2026-09-21 - Stock warnings and hedges on /best-route
 
 **Changed**
 - `/best-route` - When a route would use **all** the stock or demand currently on record, it now warns you (if the real
@@ -67,7 +68,7 @@ _Ref: 72941af_
 
 ---
 
-## 2026-09-21 - Short route lists explain themselves
+## 2.3 - 2026-09-21 - Short route lists explain themselves
 
 **Changed**
 - `/top-routes`, `/routes-from`, `/route-on-the-way` - When fewer routes qualify than the list normally shows (for example
@@ -78,7 +79,7 @@ _Ref: 5f5b3ea_
 
 ---
 
-## 2026-09-21 - Routes ranked by what you can earn
+## 2.2 - 2026-09-21 - Routes ranked by what you can earn
 
 **Changed**
 - `/top-routes`, `/routes-from`, `/route-on-the-way` - Routes are now ranked by the profit **you can actually earn** with your
@@ -90,7 +91,7 @@ _Ref: cb98740_
 
 ---
 
-## 2026-09-21 - Refinery advisor
+## 2.1 - 2026-09-21 - Refinery advisor
 
 **Changed**
 - `/refinery-advisor` - Refineries in the ore's own mining system now come first, and **every** refinery in that system is
@@ -105,7 +106,7 @@ _Ref: c34f469_
 
 ---
 
-## 2026-09-21 - Blueprints
+## 2.0 - 2026-09-21 - Blueprints
 
 **New**
 - `/blueprint-search` - Type a blueprint name (partial names and small typos are fine) and see which contracts award it, who
