@@ -741,6 +741,22 @@ CREATE TABLE IF NOT EXISTS blueprint_pool_entries (
 );
 
 CREATE INDEX IF NOT EXISTS idx_blueprint_pool_by_blueprint ON blueprint_pool_entries (blueprint_uuid);
+
+-- One row per (command, user), aggregated rather than one row per invocation - matches this
+-- project's standing preference for keeping the Pi's own storage footprint lean (see
+-- CLAUDE.local.md) over a raw per-event log nobody needs the individual rows of; still
+-- bounded by unique command x user pairs, not unbounded like a per-invocation log would be.
+-- Per-user counts are the source of truth - excluding the bot owner's own constant testing
+-- from a "real usage" report is a read-time GROUP BY (get_command_usage_stats), not a
+-- write-time decision, so the raw data stays usable for anything else later (e.g. which
+-- users use a given command) without a schema change.
+CREATE TABLE IF NOT EXISTS command_usage_by_user (
+    command_name TEXT NOT NULL,
+    user_id INTEGER NOT NULL,
+    use_count INTEGER NOT NULL DEFAULT 0,
+    last_used_at TEXT NOT NULL,
+    PRIMARY KEY (command_name, user_id)
+);
 """
 
 
@@ -4241,3 +4257,48 @@ class Database:
                 "DELETE FROM blueprint_shopping_threads WHERE user_id=? AND guild_id=?", (user_id, guild_id),
             )
             await db.commit()
+
+    async def record_command_usage(self, command_name: str, user_id: int) -> None:
+        """Best-effort usage counter for /command-usage - see command_usage_by_user's own
+        schema comment for why this is one aggregated row per (command, user), not a
+        per-invocation log. Deliberately records the raw user_id and nothing about
+        "ownership" - excluding the bot owner's own testing from a real-usage report is
+        get_command_usage_stats' job at read time, not this method's."""
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        async with self.connect() as db:
+            await db.execute(
+                """INSERT INTO command_usage_by_user (command_name, user_id, use_count, last_used_at)
+                   VALUES (?, ?, 1, ?)
+                   ON CONFLICT(command_name, user_id) DO UPDATE SET
+                       use_count = use_count + 1,
+                       last_used_at = excluded.last_used_at""",
+                (command_name, user_id, now),
+            )
+            await db.commit()
+
+    async def get_command_usage_stats(self, owner_ids: set[int]) -> list[dict[str, Any]]:
+        """One row per command: total_count/owner_count/last_used_at across every user, plus
+        the same three figures with owner_ids excluded (real_count/last_used_excluding_owner_at)
+        and distinct_real_users - how many non-owner users have ever run it at all, the
+        clearest single "is anyone actually using this" signal for trimming. owner_ids is a
+        set (not a single id) to cover a team-owned Discord application, where discord.py
+        populates bot.owner_ids instead of a single bot.owner_id - see UexBot.is_owner."""
+        owner_ids = owner_ids or set()
+        placeholders = ",".join("?" for _ in owner_ids) or "NULL"
+        async with self.connect() as db:
+            rows = await (await db.execute(
+                f"""SELECT command_name,
+                           SUM(use_count) AS total_count,
+                           SUM(CASE WHEN user_id IN ({placeholders}) THEN use_count ELSE 0 END) AS owner_count,
+                           MAX(last_used_at) AS last_used_at,
+                           MAX(CASE WHEN user_id NOT IN ({placeholders}) THEN last_used_at END)
+                               AS last_used_excluding_owner_at,
+                           COUNT(DISTINCT CASE WHEN user_id NOT IN ({placeholders}) THEN user_id END)
+                               AS distinct_real_users
+                    FROM command_usage_by_user
+                    GROUP BY command_name
+                    ORDER BY (SUM(use_count) - SUM(CASE WHEN user_id IN ({placeholders}) THEN use_count ELSE 0 END)) DESC,
+                             command_name""",
+                (*owner_ids, *owner_ids, *owner_ids, *owner_ids),
+            )).fetchall()
+            return [dict(row) for row in rows]

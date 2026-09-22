@@ -14,7 +14,7 @@ from discord.ext import commands
 # Display order + grouping. A command name not listed here still appears, under "Other".
 # These remain available as slash commands but are implementation health checks rather than
 # normal player tools, so they do not add noise to /intro.
-HIDDEN_COMMANDS = {"marketplace-index-status"}
+HIDDEN_COMMANDS = {"marketplace-index-status", "command-usage"}
 
 CATEGORIES: list[tuple[str, str, list[str]]] = [
     ("💰 Prices & Routes", "Terminal prices, profitable hauls, and ranked live routes.", [

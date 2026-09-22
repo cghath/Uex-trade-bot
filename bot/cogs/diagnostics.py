@@ -1,4 +1,4 @@
-"""Diagnostic commands - currently just /test-dm.
+"""Diagnostic commands: /test-dm and /command-usage.
 
 Motivated by a real, recurring problem with Discord bots in general: whether a bot's DM
 actually reaches a given user depends on THEIR Discord settings (a per-server "Allow direct
@@ -8,6 +8,13 @@ returns a 403 Forbidden). This bot now has two DM-only delivery paths (Marketpla
 a Personal-scope /stock-alert-add) where a silently-failing DM means the user never finds out
 their alert is dead. /test-dm lets someone check that channel actually works *before*
 depending on it, rather than discovering it during a real alert.
+
+/command-usage is owner-only: a running count of real command usage (bot.uex.main's
+on_app_command_completion listener feeds command_usage_stats), specifically to inform
+trimming the command surface for new-user friendliness - see CONTRIBUTING.md/
+PROJECT_CONTEXT.md. The owner's own constant testing is tracked but excluded from "real"
+usage, since it would otherwise make every command look used regardless of whether any
+actual player ever touches it.
 """
 from __future__ import annotations
 
@@ -60,6 +67,73 @@ class Diagnostics(commands.Cog):
             "stock alerts and Marketplace alerts will work fine.",
             ephemeral=True,
         )
+
+    @app_commands.command(
+        name="command-usage",
+        description="Owner-only: real command usage (excluding your own testing), to inform trimming.",
+    )
+    async def command_usage(self, interaction: discord.Interaction) -> None:
+        if not await self.bot.is_owner(interaction.user):
+            await interaction.response.send_message("Owner-only command.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+
+        # is_owner() above guarantees one of these is populated by now (it fetches
+        # application_info() and sets whichever applies the first time it's ever called) -
+        # owner_ids covers a team-owned application, where discord.py populates that set
+        # instead of a single owner_id.
+        owner_ids = self.bot.owner_ids or ({self.bot.owner_id} if self.bot.owner_id else set())
+        stats = await self.bot.db.get_command_usage_stats(owner_ids)
+        tracked_names = {row["command_name"] for row in stats}
+        # walk_commands() is the live command surface right now - a name in it with no
+        # matching stats row has never been invoked by anyone, including the owner, which is
+        # the strongest possible "nobody is touching this" signal for trimming.
+        all_names = {cmd.qualified_name for cmd in self.bot.tree.walk_commands()}
+        never_invoked = sorted(all_names - tracked_names)
+
+        rows = [
+            {
+                "name": row["command_name"],
+                "real": row["total_count"] - row["owner_count"],
+                "owner": row["owner_count"],
+                "users": row["distinct_real_users"],
+                "last_real": (row["last_used_excluding_owner_at"] or "never")[:10],
+            }
+            for row in stats
+        ]
+        least_used = sorted(rows, key=lambda r: r["real"])[:15]
+        most_used = sorted(rows, key=lambda r: -r["real"])[:10]
+
+        lines = [
+            f"{len(all_names)} live commands - {len(tracked_names)} have at least one recorded "
+            f"invocation, {len(never_invoked)} have never been invoked at all (not even by you).",
+            "",
+            "Least used (real usage, your own testing excluded):",
+        ]
+        for r in least_used:
+            lines.append(
+                f"  /{r['name']:<28} {r['real']:>4} real  {r['users']:>3} users  "
+                f"({r['owner']} by you, last real: {r['last_real']})"
+            )
+        if never_invoked:
+            lines.append("")
+            lines.append("Never invoked at all: " + ", ".join(f"/{n}" for n in never_invoked))
+        lines.append("")
+        lines.append("Most used:")
+        for r in most_used:
+            lines.append(
+                f"  /{r['name']:<28} {r['real']:>4} real  {r['users']:>3} users  "
+                f"({r['owner']} by you, last real: {r['last_real']})"
+            )
+
+        body = "```\n" + "\n".join(lines) + "\n```"
+        # Discord's non-embed message cap is 2000 chars, well under this table's worst case
+        # (67 commands x ~2 sections) - truncate with a visible note rather than let the send
+        # itself fail, matching this codebase's established "disclose, don't silently drop"
+        # convention for anything that can overflow a Discord limit.
+        if len(body) > 1990:
+            body = body[:1900] + "\n... truncated, ask again after some commands are trimmed ...\n```"
+        await interaction.followup.send(body, ephemeral=True)
 
 
 async def setup(bot: commands.Bot) -> None:
