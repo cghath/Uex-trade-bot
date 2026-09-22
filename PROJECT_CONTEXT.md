@@ -2607,7 +2607,7 @@ they're in sync).
 
 ## Where to look for what
 
-Five docs, deliberately scoped so they don't duplicate each other:
+Six docs, deliberately scoped so they don't duplicate each other:
 
 | Doc | Answers |
 |---|---|
@@ -2616,11 +2616,16 @@ Five docs, deliberately scoped so they don't duplicate each other:
 | `CONTRIBUTING.md` | *How* to work on this codebase - required patterns, pre-flight checklist |
 | `PROJECT_CONTEXT.md` (this doc) | *What happened and why* - history, hard-won API knowledge, current state |
 | `ROADMAP.md` | *What's next* - completed features and the backlog of ideas |
+| `AI_BOT_HANDOFF.md` | *What still needs porting* to the separate AI-bot project - a live checklist, not history |
 
 Standalone troubleshooting write-ups have been folded into `CONTRIBUTING.md` rather than kept
 as separate files - point-in-time incident logs drift out of date and end up contradicting the
 maintained guidance. If you debug something worth remembering, add it to `CONTRIBUTING.md`
 (mechanics and prevention) or here (history and context), not a new log file.
+`AI_BOT_HANDOFF.md` is a deliberate exception to that rule, not a violation of it: it isn't a
+record of what happened in THIS codebase (that's what this file is for), it's a live sync
+queue against a DIFFERENT one - entries get checked off and eventually deleted once ported,
+rather than accumulating as permanent history the way an incident log would.
 
 ## How the scanner's matching logic evolved (read before touching `bot/uex/scanner.py`)
 
