@@ -5,25 +5,6 @@ the AI bot uses the same commands with an `ai-` prefix (`/price` -> `/ai-price`)
 
 ---
 
-## 2026-09-21 - Backup route button
-
-**New**
-- **Backup route** button on `/best-route`, `/top-routes`, `/routes-from` and `/route-on-the-way` - On a route that would use
-  **all** the stock or demand on record, press it for a private plan B that **keeps the commodity you may already have
-  bought**. It can fill your spare hold with something else at the same terminals, offer a different destination when that
-  is clearly better (at least 10% more profit, since travel time isn't counted), and - if you haven't bought yet - show the
-  best load from that terminal without it. Often the honest answer is that nothing beats your plan; it says so and tells you
-  to continue as planned. Only the player who ran the command can press it, and like the Track button it stops working after
-  about 15 minutes or a bot restart.
-
-**Changed**
-- The stock warning on those routes now points at the button. A `/best-route` result built from its price-row fallback has no
-  per-route buttons, so it still points at `/mixed-routes`.
-
-_Ref: f06758a_
-
----
-
 ## 2026-09-21 - Stock warnings and hedges on route lists
 
 **Changed**

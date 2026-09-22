@@ -61,10 +61,9 @@ def eligible_market_rows(
     auto_load_only: bool = False,
     system: str | None = None,
 ) -> list[dict[str, Any]]:
-    """The rows that pass the shared route safety filters. Split out of build_pair_opportunities
-    (unchanged behaviour) so a caller that needs the same eligibility without the profitable-pair
-    pairing - bot.uex.backup_routes, which must keep the player's own commodity in play even
-    after they have bought out the origin's stock - applies exactly the same filters."""
+    """Apply the shared route safety filters to a market-row pool. Extracted from
+    build_pair_opportunities so other searches over the same snapshot (backup_routes.py)
+    can reuse the identical filtering without re-deriving it."""
     return [
         r for r in market_rows
         if (not space_only or is_space_terminal(r))
