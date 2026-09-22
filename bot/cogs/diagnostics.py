@@ -112,16 +112,20 @@ class Diagnostics(commands.Cog):
                     f"No recorded real (non-owner) usage for `/{command}`.", ephemeral=True,
                 )
                 return
-            lines = [f"Real users of /{command} ({len(users)}):", ""]
+            # Deliberately NOT a ```code block``` (unlike the aggregate report below) -
+            # Discord does not parse <@id> mention syntax inside one, so the whole point of
+            # embedding a clickable mention (jump straight to that user, no manual lookup)
+            # would silently stop working while still looking fine at a glance.
+            lines = [f"**Real users of /{command}** ({len(users)}):", ""]
             for u in users:
-                display_name = u["username"] or "(unknown name)"
+                display_name = u["username"] or "(unknown name - hasn't used this command since usernames started being tracked)"
                 lines.append(
-                    f"  {display_name} <@{u['user_id']}> - {u['use_count']} use(s), "
+                    f"- {display_name} (<@{u['user_id']}>) - {u['use_count']} use(s), "
                     f"last {(u['last_used_at'] or '')[:10]}"
                 )
-            body = "```\n" + "\n".join(lines) + "\n```"
+            body = "\n".join(lines)
             if len(body) > 1990:
-                body = body[:1900] + "\n... truncated ...\n```"
+                body = body[:1950] + "\n... truncated ..."
             await interaction.followup.send(body, ephemeral=True)
             return
 

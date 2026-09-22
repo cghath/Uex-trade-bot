@@ -405,6 +405,31 @@ def test_command_usage_with_a_command_shows_the_real_users_who_ran_it():
         assert "PlayerTwo" in body and "<@222>" in body
         assert "PlayerOne" in body and "<@111>" in body
         assert "3 use" in body
+        # Regression: Discord does not parse <@id> mention syntax inside a ```code block```,
+        # so a code-block-wrapped body would show the raw text but the mention would never
+        # actually be clickable - defeating the entire point of embedding it.
+        assert "```" not in body, "mentions must not be wrapped in a code block or they won't render"
+
+    asyncio.run(run())
+
+
+def test_command_usage_with_a_command_flags_a_user_predating_username_tracking():
+    """A row written before the username column existed (or before this specific command
+    was used again since) has an empty username - must say so clearly, not just print a
+    blank name, so the owner isn't left wondering if something's broken."""
+    async def run():
+        users_by_command = {"multi-stop-route": [_user_row(323346922112811008, "", use_count=1)]}
+        cog = _cog(
+            is_owner=True, stats=[], live_command_names=["multi-stop-route"],
+            users_by_command=users_by_command,
+        )
+        interaction = _FakeInteraction()
+
+        await cog.command_usage.callback(cog, interaction, "multi-stop-route")
+
+        body = interaction.followup.send.call_args.args[0]
+        assert "<@323346922112811008>" in body
+        assert "unknown name" in body
 
     asyncio.run(run())
 
