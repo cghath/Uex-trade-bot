@@ -2523,6 +2523,30 @@ they're in sync).
     This closes the gap entry 71 identified: the button (removed) answered "what should I do
     with my ship's spare capacity" pre-trip; this answers "I'm stuck holding cargo, help me
     sell it," which is what the user described as their original intent for backups/hedges.
+73. **Entry 72's sell-side reroute called find_backup_routes synchronously on the event loop -
+    the exact bug class entries 45/46 already found and fixed for /mixed-routes and
+    /multi-stop-route, missed here because this call site is new, not one of the ones those
+    entries touched.** `find_backup_routes` always computes `without_anchor` internally
+    (`build_mixed_routes` over the FULL market snapshot) regardless of whether the caller
+    reads that field - entry 72's caller never does, but the function has no way to skip the
+    work for a caller that doesn't need it. Caught by an outside audit, not a live incident:
+    `_suggest_sell_shortfall_reroute` (`bot/cogs/route_progression.py`) called
+    `find_backup_routes` directly in the coroutine handling a leg-outcome report, which would
+    run that search on the bot's one asyncio event loop thread on a dense enough market
+    snapshot, delaying every other interaction and background poller for as long as it takes -
+    matching entries 45/46's own measured ~15s reproduction case almost exactly, just via a
+    different entry point into the same underlying cost. Fixed identically to those entries:
+    `await asyncio.to_thread(find_backup_routes, ...)`. Regression test follows entries 45/46's
+    own pattern exactly - monkeypatch the module-level name to record
+    `threading.current_thread()` and assert it isn't `threading.main_thread()`, not a timing
+    check, which entry 45 already found can pass by accident from unrelated awaits earlier in
+    the same handler. Generalizes past this one fix: entry 45's own lesson ("every OTHER
+    caller of a helper, not just the one a report named") applies transitively too - a NEW
+    caller added after that lesson was written can still reintroduce the exact bug the lesson
+    was about, because the lesson's own audit only covers callers that existed at the time it
+    was written. Any future new call site for `find_backup_routes`,
+    `build_mixed_routes`/`build_multi_stop_routes`, or `allocate_pair_cargo` needs this same
+    check before merging, not just the callers already known to need it.
 
 ## Where to look for what
 

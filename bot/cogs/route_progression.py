@@ -1020,7 +1020,14 @@ class RouteProgression(commands.Cog):
             if not buy_price:
                 return
             market_rows = await self.bot.db.get_mixed_route_market_rows()
-            result = find_backup_routes(
+            # find_backup_routes always computes without_anchor internally (build_mixed_routes
+            # over the full market snapshot, even though this caller never reads that field) -
+            # dense market data can make that expensive enough to matter, and this call would
+            # otherwise run synchronously on the bot's one asyncio event loop, delaying every
+            # other interaction and background poller for as long as it takes. Same fix as
+            # prices.py's own build_mixed_routes/build_multi_stop_routes calls.
+            result = await asyncio.to_thread(
+                find_backup_routes,
                 market_rows,
                 origin_terminal_id=leg.id_terminal, destination_terminal_id=leg.id_terminal,
                 anchor_commodity_id=leg.id_commodity, anchor_scu=shortfall_scu, anchor_buy_price=float(buy_price),

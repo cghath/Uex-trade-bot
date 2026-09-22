@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+import threading
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock, Mock
@@ -14,6 +15,7 @@ from cryptography.fernet import Fernet
 import discord
 import pytest
 
+from bot.cogs import route_progression as route_progression_module
 from bot.cogs.route_progression import (
     AbandonConfirmView,
     ActualAmountModal,
@@ -2698,6 +2700,59 @@ def test_handle_leg_outcome_a_sell_side_shortfall_with_no_other_buyer_says_so(tm
         assert channel.send.await_count == 2, "expected the 'no better buyer' message plus leg 3's prompt"
         no_reroute_message = channel.send.call_args_list[0].args[0]
         assert "no better" in no_reroute_message, no_reroute_message
+
+    asyncio.run(run())
+
+
+def test_handle_leg_outcome_sell_side_reroute_offloads_the_search_to_a_worker_thread(tmp_path, monkeypatch):
+    """Same regression class as /mixed-routes' and /multi-stop-route's own offload tests
+    (test_route_send_shape.py): find_backup_routes always computes without_anchor internally
+    (build_mixed_routes over the full market snapshot), which can be expensive enough on
+    dense data to matter, and this call would otherwise run synchronously on the bot's one
+    asyncio event loop. Checked directly via the actual thread it ran on, not timing, which
+    can pass by accident from unrelated awaits earlier in the same handler."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await _seed_market_row(db)
+        await db.record_terminal_market_snapshot([
+            {"id_commodity": 1, "id_terminal": 20, "commodity_name": "Gold", "terminal_name": "Elsewhere",
+             "price_buy": 0, "price_sell": 0, "scu_buy": 0, "scu_sell": 0, "status_buy": None, "status_sell": 7},
+            {"id_commodity": 1, "id_terminal": 30, "commodity_name": "Gold", "terminal_name": "Port Olisar",
+             "price_buy": 0, "price_sell": 150, "scu_buy": 0, "scu_sell": 60, "status_buy": None, "status_sell": 1},
+        ])
+        leg0 = _leg_input(id_terminal=10, id_commodity=1, quoted_price=100.0, quoted_scu=50.0, quoted_status=3)
+        leg1 = _leg_input(
+            side="sell", id_terminal=20, id_commodity=1, terminal_name="Elsewhere",
+            display_label="Sell Gold at Elsewhere", quoted_price=90.0, quoted_scu=40.0, quoted_status=2,
+        )
+        leg2 = _leg_input(
+            side="buy", id_terminal=30, id_commodity=3, terminal_name="Third Stop",
+            commodity_name="Iron", display_label="Buy Iron at Third Stop",
+            quoted_price=10.0, quoted_scu=20.0, quoted_status=3,
+        )
+        await _create_thread_for_legs(db, 1, [leg0, leg1, leg2])
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db})()
+        cog._active_legs = {1: [leg0, leg1, leg2]}
+        channel = _fake_thread_channel()
+
+        called_from_thread = {}
+        real_find = route_progression_module.find_backup_routes
+
+        def spy(*args, **kwargs):
+            called_from_thread["thread"] = threading.current_thread()
+            return real_find(*args, **kwargs)
+
+        monkeypatch.setattr(route_progression_module, "find_backup_routes", spy)
+
+        await cog.handle_leg_outcome(channel, 1, 1, leg1, outcome="missing")
+
+        assert called_from_thread.get("thread") is not None, "find_backup_routes was never called"
+        assert called_from_thread["thread"] is not threading.main_thread(), (
+            "find_backup_routes ran on the main/event-loop thread - it must be offloaded via "
+            "asyncio.to_thread so it can't block the bot's one event loop"
+        )
 
     asyncio.run(run())
 
