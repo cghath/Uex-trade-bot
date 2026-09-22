@@ -111,9 +111,15 @@ class UexBot(commands.Bot):
         Best-effort only: a failure here must never surface to the user, since by this
         point the command's own response has already been sent. Records the raw user_id
         with no owner-exclusion here - see /command-usage (bot/cogs/diagnostics.py) for
-        where that happens, at read time."""
+        where that happens, at read time. display_name (not the raw username) is stored -
+        it's the guild nickname when the interaction has one, falling back to the user's
+        global display name/username otherwise (discord.py's own User/Member.display_name
+        already handles that distinction), which is the name the owner would actually
+        recognize them by when deciding who to reach out to."""
         try:
-            await self.db.record_command_usage(command.qualified_name, interaction.user.id)
+            await self.db.record_command_usage(
+                command.qualified_name, interaction.user.id, interaction.user.display_name,
+            )
         except Exception:
             logger.warning("Could not record command usage for %s", command.qualified_name, exc_info=True)
 

@@ -749,10 +749,14 @@ CREATE INDEX IF NOT EXISTS idx_blueprint_pool_by_blueprint ON blueprint_pool_ent
 -- Per-user counts are the source of truth - excluding the bot owner's own constant testing
 -- from a "real usage" report is a read-time GROUP BY (get_command_usage_stats), not a
 -- write-time decision, so the raw data stays usable for anything else later (e.g. which
--- users use a given command) without a schema change.
+-- users use a given command) without a schema change. username is refreshed on every write
+-- (not set-once) so it reflects the user's current display name as of their last use of
+-- THIS specific command, not whatever it was the first time - added specifically so the
+-- owner can recognize who to reach out to for feedback, not just a count.
 CREATE TABLE IF NOT EXISTS command_usage_by_user (
     command_name TEXT NOT NULL,
     user_id INTEGER NOT NULL,
+    username TEXT NOT NULL DEFAULT '',
     use_count INTEGER NOT NULL DEFAULT 0,
     last_used_at TEXT NOT NULL,
     PRIMARY KEY (command_name, user_id)
@@ -1164,6 +1168,9 @@ class Database:
             # suppress_terminal_market_side's own transaction the same way
             # market_update_applied_at is - see that method's docstring.
             "ALTER TABLE route_progression_legs ADD COLUMN suppression_applied_at TEXT",
+            # command_usage_by_user shipped without this column - added so the owner can
+            # recognize who to reach out to for feedback, not just see a use count.
+            "ALTER TABLE command_usage_by_user ADD COLUMN username TEXT NOT NULL DEFAULT ''",
         ]
         for statement in migrations:
             try:
@@ -4258,23 +4265,42 @@ class Database:
             )
             await db.commit()
 
-    async def record_command_usage(self, command_name: str, user_id: int) -> None:
+    async def record_command_usage(self, command_name: str, user_id: int, username: str) -> None:
         """Best-effort usage counter for /command-usage - see command_usage_by_user's own
         schema comment for why this is one aggregated row per (command, user), not a
         per-invocation log. Deliberately records the raw user_id and nothing about
         "ownership" - excluding the bot owner's own testing from a real-usage report is
-        get_command_usage_stats' job at read time, not this method's."""
+        get_command_usage_stats' job at read time, not this method's. username is
+        overwritten on every call (not set-once), so it always reflects the user's current
+        display name as of their last use of THIS command."""
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         async with self.connect() as db:
             await db.execute(
-                """INSERT INTO command_usage_by_user (command_name, user_id, use_count, last_used_at)
-                   VALUES (?, ?, 1, ?)
+                """INSERT INTO command_usage_by_user (command_name, user_id, username, use_count, last_used_at)
+                   VALUES (?, ?, ?, 1, ?)
                    ON CONFLICT(command_name, user_id) DO UPDATE SET
+                       username = excluded.username,
                        use_count = use_count + 1,
                        last_used_at = excluded.last_used_at""",
-                (command_name, user_id, now),
+                (command_name, user_id, username, now),
             )
             await db.commit()
+
+    async def get_command_users(self, command_name: str, owner_ids: set[int]) -> list[dict[str, Any]]:
+        """Who has actually run this specific command (owner_ids excluded), ranked by use
+        count - the per-command drill-down /command-usage's command option shows, meant for
+        picking real users to reach out to for feedback, not just seeing a count."""
+        owner_ids = owner_ids or set()
+        placeholders = ",".join("?" for _ in owner_ids) or "NULL"
+        async with self.connect() as db:
+            rows = await (await db.execute(
+                f"""SELECT user_id, username, use_count, last_used_at
+                    FROM command_usage_by_user
+                    WHERE command_name = ? AND user_id NOT IN ({placeholders})
+                    ORDER BY use_count DESC, last_used_at DESC""",
+                (command_name, *owner_ids),
+            )).fetchall()
+            return [dict(row) for row in rows]
 
     async def get_command_usage_stats(self, owner_ids: set[int]) -> list[dict[str, Any]]:
         """One row per command: total_count/owner_count/last_used_at across every user, plus
