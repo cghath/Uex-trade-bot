@@ -10,17 +10,36 @@ their alert is dead. /test-dm lets someone check that channel actually works *be
 depending on it, rather than discovering it during a real alert.
 
 /command-usage is owner-only: a running count of real command usage (bot.uex.main's
-on_app_command_completion listener feeds command_usage_stats), specifically to inform
+on_app_command_completion listener feeds command_usage_by_user), specifically to inform
 trimming the command surface for new-user friendliness - see CONTRIBUTING.md/
 PROJECT_CONTEXT.md. The owner's own constant testing is tracked but excluded from "real"
 usage, since it would otherwise make every command look used regardless of whether any
-actual player ever touches it.
+actual player ever touches it. Its optional `command` option drills into who (by display
+name, not just a count) has actually run one specific command, for reaching out to real
+users for feedback.
 """
 from __future__ import annotations
 
 import discord
 from discord import app_commands
 from discord.ext import commands
+
+
+async def tracked_command_autocomplete(
+    interaction: discord.Interaction, current: str,
+) -> list[app_commands.Choice[str]]:
+    """Suggests only commands with at least one recorded invocation - a name from the live
+    command tree with zero usage would just send the owner to an empty drill-down."""
+    try:
+        owner_ids = interaction.client.owner_ids or (
+            {interaction.client.owner_id} if interaction.client.owner_id else set()
+        )
+        stats = await interaction.client.db.get_command_usage_stats(owner_ids)
+    except Exception:
+        return []
+    current_lower = current.lower()
+    matches = [row["command_name"] for row in stats if current_lower in row["command_name"].lower()][:25]
+    return [app_commands.Choice(name=name, value=name) for name in matches]
 
 
 class Diagnostics(commands.Cog):
@@ -72,7 +91,9 @@ class Diagnostics(commands.Cog):
         name="command-usage",
         description="Owner-only: real command usage (excluding your own testing), to inform trimming.",
     )
-    async def command_usage(self, interaction: discord.Interaction) -> None:
+    @app_commands.describe(command="Optional: see WHICH real users ran this specific command, for feedback outreach.")
+    @app_commands.autocomplete(command=tracked_command_autocomplete)
+    async def command_usage(self, interaction: discord.Interaction, command: str | None = None) -> None:
         if not await self.bot.is_owner(interaction.user):
             await interaction.response.send_message("Owner-only command.", ephemeral=True)
             return
@@ -83,6 +104,27 @@ class Diagnostics(commands.Cog):
         # owner_ids covers a team-owned application, where discord.py populates that set
         # instead of a single owner_id.
         owner_ids = self.bot.owner_ids or ({self.bot.owner_id} if self.bot.owner_id else set())
+
+        if command is not None:
+            users = await self.bot.db.get_command_users(command, owner_ids)
+            if not users:
+                await interaction.followup.send(
+                    f"No recorded real (non-owner) usage for `/{command}`.", ephemeral=True,
+                )
+                return
+            lines = [f"Real users of /{command} ({len(users)}):", ""]
+            for u in users:
+                display_name = u["username"] or "(unknown name)"
+                lines.append(
+                    f"  {display_name} <@{u['user_id']}> - {u['use_count']} use(s), "
+                    f"last {(u['last_used_at'] or '')[:10]}"
+                )
+            body = "```\n" + "\n".join(lines) + "\n```"
+            if len(body) > 1990:
+                body = body[:1900] + "\n... truncated ...\n```"
+            await interaction.followup.send(body, ephemeral=True)
+            return
+
         stats = await self.bot.db.get_command_usage_stats(owner_ids)
         tracked_names = {row["command_name"] for row in stats}
         # walk_commands() is the live command surface right now - a name in it with no

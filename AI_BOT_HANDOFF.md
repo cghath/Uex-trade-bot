@@ -46,3 +46,9 @@ is worth more than an unchecked one you can no longer remember the reason for.
       `/my-trading-preferences`. `bot/uex/trading_preferences.py`,
       `bot/cogs/trading_preferences.py`, `bot/cogs/ships.py`, `bot/cogs/help.py`
 - [ ] PR #33 - Docs only: added this file. Nothing to port, check off once read.
+- [ ] PR #35 - `/command-usage` now also tracks and shows real users by display name (not
+      just counts), with a new optional `command` option to drill into who ran a specific
+      one - for reaching out to real users for feedback. `command_usage_by_user` gained a
+      `username` column (additive `ALTER TABLE`, not just `SCHEMA` - the AI bot's own copy
+      of this table, if PR #31 was already ported, needs the same migration, not a fresh
+      `CREATE TABLE`). `bot/db/database.py`, `bot/main.py`, `bot/cogs/diagnostics.py`

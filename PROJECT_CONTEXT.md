@@ -2604,6 +2604,29 @@ they're in sync).
     this one command: a survey or audit's "looks redundant" call is a starting hypothesis to
     verify against the actual code, not a finding to act on directly - the smaller, cheaper
     check (read `/my-ship`'s ~20 lines) caught a real information loss before it shipped.
+76. **`/command-usage` (entry 74) grew a per-command drill-down showing real users by name,
+    specifically so the owner can reach out to them for feedback - a genuinely different need
+    than the aggregate counts alone answered.** `command_usage_by_user` gained a `username`
+    column (`ALTER TABLE ... ADD COLUMN username TEXT NOT NULL DEFAULT ''`, plus the matching
+    `CREATE TABLE` in `SCHEMA` for a fresh DB - this table already held real accumulating
+    production data on the Pi by the time this landed, so the additive-only migration
+    convention mattered here for real, not just in theory), refreshed on EVERY write
+    (`record_command_usage`'s `ON CONFLICT DO UPDATE SET username = excluded.username`), not
+    set once - the point is recognizing who to reach out to RIGHT NOW, and a stale name from
+    whenever they first used a command would actively work against that. Stores
+    `interaction.user.display_name` (guild nickname, falling back to global display name/
+    username outside a guild - discord.py's own `User`/`Member.display_name` already handles
+    that distinction), not the raw immutable username, since display name is what the owner
+    would actually recognize someone by. New `Database.get_command_users(command_name,
+    owner_ids)` - same owner-exclusion pattern as `get_command_usage_stats`, ranked by
+    `use_count` - backs a new optional `command` parameter on `/command-usage`
+    (autocompleted from `tracked_command_autocomplete`, which only suggests commands with at
+    least one recorded invocation, not the full live command list, since suggesting a
+    zero-usage command would just send the owner to an empty drill-down). The per-user list
+    embeds real `<@user_id>` Discord mentions alongside the display name - safe specifically
+    because the report is ephemeral and owner-only, so the mentioned user's client never
+    renders the message and never gets pinged by it; this makes the report directly
+    actionable (click through to DM) rather than just informational.
 
 ## Where to look for what
 
