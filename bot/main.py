@@ -103,6 +103,20 @@ class UexBot(commands.Bot):
         except UexApiError as exc:
             logger.warning("Could not warm the item catalog at startup: %s", exc)
 
+    async def on_app_command_completion(
+        self, interaction: discord.Interaction, command: discord.app_commands.Command,
+    ) -> None:
+        """discord.py dispatches this after every slash command that completes WITHOUT
+        raising - never for a failed one, so this only ever counts real, successful usage.
+        Best-effort only: a failure here must never surface to the user, since by this
+        point the command's own response has already been sent. Records the raw user_id
+        with no owner-exclusion here - see /command-usage (bot/cogs/diagnostics.py) for
+        where that happens, at read time."""
+        try:
+            await self.db.record_command_usage(command.qualified_name, interaction.user.id)
+        except Exception:
+            logger.warning("Could not record command usage for %s", command.qualified_name, exc_info=True)
+
     @commands.command()
     @commands.is_owner()
     async def sync(self, ctx: commands.Context, spec: str | None = None) -> None:

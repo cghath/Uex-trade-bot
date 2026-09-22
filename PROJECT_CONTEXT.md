@@ -2547,6 +2547,39 @@ they're in sync).
     was written. Any future new call site for `find_backup_routes`,
     `build_mixed_routes`/`build_multi_stop_routes`, or `allocate_pair_cargo` needs this same
     check before merging, not just the callers already known to need it.
+74. **`/command-usage` (owner-only) exists to inform trimming the command surface for
+    new-user friendliness, not as a general-purpose analytics feature - and the write/read
+    split it landed on came from a genuine mid-build design change, not the first draft.**
+    First version recorded usage as one aggregated row per command
+    (`command_usage_stats(command_name, total_count, owner_count, ...)`), with the write path
+    (`UexBot.on_app_command_completion`, dispatched by discord.py after every slash command
+    that completes WITHOUT raising - confirmed empirically via
+    `inspect.getsource(CommandTree._call)`, not assumed) deciding at write time whether the
+    caller was the owner (`await self.is_owner(interaction.user)`) and bucketing the count
+    accordingly. Once the user asked to also track which users use which commands, that
+    per-command aggregate had nowhere to put per-user data without becoming an unbounded
+    per-invocation log - the exact thing the schema comment was written to avoid. Redesigned
+    around `command_usage_by_user(command_name, user_id, use_count, last_used_at)`, still one
+    row per (command, user) pair, not per invocation - the write path
+    (`Database.record_command_usage`) now just increments a raw `user_id` with no ownership
+    concept at all, and owner-exclusion moved entirely to the read side
+    (`Database.get_command_usage_stats(owner_ids: set[int])`), which GROUPs by command and
+    computes total/owner/real counts, `last_used_excluding_owner_at`, and
+    `distinct_real_users` (how many different non-owner users have ever run it - the clearest
+    single "is anyone actually using this" signal) in one query. `owner_ids` is a set, not a
+    single id, because `commands.Bot.is_owner()` populates EITHER `owner_id` (single) or
+    `owner_ids` (a set, for a team-owned Discord application) depending on which applies -
+    confirmed by reading discord.py's own `is_owner()` source rather than assuming a single
+    id is always available. The general lesson: when a feature request changes what
+    granularity a write path needs to preserve, check whether an aggregate-at-write-time
+    design can even represent the new requirement before extending it - here it couldn't,
+    and moving the aggregation to read time (GROUP BY over the raw per-user rows) turned out
+    simpler than maintaining two synchronized counters ever would have been. `/command-usage`
+    itself lives in `bot/cogs/diagnostics.py` (alongside `/test-dm`, the only other
+    owner/implementation-facing command) and is listed in `help.py`'s `HIDDEN_COMMANDS` next
+    to the pre-existing `marketplace-index-status` - "implementation health checks rather
+    than normal player tools," per that set's own comment - so it doesn't add noise to
+    `/intro` for a first-time user, which is the entire point of building it.
 
 ## Where to look for what
 
