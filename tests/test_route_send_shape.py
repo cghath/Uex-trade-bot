@@ -1417,6 +1417,63 @@ def test_best_route_primary_branch_suggests_a_hedge_at_the_same_terminal_pair(tm
     asyncio.run(run())
 
 
+def test_best_route_primary_branch_a_hedge_lookup_failure_still_sends_the_route(tmp_path):
+    """The market-row fetch/search behind the inline Hedge: line is additive and must not be
+    able to abort the whole command - this bot has no global app-command error handler, so an
+    uncaught exception here would leave the deferred interaction with no further response."""
+    async def run():
+        db = Database(tmp_path / "best_route_hedge_lookup_failure.sqlite3", Fernet(Fernet.generate_key()))
+        await db.init()
+        db.get_mixed_route_market_rows = AsyncMock(side_effect=RuntimeError("database is locked"))
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            path = request.url.path
+            if "commodities_prices" in path:
+                return httpx.Response(200, json={"status": "ok", "data": [
+                    {"id_commodity": 1, "commodity_name": "Taranite"}
+                ]})
+            if "commodities_routes" in path:
+                return httpx.Response(200, json={"status": "ok", "data": [
+                    {
+                        "id_terminal_origin": 1, "id_terminal_destination": 101,
+                        "origin_terminal_name": "Origin 1", "destination_terminal_name": "Destination 1",
+                        "price_origin": 100, "price_destination": 200, "price_margin": 50, "price_roi": 100,
+                        "distance": 5, "score": 100, "scu_origin": 21, "scu_destination": 21,
+                        "status_origin": 1, "status_destination": 1, "profit": 100,
+                    }
+                ]})
+            if "vehicles" in path:
+                return httpx.Response(200, json={"status": "ok", "data": [
+                    {"name": "Ironclad Assault", "scu": 1440},
+                ]})
+            return httpx.Response(200, json={"status": "ok", "data": []})
+
+        client = UexClient(app_token="test", base_url="https://uex.test")
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+        bot = type("FakeBot", (), {})()
+        bot.db = db
+        bot.uex = client
+        bot.get_cog = lambda name: None
+        cog = Prices.__new__(Prices)
+        cog.bot = bot
+        interaction = _FakeInteraction(1)
+
+        try:
+            await cog.best_route.callback(cog, interaction, commodity="Taranite", ship="Ironclad Assault")
+        finally:
+            await client.aclose()
+
+        route_embeds = [kwargs["embed"] for _, kwargs in interaction.followup.sent[1:] if kwargs.get("embed") is not None]
+        assert len(route_embeds) == 1, "the route must still be sent, not silently dropped"
+        combined = "\n".join(f.value or "" for f in route_embeds[0].fields)
+        assert "Press **Backup route** below" in combined, combined
+        assert "Hedge:" not in combined, "the lookup failed, so no hedge item could be found"
+
+    asyncio.run(run())
+
+
 def _fallback_best_route_cog(db, *, vehicles, buy_scu, sell_scu):
     """A real /best-route fallback-branch setup: UEX has no precomputed routes for the commodity,
     so the route is paired from its raw buy/sell price rows (Buy A id 1 -> Sell A id 3)."""
@@ -1484,6 +1541,36 @@ def test_best_route_fallback_branch_warns_and_suggests_a_hedge_when_stock_is_the
         for _, kwargs in interaction.followup.sent:
             if kwargs.get("embed") is not None:
                 assert len(kwargs["embed"]) <= 6000, len(kwargs["embed"])
+
+    asyncio.run(run())
+
+
+def test_best_route_fallback_branch_a_hedge_lookup_failure_still_sends_the_route(tmp_path):
+    """Same guard as the primary branch's identical test, for /best-route's OTHER cargo/hedge
+    call site (raw price-row pairing, used when UEX has no precomputed routes)."""
+    async def run():
+        db = Database(tmp_path / "best_route_fallback_hedge_lookup_failure.sqlite3", Fernet(Fernet.generate_key()))
+        await db.init()
+        db.get_mixed_route_market_rows = AsyncMock(side_effect=RuntimeError("database is locked"))
+        cog, client, handler = _fallback_best_route_cog(
+            db, vehicles=[{"name": "Ironclad Assault", "scu": 1440}], buy_scu=21, sell_scu=21,
+        )
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        interaction = _FakeInteraction(1)
+        try:
+            await cog.best_route.callback(cog, interaction, commodity="Taranite", ship="Ironclad Assault")
+        finally:
+            await client.aclose()
+
+        # The fallback branch sends every route as one field on a single combined embed
+        # (unlike the primary branch's one-message-per-route) - the assertion here is that
+        # this embed, and its field for the route, still arrives at all.
+        route_embeds = [kwargs["embed"] for _, kwargs in interaction.followup.sent if kwargs.get("embed") is not None]
+        assert len(route_embeds) == 1 and route_embeds[0].fields, "the route must still be sent, not silently dropped"
+        combined = _all_embed_text(interaction)
+        assert "/mixed-routes" in combined, "the warning itself is unaffected"
+        assert "Hedge:" not in combined, "the lookup failed, so no hedge item could be found"
 
     asyncio.run(run())
 

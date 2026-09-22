@@ -675,14 +675,21 @@ class Prices(commands.Cog):
                         value_lines.append(f"⚠️ {headroom_note}")
                         if can_backup:
                             backup_scu = cargo.max_scu
-                            if market_rows is None:
-                                market_rows = await self.bot.db.get_mixed_route_market_rows()
-                            for hedge_item in find_hedge_cargo(
-                                market_rows, origin_terminal_id=origin_id, destination_terminal_id=destination_id,
-                                exclude_commodity_id=id_commodity, remaining_capacity_scu=room.capacity_scu,
-                                remaining_budget=room.budget,
-                            ):
-                                value_lines.append(f"Hedge: {cargo_item_line(hedge_item)}")
+                            # Additive: a failure fetching/searching the market snapshot must
+                            # cost the player the inline Hedge: line, never the route itself -
+                            # this command has no global error handler, and every route after
+                            # a raised exception here would silently never be sent.
+                            try:
+                                if market_rows is None:
+                                    market_rows = await self.bot.db.get_mixed_route_market_rows()
+                                for hedge_item in find_hedge_cargo(
+                                    market_rows, origin_terminal_id=origin_id, destination_terminal_id=destination_id,
+                                    exclude_commodity_id=id_commodity, remaining_capacity_scu=room.capacity_scu,
+                                    remaining_budget=room.budget,
+                                ):
+                                    value_lines.append(f"Hedge: {cargo_item_line(hedge_item)}")
+                            except Exception:
+                                logger.warning("Hedge suggestion unavailable for /best-route", exc_info=True)
                 elif not ship_vehicle:
                     value_lines.append("Cargo: unknown (set a ship with /set-default-ship to see haulable SCU)")
 
@@ -958,15 +965,19 @@ class Prices(commands.Cog):
                     value_lines.append(f"⚠️ {headroom_note}")
                     room = hedge_room(cargo, ship_cargo_scu=ship_cargo_scu)
                     if room is not None and route.buy_terminal_id is not None and route.sell_terminal_id is not None:
-                        if market_rows is None:
-                            market_rows = await self.bot.db.get_mixed_route_market_rows()
-                        for hedge_item in find_hedge_cargo(
-                            market_rows, origin_terminal_id=route.buy_terminal_id,
-                            destination_terminal_id=route.sell_terminal_id,
-                            exclude_commodity_id=id_commodity, remaining_capacity_scu=room.capacity_scu,
-                            remaining_budget=room.budget,
-                        ):
-                            value_lines.append(f"Hedge: {cargo_item_line(hedge_item)}")
+                        # Additive - see the identical try/except in the primary branch above.
+                        try:
+                            if market_rows is None:
+                                market_rows = await self.bot.db.get_mixed_route_market_rows()
+                            for hedge_item in find_hedge_cargo(
+                                market_rows, origin_terminal_id=route.buy_terminal_id,
+                                destination_terminal_id=route.sell_terminal_id,
+                                exclude_commodity_id=id_commodity, remaining_capacity_scu=room.capacity_scu,
+                                remaining_budget=room.budget,
+                            ):
+                                value_lines.append(f"Hedge: {cargo_item_line(hedge_item)}")
+                        except Exception:
+                            logger.warning("Hedge suggestion unavailable for /best-route", exc_info=True)
             elif not ship_vehicle:
                 value_lines.append("Cargo: unknown (set a ship with /set-default-ship to see haulable SCU)")
 

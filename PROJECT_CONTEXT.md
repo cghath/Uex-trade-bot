@@ -2386,6 +2386,57 @@ they're in sync).
     now asserts the button and its context. Mutation-checked: 22 deliberate breakages, all caught.
     Not deployed.
 
+70. **Outside audit of entries 68-69 (routing hedge/backup work), commit `8f9be8e`: three
+    confirmed findings, all fixed with tests.** (1) `/routes-from` and `/route-on-the-way` did
+    real DB work (terminal-name resolution, then trading preferences) before ever acknowledging
+    the interaction - `_send_ranked_routes` deferred first, but only AFTER both commands' own
+    lookups had already run, risking Discord's ~3s initial-response deadline the same way the
+    earlier `/set-trading-preferences` fix addressed (CLAUDE.local.md's "Established
+    conventions"). Fixed by deferring as the literal first line of each command and routing
+    every response after that through
+    `interaction.followup`, never `interaction.response`; `_send_ranked_routes` gained an
+    `already_deferred` flag (default False, so `/top-routes` - which has no pre-defer DB work -
+    keeps its own unconditional defer unchanged) rather than an `is_done()` check, since the
+    latter would have required updating every mocked `interaction.response` across several test
+    files that construct it as a bare `SimpleNamespace(defer=AsyncMock())` with no `is_done`
+    method. The regression test for "does it defer before the DB call" needed the two test
+    files' `_FakeResponse.defer()`/`send_message()` to actually raise on a second call (matching
+    real discord.py's `InteractionResponded`) - the original no-op mock let a forgotten
+    `already_deferred=True` (a real double-defer) pass silently, since nothing observed call
+    order or repetition.
+    (2) `bot.uex.backup_routes._gain_pct` divides by its reference profit - safe when the
+    reference is a real positive figure, but `BackupLoad`'s own accounting charges the FULL cost
+    of everything a player holds even when a destination's demand can't absorb all of it
+    (`anchor_unsold_scu`), so `baseline_profit` (and `best_keeping_anchor_profit`, which folds it
+    in via `x or 0.0` - itself truthy for any nonzero negative) can be genuinely negative: enough
+    of a held commodity goes unsold that continuing as planned is already a loss. Dividing by
+    that negative reference inverts or explodes the percentage's sign, and one call site's
+    literal `+` prefix (rather than a `:+` format spec) turned a negative result into literally
+    "+-215%". Fixed with one shared `_profit_comparison(candidate, reference, subject)` used by
+    all three comparison lines: a percentage only when the reference is a real positive profit,
+    "breaks even" wording for an exactly-zero reference (also fixing a smaller pre-existing bug
+    where `if baseline:`/`if reference:`/`if keeping:` silently dropped the comparison line
+    entirely for a legitimate zero rather than showing one), "turns a loss into" when the
+    candidate is profitable, and "avoids N aUEC of the loss" when both are still losses.
+    (3) `/best-route`'s two hedge-lookup call sites called `get_mixed_route_market_rows()` (a DB
+    read) and `find_hedge_cargo()` with no try/except, unlike `/top-routes`'/`/routes-from`'s
+    shared pre-pass (entry 68), which already wraps this exact fetch - a failure there would
+    abort the whole deferred command with no further response, and this bot has no global
+    app-command error handler. Fixed with an identical try/except around each site (both the
+    UEX-routes primary branch and the raw-price-row fallback), logging and continuing without a
+    hedge line rather than losing the route (the `stock_headroom_warning` text and, on the
+    primary branch, the Backup route button are both computed before the try block, so neither
+    is affected by a failure inside it).
+    Also fixed, called out by the audit as lower-severity cleanup: a trailing blank line at the
+    end of `bot/discord_ui.py` and `tests/test_route_presentation.py` (`git diff --check`).
+    **Deliberately not done this round**, per the audit's own priority ranking (only the three
+    findings above were called "should be fixed" before calling the work polished): an explicit
+    "searching current market data" message on `/mixed-routes`/`/multi-stop-route`/
+    `/route-from-multi`/the ranked route commands (`/diminishing-returns` already has one), and
+    visually disabling the Backup route button after its 15-minute timeout (the established
+    `disable_in_background` pattern from `LegOutcomeView`/`HedgeReportView` would need the
+    button's view to capture `view.message`, which it doesn't yet).
+
 ## Where to look for what
 
 Five docs, deliberately scoped so they don't duplicate each other:

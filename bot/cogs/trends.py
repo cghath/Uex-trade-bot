@@ -354,8 +354,15 @@ class Trends(commands.Cog):
         system: str | None = None,
         risk_tolerance: str | None = None,
         budget: float | None = None,
+        already_deferred: bool = False,
     ) -> None:
-        await interaction.response.defer()
+        # already_deferred is set by a caller (routes_from, route_on_the_way) that had to do its
+        # own DB work (terminal-name resolution) before this point and so deferred itself, right
+        # at the top of its own function, before that work - deferring again here would raise
+        # discord.InteractionResponded. /top-routes has no such pre-work and still relies on the
+        # unconditional defer below.
+        if not already_deferred:
+            await interaction.response.defer()
 
         ship_query = ship or await self.bot.db.get_default_ship(interaction.user.id)
         ship_vehicle = None
@@ -813,9 +820,16 @@ class Trends(commands.Cog):
         system: app_commands.Choice[str] | None = None,
         budget: app_commands.Range[float, 1, 1_000_000_000] | None = None,
     ) -> None:
+        # Deferred immediately, before resolve_terminal_id_by_name or the preferences
+        # lookup below - both are real DB work, and either one running long risks Discord's
+        # ~3s initial-response deadline (the same "defer before any network/DB work"
+        # convention as /set-trading-preferences). Every response after this point goes
+        # through interaction.followup, never interaction.response, including the error
+        # paths below.
+        await interaction.response.defer()
         resolved = await self.bot.db.resolve_terminal_id_by_name(location)
         if resolved is None:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"Couldn't find a single terminal matching '{location}' - pick one from the "
                 "autocomplete list to make sure it's unambiguous."
             )
@@ -846,7 +860,7 @@ class Trends(commands.Cog):
         entries = [r for r in pool if r.origin_terminal_id == origin_id]
         if not entries:
             still_gathering = " (still gathering route data - try again in a few minutes)" if not pool else ""
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"No profitable routes found starting from **{origin_name}** right now{still_gathering}."
             )
             return
@@ -871,6 +885,7 @@ class Trends(commands.Cog):
             system=system_value,
             risk_tolerance=prefs["risk_tolerance"],
             budget=float(budget) if budget is not None else None,
+            already_deferred=True,
         )
 
     @app_commands.command(
@@ -899,9 +914,13 @@ class Trends(commands.Cog):
         budget: app_commands.Range[float, 1, 1_000_000_000] | None = None,
         auto_load_only: bool | None = None,
     ) -> None:
+        # Deferred immediately, before either terminal resolution or the preferences lookup
+        # below - see routes_from's identical comment. Every response after this point goes
+        # through interaction.followup, never interaction.response.
+        await interaction.response.defer()
         resolved_origin = await self.bot.db.resolve_terminal_id_by_name(origin)
         if resolved_origin is None:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"Couldn't find a single terminal matching '{origin}' - pick one from the "
                 "autocomplete list to make sure it's unambiguous."
             )
@@ -910,7 +929,7 @@ class Trends(commands.Cog):
 
         resolved_destination = await self.bot.db.resolve_terminal_id_by_name(destination)
         if resolved_destination is None:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"Couldn't find a single terminal matching '{destination}' - pick one from the "
                 "autocomplete list to make sure it's unambiguous."
             )
@@ -918,7 +937,7 @@ class Trends(commands.Cog):
         destination_id, destination_name = resolved_destination
 
         if origin_id == destination_id:
-            await interaction.response.send_message("Origin and destination can't be the same terminal.")
+            await interaction.followup.send("Origin and destination can't be the same terminal.")
             return
 
         prefs = await self.bot.db.get_trading_preferences(interaction.user.id)
@@ -947,7 +966,7 @@ class Trends(commands.Cog):
         ]
         if not entries:
             still_gathering = " (still gathering route data - try again in a few minutes)" if not pool else ""
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"No profitable routes found from **{origin_name}** to **{destination_name}** "
                 f"right now{still_gathering}."
             )
@@ -973,6 +992,7 @@ class Trends(commands.Cog):
             system=None,
             risk_tolerance=prefs["risk_tolerance"],
             budget=float(budget) if budget is not None else None,
+            already_deferred=True,
         )
 
     # -- /movers: single bulk call, computed on demand -----------------------
