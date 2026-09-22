@@ -52,3 +52,7 @@ is worth more than an unchecked one you can no longer remember the reason for.
       `username` column (additive `ALTER TABLE`, not just `SCHEMA` - the AI bot's own copy
       of this table, if PR #31 was already ported, needs the same migration, not a fresh
       `CREATE TABLE`). `bot/db/database.py`, `bot/main.py`, `bot/cogs/diagnostics.py`
+- [ ] PR #36 - Fix: `/command-usage`'s per-user mentions weren't actually clickable - a
+      ```code block``` around the whole response silently blocks Discord's `<@id>` mention
+      parsing. Only relevant if PR #35 (or an equivalent) was already ported.
+      `bot/cogs/diagnostics.py`

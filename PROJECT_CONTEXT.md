@@ -2627,6 +2627,23 @@ they're in sync).
     because the report is ephemeral and owner-only, so the mentioned user's client never
     renders the message and never gets pinged by it; this makes the report directly
     actionable (click through to DM) rather than just informational.
+77. **Entry 76's own mention didn't actually render - caught the same day, live, by the
+    user actually clicking it.** The per-user drill-down wrapped its whole body in a
+    ` ```code block``` ` (matching the aggregate report's own formatting), but Discord does
+    not parse `<@user_id>` mention syntax inside one - it printed as literal text
+    (`<@323346922112811008>`), not a clickable mention, silently defeating the entire
+    point of embedding it (click through to that user, no manual ID lookup). Also
+    surfaced in the same screenshot: a genuinely correct "(unknown name)" for a row that
+    predates this session's own username-tracking deploy (entry 76) - that part was
+    working as designed, not a bug, but the message didn't say why, leaving it
+    indistinguishable from a real failure. Fixed by dropping the code block for the
+    per-user list specifically (the aggregate report keeps its own, since that one has no
+    mentions to protect and benefits from monospace column alignment) and expanding the
+    unknown-name fallback to explain itself ("hasn't used this command since usernames
+    started being tracked") instead of leaving the owner to guess. Generalizes: Discord
+    does not parse ANY markup (mentions, bold, links) inside a code block - any future
+    message that needs both a code block's alignment AND a clickable mention has to pick
+    one or split the two into separate lines/sections, not assume both work together.
 
 ## Where to look for what
 
