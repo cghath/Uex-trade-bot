@@ -45,4 +45,4 @@ is worth more than an unchecked one you can no longer remember the reason for.
 - [ ] PR #32 - Removed `/my-ship`, folded its live SCU-capacity/staleness info into
       `/my-trading-preferences`. `bot/uex/trading_preferences.py`,
       `bot/cogs/trading_preferences.py`, `bot/cogs/ships.py`, `bot/cogs/help.py`
-      *(not yet merged here - move this entry once it lands)*
+- [ ] PR #33 - Docs only: added this file. Nothing to port, check off once read.
