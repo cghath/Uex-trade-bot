@@ -2464,10 +2464,27 @@ they're in sync).
     resolving conflicts against entry 70's later changes to the same files by hand (see the
     revert's own PR description for exactly which lines were kept vs dropped) rather than
     reconstructing the pre-button files from scratch - lower risk of silently losing one of
-    entry 70's fixes in the process. Full suite re-run and passing after the revert. The button
+    entry 70's fixes in the process. The button
     was never its own slash command, only a message component attached to existing route
     messages, so the command surface is unaffected - still 67 commands, unchanged from before
     entry 69.
+
+    One real bug slipped through the conflict resolution: `git revert` reverts a file's
+    WHOLE diff, not just the parts meant to go - `bot/uex/mixed_routes.py`'s
+    `eligible_market_rows` extraction (also from the button PR) auto-merged away along with
+    everything else in that file, even though the plan was explicitly to keep it (comment
+    at the time: "harmless, still needed by backup_routes.py"). The keep-decision was made
+    for `backup_routes.py` and its test file as whole-file conflicts (`git checkout --ours`),
+    but `mixed_routes.py` had no textual conflict at all, so its revert applied silently and
+    was never re-examined - `python -c "import bot.uex.backup_routes"` raised `ImportError:
+    cannot import name 'eligible_market_rows'` the moment it was actually checked. Fixed by
+    re-adding the extraction (`build_pair_opportunities` calling `eligible_market_rows`
+    rather than inlining the filter). Full suite re-run after that fix: 989 passed, `ruff
+    --select F` clean. Lesson: when a revert is deliberately keeping only PART of what a
+    commit touched in some files, every OTHER file the same commit touched needs the same
+    "did this take something I meant to keep with it" check - a clean auto-merge is not
+    evidence the file's end state is what was intended, only that git found no textual
+    overlap to flag.
 
 ## Where to look for what
 

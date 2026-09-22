@@ -53,6 +53,26 @@ class MixedRoute:
         return 0.0 if self.investment <= 0 else self.profit / self.investment * 100
 
 
+def eligible_market_rows(
+    market_rows: list[dict[str, Any]],
+    *,
+    space_only: bool = False,
+    capital_access_only: bool = False,
+    auto_load_only: bool = False,
+    system: str | None = None,
+) -> list[dict[str, Any]]:
+    """Apply the shared route safety filters to a market-row pool. Extracted from
+    build_pair_opportunities so other searches over the same snapshot (backup_routes.py)
+    can reuse the identical filtering without re-deriving it."""
+    return [
+        r for r in market_rows
+        if (not space_only or is_space_terminal(r))
+        and (not capital_access_only or supports_capital_cargo_access(r))
+        and (system is None or terminal_in_system(r, system))
+        and (not auto_load_only or terminal_supports_auto_load(r))
+    ]
+
+
 def build_pair_opportunities(
     market_rows: list[dict[str, Any]],
     *,
@@ -69,13 +89,13 @@ def build_pair_opportunities(
     Shared by a single hop (build_mixed_routes) and every leg of a multi-stop chain
     (bot/uex/multi_stop_routes.py).
     """
-    eligible_rows = [
-        r for r in market_rows
-        if (not space_only or is_space_terminal(r))
-        and (not capital_access_only or supports_capital_cargo_access(r))
-        and (system is None or terminal_in_system(r, system))
-        and (not auto_load_only or terminal_supports_auto_load(r))
-    ]
+    eligible_rows = eligible_market_rows(
+        market_rows,
+        space_only=space_only,
+        capital_access_only=capital_access_only,
+        auto_load_only=auto_load_only,
+        system=system,
+    )
     origins = [
         r for r in eligible_rows
         if _positive(r.get("price_buy")) and _positive(r.get("scu_buy"))
