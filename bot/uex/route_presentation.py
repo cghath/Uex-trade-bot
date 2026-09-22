@@ -238,9 +238,7 @@ def format_evidence_note(level: EvidenceLevel, *, label: str) -> str:
     return f"{label}: no information reported - not the same as confirmed zero"
 
 
-def stock_headroom_warning(
-    limited_by: str, *, mixed_routes_command: str = "/mixed-routes", has_backup_button: bool = False
-) -> str | None:
+def stock_headroom_warning(limited_by: str, *, mixed_routes_command: str = "/mixed-routes") -> str | None:
     """A cargo estimate capped by real stock/demand (limited_by == "stock", from
     bot.uex.ships.estimate_route_cargo) is planning to use the ENTIRE quantity UEX
     currently reports, not a portion of it - if that figure is even slightly stale, or
@@ -249,18 +247,9 @@ def stock_headroom_warning(
     ship/budget capped them below the full reported amount, so there's already real
     headroom against exactly this kind of drift, and nothing to warn about. Framed as a
     nudge toward mixed-routes hedging with a second commodity, not a hard error, since a
-    stock-limited route is still the single best option available - it's just fragile.
-
-    has_backup_button is True only for a message that really carries a Backup route button
-    (bot.discord_ui.BackupRouteButton) - then the nudge points at it instead of at a separate
-    command, and never mentions a button the message does not have."""
+    stock-limited route is still the single best option available - it's just fragile."""
     if limited_by != "stock":
         return None
-    if has_backup_button:
-        return (
-            "Uses the entire stock/demand currently on record - if it's lower on arrival, your hold could be "
-            "left half-empty. Press **Backup route** below for a plan B that keeps your commodity"
-        )
     return (
         f"Uses the entire stock/demand currently on record - if it's lower on arrival, "
         f"{mixed_routes_command} can hedge with a second commodity so your hold isn't left half-empty"

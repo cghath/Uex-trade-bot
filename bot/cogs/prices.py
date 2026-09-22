@@ -31,8 +31,6 @@ from bot.uex.supply_demand import (
 from bot.uex.ships import estimate_route_cargo, resolve_ship
 from bot.uex.status import build_status_lookup, resolve_status_label
 from bot.uex.trading import best_buy_locations, best_routes, best_sell_locations
-from bot.discord_ui import add_backup_button
-from bot.uex.backup_routes import BackupContext
 from bot.uex.mixed_routes import build_mixed_routes, find_hedge_cargo, requires_capital_cargo_access
 from bot.uex.multi_stop_routes import (
     MAX_LEGS,
@@ -612,7 +610,6 @@ class Prices(commands.Cog):
                 distance = r.get("distance")
                 score = r.get("score")
 
-                backup_scu: float | None = None  # set when this route's message gets a Backup route button
                 value_lines = [
                     f"Buy {price_origin:.2f} / Sell {price_destination:.2f} (+{per_unit_diff:.2f} aUEC/unit)"
                 ]
@@ -669,12 +666,10 @@ class Prices(commands.Cog):
                     if cargo.run_profit is not None:
                         cargo_line += f" · Run profit: **{cargo.run_profit:,.0f} aUEC** for this haul"
                     value_lines.append(cargo_line)
-                    room = hedge_room(cargo, ship_cargo_scu=ship_cargo_scu)
-                    can_backup = room is not None and origin_id is not None and destination_id is not None
-                    if headroom_note := stock_headroom_warning(cargo.limited_by, has_backup_button=can_backup):
+                    if headroom_note := stock_headroom_warning(cargo.limited_by):
                         value_lines.append(f"⚠️ {headroom_note}")
-                        if can_backup:
-                            backup_scu = cargo.max_scu
+                        room = hedge_room(cargo, ship_cargo_scu=ship_cargo_scu)
+                        if room is not None and origin_id is not None and destination_id is not None:
                             # Additive: a failure fetching/searching the market snapshot must
                             # cost the player the inline Hedge: line, never the route itself -
                             # this command has no global error handler, and every route after
@@ -788,20 +783,6 @@ class Prices(commands.Cog):
                         ],
                     )
                     view = RouteTrackingView(tracking_cog, [trackable_route])
-
-                if backup_scu is not None:
-                    view = add_backup_button(
-                        view, owner_id=interaction.user.id, db=self.bot.db,
-                        context=BackupContext(
-                            origin_terminal_id=origin_id, origin_name=origin,
-                            destination_terminal_id=destination_id, destination_name=dest,
-                            anchor_commodity_id=id_commodity, anchor_name=commodity_display, anchor_scu=backup_scu,
-                            anchor_buy_price=float(price_origin), ship_capacity_scu=ship_cargo_scu,
-                            ship_name=ship_vehicle.get("name") if ship_vehicle else None,
-                            capital_access_only=requires_capital_cargo_access(ship_vehicle) if ship_vehicle else False,
-                            auto_load_only=auto_load_only, system=system_value,
-                        ),
-                    )
 
                 if view is not None:
                     await interaction.followup.send(embed=route_embed, view=view)
