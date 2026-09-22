@@ -1,8 +1,7 @@
 # Patch Notes
 
-What changed for players, newest first. Command names are shown as on the production bot;
-the AI bot uses the same commands with an `ai-` prefix (`/price` -> `/ai-price`). Each entry
-bumps the minor version by one (2.0 is the oldest entry below); the next new entry is 2.10.
+What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
+the oldest entry below); the next new entry is 2.10.
 
 ---
 
