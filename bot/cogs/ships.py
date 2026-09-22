@@ -65,32 +65,6 @@ class Ships(commands.Cog):
         msg = "Default ship cleared." if removed else "You don't have a default ship set."
         await interaction.response.send_message(msg, ephemeral=True)
 
-    @app_commands.command(name="my-ship", description="Show your current default ship.")
-    async def my_ship(self, interaction: discord.Interaction) -> None:
-        ship_name = await self.bot.db.get_default_ship(interaction.user.id)
-        if not ship_name:
-            await interaction.response.send_message("No default ship set. Use /set-default-ship.", ephemeral=True)
-            return
-
-        await interaction.response.defer(ephemeral=True)
-        try:
-            vehicles = await self.bot.uex.get_vehicles()
-            vehicle = resolve_ship(vehicles, ship_name)
-        except UexApiError:
-            vehicle = None
-
-        if vehicle is None:
-            await interaction.followup.send(
-                f"Default ship is set to '{ship_name}', but it couldn't be matched against UEX's current "
-                "ship list (maybe renamed) - try /set-default-ship again.",
-                ephemeral=True,
-            )
-            return
-
-        scu = vehicle.get("scu")
-        scu_text = f"{scu:,.0f} SCU" if scu else "unknown cargo capacity"
-        await interaction.followup.send(f"Default ship: **{vehicle.get('name')}** ({scu_text})", ephemeral=True)
-
 
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(Ships(bot))

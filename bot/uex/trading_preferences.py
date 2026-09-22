@@ -54,19 +54,27 @@ def describe_active_preferences(
     return "Active preferences: " + ", ".join(parts)
 
 
-def format_trading_preferences(prefs: dict[str, object]) -> str:
+def format_trading_preferences(prefs: dict[str, object], *, ship_detail: str | None = None) -> str:
     """Full current-state listing for /my-trading-preferences and /set-trading-preferences'
-    confirmation - every field, not just the active ones describe_active_preferences shows."""
+    confirmation - every field, not just the active ones describe_active_preferences shows.
+
+    ship_detail is an optional, already-resolved string appended to the ship line (e.g. a
+    live cargo-capacity figure, or a "couldn't be matched" staleness note) - this module
+    stays dependency-free/no-I/O per its own docstring, so any live UEX lookup happens in
+    the caller (bot/cogs/trading_preferences.py's /my-trading-preferences, mirroring the
+    former /my-ship's own lookup) and is only ever passed in as plain text, never fetched
+    here."""
     def _yes_no(value: object) -> str:
         return "Yes" if value else "No"
 
     system = prefs.get("preferred_system") or "Any (no restriction)"
     risk = prefs.get("risk_tolerance") or "High (no restriction, default)"
     ship = prefs.get("ship_name") or "None set"
+    ship_line = f"Default ship: **{ship}**" + (f" {ship_detail}" if ship_detail else "")
     budget = prefs.get("budget")
     budget_display = f"{budget:,.0f} aUEC" if budget else "None set"
     return "\n".join([
-        f"Default ship: **{ship}**",
+        ship_line,
         f"Default budget: **{budget_display}** (mixed-routes/multi-stop-route/route-from-multi/route-on-the-way only)",
         f"Space-only terminals: **{_yes_no(prefs.get('space_only'))}** (mixed-routes/multi-stop-route only)",
         f"Capital-ship access required: **{_yes_no(prefs.get('capital_ship_access'))}** (mixed-routes/multi-stop-route only)",
