@@ -2485,6 +2485,44 @@ they're in sync).
     "did this take something I meant to keep with it" check - a clean auto-merge is not
     evidence the file's end state is what was intended, only that git found no textual
     overlap to flag.
+72. **The reactive hedge the user actually wanted (entry 71's own closing note) lives on the
+    SELL side, and reuses find_backup_routes' other_destination case with a deliberate
+    origin=destination trick.** `_suggest_shortfall_hedge` (entry 66) only ever fired for a
+    BUY-side shortfall, filling cargo space that just opened up at the SAME origin/destination
+    pair via `find_hedge_cargo`. The new `_suggest_sell_shortfall_reroute`
+    (`bot/cogs/route_progression.py`) fires for a SELL-side shortfall instead: the player is
+    left physically holding the unsold remainder, so the question is "where else can I sell
+    this," not "what else can fill my hold." Reuses
+    `bot.uex.backup_routes.find_backup_routes` - the same search kept unchanged through
+    entry 71's removal specifically for this - called with the CURRENT terminal passed as
+    BOTH `origin_terminal_id` and `destination_terminal_id`. That is not an approximation of
+    the real inputs, it is load-bearing: `find_backup_routes`' `anchor_destinations` already
+    excludes `terminal_id == origin_terminal_id`, so passing the same terminal for both
+    correctly rules out "sell the rest right back here" as its own candidate, and its
+    `baseline`/`fuller_hold` both come back unpriced (there is no "continue as planned" once
+    a shortfall already happened) - which in turn means `_clearly_better` compares any
+    candidate against a `0` reference, so any profitable reroute qualifies rather than
+    needing to clear `MIN_DETOUR_GAIN_PCT` over a real baseline. `ship_capacity_scu` is
+    deliberately capped to exactly the shortfall amount (not the player's real ship), which
+    has the side effect of zeroing `fuller_hold`'s and `without_anchor`'s search space too -
+    exactly right, since only `other_destination` is shown (a design choice, not a
+    limitation: `without_anchor` reads as "abandon this cargo," which is not actionable for a
+    player who already owns it and needs to do something with it). `anchor_buy_price` comes
+    from the paired BUY leg's `actual_price` if reported, else its `quoted_price` - read fresh
+    from `route_progression_legs`, same pattern as `_suggest_shortfall_hedge`'s own
+    `paired_sell` lookup. Deliberately NOT tracked with a button or a `route_progression_hedges`
+    row, unlike the buy-side hedge: that table's confirmation flow piggybacks onto the anchor
+    route's own NEXT leg, and a sell-side reroute has no such next leg to attach a
+    confirmation to - the tracked route already ends at (or continues past) this shortfall.
+    Plain suggestion only, matching `_suggest_shortfall_hedge`'s own best-effort/non-critical-
+    path guarantee (wrapped in try/except, logged not raised, never touches leg persistence,
+    market update, suppression, or next-leg advance). Same session, also fixed: both
+    shortfall-hedge paths now say so explicitly when no complementary commodity/buyer is
+    found, instead of silently sending nothing - a player who just reported a shortfall
+    deserves to know the search ran and came up empty, not to wonder if the report registered.
+    This closes the gap entry 71 identified: the button (removed) answered "what should I do
+    with my ship's spare capacity" pre-trip; this answers "I'm stuck holding cargo, help me
+    sell it," which is what the user described as their original intent for backups/hedges.
 
 ## Where to look for what
 

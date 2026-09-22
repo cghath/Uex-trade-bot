@@ -2606,7 +2606,7 @@ def test_handle_leg_outcome_a_buy_side_shortfall_suggests_a_hedge_in_the_thread(
     asyncio.run(run())
 
 
-def test_handle_leg_outcome_no_hedge_available_only_sends_the_next_leg_prompt(tmp_path):
+def test_handle_leg_outcome_no_hedge_available_says_so_and_sends_the_next_leg_prompt(tmp_path):
     async def run():
         db = _make_db(tmp_path)
         await db.init()
@@ -2624,26 +2624,28 @@ def test_handle_leg_outcome_no_hedge_available_only_sends_the_next_leg_prompt(tm
 
         await cog.handle_leg_outcome(channel, 1, 0, leg0, outcome="missing")
 
-        assert channel.send.await_count == 1, "no complementary commodity exists - only the leg-2 prompt should post"
+        assert channel.send.await_count == 2, "expected the 'nothing found' message plus the leg-2 prompt"
+        no_hedge_message = channel.send.call_args_list[0].args[0]
+        assert "nothing else" in no_hedge_message, no_hedge_message
 
     asyncio.run(run())
 
 
-def test_handle_leg_outcome_a_sell_side_shortfall_does_not_suggest_a_hedge(tmp_path):
-    """A sell-side shortfall means demand ran short, not stock - the player still has
-    unsold cargo, a different problem (find another buyer) than 'cargo space opened up',
-    so this must stay silent even with a real complementary commodity available. Uses a
-    3-leg thread so the tested (sell) leg isn't the LAST one - reporting the final leg
-    would complete and archive the thread, which _FakeThreadChannel doesn't support."""
+def test_handle_leg_outcome_a_sell_side_shortfall_suggests_a_different_destination(tmp_path):
+    """The tracking-thread counterpart to find_backup_routes' own other_destination case:
+    a 'missing' report on a sell leg means the player is left holding unsold cargo, so
+    this should suggest a different terminal that still buys it. Uses a 3-leg thread so
+    the tested (sell) leg isn't the LAST one - reporting the final leg would complete and
+    archive the thread, which _FakeThreadChannel doesn't support."""
     async def run():
         db = _make_db(tmp_path)
         await db.init()
         await _seed_market_row(db)
         await db.record_terminal_market_snapshot([
-            {"id_commodity": 2, "id_terminal": 10, "commodity_name": "Cobalt", "terminal_name": "Area18 TDD",
-             "price_buy": 20, "price_sell": 0, "scu_buy": 95, "scu_sell": 0, "status_buy": 1, "status_sell": None},
-            {"id_commodity": 2, "id_terminal": 20, "commodity_name": "Cobalt", "terminal_name": "Elsewhere",
-             "price_buy": 0, "price_sell": 50, "scu_buy": 0, "scu_sell": 80, "status_buy": None, "status_sell": 1},
+            {"id_commodity": 1, "id_terminal": 20, "commodity_name": "Gold", "terminal_name": "Elsewhere",
+             "price_buy": 0, "price_sell": 0, "scu_buy": 0, "scu_sell": 0, "status_buy": None, "status_sell": 7},
+            {"id_commodity": 1, "id_terminal": 30, "commodity_name": "Gold", "terminal_name": "Port Olisar",
+             "price_buy": 0, "price_sell": 150, "scu_buy": 0, "scu_sell": 60, "status_buy": None, "status_sell": 1},
         ])
         leg0 = _leg_input(id_terminal=10, id_commodity=1, quoted_price=100.0, quoted_scu=50.0, quoted_status=3)
         leg1 = _leg_input(
@@ -2663,7 +2665,39 @@ def test_handle_leg_outcome_a_sell_side_shortfall_does_not_suggest_a_hedge(tmp_p
 
         await cog.handle_leg_outcome(channel, 1, 1, leg1, outcome="missing")
 
-        assert channel.send.await_count == 1, "expected only leg 3's prompt, no hedge suggestion"
+        assert channel.send.await_count == 2, "expected the reroute suggestion plus leg 3's prompt"
+        reroute_message = channel.send.call_args_list[0].args[0]
+        assert "Port Olisar" in reroute_message, reroute_message
+
+    asyncio.run(run())
+
+
+def test_handle_leg_outcome_a_sell_side_shortfall_with_no_other_buyer_says_so(tmp_path):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await _seed_market_row(db)
+        leg0 = _leg_input(id_terminal=10, id_commodity=1, quoted_price=100.0, quoted_scu=50.0, quoted_status=3)
+        leg1 = _leg_input(
+            side="sell", id_terminal=20, id_commodity=1, terminal_name="Elsewhere",
+            display_label="Sell Gold at Elsewhere", quoted_price=90.0, quoted_scu=40.0, quoted_status=2,
+        )
+        leg2 = _leg_input(
+            side="buy", id_terminal=30, id_commodity=3, terminal_name="Third Stop",
+            commodity_name="Iron", display_label="Buy Iron at Third Stop",
+            quoted_price=10.0, quoted_scu=20.0, quoted_status=3,
+        )
+        await _create_thread_for_legs(db, 1, [leg0, leg1, leg2])
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db})()
+        cog._active_legs = {1: [leg0, leg1, leg2]}
+        channel = _fake_thread_channel()
+
+        await cog.handle_leg_outcome(channel, 1, 1, leg1, outcome="missing")
+
+        assert channel.send.await_count == 2, "expected the 'no better buyer' message plus leg 3's prompt"
+        no_reroute_message = channel.send.call_args_list[0].args[0]
+        assert "no better" in no_reroute_message, no_reroute_message
 
     asyncio.run(run())
 

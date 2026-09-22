@@ -22,6 +22,7 @@ import logging
 import discord
 from discord.ext import commands, tasks
 
+from bot.uex.backup_routes import find_backup_routes
 from bot.uex.mixed_routes import find_hedge_cargo
 from bot.uex.route_presentation import cargo_item_line
 from bot.uex.route_progression import (
@@ -919,7 +920,13 @@ class RouteProgression(commands.Cog):
         table's schema comment) and attaching a HedgeReportView lets the player confirm
         what actually happened, feeding real data back the same way a tracked leg does -
         capping it at one suggestion keeps that trackable via a single button instead of
-        needing a button per commodity."""
+        needing a button per commodity.
+
+        Says so explicitly when no complementary commodity exists, rather than staying
+        silent - a prior version returned with nothing sent, which read identically to
+        "nothing happened" whether the search genuinely found nothing or silently failed;
+        a player who just reported a shortfall deserves to know the space was considered
+        and nothing usable was found for it, not to wonder if the report registered."""
         if shortfall_scu <= 0 or not isinstance(channel, discord.Thread):
             return
         try:
@@ -941,6 +948,10 @@ class RouteProgression(commands.Cog):
                 max_commodities=1,
             )
             if not hedge:
+                await channel.send(
+                    f"That shortfall left ~{shortfall_scu:,.0f} SCU of cargo space unused - nothing else "
+                    f"trades between **{leg.terminal_name}** and your destination right now."
+                )
                 return
             item = hedge[0]
             hedge_id = await self.bot.db.create_route_progression_hedge(
@@ -962,6 +973,78 @@ class RouteProgression(commands.Cog):
         except Exception:
             logger.info(
                 "Shortfall-hedge suggestion failed for thread %s (non-critical, leg outcome already recorded)",
+                thread_id, exc_info=True,
+            )
+
+    async def _suggest_sell_shortfall_reroute(
+        self, channel: discord.abc.MessageableChannel, thread_id: int, leg_index: int,
+        leg: RouteLegInput, shortfall_scu: float,
+    ) -> None:
+        """Best-effort only - same non-critical-path guarantee as _suggest_shortfall_hedge.
+
+        A sell-side shortfall means demand at THIS terminal ran short, so the player is left
+        physically holding shortfall_scu of unsold cargo. Answers "where else can I sell this"
+        by reusing bot.uex.backup_routes.find_backup_routes' other_destination search, with
+        the CURRENT terminal passed as both origin_terminal_id and destination_terminal_id:
+        origin because that is where the held cargo would travel from, and destination because
+        passing the same terminal for both makes find_backup_routes' own origin-exclusion
+        (anchor_destinations never includes origin_terminal_id) correctly rule out "sell the
+        rest right back here" as a candidate, while its baseline naturally prices as
+        unavailable - there is no "continue as planned" once the shortfall already happened,
+        so any profitable reroute qualifies rather than needing to clear MIN_DETOUR_GAIN_PCT
+        over a real baseline (see find_backup_routes' own _clearly_better).
+
+        ship_capacity_scu is deliberately capped to exactly shortfall_scu, not the player's
+        real ship - the player is standing at a sell location holding a fixed amount of cargo,
+        not shopping for fillers, so there is no real "capacity" question here beyond what
+        they are already holding; this also means fuller_hold and without_anchor come back
+        empty by construction (zero room and zero origin stock respectively), which is exactly
+        right for this use - only other_destination is ever shown.
+
+        Unlike the buy-side hedge, this is a plain suggestion, never tracked with a button or
+        a route_progression_hedges row: that table's confirmation flow piggybacks onto the
+        anchor route's own NEXT leg, and a sell-side reroute has no such next leg to attach a
+        confirmation to - the tracked route already ends at (or continues past) this shortfall."""
+        if shortfall_scu <= 0 or not isinstance(channel, discord.Thread):
+            return
+        try:
+            legs = await self.bot.db.get_route_progression_legs(thread_id)
+            paired_buy = next(
+                (row for row in legs if row["side"] == "buy" and row["id_commodity"] == leg.id_commodity), None,
+            )
+            if paired_buy is None:
+                return
+            buy_price = (
+                paired_buy["actual_price"] if paired_buy["actual_price"] is not None else paired_buy["quoted_price"]
+            )
+            if not buy_price:
+                return
+            market_rows = await self.bot.db.get_mixed_route_market_rows()
+            result = find_backup_routes(
+                market_rows,
+                origin_terminal_id=leg.id_terminal, destination_terminal_id=leg.id_terminal,
+                anchor_commodity_id=leg.id_commodity, anchor_scu=shortfall_scu, anchor_buy_price=float(buy_price),
+                ship_capacity_scu=shortfall_scu,
+            )
+            if result.other_destination is None:
+                await channel.send(
+                    f"That left ~{shortfall_scu:,.0f} SCU of **{leg.commodity_name}** unsold - no better "
+                    f"buyer was found from **{leg.terminal_name}** right now."
+                )
+                return
+            load = result.other_destination
+            item = load.cargo[0]
+            unsold_note = (
+                f" (only {item.quantity_scu:,.0f} of the {shortfall_scu:,.0f} SCU you're holding - the rest "
+                f"still won't sell there)" if load.anchor_unsold_scu > 0 else ""
+            )
+            await channel.send(
+                f"That left ~{shortfall_scu:,.0f} SCU of **{leg.commodity_name}** unsold - "
+                f"**{load.destination_name}** buys it{unsold_note}:\n{cargo_item_line(item)}"
+            )
+        except Exception:
+            logger.info(
+                "Sell-shortfall reroute suggestion failed for thread %s (non-critical, leg outcome already recorded)",
                 thread_id, exc_info=True,
             )
 
@@ -1189,12 +1272,16 @@ class RouteProgression(commands.Cog):
         # Additive only, never on the critical path above (leg persistence, market update,
         # suppression already committed by this point) - gated on market_update_already_applied
         # the same way suppression is, so a replay of an already-recorded report doesn't post a
-        # duplicate suggestion. Only a buy-side shortfall gets one: a sell-side "less"/"missing"
-        # means demand ran short, not stock - the player still has unsold cargo, which is a
-        # different problem (find another buyer) than "cargo space just opened up."
-        if not market_update_already_applied and leg.side == "buy" and outcome in ("missing", "less"):
+        # duplicate suggestion. A buy-side shortfall means cargo space opened up (fill it, same
+        # origin/destination pair - _suggest_shortfall_hedge); a sell-side shortfall means
+        # demand ran short, so the player is left holding unsold cargo (find it a different
+        # buyer - _suggest_sell_shortfall_reroute). Different problems, different searches.
+        if not market_update_already_applied and outcome in ("missing", "less"):
             shortfall_scu = (leg.quoted_scu or 0) - (actual_scu or 0)
-            await self._suggest_shortfall_hedge(channel, thread_id, leg_index, leg, shortfall_scu)
+            if leg.side == "buy":
+                await self._suggest_shortfall_hedge(channel, thread_id, leg_index, leg, shortfall_scu)
+            else:
+                await self._suggest_sell_shortfall_reroute(channel, thread_id, leg_index, leg, shortfall_scu)
 
         thread_row = await self.bot.db.get_route_progression_thread(thread_id)
         if thread_row is None:

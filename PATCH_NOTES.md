@@ -5,6 +5,17 @@ the AI bot uses the same commands with an `ai-` prefix (`/price` -> `/ai-price`)
 
 ---
 
+## 2026-09-22 - Reroute suggestions when a sale falls short
+
+**Changed**
+- Route tracking threads - After you report a sell-side shortfall (the destination bought less than quoted), the
+  thread now suggests a different terminal that still buys the unsold remainder, if one exists nearby. If none does,
+  it says so instead of staying quiet. The existing buy-side hedge (suggesting a commodity to fill leftover cargo
+  space) now also says so explicitly when nothing trades between your two terminals, instead of silently doing
+  nothing.
+
+---
+
 ## 2026-09-21 - Stock warnings and hedges on route lists
 
 **Changed**
