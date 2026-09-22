@@ -11,8 +11,8 @@ import math
 import random
 
 from bot.uex.backup_routes import (
-    BASELINE_NO_DATA, BASELINE_NO_DEMAND, BASELINE_OK, MIN_DETOUR_GAIN_PCT, BackupContext, build_backup_message,
-    find_backup_routes,
+    BASELINE_NO_DATA, BASELINE_NO_DEMAND, BASELINE_OK, MIN_DETOUR_GAIN_PCT, BackupContext, _profit_comparison,
+    build_backup_message, find_backup_routes,
 )
 
 O, D, E, F = 10, 20, 30, 40
@@ -246,3 +246,63 @@ def test_with_nothing_better_the_message_says_so_and_names_the_original_destinat
     message = build_backup_message(_find(_neon(e_price=None)), _context())
     assert message.sections == ()
     assert "Nothing I can find beats your current plan - continue to **Original Dest** as planned." == message.description
+
+
+# -- _profit_comparison: a negative/zero reference must never be run through a percentage ------
+# division, which inverts or explodes the sign into garbled text like "+-215%" (a confirmed
+# real case: enough of what the player holds goes unsold at the original destination that
+# continuing as planned is itself a loss - see BackupLoad.anchor_unsold_scu).
+
+def test_profit_comparison_with_a_positive_reference_shows_a_normal_percentage():
+    text = _profit_comparison(150, 100, "carrying it alone")
+    assert "+50" in text and "+50%" in text and "carrying it alone" in text and "100" in text
+
+
+def test_profit_comparison_never_produces_a_double_signed_percentage():
+    for candidate in (-500, -50, 0, 50, 500):
+        for reference in (-500, -100, -1, 0, 1, 100, 500):
+            text = _profit_comparison(candidate, reference, "the reference")
+            assert "+-" not in text and "-+" not in text, (candidate, reference, text)
+
+
+def test_profit_comparison_with_a_negative_reference_and_a_profitable_candidate_says_it_turns_the_loss_around():
+    text = _profit_comparison(480, -1890, "carrying Neon alone")
+    assert "turns a 1,890 aUEC loss" in text and "480 profit" in text and "%" not in text
+
+
+def test_profit_comparison_with_two_losses_says_how_much_of_the_loss_is_avoided():
+    text = _profit_comparison(-200, -1890, "carrying Neon alone")
+    assert "avoids 1,690 aUEC of the loss" in text and "loses 1,890" in text and "%" not in text
+
+
+def test_profit_comparison_with_a_break_even_reference_says_so_without_a_percentage():
+    text = _profit_comparison(300, 0, "carrying Neon alone")
+    assert "breaks even" in text and "%" not in text and "+300" in text
+
+
+def test_a_loss_making_original_route_is_described_in_aUEC_not_a_garbled_percentage():
+    """2 of the 21 SCU of held Neon sell at Original Dest, the rest is stranded - a real
+    negative baseline_profit, reachable through find_backup_routes itself, not a synthetic
+    _profit_comparison call."""
+    rows = _neon(d_price=105, d_demand=2) + _cobalt_at_d()
+    result = _find(rows)
+    assert result.baseline_profit is not None and result.baseline_profit < 0
+    assert result.fuller_hold is not None and result.fuller_hold.profit > 0
+
+    message = build_backup_message(result, _context())
+    text = " ".join(line for _, lines in message.sections for line in lines)
+    assert "+-" not in text
+    assert "turns a 1,890 aUEC loss" in text
+
+
+def test_a_baseline_of_exactly_zero_still_gets_a_comparison_line_not_a_silently_dropped_one():
+    """baseline == 0.0 is falsy in Python but is real, known information - the message must
+    still compare against it (as 'breaks even'), not silently omit the line the way a bare
+    truthy check would (the same class of bug as the negative-reference garbling above)."""
+    rows = _neon(d_price=210, d_demand=10) + _cobalt_at_d()
+    result = _find(rows)
+    assert result.baseline_profit == 0.0
+
+    message = build_backup_message(result, _context())
+    text = " ".join(line for _, lines in message.sections for line in lines)
+    assert "breaks even" in text

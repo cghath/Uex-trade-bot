@@ -234,4 +234,3 @@ def add_backup_button(
         view = discord.ui.View(timeout=BACKUP_VIEW_TIMEOUT_SECONDS)
     view.add_item(BackupRouteButton(owner_id=owner_id, db=db, context=context))
     return view
-

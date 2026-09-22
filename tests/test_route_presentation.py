@@ -306,4 +306,3 @@ def test_hedge_room_ignores_a_sliver_of_budget_left_by_rounding_on_a_budget_limi
     )
     assert cargo.limited_by == "budget" and cargo.investment < 100.004
     assert hedge_room(cargo, ship_cargo_scu=1000, budget=100.004) is None
-

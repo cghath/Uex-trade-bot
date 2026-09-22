@@ -28,14 +28,25 @@ async def _seed_terminals(db: Database) -> None:
 
 
 class _FakeResponse:
+    """deferred/send_message raise on a second call, matching real discord.py's
+    InteractionResponded - so a caller that defers twice (e.g. a command that deferred
+    itself but forgot already_deferred=True calling _send_ranked_routes) fails loudly
+    instead of silently passing."""
+
     def __init__(self):
         self.messages = []
+        self.deferred = False
 
     async def defer(self, **kwargs):
-        pass
+        if self.deferred:
+            raise RuntimeError("interaction already responded to (double defer)")
+        self.deferred = True
 
     async def send_message(self, *args, **kwargs):
+        if self.deferred:
+            raise RuntimeError("interaction already responded to")
         self.messages.append((args, kwargs))
+        self.deferred = True
 
 
 class _FakeFollowup:
@@ -70,6 +81,48 @@ def _make_cog(bot) -> Trends:
     return cog
 
 
+def test_route_on_the_way_defers_before_the_terminal_lookup(tmp_path):
+    """A slow resolve_terminal_id_by_name must not risk Discord's ~3s initial-response
+    deadline - the command has to acknowledge the interaction first."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await _seed_terminals(db)
+        client = UexClient(app_token="test", base_url="https://uex.test")
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json={"status": "ok", "data": []})
+        ))
+
+        bot = type("FakeBot", (), {})()
+        bot.db = db
+        bot.uex = client
+        bot.get_cog = lambda name: None
+        cog = _make_cog(bot)
+        cog._top_scored_routes_lock = asyncio.Lock()
+        cog._top_scored_routes = []
+        cog._top_scored_routes_updated_at = None
+        interaction = _FakeInteraction(1)
+
+        real_resolve = db.resolve_terminal_id_by_name
+        seen_deferred = []
+
+        async def spying_resolve(name):
+            seen_deferred.append(interaction.response.deferred)
+            return await real_resolve(name)
+
+        db.resolve_terminal_id_by_name = spying_resolve
+
+        try:
+            await cog.route_on_the_way.callback(cog, interaction, origin="Area18", destination="Port Tressler")
+        finally:
+            await client.aclose()
+
+        assert seen_deferred == [True, True], "the interaction must already be deferred by the time the DB is queried"
+
+    asyncio.run(run())
+
+
 def test_route_on_the_way_reports_when_the_origin_cannot_be_resolved(tmp_path):
     async def run():
         db = _make_db(tmp_path)
@@ -94,9 +147,9 @@ def test_route_on_the_way_reports_when_the_origin_cannot_be_resolved(tmp_path):
         finally:
             await client.aclose()
 
-        assert interaction.response.messages, "expected an immediate response"
-        assert "couldn't find" in interaction.response.messages[0][0][0].lower()
-        assert not interaction.followup.sent
+        assert not interaction.response.messages, "must defer, not respond directly"
+        assert len(interaction.followup.sent) == 1, "must not proceed to ranking a location it couldn't resolve"
+        assert "couldn't find" in interaction.followup.sent[0][0][0].lower()
 
     asyncio.run(run())
 
@@ -126,9 +179,9 @@ def test_route_on_the_way_reports_when_the_destination_cannot_be_resolved(tmp_pa
         finally:
             await client.aclose()
 
-        assert interaction.response.messages, "expected an immediate response"
-        assert "couldn't find" in interaction.response.messages[0][0][0].lower()
-        assert not interaction.followup.sent
+        assert not interaction.response.messages, "must defer, not respond directly"
+        assert len(interaction.followup.sent) == 1, "must not proceed to ranking a location it couldn't resolve"
+        assert "couldn't find" in interaction.followup.sent[0][0][0].lower()
 
     asyncio.run(run())
 
@@ -156,8 +209,9 @@ def test_route_on_the_way_rejects_the_same_terminal_for_both(tmp_path):
         finally:
             await client.aclose()
 
-        assert "same terminal" in interaction.response.messages[0][0][0].lower()
-        assert not interaction.followup.sent
+        assert not interaction.response.messages, "must defer, not respond directly"
+        assert len(interaction.followup.sent) == 1
+        assert "same terminal" in interaction.followup.sent[0][0][0].lower()
 
     asyncio.run(run())
 
@@ -192,9 +246,9 @@ def test_route_on_the_way_reports_when_no_route_matches_both_ends(tmp_path):
         finally:
             await client.aclose()
 
-        assert interaction.response.messages, "expected an immediate response"
-        assert "no profitable routes" in interaction.response.messages[0][0][0].lower()
-        assert not interaction.followup.sent
+        assert not interaction.response.messages, "must defer, not respond directly"
+        assert len(interaction.followup.sent) == 1
+        assert "no profitable routes" in interaction.followup.sent[0][0][0].lower()
 
     asyncio.run(run())
 
@@ -369,7 +423,8 @@ def test_route_on_the_way_direction_matters(tmp_path):
         finally:
             await client.aclose()
 
-        assert "no profitable routes" in interaction.response.messages[0][0][0].lower()
-        assert not interaction.followup.sent
+        assert not interaction.response.messages, "must defer, not respond directly"
+        assert len(interaction.followup.sent) == 1
+        assert "no profitable routes" in interaction.followup.sent[0][0][0].lower()
 
     asyncio.run(run())

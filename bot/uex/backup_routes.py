@@ -355,6 +355,25 @@ def _gain_pct(profit: float, reference: float) -> float:
     return (profit - reference) / reference * 100
 
 
+def _profit_comparison(candidate_profit: float, reference_profit: float, subject: str) -> str:
+    """One line comparing candidate_profit against reference_profit, phrased against `subject`
+    (e.g. "carrying Neon alone", "the same trip to Levski"). A percentage only means something
+    when the reference is a real positive profit to measure a gain against - dividing by a
+    reference that is zero or negative inverts or explodes the sign of _gain_pct (garbled text
+    like "+-215%"), and this codebase's own held-anchor accounting makes a negative reference a
+    real, reachable case: enough of what the player holds can go unsold at the original
+    destination that continuing as planned is itself a loss (see BackupLoad.anchor_unsold_scu).
+    A non-positive reference is described in plain aUEC terms instead of a percentage."""
+    diff = candidate_profit - reference_profit
+    if reference_profit > 0:
+        return f"{diff:+,.0f} profit ({_gain_pct(candidate_profit, reference_profit):+.0f}%) vs {subject} ({reference_profit:,.0f})"
+    if reference_profit == 0:
+        return f"{diff:+,.0f} profit vs {subject}, which breaks even"
+    if candidate_profit > 0:
+        return f"turns a {abs(reference_profit):,.0f} aUEC loss on {subject} into {candidate_profit:,.0f} profit"
+    return f"avoids {diff:,.0f} aUEC of the loss vs {subject} (which loses {abs(reference_profit):,.0f})"
+
+
 def _system_of(load: BackupLoad, side: str) -> object:
     item = load.cargo[0]
     return (item.source if side == "origin" else item.destination).get("star_system_name")
@@ -381,9 +400,8 @@ def build_backup_message(result: BackupResult, context: BackupContext) -> Backup
         load = result.fuller_hold
         lines = [f"Sell at **{context.destination_name}** as planned and fill the spare space:"]
         lines += _load_lines(load, context.anchor_commodity_id)
-        if baseline:
-            lines.append(f"+{load.profit - baseline:,.0f} profit (+{_gain_pct(load.profit, baseline):.0f}%) "
-                         f"over carrying {anchor} alone ({baseline:,.0f})")
+        if baseline is not None:
+            lines.append(_profit_comparison(load.profit, baseline, f"carrying {anchor} alone"))
         sections.append(("Same trip, fuller hold", tuple(lines)))
 
     if result.other_destination is not None:
@@ -391,9 +409,8 @@ def build_backup_message(result: BackupResult, context: BackupContext) -> Backup
         reference = result.fuller_hold.profit if result.fuller_hold is not None else baseline
         lines = [f"Keep your {anchor} and sell it at **{load.destination_name}** instead:"]
         lines += _load_lines(load, context.anchor_commodity_id)
-        if reference:
-            lines.append(f"{_gain_pct(load.profit, reference):+.0f}% vs the same trip to {context.destination_name} "
-                         f"({reference:,.0f})")
+        if reference is not None:
+            lines.append(_profit_comparison(load.profit, reference, f"the same trip to {context.destination_name}"))
         elif problem:
             lines.append(f"Your original route couldn't be priced: {problem}.")
         if load.anchor_unsold_scu > 0:
@@ -409,7 +426,7 @@ def build_backup_message(result: BackupResult, context: BackupContext) -> Backup
         lines = [f"The best load from **{context.origin_name}** without it, selling at **{load.destination_name}**:"]
         lines += _load_lines(load, context.anchor_commodity_id)
         if keeping:
-            lines.append(f"{_gain_pct(load.profit, keeping):+.0f}% vs the best option that keeps {anchor}")
+            lines.append(_profit_comparison(load.profit, keeping, f"the best option that keeps {anchor}"))
         elif problem:
             lines.append(f"Your original route couldn't be priced: {problem}.")
         if note := travel_warning(_system_of(load, "origin"), _system_of(load, "destination"), has_real_distance=False):
