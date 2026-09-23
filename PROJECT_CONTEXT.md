@@ -2713,6 +2713,32 @@ they're in sync).
     split for any future feature that displays a UEX terminal name is still worth it - it's
     the DISPLAY LAYOUT choice that needed two more tries, not the data underneath it.
 
+80. **Most of the `/items` catalog isn't actually sold anywhere - an autocomplete built
+    straight off it suggests dead ends most of the time.** Live testing flagged
+    `/ingame-item-finder`'s `item` autocomplete as feeling "pointlessly bloated," showing
+    names a player couldn't actually pick and buy. Confirmed empirically before designing a
+    fix (same "verify against real data" rule as entry 79 and the scanner table above): of
+    7,769 distinct catalogued item names, only 2,829 ever appear in UEX's own
+    `/items_prices_all` - the rest (cosmetics, ship paint, and similar) have zero real shop
+    listings, so autocompleting them just guaranteed a "No shop currently lists X for sale"
+    reply the instant one was picked. `/items_prices_all` itself was a new discovery this
+    session - unlike `/items_prices` (requires `id_item`/`id_terminal`/`id_category` filters,
+    one call per item), it returns every item-price row across every terminal unfiltered in
+    one call, documented 12h Cache TTL matching UEX's own hourly update cadence. New
+    `UexClient.get_items_prices_all()` backs a new `sold_item_name_autocomplete`
+    (`bot/cogs/item_finder.py`), scoped to items with at least one real price row.
+    Deliberately does NOT fall back to the full catalog the way Marketplace's
+    `traded_item_autocomplete` does (`bot/cogs/marketplace.py`) - that fallback exists for a
+    documented reason (a gap in the BOT's OWN activity-tracking table, not the item's real
+    availability), and that reasoning doesn't transfer here: an item missing from
+    `/items_prices_all` means it's genuinely not sold anywhere right now, so surfacing it
+    would just reintroduce the exact dead-end complaint being fixed. Generalizes past this
+    one command: when an autocomplete or suggestion list is built from a full reference
+    catalog, check whether every catalogued entry is actually a valid choice for what the
+    command does - a catalog can be a superset of "real options" for reasons (cosmetics,
+    unreleased items, discontinued items) that have nothing to do with gaps in the bot's own
+    data collection.
+
 ## Where to look for what
 
 Six docs, deliberately scoped so they don't duplicate each other:
