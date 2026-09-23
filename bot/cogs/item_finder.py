@@ -43,7 +43,10 @@ async def sold_item_name_autocomplete(interaction: discord.Interaction, current:
     this deliberately does NOT fall back to the full catalog - an item genuinely absent
     from a real shop-price pull should stay unreachable from here, not resurface as a
     dead-end suggestion."""
-    rows = await interaction.client.uex.get_items_prices_all()
+    try:
+        rows = await interaction.client.uex.get_items_prices_all()
+    except UexApiError:
+        return []
     current_lower = current.lower()
     seen: set[str] = set()
     matches: list[str] = []
