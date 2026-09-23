@@ -7,6 +7,7 @@ from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock
 
 from bot.cogs.item_finder import ItemFinder, MAX_RESULTS_SHOWN, sold_item_name_autocomplete
+from bot.uex.exceptions import UexApiError
 from bot.uex.item_finder import ItemListing, format_item_listing_line, rank_item_listings, split_place_and_vendor
 
 
@@ -260,6 +261,17 @@ def test_sold_item_name_autocomplete_caps_at_discords_25_choice_limit():
         assert len(choices) == 25
 
     asyncio.run(run())
+
+
+def test_sold_item_name_autocomplete_returns_no_suggestions_on_a_uex_failure():
+    """A cold cache or UEX outage during get_items_prices_all() must degrade to an empty
+    suggestion list, matching ship_name_autocomplete's (bot/cogs/ships.py) established
+    pattern - not an uncaught exception, found missing by an outside audit."""
+    async def run():
+        interaction = NS(client=NS(uex=NS(get_items_prices_all=AsyncMock(side_effect=UexApiError("down")))))
+        return await sold_item_name_autocomplete(interaction, "arc")
+
+    assert asyncio.run(run()) == []
 
 
 # -- /ingame-item-finder command end to end ----------------------------------------------
