@@ -1,7 +1,16 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.10.
+the oldest entry below); the next new entry is 2.11.
+
+---
+
+## 2.10 - 2026-09-23 - In-game Item Finder
+
+**New**
+- `/ingame-item-finder` - Find every shop currently selling a weapon, armor, ammo, or other in-game item,
+  closest to a location you pick first. Each result shows where it is and its price. Shows up to 15 shops;
+  the footer says how many more exist if there are extras.
 
 ---
 
