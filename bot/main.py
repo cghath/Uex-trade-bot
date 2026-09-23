@@ -46,6 +46,7 @@ INITIAL_COGS = (
     "bot.cogs.mining_locations",
     "bot.cogs.blueprints",
     "bot.cogs.item_finder",
+    "bot.cogs.ship_parts_finder",
 )
 
 

@@ -180,3 +180,42 @@ class WikiApiClient:
         if not isinstance(detail, dict) or detail.get("uuid") != ore_uuid:
             raise WikiApiError("commodity detail identity mismatch")
         return detail
+
+    async def get_vehicle_ports(self, vehicle_name: str) -> list[dict[str, Any]]:
+        """One ship's hardpoint/component slots ("ports": type, size range, default
+        equipped item), for the Ship Parts Finder - UEX has no equivalent data (its own
+        `id_vehicle` FK on `/items` is populated almost exclusively for cosmetic Liveries,
+        confirmed empirically against live catalog data, not functional components).
+
+        `filter[name]` on this API matches by substring, not exact name (a query of
+        "Avenger" returns every Avenger variant) - so this only accepts an exact,
+        case-insensitive `name` match against the results and returns [] otherwise. Callers
+        must pass an already-resolved canonical ship name (e.g. via
+        `bot/uex/ships.py: resolve_ship` against UEX's own vehicle list) rather than a raw
+        user query, the same "resolve to exactly one candidate first" convention every other
+        name-matching helper in this codebase follows.
+        """
+        body = await self._get_json("/vehicles", {"filter[name]": vehicle_name, "page[size]": 10})
+        rows = self._rows(body, "/vehicles")
+        target = vehicle_name.strip().lower()
+        exact = [row for row in rows if (row.get("name") or "").strip().lower() == target]
+        if len(exact) != 1:
+            return []
+        ports = exact[0].get("ports")
+        return ports if isinstance(ports, list) else []
+
+    async def get_item_detail(self, item_uuid: str) -> dict[str, Any]:
+        """One component's real stats (e.g. `power_plant.power_segment_generation`) plus
+        its UEX-sourced price/terminal listings (`uex_prices.purchase`), by Star Citizen
+        UUID - verified live that `uex_prices.purchase[].terminal_id` is the exact same id
+        UEX's own `/terminals` uses (3/3 real terminals cross-checked by id and name), not
+        an independently-scraped copy. Component hardware prices change far less often than
+        commodity market prices, so this embedded copy is used as the price/stats source
+        directly rather than a separate live UEX lookup per candidate item."""
+        if not _UUID_RE.fullmatch(item_uuid or ""):
+            raise WikiApiError(f"not an item uuid: {item_uuid!r}")
+        body = await self._get_json(f"/items/{item_uuid}")
+        detail = body.get("data")
+        if not isinstance(detail, dict) or detail.get("uuid") != item_uuid:
+            raise WikiApiError("item detail identity mismatch")
+        return detail

@@ -245,3 +245,56 @@ def test_blueprint_detail_accepts_a_bare_object_and_rejects_other_shapes():
     h2 = _Harness(lambda req, n: httpx.Response(200, json={"data": [1]}))
     with pytest.raises(WikiApiError):
         h2.run(lambda c: c.get_blueprint_detail(UUID))
+
+
+# -- get_vehicle_ports --------------------------------------------------------------------------
+
+def _vehicle(name: str, ports: list) -> dict:
+    return {"uuid": f"v-{name}", "name": name, "ports": ports}
+
+
+def test_vehicle_ports_returns_the_exact_case_insensitive_name_match_only():
+    rows = [_vehicle("Avenger Stalker", [{"name": "hardpoint_power_plant"}]), _vehicle("Avenger Titan", [{"name": "x"}])]
+    h = _Harness(lambda req, n: httpx.Response(200, json={"data": rows}))
+    ports = h.run(lambda c: c.get_vehicle_ports("avenger stalker"))
+    assert ports == [{"name": "hardpoint_power_plant"}]
+    assert h.requests[0].url.params["filter[name]"] == "avenger stalker"
+
+
+def test_vehicle_ports_returns_empty_when_no_row_or_more_than_one_row_matches_exactly():
+    h_none = _Harness(lambda req, n: httpx.Response(200, json={"data": [_vehicle("Avenger Titan", [])]}))
+    assert h_none.run(lambda c: c.get_vehicle_ports("Avenger Stalker")) == []
+
+    # filter[name] matches by substring - "Avenger" alone must not silently pick one variant.
+    rows = [_vehicle("Avenger Stalker", [{"name": "a"}]), _vehicle("Avenger Titan", [{"name": "b"}])]
+    h_ambiguous = _Harness(lambda req, n: httpx.Response(200, json={"data": rows}))
+    assert h_ambiguous.run(lambda c: c.get_vehicle_ports("Avenger")) == []
+
+
+def test_vehicle_ports_tolerates_a_missing_or_malformed_ports_field():
+    h = _Harness(lambda req, n: httpx.Response(200, json={"data": [{"name": "Avenger Stalker"}]}))
+    assert h.run(lambda c: c.get_vehicle_ports("Avenger Stalker")) == []
+
+
+# -- get_item_detail ----------------------------------------------------------------------------
+
+def test_item_detail_validates_the_uuid_before_any_request_and_checks_identity():
+    h = _Harness(lambda req, n: httpx.Response(200, json={"data": {"uuid": UUID, "name": "PowerBolt"}}))
+    for bad in ("", "../items", "not-a-uuid", UUID + "/x"):
+        with pytest.raises(WikiApiError):
+            h.run(lambda c, b=bad: c.get_item_detail(b))
+    assert h.requests == [], "a bad uuid must never reach the network (no path injection)"
+
+    detail = h.run(lambda c: c.get_item_detail(UUID))
+    assert detail == {"uuid": UUID, "name": "PowerBolt"}
+    assert h.requests[0].url.path.endswith(f"/items/{UUID}")
+
+
+def test_item_detail_rejects_a_mismatched_or_missing_identity():
+    h = _Harness(lambda req, n: httpx.Response(200, json={"data": {"uuid": "some-other-uuid"}}))
+    with pytest.raises(WikiApiError):
+        h.run(lambda c: c.get_item_detail(UUID))
+
+    h2 = _Harness(lambda req, n: httpx.Response(200, json={"data": [1]}))
+    with pytest.raises(WikiApiError):
+        h2.run(lambda c: c.get_item_detail(UUID))
