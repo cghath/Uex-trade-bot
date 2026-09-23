@@ -15,7 +15,11 @@ from discord.ext import commands
 from bot.cogs.marketplace import item_name_autocomplete
 from bot.cogs.prices import terminal_name_autocomplete
 from bot.uex.exceptions import UexApiError, describe_uex_api_error
-from bot.uex.item_finder import format_item_listing_line, rank_item_listings
+from bot.uex.item_finder import (
+    format_item_listing_header,
+    format_item_listing_row,
+    rank_item_listings,
+)
 from bot.uex.marketplace import find_item_id_by_name
 from bot.uex.route_presentation import add_chunked_fields, chunk_lines
 
@@ -92,11 +96,18 @@ class ItemFinder(commands.Cog):
         # insertion order, and `shown` is already closest-first (same-system-as-origin
         # listings sort first per rank_item_listings), so the origin's own system - if it
         # has any results - is naturally the first group shown.
-        lines_by_system: dict[str, list[str]] = {}
+        #
+        # Each group renders as a fixed-width monospace table (place, vendor, price,
+        # distance) inside a ```code block``` - Discord embeds have no real <table>, and a
+        # code block is the only way to get real column alignment. Place (not the raw
+        # "Vendor - Place" terminal name) is the primary label so results are actually
+        # navigable, and a separate vendor column keeps two shops at the same place (e.g.
+        # two different gun stores both at Checkmate Station) distinguishable.
+        rows_by_system: dict[str, list[str]] = {}
         for listing in shown:
             system_label = listing.star_system_name or "Unknown system"
-            lines_by_system.setdefault(system_label, []).append(
-                format_item_listing_line(listing, origin_star_system=origin_star_system)
+            rows_by_system.setdefault(system_label, []).append(
+                format_item_listing_row(listing, origin_star_system=origin_star_system)
             )
 
         # Footer set BEFORE add_chunked_fields runs (not after), matching this codebase's
@@ -108,18 +119,28 @@ class ItemFinder(commands.Cog):
 
         embed = discord.Embed(
             title=f"{item_display} — Where to Buy",
-            description=f"Closest to **{origin_name}** first.",
+            description=f"Closest to **{origin_name}** first. Prices in aUEC.",
             color=discord.Color.blurple(),
         )
         embed.set_footer(text=footer)
+
+        # Each system's header+rows collapses to a single table_text "line" (embedded
+        # newlines and all) before going through add_chunked_fields/chunk_lines - safe
+        # because even the worst case (all MAX_RESULTS_SHOWN rows in one system) stays
+        # under 1024 chars, so chunk_lines' character-count splitting never has to cut
+        # into the middle of a fenced code block.
+        table_by_system: dict[str, str] = {
+            system_label: "```\n" + "\n".join([format_item_listing_header(), *rows]) + "\n```"
+            for system_label, rows in rows_by_system.items()
+        }
 
         # All-or-nothing across every system group, not per group - the same
         # disclose-don't-drop guarantee add_chunked_fields already gives one field, applied
         # here so a result list that doesn't fully fit never sends with some systems shown
         # and others silently missing.
         all_fit = all(
-            add_chunked_fields(embed, name=system_label, lines=lines)
-            for system_label, lines in lines_by_system.items()
+            add_chunked_fields(embed, name=system_label, lines=[table_text])
+            for system_label, table_text in table_by_system.items()
         )
         if all_fit:
             await interaction.followup.send(embed=embed)
@@ -127,10 +148,14 @@ class ItemFinder(commands.Cog):
 
         # Plain-text fallback for a result list too large for one embed - same
         # disclose-don't-drop pattern as /mixed-routes'/multi-stop-route's own fallbacks.
-        fallback_lines = [f"**{item_display} — Where to Buy**", f"Closest to **{origin_name}** first.", ""]
-        for system_label, lines in lines_by_system.items():
+        fallback_lines = [
+            f"**{item_display} — Where to Buy**",
+            f"Closest to **{origin_name}** first. Prices in aUEC.",
+            "",
+        ]
+        for system_label, table_text in table_by_system.items():
             fallback_lines.append(f"**{system_label}**")
-            fallback_lines.extend(lines)
+            fallback_lines.append(table_text)
             fallback_lines.append("")
         fallback_lines.append(footer)
         for chunk in chunk_lines(fallback_lines, max_length=1900):
