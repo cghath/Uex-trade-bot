@@ -1189,6 +1189,125 @@ def test_best_route_fallback_branch_shows_investment(tmp_path):
     asyncio.run(run())
 
 
+def test_best_route_primary_branch_flags_a_cross_terminal_price_outlier(tmp_path):
+    """Cross-Terminal Price-Outlier check (bot/uex/price_outliers.py), added after a real
+    UEX data-entry error (Rayari Kaltag showing 2,614 aUEC/SCU for Fresh Food while three
+    sibling terminals all agreed around 21,614) went undetected by every other existing
+    warning/confidence signal. Built from the same /commodities_prices listing already
+    fetched for confidence scoring, so this needs no extra API call."""
+    async def run():
+        db = Database(tmp_path / "best_route_price_outlier_primary.sqlite3", Fernet(Fernet.generate_key()))
+        await db.init()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            path = request.url.path
+            if "commodities_prices" in path:
+                return httpx.Response(200, json={"status": "ok", "data": [
+                    {"id_commodity": 1, "commodity_name": "Fresh Food", "id_terminal": 1,
+                     "price_buy": 2614, "price_sell": 0},
+                    {"id_commodity": 1, "commodity_name": "Fresh Food", "id_terminal": 102,
+                     "price_buy": 21614, "price_sell": 0},
+                    {"id_commodity": 1, "commodity_name": "Fresh Food", "id_terminal": 103,
+                     "price_buy": 21500, "price_sell": 0},
+                    {"id_commodity": 1, "commodity_name": "Fresh Food", "id_terminal": 104,
+                     "price_buy": 21700, "price_sell": 0},
+                ]})
+            if "commodities_routes" in path:
+                return httpx.Response(200, json={"status": "ok", "data": [
+                    {
+                        "id_terminal_origin": 1, "id_terminal_destination": 101,
+                        "origin_terminal_name": "Origin 1", "destination_terminal_name": "Destination 1",
+                        "price_origin": 2614, "price_destination": 3000, "price_margin": 10, "price_roi": 10,
+                        "distance": 5, "score": 100, "scu_origin": 10, "scu_destination": 10,
+                        "status_origin": 1, "status_destination": 1, "profit": 100,
+                    }
+                ]})
+            return httpx.Response(200, json={"status": "ok", "data": []})
+
+        client = UexClient(app_token="test", base_url="https://uex.test")
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+        bot = type("FakeBot", (), {})()
+        bot.db = db
+        bot.uex = client
+        bot.get_cog = lambda name: None
+        cog = Prices.__new__(Prices)
+        cog.bot = bot
+        interaction = _FakeInteraction(1)
+
+        try:
+            await cog.best_route.callback(cog, interaction, commodity="Fresh Food")
+        finally:
+            await client.aclose()
+
+        assert len(interaction.followup.sent) >= 2, "expected the intro plus at least one route message"
+        _, kwargs = interaction.followup.sent[1]
+        embed = kwargs["embed"]
+        combined = "\n".join(f.value or "" for f in embed.fields)
+        assert "origin buy" in combined, combined
+        assert "2,614" in combined and "21,614" in combined, combined
+
+    asyncio.run(run())
+
+
+def test_best_route_fallback_branch_flags_a_cross_terminal_price_outlier(tmp_path):
+    """Same check as the primary-branch test above, exercised through the fallback branch
+    (no UEX /commodities_routes data for this commodity) - the price_outlier_index is
+    built once and shared by both branches, so both need their own coverage."""
+    async def run():
+        db = Database(tmp_path / "best_route_price_outlier_fallback.sqlite3", Fernet(Fernet.generate_key()))
+        await db.init()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            path = request.url.path
+            if "commodities_prices" in path:
+                return httpx.Response(200, json={"status": "ok", "data": [
+                    {"id_commodity": 1, "commodity_name": "Fresh Food", "id_terminal": 1,
+                     "price_buy": 2614, "price_sell": 0, "scu_buy": 50, "scu_sell": 0},
+                    {"id_commodity": 1, "commodity_name": "Fresh Food", "id_terminal": 3,
+                     "price_buy": 0, "price_sell": 30000, "scu_buy": 0, "scu_sell": 50},
+                    {"id_commodity": 1, "commodity_name": "Fresh Food", "id_terminal": 102,
+                     "price_buy": 21614, "price_sell": 0, "scu_buy": 50, "scu_sell": 0},
+                    {"id_commodity": 1, "commodity_name": "Fresh Food", "id_terminal": 103,
+                     "price_buy": 21500, "price_sell": 0, "scu_buy": 50, "scu_sell": 0},
+                    {"id_commodity": 1, "commodity_name": "Fresh Food", "id_terminal": 104,
+                     "price_buy": 21700, "price_sell": 0, "scu_buy": 50, "scu_sell": 0},
+                ]})
+            if "commodities_routes" in path:
+                return httpx.Response(200, json={"status": "ok", "data": []})
+            return httpx.Response(200, json={"status": "ok", "data": []})
+
+        client = UexClient(app_token="test", base_url="https://uex.test")
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+        bot = type("FakeBot", (), {})()
+        bot.db = db
+        bot.uex = client
+        bot.get_cog = lambda name: None
+        cog = Prices.__new__(Prices)
+        cog.bot = bot
+        interaction = _FakeInteraction(1)
+
+        try:
+            await cog.best_route.callback(cog, interaction, commodity="Fresh Food")
+        finally:
+            await client.aclose()
+
+        assert interaction.followup.sent, "expected at least one followup"
+        combined = "\n".join(
+            field.value or ""
+            for _, kwargs in interaction.followup.sent
+            for field in kwargs.get("embed").fields
+            if kwargs.get("embed") is not None
+        )
+        assert "origin buy" in combined, combined
+        assert "2,614" in combined and "21,614" in combined, combined
+
+    asyncio.run(run())
+
+
 def test_best_route_primary_branch_shows_investment(tmp_path):
     async def run():
         db = Database(tmp_path / "best_route_primary_investment.sqlite3", Fernet(Fernet.generate_key()))

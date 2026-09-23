@@ -1,7 +1,19 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.10.
+the oldest entry below); the next new entry is 2.11.
+
+---
+
+## 2.10 - 2026-09-22 - Price-disagreement warnings
+
+**New**
+- `/mixed-routes`, `/multi-stop-route`, `/best-route`, `/intelligence-brief` - A commodity's buy or sell price at one
+  terminal is now checked against every other terminal trading it in the same data. If one terminal is wildly out of
+  line (4x or more off the others), a warning now says so - "could be a real deal or a data error, verify before
+  committing." Added after a real UEX listing showed one terminal buying Fresh Food at roughly 1/8th the price of every
+  terminal around it - a genuine UEX data error, later confirmed and corrected in-game. `/top-routes`, `/routes-from`,
+  and `/route-on-the-way` don't have this check yet.
 
 ---
 

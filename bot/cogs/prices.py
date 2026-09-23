@@ -56,6 +56,7 @@ from bot.uex.route_presentation import (
     travel_warning,
     worst_confidence,
 )
+from bot.uex.price_outliers import find_price_outlier, format_price_outlier_warning, index_commodity_prices
 
 logger = logging.getLogger("uexbot.prices")
 
@@ -433,6 +434,11 @@ class Prices(commands.Cog):
 
         id_commodity = rows[0].get("id_commodity")
         commodity_display = rows[0].get("commodity_name", commodity)
+        # Built once from this whole per-commodity listing (every terminal trading this
+        # commodity, fetched live above for live_signals) - both branches below check
+        # their own displayed buy/sell price against every OTHER terminal's, in the same
+        # call. See bot/uex/price_outliers.py's module docstring for why this exists.
+        price_outlier_index = index_commodity_prices(rows)
 
         # Resolve the ship to use for cargo math: an explicit /best-route option wins,
         # otherwise fall back to the user's saved default (/set-default-ship). Either way
@@ -627,6 +633,21 @@ class Prices(commands.Cog):
                     if sell_status:
                         status_bits.append(f"sell side: {sell_status}")
                     value_lines.append(" · ".join(status_bits))
+
+                if origin_id is not None and (
+                    outlier := find_price_outlier(
+                        price_outlier_index, id_commodity=id_commodity, id_terminal=origin_id,
+                        side="buy", price=price_origin,
+                    )
+                ):
+                    value_lines.append(f"⚠️ {format_price_outlier_warning(outlier, label='origin buy')}")
+                if destination_id is not None and (
+                    outlier := find_price_outlier(
+                        price_outlier_index, id_commodity=id_commodity, id_terminal=destination_id,
+                        side="sell", price=price_destination,
+                    )
+                ):
+                    value_lines.append(f"⚠️ {format_price_outlier_warning(outlier, label='destination sell')}")
 
                 origin_health_obj = classify_terminal_health(health_rows[origin_id]) if origin_id in health_rows else None
                 destination_health_obj = (
@@ -901,6 +922,21 @@ class Prices(commands.Cog):
                     status_bits.append(f"sell side: {sell_status}")
                 value_lines.append(" · ".join(status_bits))
 
+            if route.buy_terminal_id is not None and (
+                outlier := find_price_outlier(
+                    price_outlier_index, id_commodity=id_commodity, id_terminal=route.buy_terminal_id,
+                    side="buy", price=route.buy_price,
+                )
+            ):
+                value_lines.append(f"⚠️ {format_price_outlier_warning(outlier, label='origin buy')}")
+            if route.sell_terminal_id is not None and (
+                outlier := find_price_outlier(
+                    price_outlier_index, id_commodity=id_commodity, id_terminal=route.sell_terminal_id,
+                    side="sell", price=route.sell_price,
+                )
+            ):
+                value_lines.append(f"⚠️ {format_price_outlier_warning(outlier, label='destination sell')}")
+
             origin_health_obj = (
                 classify_terminal_health(route_health_rows[route.buy_terminal_id])
                 if route.buy_terminal_id in route_health_rows else None
@@ -1115,6 +1151,10 @@ class Prices(commands.Cog):
                 station = stations_by_id.get(station_id, {})
                 row["station_pad_types"] = station.get("pad_types")
                 row["station_has_loading_dock"] = station.get("has_loading_dock")
+        # Built once from the whole snapshot, before filtering/allocation - a route's own
+        # cargo prices need comparing against every OTHER terminal trading the same
+        # commodity, not just the ones that survive this command's filters.
+        price_outlier_index = index_commodity_prices(market_rows)
         # Cargo allocation can run an exact combinatorial search per candidate route
         # (see allocate_pair_cargo) - dense market data can make that expensive enough
         # to matter, and this call would otherwise run synchronously on the bot's one
@@ -1175,7 +1215,9 @@ class Prices(commands.Cog):
                 origin_health=origin_health, destination_health=destination_health
             )
             for item in route.cargo:
-                warnings.extend(cargo_item_warnings(item, status_lookup=status_lookup))
+                warnings.extend(cargo_item_warnings(
+                    item, status_lookup=status_lookup, price_outlier_index=price_outlier_index
+                ))
             warnings.extend(route_practical_notes(route.cargo[0].source, route.cargo[0].destination))
             if capital_access_only:
                 warnings.append(capital_access_note("both ends"))
@@ -1377,6 +1419,9 @@ class Prices(commands.Cog):
                 row["station_pad_types"] = station.get("pad_types")
                 row["station_has_loading_dock"] = station.get("has_loading_dock")
 
+        # Built once from the whole snapshot, before filtering/allocation - see the
+        # matching comment in mixed_routes above.
+        price_outlier_index = index_commodity_prices(market_rows)
         # See the matching comment in mixed_routes above: multi-stop's DFS can call the
         # same exact allocator far more often per command, so offloading it matters even
         # more here.
@@ -1408,7 +1453,7 @@ class Prices(commands.Cog):
         await self._send_multi_stop_routes(
             interaction, routes, ship_vehicle=ship_vehicle, ship_query=ship_query, budget=budget,
             space_only=space_only, capital_access_only=capital_access_only, auto_load_only=auto_load_only,
-            system=system_value,
+            system=system_value, price_outlier_index=price_outlier_index,
         )
 
     async def _send_multi_stop_routes(
@@ -1423,13 +1468,19 @@ class Prices(commands.Cog):
         capital_access_only: bool,
         auto_load_only: bool,
         system: str | None = None,
+        price_outlier_index: dict | None = None,
     ) -> None:
         """Shared per-route embed/tracking/fallback sending for /multi-stop-route and
         /route-from-multi - both build a `routes: list[MultiStopRoute]` differently
         (unconstrained search vs. anchored to one starting terminal) but display them
         identically. Keeping this in one place is what makes CONTRIBUTING.md's "grep for
         every caller before considering a fix complete" cheap to actually do for this
-        command family."""
+        command family.
+
+        price_outlier_index (bot.uex.price_outliers.index_commodity_prices, built by each
+        caller from its own market_rows) is optional so a caller with no snapshot handy
+        just omits the cross-terminal price-disagreement warning rather than being forced
+        to build one."""
         terminal_ids = [terminal_id for route in routes for terminal_id in route.stops]
         health_rows = await self.bot.db.get_terminal_data_health_by_ids(terminal_ids)
         status_lookup = await self._get_status_lookup()
@@ -1516,7 +1567,10 @@ class Prices(commands.Cog):
                     origin_label=f"{leg_prefix}Origin", destination_label=f"{leg_prefix}Destination",
                 ))
                 for item in leg.cargo:
-                    warnings.extend(cargo_item_warnings(item, status_lookup=status_lookup, prefix=leg_prefix))
+                    warnings.extend(cargo_item_warnings(
+                        item, status_lookup=status_lookup, prefix=leg_prefix,
+                        price_outlier_index=price_outlier_index,
+                    ))
                 warnings.extend(
                     f"{leg_prefix}{note}"
                     for note in route_practical_notes(leg.cargo[0].source, leg.cargo[0].destination)
@@ -1723,6 +1777,9 @@ class Prices(commands.Cog):
                 row["station_pad_types"] = station.get("pad_types")
                 row["station_has_loading_dock"] = station.get("has_loading_dock")
 
+        # Built once from the whole snapshot, before filtering/allocation - see the
+        # matching comment in mixed_routes above.
+        price_outlier_index = index_commodity_prices(market_rows)
         routes = await asyncio.to_thread(
             build_multi_stop_routes,
             market_rows,
@@ -1752,7 +1809,7 @@ class Prices(commands.Cog):
         await self._send_multi_stop_routes(
             interaction, routes, ship_vehicle=ship_vehicle, ship_query=ship_query, budget=budget,
             space_only=space_only, capital_access_only=capital_access_only, auto_load_only=auto_load_only,
-            system=system_value,
+            system=system_value, price_outlier_index=price_outlier_index,
         )
 
     @app_commands.command(

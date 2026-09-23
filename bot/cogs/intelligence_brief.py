@@ -24,6 +24,7 @@ from bot.uex.route_presentation import (
     travel_warning,
     worst_confidence,
 )
+from bot.uex.price_outliers import index_commodity_prices
 from bot.uex.ships import resolve_ship
 from bot.uex.status import build_status_lookup
 
@@ -113,6 +114,9 @@ class IntelligenceBrief(commands.Cog):
             if not vehicle or not vehicle.get("scu"):
                 raise ValueError("ship cargo capacity unavailable")
             rows = await self.bot.db.get_mixed_route_market_rows()
+            # Built once from the whole snapshot, before filtering/allocation - matches
+            # /mixed-routes and /multi-stop-route (bot/cogs/prices.py).
+            price_outlier_index = index_commodity_prices(rows)
             capital_gate = requires_capital_cargo_access(vehicle)
             if capital_gate:
                 stations = await self.bot.uex.get_space_stations()
@@ -173,7 +177,9 @@ class IntelligenceBrief(commands.Cog):
             ]
             notes.extend(side_health_warnings(origin_health=origin_health, destination_health=destination_health))
             for item in route.cargo:
-                notes.extend(cargo_item_warnings(item, status_lookup=status_lookup))
+                notes.extend(cargo_item_warnings(
+                    item, status_lookup=status_lookup, price_outlier_index=price_outlier_index
+                ))
             if note := approximation_note(route.is_exact):
                 notes.append(f"⚠️ {note[0].upper()}{note[1:]}")
             if capital_gate:

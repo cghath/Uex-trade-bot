@@ -14,6 +14,7 @@ import discord
 
 from bot.uex.data_health import classify_terminal_health
 from bot.uex.mixed_routes import MixedCargoItem
+from bot.uex.price_outliers import index_commodity_prices
 from bot.uex.ships import CargoEstimate, estimate_route_cargo
 from bot.uex.route_presentation import (
     add_chunked_fields,
@@ -130,6 +131,69 @@ def test_cargo_item_warnings_prefix_is_prepended_to_every_line():
     lines = cargo_item_warnings(item, status_lookup={"buy": {}, "sell": {}}, prefix="Leg 2 ")
     assert lines, "expected at least the risk and limiting-factor lines"
     assert all(line.startswith("Leg 2 ") for line in lines)
+
+
+def test_cargo_item_warnings_flags_a_cross_terminal_buy_price_outlier():
+    """Reproduces the real Rayari Kaltag Fresh Food incident's shape: this item's own buy
+    price is far below what every other terminal trading the same commodity shows in the
+    same snapshot."""
+    item = _item(
+        id_commodity=120, buy_price=2614,
+        source=dict(id_terminal=72, scu_buy=10, status_buy=1),
+    )
+    index = index_commodity_prices([
+        dict(id_commodity=120, id_terminal=72, price_buy=2614, price_sell=0),
+        dict(id_commodity=120, id_terminal=39, price_buy=21614, price_sell=0),
+        dict(id_commodity=120, id_terminal=40, price_buy=21500, price_sell=0),
+        dict(id_commodity=120, id_terminal=41, price_buy=21700, price_sell=0),
+    ])
+    lines = cargo_item_warnings(item, status_lookup={"buy": {}, "sell": {}}, price_outlier_index=index)
+    joined = "\n".join(lines)
+    assert "origin buy" in joined
+    assert "2,614" in joined
+    assert "21,614" in joined
+
+
+def test_cargo_item_warnings_flags_a_cross_terminal_sell_price_outlier():
+    item = _item(
+        id_commodity=120, sell_price=200000,
+        destination=dict(id_terminal=39, scu_sell=10, status_sell=1),
+    )
+    index = index_commodity_prices([
+        dict(id_commodity=120, id_terminal=39, price_buy=0, price_sell=200000),
+        dict(id_commodity=120, id_terminal=40, price_buy=0, price_sell=20000),
+        dict(id_commodity=120, id_terminal=41, price_buy=0, price_sell=21000),
+        dict(id_commodity=120, id_terminal=42, price_buy=0, price_sell=19000),
+    ])
+    lines = cargo_item_warnings(item, status_lookup={"buy": {}, "sell": {}}, price_outlier_index=index)
+    assert any("destination sell" in line for line in lines)
+
+
+def test_cargo_item_warnings_omits_price_outlier_check_when_no_index_given():
+    """price_outlier_index defaults to None - a caller with no market-row snapshot in
+    scope (or one that hasn't built the index) just doesn't get this check, rather than
+    being forced to build one it doesn't have."""
+    item = _item(
+        id_commodity=120, buy_price=2614,
+        source=dict(id_terminal=72, scu_buy=10, status_buy=1),
+    )
+    lines = cargo_item_warnings(item, status_lookup={"buy": {}, "sell": {}})
+    assert not any("other terminals" in line for line in lines)
+
+
+def test_cargo_item_warnings_stays_silent_when_the_price_agrees_with_other_terminals():
+    item = _item(
+        id_commodity=120, buy_price=21600,
+        source=dict(id_terminal=72, scu_buy=10, status_buy=1),
+    )
+    index = index_commodity_prices([
+        dict(id_commodity=120, id_terminal=72, price_buy=21600, price_sell=0),
+        dict(id_commodity=120, id_terminal=39, price_buy=21614, price_sell=0),
+        dict(id_commodity=120, id_terminal=40, price_buy=21500, price_sell=0),
+        dict(id_commodity=120, id_terminal=41, price_buy=21700, price_sell=0),
+    ])
+    lines = cargo_item_warnings(item, status_lookup={"buy": {}, "sell": {}}, price_outlier_index=index)
+    assert not any("other terminals" in line for line in lines)
 
 
 def test_side_health_warnings_only_includes_sides_with_a_real_warning():

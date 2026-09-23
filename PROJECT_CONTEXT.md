@@ -2644,6 +2644,60 @@ they're in sync).
     does not parse ANY markup (mentions, bold, links) inside a code block - any future
     message that needs both a code block's alignment AND a clickable mention has to pick
     one or split the two into separate lines/sections, not assume both work together.
+78. **Cross-Terminal Price-Outlier warnings (`/mixed-routes`, `/multi-stop-route`,
+    `/intelligence-brief`, `/best-route`) - a real UEX data error went undetected by every
+    existing signal, so a new check compares a commodity's price at one terminal against
+    every OTHER terminal trading it in the same data.** User-reported: a live
+    `/multi-stop-route` chain's first leg showed Fresh Food buying at Rayari Kaltag Research
+    Outpost for 2,614 aUEC/SCU; the user's own UEX comparison chart showed a neighboring
+    terminal (Rayari Anvik) at 21,614 for the same commodity - an ~8x gap too suspicious to
+    be normal terminal-to-terminal variance. Investigation ruled out a bot-side bug through
+    direct live API calls (2,614 genuinely was UEX's currently served price for Kaltag at
+    the time - not a stale-cache or digit-drop bug), then the user went in-game and
+    confirmed the real price was 21,614, matching Anvik: a confirmed UEX data-entry error,
+    not a bot defect. Nothing in existing route-confidence scoring
+    (`compute_route_confidence`, `bot/uex/route_confidence.py`) would have caught this -
+    that scoring rewards freshness, report-count corroboration, and availability, none of
+    which flags a single wrong number that's otherwise "fresh" and "available." A
+    corroboration-count gate modeled on the scanner's `MIN_LISTINGS_FOR_FAIR_PRICE`
+    precedent was designed first and dropped once confirmed every row in
+    `terminal_market_state` (the table `/mixed-routes`/`/multi-stop-route` read) has NULL
+    `buy_report_count`/`sell_report_count` - that table is fed by `/commodities_prices_all`
+    (bulk), which UEX documents WITHOUT the `price_buy_users_rows`/`price_sell_users_rows`
+    fields the single-commodity `/commodities_prices` endpoint carries. A corroboration gate
+    there would have fired on literally every route, carrying zero signal. New
+    `bot/uex/price_outliers.py` is the check that actually works instead: build a
+    per-snapshot index of every terminal's price for each commodity
+    (`index_commodity_prices`), then flag a terminal's price as an outlier when it's
+    4x-or-more off the median of every OTHER terminal trading the same commodity in the same
+    data (`find_price_outlier`, gated on at least 3 sibling terminals so a thin sample never
+    trips it - the same "don't trust a lone data point" reasoning as
+    `MIN_LISTINGS_FOR_FAIR_PRICE`/`MIN_REPORTS_FOR_TRACK_RECORD`). Wired into the shared
+    `cargo_item_warnings` (`bot/uex/route_presentation.py`) via an optional
+    `price_outlier_index` parameter (`None` by default, so it costs nothing for a caller
+    without a snapshot) and connected at all three of that helper's real call sites -
+    `/mixed-routes`, `/multi-stop-route` (both entry points, via `_send_multi_stop_routes`),
+    and `/intelligence-brief` - not just the two the original request named, per this file's
+    own repeated "grep every caller of a shared helper" lesson. Each caller builds the index
+    once from the market-row snapshot it already fetches, at zero extra API cost.
+    `/best-route` needed its own wiring (it doesn't use `cargo_item_warnings` - its warning
+    lines are built inline, and its data source differs) but turned out to be an even
+    cleaner fit: it already fetches `get_commodities_prices(commodity_name=...)` live for
+    confidence-score corroboration (`live_signals`) - a full, live, per-commodity,
+    all-terminal listing that carries REAL `price_buy_users_rows` (this is not the bulk
+    endpoint), so the same `index_commodity_prices`/`find_price_outlier` functions reuse
+    that already-fetched data directly, in both of `/best-route`'s branches (the
+    UEX-precomputed-routes branch and the no-UEX-route fallback). `/top-routes` and its two
+    siblings (`/routes-from`, `/route-on-the-way`, sharing `build_ranked_route_messages` in
+    `trends.py`) were deliberately left unprotected for now: each ranked entry can be a
+    DIFFERENT commodity, and the confidence data already fetched there
+    (`get_route_market_signals_by_ids`) is scoped to only the exact origin/destination pair
+    already selected for display, not a full per-commodity terminal listing - there's no
+    sibling pool in memory the way `/best-route` and the mixed-routes family have. Closing
+    that gap needs a real design decision (a new live API call per distinct commodity shown,
+    vs. comparing against the same stale `terminal_market_state` snapshot the mixed-routes
+    family uses, which would mean cross-checking two different UEX endpoints/timestamps) -
+    deferred until that tradeoff is worked through, not silently skipped.
 
 ## Where to look for what
 
