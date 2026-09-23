@@ -4391,6 +4391,19 @@ class Database:
             )
             await db.commit()
 
+    async def remove_ship_parts_entry(
+        self, user_id: int, guild_id: int, id_vehicle: int, category: str, port_name: str,
+    ) -> None:
+        """Removes one locked-in slot without touching the rest of the list - the same
+        composite primary key set_ship_parts_entry keys its own upsert on."""
+        async with self.connect() as db:
+            await db.execute(
+                """DELETE FROM ship_parts_shopping_entries
+                   WHERE user_id=? AND guild_id=? AND id_vehicle=? AND category=? AND port_name=?""",
+                (user_id, guild_id, id_vehicle, category, port_name),
+            )
+            await db.commit()
+
     async def get_ship_parts_thread(self, user_id: int, guild_id: int) -> dict | None:
         async with self.connect() as db:
             row = await (await db.execute(

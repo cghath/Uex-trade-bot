@@ -100,7 +100,23 @@ def _format_stat_block(detail: dict) -> str:
     (quantum_drive.standard_jump.drive_speed_formatted), not as a top-level scalar like
     every other category's headline stat. The generic top-level-only scan below explicitly
     skips dict/list values, so it silently dropped speed entirely until this was added -
-    confirmed missing, not just unformatted."""
+    confirmed missing, not just unformatted.
+
+    Found live in a real user report: the generic scan was also showing raw garbage for
+    some fields that have a nicer sibling right next to them - quantum drives'
+    `jump_range` is literally float32's max value (3.402823e+38) used as a "no limit"
+    sentinel, with `jump_range_formatted` already reading "Unlimited" one key over. The
+    scan now prefers `f"{key}_formatted"` over a raw value whenever that sibling exists,
+    for any category, not just quantum drives (checked live: no other mapped category
+    currently has any `_formatted` sibling, so this only changes quantum drives' output
+    today, but the fix isn't QD-specific). Quantum drives' remaining raw-only fields
+    (`quantum_fuel_requirement`, `fuel_rate`, `fuel_consumption_scu_per_gm`,
+    `fuel_efficiency`) are internal fuel-mechanic constants with no formatted counterpart
+    and no comparison value to a player picking a drive, so they're excluded outright
+    rather than shown as more raw decimals."""
+    quantum_drive_internal_keys = {
+        "quantum_fuel_requirement", "fuel_rate", "fuel_consumption_scu_per_gm", "fuel_efficiency",
+    }
     for raw_key in (detail.get("type"), detail.get("sub_type")):
         if not raw_key:
             continue
@@ -109,6 +125,7 @@ def _format_stat_block(detail: dict) -> str:
         if not isinstance(block, dict):
             continue
         lines: list[str] = []
+        skip_keys: set[str] = set()
         if key == "quantum_drive":
             standard_jump = block.get("standard_jump")
             if isinstance(standard_jump, dict) and standard_jump.get("drive_speed_formatted"):
@@ -116,9 +133,12 @@ def _format_stat_block(detail: dict) -> str:
             travel_time = block.get("travel_time_10gm")
             if isinstance(travel_time, dict) and travel_time.get("formatted"):
                 lines.append(f"10 Gm in: {travel_time['formatted']}")
-        lines.extend(
-            f"{k}: {v}" for k, v in block.items() if v is not None and not isinstance(v, (dict, list))
-        )
+            skip_keys = quantum_drive_internal_keys
+        for k, v in block.items():
+            if k in skip_keys or k.endswith("_formatted") or v is None or isinstance(v, (dict, list)):
+                continue
+            formatted = block.get(f"{k}_formatted")
+            lines.append(f"{k}: {formatted}" if formatted is not None else f"{k}: {v}")
         if lines:
             return " · ".join(lines[:4])
     return ""
@@ -299,6 +319,55 @@ class ShipPartsShoppingService:
         return True
 
 
+class _RemoveEntrySelect(discord.ui.Select):
+    """Transient, single-use dropdown for removing one locked-in part at a time, per the
+    user's own live feedback that "Clear list" only ever wiping everything wasn't enough.
+    Options are captured from the SAME entries list this select was built from, not
+    re-fetched in the callback - the instance is short-lived (one pick, then it's done, see
+    _RemoveEntryView's timeout) so a stale index is a non-issue in practice, and avoids a
+    second DB round trip just to re-derive what's already in hand."""
+    def __init__(self, service: "ShipPartsShoppingService", entries: list[dict]) -> None:
+        self.service = service
+        self.entries = entries[:25]
+        options = []
+        for i, entry in enumerate(self.entries):
+            port_label = entry["port_name"].removeprefix("hardpoint_").replace("_", " ").strip().title() or entry["port_name"]
+            options.append(discord.SelectOption(
+                label=f"{entry['item_name']} ({entry['category']})"[:100],
+                description=f"{entry['vehicle_name']} - {port_label}"[:100],
+                value=str(i),
+            ))
+        super().__init__(placeholder="Pick a part to remove...", options=options, min_values=1, max_values=1)
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        entry = self.entries[int(self.values[0])]
+        await interaction.response.defer(ephemeral=True)
+        try:
+            await self.service.bot.db.remove_ship_parts_entry(
+                entry["user_id"], entry["guild_id"], entry["id_vehicle"], entry["category"], entry["port_name"],
+            )
+        except Exception:
+            logger.exception("Could not remove a ship parts entry")
+            await interaction.followup.send("I couldn't remove that part. Nothing was changed; please try again.",
+                                            ephemeral=True)
+            return
+        try:
+            await self.service.refresh(interaction.channel, entry["user_id"], entry["guild_id"])
+        except Exception:
+            logger.exception("Ship parts entry removed but the Discord refresh failed")
+            await interaction.followup.send(
+                f"Removed **{entry['item_name']}**, but I couldn't update the list message. Press Refresh list.",
+                ephemeral=True)
+            return
+        await interaction.followup.send(f"Removed **{entry['item_name']}** ({entry['category']}).", ephemeral=True)
+
+
+class _RemoveEntryView(discord.ui.View):
+    def __init__(self, service: "ShipPartsShoppingService", entries: list[dict]) -> None:
+        super().__init__(timeout=300)
+        self.add_item(_RemoveEntrySelect(service, entries))
+
+
 class ShipPartsShoppingView(discord.ui.View):
     """Persistent controls whose callbacks always re-check the stored owner - survives a bot
     restart (timeout=None, fixed custom_ids, registered once via cog_load's bot.add_view).
@@ -329,6 +398,20 @@ class ShipPartsShoppingView(discord.ui.View):
                     ephemeral=True)
                 return
             await interaction.followup.send("List refreshed.", ephemeral=True)
+
+    @discord.ui.button(label="Remove a part", style=discord.ButtonStyle.secondary,
+                       custom_id="ship-parts-shopping:remove-one")
+    async def remove_button(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        row = await self._owner(interaction)
+        if row is None:
+            return
+        entries = await self.service.bot.db.get_ship_parts_entries(row["user_id"], row["guild_id"])
+        if not entries:
+            await interaction.response.send_message("Your list is empty - nothing to remove.", ephemeral=True)
+            return
+        note = "" if len(entries) <= 25 else f" (showing the first 25 of {len(entries)})"
+        await interaction.response.send_message(
+            f"Pick a part to remove{note}:", view=_RemoveEntryView(self.service, entries), ephemeral=True)
 
     @discord.ui.button(label="Clear list", style=discord.ButtonStyle.danger,
                        custom_id="ship-parts-shopping:clear")

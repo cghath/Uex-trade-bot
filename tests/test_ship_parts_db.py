@@ -79,6 +79,16 @@ def test_ship_parts_entries_lock_one_slot_per_ship_per_port_and_survive_restart(
         assert (await db2.get_ship_parts_thread(1, 10))["message_id"] == 800
         assert (await db2.get_ship_parts_thread_owner(700))["user_id"] == 1
 
+        # Removing one slot leaves the other two untouched.
+        await db2.remove_ship_parts_entry(1, 10, 100, "Turrets", "hp_turret_left")
+        entries = await db2.get_ship_parts_entries(1, 10)
+        assert len(entries) == 2
+        assert {e["port_name"] for e in entries} == {"hp_power", "hp_turret_nose"}
+
+        # Removing a slot that isn't there is a harmless no-op, not an error.
+        await db2.remove_ship_parts_entry(1, 10, 100, "Turrets", "hp_turret_left")
+        assert len(await db2.get_ship_parts_entries(1, 10)) == 2
+
         await db2.clear_ship_parts_entries(1, 10)
         assert await db2.get_ship_parts_entries(1, 10) == []
         await db2.delete_ship_parts_thread(1, 10)
