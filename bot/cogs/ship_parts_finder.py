@@ -23,6 +23,16 @@ _format_stat_block's docstring). PowerPlant/Cooler/Shield/QuantumDrive/Turret/Ra
 their block by the item's own `type` field; MissileLauncher keys it by `sub_type` instead
 ("MissileRack" -> "missile_rack") - _format_stat_block checks both rather than hardcoding
 one shape.
+
+An outside audit before merge found four real P2s, all fixed: (1) selecting a category ran
+the full catalog/price/wiki lookup before acknowledging the interaction, risking Discord's
+3s timeout on a cold cache - PartsBrowserView now defers first; (2) a category with more
+than one physical port (e.g. two independently-sized turrets) silently used only the first
+one, both in the picker and in the DB's primary key - fixed with a slot-selection step and
+a port_name column added to ship_parts_shopping_entries' key; (3) the required `location`
+input was resolved and stored but never actually used - _attach_distances now computes and
+sorts by real distance to each candidate's cheapest listing; (4) the selected part wasn't
+visibly marked before locking it in - now shown with a checkmark in the comparison list.
 """
 from __future__ import annotations
 
@@ -95,30 +105,46 @@ def _format_stat_block(detail: dict) -> str:
     return ""
 
 
-def _format_candidate_line(detail: dict) -> str:
+def _cheapest_purchase(detail: dict) -> dict:
+    purchases = ((detail.get("uex_prices") or {}).get("purchase")) or []
+    if not purchases:
+        return {}
+    return min(purchases, key=lambda p: p.get("price_buy") if p.get("price_buy") is not None else float("inf"))
+
+
+def _format_port_label(port: ShipPort) -> str:
+    """A physical slot's own name, e.g. "hardpoint_weapon_gun_class1_left_wing", made
+    readable - not curated per-ship, just a mechanical cleanup of the raw wiki port name."""
+    label = port.name.removeprefix("hardpoint_").replace("_", " ").strip().title()
+    size = f"S{port.size_min}" if port.size_min == port.size_max else f"S{port.size_min}-{port.size_max}"
+    return f"{label or port.name} ({size})"
+
+
+def _format_candidate_line(detail: dict, *, selected: bool = False) -> str:
     name = detail.get("name") or "Unknown"
     size = detail.get("size")
     grade = detail.get("grade")
     manufacturer = (detail.get("manufacturer") or {}).get("name") if isinstance(detail.get("manufacturer"), dict) else None
-    price = None
-    terminal = None
-    purchases = ((detail.get("uex_prices") or {}).get("purchase")) or []
-    if purchases:
-        cheapest = min(purchases, key=lambda p: p.get("price_buy") if p.get("price_buy") is not None else float("inf"))
-        price = cheapest.get("price_buy")
-        terminal = cheapest.get("terminal_name")
-    header = f"**{name}**"
+    cheapest = _cheapest_purchase(detail)
+    price = cheapest.get("price_buy")
+    terminal = cheapest.get("terminal_name")
+    marker = "✅ " if selected else ""
+    header = f"{marker}**{name}**"
     if size is not None:
         header += f" (S{size})"
     if grade:
         header += f" · Grade {grade}"
     if manufacturer:
         header += f" · {manufacturer}"
-    price_line = f"{price:,.0f} aUEC @ {terminal}" if price is not None and terminal else "price unknown"
+    price_part = f"{price:,.0f} aUEC @ {terminal}" if price is not None and terminal else "price unknown"
+    distance = detail.get("_distance_gm")
+    distance_part = f"{distance:.1f} Gm away" if distance is not None else "distance unknown"
     stat_line = _format_stat_block(detail)
-    body = f"{header}\n   {price_line}"
+    body = f"{header}\n   {price_part} · {distance_part}"
     if stat_line:
         body += f"\n   {stat_line}"
+    if selected:
+        body += "\n   (selected - press \"Lock in selected part\" to save it)"
     return body
 
 
@@ -184,7 +210,8 @@ class ShipPartsShoppingService:
                 lines.extend(["", f"**{current_ship}**"])
             price = f"{entry['price_buy']:,.0f} aUEC" if entry.get("price_buy") is not None else "price unknown"
             terminal = entry.get("terminal_name") or "unknown shop"
-            lines.append(f"• {entry['category']}: {entry['item_name']} - {price} @ {terminal}")
+            port_label = entry["port_name"].removeprefix("hardpoint_").replace("_", " ").strip().title() or entry["port_name"]
+            lines.append(f"• {entry['category']} ({port_label}): {entry['item_name']} - {price} @ {terminal}")
         return _pages(lines)
 
     async def refresh(self, thread: discord.Thread, user_id: int, guild_id: int) -> None:
@@ -211,7 +238,8 @@ class ShipPartsShoppingService:
 
     async def lock_in(
         self, interaction: discord.Interaction, id_vehicle: int, vehicle_name: str, category: str,
-        id_item: int, item_name: str, id_terminal: int | None, terminal_name: str | None, price_buy: float | None,
+        port_name: str, id_item: int, item_name: str, id_terminal: int | None, terminal_name: str | None,
+        price_buy: float | None,
     ) -> bool:
         if interaction.guild_id is None:
             await interaction.followup.send("Ship parts lists are available in a server.", ephemeral=True)
@@ -224,7 +252,7 @@ class ShipPartsShoppingService:
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         try:
             await self.bot.db.set_ship_parts_entry(
-                interaction.user.id, interaction.guild_id, id_vehicle, vehicle_name, category,
+                interaction.user.id, interaction.guild_id, id_vehicle, vehicle_name, category, port_name,
                 id_item, item_name, id_terminal, terminal_name, price_buy, now,
             )
         except Exception:
@@ -300,7 +328,12 @@ class ShipPartsShoppingView(discord.ui.View):
 class PartsBrowserView(discord.ui.View):
     """Transient (NOT persistent, matches blueprint_planner.py's CraftConfigView) - browsing
     a ship's slots doesn't need to survive a restart, only a locked-in choice does. If this
-    view goes stale on a restart, the user just re-runs /ship-parts-finder."""
+    view goes stale on a restart, the user just re-runs /ship-parts-finder.
+
+    Category -> [slot, when a category has more than one physical port] -> part, since a
+    ship can have several independent slots in one category (e.g. two differently-sized
+    turrets) that each need their own choice - collapsing to the category's first port
+    silently made those unreachable, a real defect an outside audit caught before merge."""
     def __init__(
         self, cog: "ShipPartsFinder", vehicle: dict, origin_terminal: tuple[int, str],
         grouped_ports: dict[str, list[ShipPort]],
@@ -311,6 +344,7 @@ class PartsBrowserView(discord.ui.View):
         self.origin_terminal = origin_terminal
         self.grouped_ports = grouped_ports
         self.category: str | None = None
+        self.selected_port: ShipPort | None = None
         self.candidates: list[dict] = []
         self.selected_candidate: dict | None = None
         self.category_select = _CategorySelect(self)
@@ -320,44 +354,70 @@ class PartsBrowserView(discord.ui.View):
         header = f"**{self.vehicle.get('name')}** parts - pick a category to compare real options."
         if self.category is None:
             return header
+        ports = self.grouped_ports.get(self.category, [])
+        if len(ports) > 1 and self.selected_port is None:
+            return f"{header}\n\n**{self.category}** has {len(ports)} separate slots on this ship - pick one below."
+        slot_label = f" - {_format_port_label(self.selected_port)}" if len(ports) > 1 and self.selected_port else ""
         if not self.candidates:
-            return f"{header}\n\nNo currently-sold {self.category} options found for this ship."
-        lines = [header, "", f"**{self.category}**"]
+            return f"{header}\n\nNo currently-sold {self.category}{slot_label} options found for this ship."
+        lines = [header, "", f"**{self.category}{slot_label}**"]
         for detail in self.candidates[:MAX_CANDIDATES_SHOWN]:
-            lines.append(_format_candidate_line(detail))
+            lines.append(_format_candidate_line(detail, selected=detail is self.selected_candidate))
         if len(self.candidates) > MAX_CANDIDATES_SHOWN:
             lines.append(f"...and {len(self.candidates) - MAX_CANDIDATES_SHOWN} more, showing the first {MAX_CANDIDATES_SHOWN}.")
         return "\n".join(lines)[:1900]
 
+    def _remove_items(self, *types: type) -> None:
+        for child in [c for c in self.children if isinstance(c, types)]:
+            self.remove_item(child)
+
     async def show_category(self, interaction: discord.Interaction, category: str) -> None:
         self.category = category
+        self.selected_port = None
         self.selected_candidate = None
+        self.candidates = []
+        self._remove_items(_SlotSelect, _PartSelect)
         ports = self.grouped_ports.get(category, [])
-        port = ports[0] if ports else None
+        if len(ports) > 1:
+            self.add_item(_SlotSelect(self, ports))
+            await interaction.response.edit_message(content=self.text(), view=self)
+            return
+        await self._load_candidates(interaction, ports[0] if ports else None)
+
+    async def show_slot(self, interaction: discord.Interaction, port: ShipPort) -> None:
+        self.selected_candidate = None
+        await self._load_candidates(interaction, port)
+
+    async def _load_candidates(self, interaction: discord.Interaction, port: ShipPort | None) -> None:
+        # Deferred BEFORE the slow catalog/price/wiki lookups below - a live catalog+price
+        # fetch plus batched wiki detail calls can exceed Discord's 3s component-interaction
+        # deadline on a cold cache, which surfaced as "Interaction failed" before this fix.
+        await interaction.response.defer()
+        self.selected_port = port
         self.candidates = []
         if port is not None:
             try:
-                self.candidates = await self.cog.candidates_for_port(port, limit=MAX_CANDIDATES_SHOWN)
+                self.candidates = await self.cog.candidates_for_port(
+                    port, limit=MAX_CANDIDATES_SHOWN, origin_id=self.origin_terminal[0],
+                )
             except (UexApiError, WikiApiError) as exc:
-                await interaction.response.edit_message(content=f"Couldn't load {category} options: {exc}", view=self)
+                await interaction.edit_original_response(content=f"Couldn't load {self.category} options: {exc}", view=self)
                 return
-        for child in [c for c in self.children if isinstance(c, _PartSelect)]:
-            self.remove_item(child)
+        self._remove_items(_PartSelect)
         if self.candidates:
             self.add_item(_PartSelect(self, self.candidates))
-        await interaction.response.edit_message(content=self.text(), view=self)
+        await interaction.edit_original_response(content=self.text(), view=self)
 
     async def lock_in_selected(self, interaction: discord.Interaction) -> None:
-        if self.selected_candidate is None or self.category is None:
+        if self.selected_candidate is None or self.category is None or self.selected_port is None:
             await interaction.response.send_message("Pick a part first.", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
         detail = self.selected_candidate
-        purchases = ((detail.get("uex_prices") or {}).get("purchase")) or []
-        cheapest = min(purchases, key=lambda p: p.get("price_buy") if p.get("price_buy") is not None else float("inf")) if purchases else {}
+        cheapest = _cheapest_purchase(detail)
         await self.cog.shopping.lock_in(
             interaction, self.vehicle["id"], self.vehicle.get("name") or "", self.category,
-            detail.get("_uex_id"), detail.get("name") or "unknown",
+            self.selected_port.name, detail.get("_uex_id"), detail.get("name") or "unknown",
             cheapest.get("terminal_id"), cheapest.get("terminal_name"), cheapest.get("price_buy"),
         )
 
@@ -375,6 +435,19 @@ class _CategorySelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction) -> None:
         await self.parent_view.show_category(interaction, self.values[0])
+
+
+class _SlotSelect(discord.ui.Select):
+    """Shown only when a category has more than one physical port on this ship."""
+    def __init__(self, parent: PartsBrowserView, ports: list[ShipPort]) -> None:
+        options = [discord.SelectOption(label=_format_port_label(port)[:100], value=str(i))
+                   for i, port in enumerate(ports[:25])]
+        super().__init__(placeholder="Choose a slot", options=options)
+        self.parent_view = parent
+        self._ports = ports
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await self.parent_view.show_slot(interaction, self._ports[int(self.values[0])])
 
 
 class _PartSelect(discord.ui.Select):
@@ -464,7 +537,7 @@ class ShipPartsFinder(commands.Cog):
         self._detail_cache[item_uuid] = (now + DETAIL_CACHE_SECONDS, detail)
         return detail
 
-    async def candidates_for_port(self, port: ShipPort, *, limit: int) -> list[dict]:
+    async def candidates_for_port(self, port: ShipPort, *, limit: int, origin_id: int | None = None) -> list[dict]:
         catalog = await self.bot.uex.get_item_catalog()
         candidates = candidate_items_for_port(catalog, port)
         price_rows = await self.bot.uex.get_items_prices_all()
@@ -482,7 +555,43 @@ class ShipPartsFinder(commands.Cog):
                 result = dict(result)
                 result["_uex_id"] = row.get("id")
                 details.append(result)
+        if origin_id is not None:
+            details = await self._attach_distances(details, origin_id)
         return details
+
+    async def _attach_distances(self, candidates: list[dict], origin_id: int) -> list[dict]:
+        """Real distance (gigameters) from the player's given location to each candidate's
+        own cheapest listing, batched via asyncio.gather - mirrors /ingame-item-finder's
+        own _fetch_distances. Without this, the required `location` input had no effect on
+        anything shown, a real gap an outside audit caught before merge. Candidates sort
+        closest-first, with unknown distance sorting last (matches item_finder's
+        established convention, not a new one)."""
+        terminal_ids: dict[int, int | None] = {}
+        for detail in candidates:
+            terminal_id = _cheapest_purchase(detail).get("terminal_id")
+            terminal_ids[id(detail)] = terminal_id
+
+        to_fetch = sorted({tid for tid in terminal_ids.values() if tid is not None and tid != origin_id})
+        distances: dict[int, float | None] = {origin_id: 0.0}
+        for start in range(0, len(to_fetch), DETAIL_BATCH_SIZE):
+            batch = to_fetch[start:start + DETAIL_BATCH_SIZE]
+            results = await asyncio.gather(
+                *(self.bot.uex.get_terminal_distance(origin_id, tid) for tid in batch), return_exceptions=True,
+            )
+            for tid, result in zip(batch, results):
+                if isinstance(result, Exception) or not result:
+                    distances[tid] = None
+                    continue
+                try:
+                    distances[tid] = float(result.get("distance"))
+                except (TypeError, ValueError):
+                    distances[tid] = None
+
+        for detail in candidates:
+            terminal_id = terminal_ids[id(detail)]
+            detail["_distance_gm"] = distances.get(terminal_id) if terminal_id is not None else None
+        candidates.sort(key=lambda d: (d["_distance_gm"] is None, d["_distance_gm"] or 0.0))
+        return candidates
 
     @app_commands.command(
         name="ship-parts-finder",

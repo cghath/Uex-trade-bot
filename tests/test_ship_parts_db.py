@@ -34,24 +34,37 @@ def test_ship_parts_reference_is_replaced_wholesale_per_ship(tmp_path):
     asyncio.run(run())
 
 
-def test_ship_parts_entries_lock_one_slot_per_ship_per_category_and_survive_restart(tmp_path):
+def test_ship_parts_entries_lock_one_slot_per_ship_per_port_and_survive_restart(tmp_path):
     async def run():
         db, path = _db(tmp_path)
         await db.init()
         await db.set_ship_parts_entry(
-            1, 10, 100, "Avenger Stalker", "Power Plants", 500, "PowerBolt", 139,
+            1, 10, 100, "Avenger Stalker", "Power Plants", "hp_power", 500, "PowerBolt", 139,
             "Platinum Bay - HUR-L5", 19998.0, "2026-09-23 00:00:00",
         )
         entries = await db.get_ship_parts_entries(1, 10)
         assert len(entries) == 1 and entries[0]["item_name"] == "PowerBolt"
 
-        # Re-locking the same slot replaces it, not a second row.
+        # Re-locking the same port replaces it, not a second row.
         await db.set_ship_parts_entry(
-            1, 10, 100, "Avenger Stalker", "Power Plants", 501, "Atlas", 114,
+            1, 10, 100, "Avenger Stalker", "Power Plants", "hp_power", 501, "Atlas", 114,
             "Dumper's Depot - Area 18", 21000.0, "2026-09-23 01:00:00",
         )
         entries = await db.get_ship_parts_entries(1, 10)
         assert len(entries) == 1 and entries[0]["item_name"] == "Atlas"
+
+        # A second, distinct port in the SAME category is a second entry, not collapsed.
+        await db.set_ship_parts_entry(
+            1, 10, 100, "Avenger Stalker", "Turrets", "hp_turret_left", 600, "VariPuck S3", 115,
+            "Dumper's Depot - GrimHEX", 5000.0, "2026-09-23 02:00:00",
+        )
+        await db.set_ship_parts_entry(
+            1, 10, 100, "Avenger Stalker", "Turrets", "hp_turret_nose", 601, "VariPuck S4", 115,
+            "Dumper's Depot - GrimHEX", 6000.0, "2026-09-23 02:00:00",
+        )
+        entries = await db.get_ship_parts_entries(1, 10)
+        assert len(entries) == 3
+        assert {e["port_name"] for e in entries if e["category"] == "Turrets"} == {"hp_turret_left", "hp_turret_nose"}
 
         # Scoped per user/guild.
         assert await db.get_ship_parts_entries(2, 10) == []
@@ -62,7 +75,7 @@ def test_ship_parts_entries_lock_one_slot_per_ship_per_category_and_survive_rest
         db2 = Database(path, db._fernet)
         await db2.init()
         entries = await db2.get_ship_parts_entries(1, 10)
-        assert len(entries) == 1
+        assert len(entries) == 3
         assert (await db2.get_ship_parts_thread(1, 10))["message_id"] == 800
         assert (await db2.get_ship_parts_thread_owner(700))["user_id"] == 1
 

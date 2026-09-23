@@ -98,7 +98,7 @@ def _interaction(channel, *, user_id=1, interaction_id=300):
 
 def _lock_in(service, interaction):
     return service.lock_in(
-        interaction, 100, "Avenger Stalker", "Power Plants",
+        interaction, 100, "Avenger Stalker", "Power Plants", "hardpoint_power_plant",
         500, "PowerBolt", 139, "Platinum Bay - HUR-L5", 19998.0,
     )
 
@@ -124,7 +124,7 @@ def test_complete_private_thread_lock_in_and_restart_reuse(tmp_path, monkeypatch
         bot2 = NS(db=restarted, get_channel=lambda _id: thread, fetch_channel=AsyncMock())
         # Locking a second part in a different category reuses the saved thread.
         await ShipPartsShoppingService(bot2).lock_in(
-            _interaction(channel, interaction_id=301), 100, "Avenger Stalker", "Coolers",
+            _interaction(channel, interaction_id=301), 100, "Avenger Stalker", "Coolers", "hardpoint_cooler_left",
             600, "Bracer", 115, "Dumper's Depot - GrimHEX", 5000.0,
         )
         return first, channel, thread, restarted
@@ -148,7 +148,7 @@ def test_relocking_the_same_slot_replaces_it_not_a_second_entry(tmp_path, monkey
         service = ShipPartsShoppingService(bot)
         await _lock_in(service, _interaction(channel))
         await service.lock_in(
-            _interaction(channel, interaction_id=301), 100, "Avenger Stalker", "Power Plants",
+            _interaction(channel, interaction_id=301), 100, "Avenger Stalker", "Power Plants", "hardpoint_power_plant",
             501, "Atlas", 114, "Dumper's Depot - Area 18", 21000.0,
         )
         return await db.get_ship_parts_entries(1, 10)
@@ -213,17 +213,17 @@ def test_oversized_private_list_uses_one_safe_attachment():
 def test_render_groups_entries_by_ship():
     async def run():
         db = NS(get_ship_parts_entries=AsyncMock(return_value=[
-            {"vehicle_name": "Avenger Stalker", "category": "Power Plants", "item_name": "PowerBolt",
-             "price_buy": 19998.0, "terminal_name": "Platinum Bay - HUR-L5"},
-            {"vehicle_name": "Cutlass Black", "category": "Shield Generators", "item_name": "Shimmer",
-             "price_buy": None, "terminal_name": None},
+            {"vehicle_name": "Avenger Stalker", "category": "Power Plants", "port_name": "hardpoint_power_plant",
+             "item_name": "PowerBolt", "price_buy": 19998.0, "terminal_name": "Platinum Bay - HUR-L5"},
+            {"vehicle_name": "Cutlass Black", "category": "Shield Generators", "port_name": "hardpoint_shield",
+             "item_name": "Shimmer", "price_buy": None, "terminal_name": None},
         ]))
         return await ShipPartsShoppingService(NS(db=db)).render(1, 10)
 
     pages = asyncio.run(run())
     text = "\n".join(pages)
     assert "**Avenger Stalker**" in text and "**Cutlass Black**" in text
-    assert "PowerBolt" in text and "19,998 aUEC" in text
+    assert "PowerBolt" in text and "19,998 aUEC" in text and "Power Plant" in text
     assert "price unknown" in text and "unknown shop" in text
 
 
@@ -338,3 +338,182 @@ def test_command_reports_an_unresolvable_ship():
 
     interaction = asyncio.run(run())
     assert "NotAShip" in interaction.followup.send.await_args.args[0]
+
+
+# -- audit fixes: deferred category select, multi-slot, distance wiring, selected marker ----
+
+def _component_interaction(*, user_id=1):
+    return NS(
+        user=NS(id=user_id, display_name="Pilot"),
+        response=NS(defer=AsyncMock(), edit_message=AsyncMock(), send_message=AsyncMock()),
+        edit_original_response=AsyncMock(),
+    )
+
+
+def _detail(name, uuid="u1", price=1000.0, terminal_id=1, terminal_name="Some Shop"):
+    return {
+        "uuid": uuid, "name": name, "type": "PowerPlant", "_uex_id": 1,
+        "uex_prices": {"purchase": [{"price_buy": price, "terminal_id": terminal_id, "terminal_name": terminal_name}]},
+    }
+
+
+def test_show_category_defers_before_the_slow_candidate_lookup():
+    async def run():
+        seen_defer_count = None
+
+        async def slow_candidates(port, *, limit, origin_id=None):
+            nonlocal seen_defer_count
+            seen_defer_count = interaction.response.defer.await_count
+            return [_detail("PowerBolt")]
+
+        cog = NS(candidates_for_port=slow_candidates)
+        port = ShipPort(name="hardpoint_power_plant", port_type="PowerPlant", size_min=1, size_max=1)
+        view = ship_parts_finder.PartsBrowserView(cog, {"id": 100, "name": "Avenger Stalker"}, (1, "Origin"),
+                                                    {"Power Plants": [port]})
+        interaction = _component_interaction()
+        await view.show_category(interaction, "Power Plants")
+        return interaction, view, seen_defer_count
+
+    interaction, view, seen_defer_count = asyncio.run(run())
+    assert seen_defer_count == 1, "the slow lookup must observe defer already awaited, not called after"
+    interaction.edit_original_response.assert_awaited_once()
+    interaction.response.edit_message.assert_not_awaited()
+    assert view.selected_port is not None and view.candidates
+
+
+def test_category_with_multiple_ports_shows_a_slot_select_without_loading_candidates_yet():
+    async def run():
+        cog = NS(candidates_for_port=AsyncMock(side_effect=AssertionError("should not load candidates before a slot is chosen")))
+        left = ShipPort(name="hardpoint_turret_left", port_type="Turret", size_min=3, size_max=3)
+        nose = ShipPort(name="hardpoint_turret_nose", port_type="Turret", size_min=4, size_max=4)
+        view = ship_parts_finder.PartsBrowserView(cog, {"id": 100, "name": "Avenger Stalker"}, (1, "Origin"),
+                                                    {"Turrets": [left, nose]})
+        interaction = _component_interaction()
+        await view.show_category(interaction, "Turrets")
+        return interaction, view
+
+    interaction, view = asyncio.run(run())
+    interaction.response.edit_message.assert_awaited_once()
+    interaction.edit_original_response.assert_not_awaited()
+    assert any(isinstance(child, ship_parts_finder._SlotSelect) for child in view.children)
+    assert view.selected_port is None
+
+
+def test_selecting_a_slot_loads_candidates_for_that_specific_port():
+    async def run():
+        calls = []
+
+        async def track(port, *, limit, origin_id=None):
+            calls.append(port.name)
+            return [_detail("VariPuck S3")]
+
+        cog = NS(candidates_for_port=track)
+        left = ShipPort(name="hardpoint_turret_left", port_type="Turret", size_min=3, size_max=3)
+        nose = ShipPort(name="hardpoint_turret_nose", port_type="Turret", size_min=4, size_max=4)
+        view = ship_parts_finder.PartsBrowserView(cog, {"id": 100, "name": "Avenger Stalker"}, (1, "Origin"),
+                                                    {"Turrets": [left, nose]})
+        await view.show_slot(_component_interaction(), nose)
+        return view, calls
+
+    view, calls = asyncio.run(run())
+    assert calls == ["hardpoint_turret_nose"]
+    assert view.selected_port.name == "hardpoint_turret_nose"
+
+
+def test_locking_in_passes_the_selected_ports_own_name_not_the_categorys_first_port():
+    async def run():
+        lock_calls = []
+
+        class FakeShopping:
+            async def lock_in(self, interaction, id_vehicle, vehicle_name, category, port_name, id_item, item_name,
+                              id_terminal, terminal_name, price_buy):
+                lock_calls.append(port_name)
+
+        cog = NS(shopping=FakeShopping())
+        nose = ShipPort(name="hardpoint_turret_nose", port_type="Turret", size_min=4, size_max=4)
+        view = ship_parts_finder.PartsBrowserView(cog, {"id": 100, "name": "Avenger Stalker"}, (1, "Origin"),
+                                                    {"Turrets": [nose]})
+        view.category = "Turrets"
+        view.selected_port = nose
+        view.selected_candidate = _detail("VariPuck S4")
+        interaction = _component_interaction()
+        interaction.response.defer = AsyncMock()
+        await view.lock_in_selected(interaction)
+        return lock_calls
+
+    assert asyncio.run(run()) == ["hardpoint_turret_nose"]
+
+
+def test_selected_candidate_is_visibly_marked_in_the_rendered_text():
+    cog = NS()
+    port = ShipPort(name="hardpoint_power_plant", port_type="PowerPlant", size_min=1, size_max=1)
+    view = ship_parts_finder.PartsBrowserView(cog, {"id": 100, "name": "Avenger Stalker"}, (1, "Origin"),
+                                                {"Power Plants": [port]})
+    view.category = "Power Plants"
+    view.selected_port = port
+    a, b = _detail("PowerBolt", uuid="ua"), _detail("Atlas", uuid="ub")
+    view.candidates = [a, b]
+    view.selected_candidate = b
+    text = view.text()
+    assert "✅ **Atlas**" in text
+    assert "✅ **PowerBolt**" not in text and "**PowerBolt**" in text
+
+
+# -- _attach_distances ------------------------------------------------------------------------
+
+def test_attach_distances_sorts_closest_first_and_unknown_last():
+    async def run():
+        uex = NS(get_terminal_distance=AsyncMock(side_effect=lambda origin, dest: {2: {"distance": 5.0}, 3: {"distance": 1.0}}.get(dest)))
+        cog = ShipPartsFinder(NS(uex=uex), wiki_client=NS(), start_refresh=False)
+        far = _detail("Far", terminal_id=2)
+        near = _detail("Near", terminal_id=3)
+        unknown = _detail("Unknown", terminal_id=4)
+        return await cog._attach_distances([far, near, unknown], origin_id=1)
+
+    result = asyncio.run(run())
+    assert [d["name"] for d in result] == ["Near", "Far", "Unknown"]
+    assert result[0]["_distance_gm"] == 1.0 and result[1]["_distance_gm"] == 5.0 and result[2]["_distance_gm"] is None
+
+
+def test_attach_distances_treats_the_origin_terminal_itself_as_zero():
+    async def run():
+        uex = NS(get_terminal_distance=AsyncMock())
+        cog = ShipPartsFinder(NS(uex=uex), wiki_client=NS(), start_refresh=False)
+        here = _detail("Here", terminal_id=1)
+        return await cog._attach_distances([here], origin_id=1), uex
+
+    result, uex = asyncio.run(run())
+    assert result[0]["_distance_gm"] == 0.0
+    uex.get_terminal_distance.assert_not_awaited()
+
+
+def test_candidates_for_port_attaches_distances_only_when_origin_is_given():
+    async def run():
+        catalog = [{"id": 1, "uuid": "u1", "category": "Power Plants", "size": "1", "name": "X"}]
+        uex = NS(
+            get_item_catalog=AsyncMock(return_value=catalog),
+            get_items_prices_all=AsyncMock(return_value=[{"id_item": 1}]),
+            get_terminal_distance=AsyncMock(return_value={"distance": 2.5}),
+        )
+        wiki = NS(get_item_detail=AsyncMock(return_value=_detail("X", uuid="u1", terminal_id=9)))
+        cog = ShipPartsFinder(NS(uex=uex), wiki_client=wiki, start_refresh=False)
+        port = ShipPort(name="hp", port_type="PowerPlant", size_min=1, size_max=1)
+        without_origin = await cog.candidates_for_port(port, limit=10)
+        with_origin = await cog.candidates_for_port(port, limit=10, origin_id=1)
+        return without_origin, with_origin
+
+    without_origin, with_origin = asyncio.run(run())
+    assert "_distance_gm" not in without_origin[0]
+    assert with_origin[0]["_distance_gm"] == 2.5
+
+
+# -- _format_port_label -----------------------------------------------------------------------
+
+def test_format_port_label_reads_and_cleans_the_raw_port_name():
+    port = ShipPort(name="hardpoint_weapon_gun_class1_left_wing", port_type="Turret", size_min=3, size_max=3)
+    assert ship_parts_finder._format_port_label(port) == "Weapon Gun Class1 Left Wing (S3)"
+
+
+def test_format_port_label_shows_a_size_range_when_min_and_max_differ():
+    port = ShipPort(name="hardpoint_turret", port_type="Turret", size_min=2, size_max=4)
+    assert "(S2-4)" in ship_parts_finder._format_port_label(port)

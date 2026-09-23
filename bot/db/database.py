@@ -762,11 +762,12 @@ CREATE TABLE IF NOT EXISTS command_usage_by_user (
     PRIMARY KEY (command_name, user_id)
 );
 
--- Ship Parts Finder (in design, not yet user-facing): one row per (ship, hardpoint) -
--- daily-refreshed reference data bridging a ship's real component slots (sourced from the
--- Star Citizen Wiki API - UEX has no equivalent) to UEX's own item catalog by category+size.
--- Replaced wholesale per ship on each collector run, same "never patch reference data in
--- place" convention as terminal_reference/commodity_reference above.
+-- Ship Parts Finder (/ship-parts-finder, registered as a slash command, not yet deployed to
+-- production): one row per (ship, hardpoint) - daily-refreshed reference data bridging a
+-- ship's real component slots (sourced from the Star Citizen Wiki API - UEX has no
+-- equivalent) to UEX's own item catalog by category+size. Replaced wholesale per ship on
+-- each collector run, same "never patch reference data in place" convention as
+-- terminal_reference/commodity_reference above.
 CREATE TABLE IF NOT EXISTS ship_parts_reference (
     id_vehicle INTEGER NOT NULL,
     vehicle_name TEXT NOT NULL,
@@ -778,22 +779,26 @@ CREATE TABLE IF NOT EXISTS ship_parts_reference (
 );
 CREATE INDEX IF NOT EXISTS idx_ship_parts_reference_vehicle_name ON ship_parts_reference (vehicle_name);
 
--- One locked-in part per (user, guild, ship, slot category) - re-locking a category for the
--- same ship replaces the row rather than accumulating duplicates, unlike
+-- One locked-in part per (user, guild, ship, slot category, physical port) - re-locking the
+-- same port replaces its row rather than accumulating duplicates, unlike
 -- blueprint_shopping_entries (which combines many distinct plans, not one slot per category).
+-- Keyed on port_name, not just category, because a ship can have multiple physical slots in
+-- the same category (e.g. two independently-sized turrets) that need independent choices -
+-- an earlier version keyed on category alone and silently collapsed them to one.
 CREATE TABLE IF NOT EXISTS ship_parts_shopping_entries (
     user_id INTEGER NOT NULL,
     guild_id INTEGER NOT NULL,
     id_vehicle INTEGER NOT NULL,
     vehicle_name TEXT NOT NULL,
     category TEXT NOT NULL,
+    port_name TEXT NOT NULL,
     id_item INTEGER NOT NULL,
     item_name TEXT NOT NULL,
     id_terminal INTEGER,
     terminal_name TEXT,
     price_buy REAL,
     locked_at TEXT NOT NULL,
-    PRIMARY KEY (user_id, guild_id, id_vehicle, category)
+    PRIMARY KEY (user_id, guild_id, id_vehicle, category, port_name)
 );
 CREATE TABLE IF NOT EXISTS ship_parts_shopping_threads (
     user_id INTEGER NOT NULL,
@@ -4348,22 +4353,24 @@ class Database:
 
     async def set_ship_parts_entry(
         self, user_id: int, guild_id: int, id_vehicle: int, vehicle_name: str, category: str,
-        id_item: int, item_name: str, id_terminal: int | None, terminal_name: str | None,
+        port_name: str, id_item: int, item_name: str, id_terminal: int | None, terminal_name: str | None,
         price_buy: float | None, locked_at: str,
     ) -> None:
-        """Locks in one slot's part for (user, guild, ship, category) - replaces any
-        previously locked part for that same slot rather than accumulating duplicates."""
+        """Locks in one physical slot's part for (user, guild, ship, category, port_name) -
+        replaces any previously locked part for that same slot rather than accumulating
+        duplicates. Keyed on port_name (not just category) since a ship can have multiple
+        independent slots in the same category, e.g. two differently-sized turrets."""
         async with self.connect() as db:
             await db.execute(
                 """INSERT INTO ship_parts_shopping_entries
-                   (user_id, guild_id, id_vehicle, vehicle_name, category, id_item, item_name,
-                    id_terminal, terminal_name, price_buy, locked_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(user_id, guild_id, id_vehicle, category) DO UPDATE SET
+                   (user_id, guild_id, id_vehicle, vehicle_name, category, port_name, id_item,
+                    item_name, id_terminal, terminal_name, price_buy, locked_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(user_id, guild_id, id_vehicle, category, port_name) DO UPDATE SET
                        id_item=excluded.id_item, item_name=excluded.item_name,
                        id_terminal=excluded.id_terminal, terminal_name=excluded.terminal_name,
                        price_buy=excluded.price_buy, locked_at=excluded.locked_at""",
-                (user_id, guild_id, id_vehicle, vehicle_name, category, id_item, item_name,
+                (user_id, guild_id, id_vehicle, vehicle_name, category, port_name, id_item, item_name,
                  id_terminal, terminal_name, price_buy, locked_at),
             )
             await db.commit()
@@ -4372,7 +4379,7 @@ class Database:
         async with self.connect() as db:
             rows = await (await db.execute(
                 """SELECT * FROM ship_parts_shopping_entries WHERE user_id=? AND guild_id=?
-                   ORDER BY vehicle_name, category""",
+                   ORDER BY vehicle_name, category, port_name""",
                 (user_id, guild_id),
             )).fetchall()
             return [dict(row) for row in rows]
