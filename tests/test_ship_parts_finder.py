@@ -518,6 +518,43 @@ def test_selected_candidate_is_visibly_marked_in_the_rendered_text():
     assert "✅ **PowerBolt**" not in text and "**PowerBolt**" in text
 
 
+def test_selection_summary_is_blank_before_any_category_is_chosen():
+    cog = NS()
+    view = ship_parts_finder.PartsBrowserView(cog, {"id": 100, "name": "Avenger Stalker"}, (1, "Origin"), {})
+    assert view._selection_summary() == ""
+    assert "Selected so far" not in view.text()
+
+
+def test_selection_summary_shows_pick_below_for_an_unresolved_slot_or_part():
+    cog = NS()
+    left = ShipPort(name="hardpoint_turret_left", port_type="Turret", size_min=3, size_max=3)
+    nose = ShipPort(name="hardpoint_turret_nose", port_type="Turret", size_min=4, size_max=4)
+    view = ship_parts_finder.PartsBrowserView(cog, {"id": 100, "name": "Avenger Stalker"}, (1, "Origin"),
+                                                {"Turrets": [left, nose]})
+    view.category = "Turrets"
+    summary = view._selection_summary()
+    assert "Category: **Turrets**" in summary
+    assert "Slot: *(pick below)*" in summary
+    assert "Part:" not in summary
+    assert summary in view.text()
+
+
+def test_selection_summary_reflects_a_chosen_slot_and_part_plainly_regardless_of_dropdown_state():
+    cog = NS()
+    port = ShipPort(name="hardpoint_power_plant", port_type="PowerPlant", size_min=1, size_max=1)
+    view = ship_parts_finder.PartsBrowserView(cog, {"id": 100, "name": "Avenger Stalker"}, (1, "Origin"),
+                                                {"Power Plants": [port]})
+    view.category = "Power Plants"
+    view.selected_port = port
+    view.candidates = [_detail("Atlas", uuid="ua")]
+    view.selected_candidate = view.candidates[0]
+    summary = view._selection_summary()
+    assert "Category: **Power Plants**" in summary
+    assert "Slot:" not in summary  # single-port category never shows a redundant slot line
+    assert "Part: **Atlas**" in summary
+    assert summary in view.text()
+
+
 # -- _attach_distances ------------------------------------------------------------------------
 
 def test_attach_distances_sorts_closest_first_and_unknown_last():

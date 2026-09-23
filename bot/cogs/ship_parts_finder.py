@@ -379,17 +379,34 @@ class PartsBrowserView(discord.ui.View):
         self.category_select = _CategorySelect(self)
         self.add_item(self.category_select)
 
+    def _selection_summary(self) -> str:
+        # Plain-text mirror of the dropdowns' own state, independent of whether Discord's
+        # collapsed-Select `default=True` rendering actually shows the pick in a given
+        # client - requested directly by the user as a fallback after the dropdown-collapse
+        # bug, so this stays even once that fix is confirmed working.
+        if self.category is None:
+            return ""
+        parts = [f"Category: **{self.category}**"]
+        ports = self.grouped_ports.get(self.category, [])
+        if len(ports) > 1:
+            parts.append(f"Slot: **{_format_port_label(self.selected_port)}**" if self.selected_port else "Slot: *(pick below)*")
+        if self.selected_port is not None or len(ports) <= 1:
+            name = self.selected_candidate.get("name") if self.selected_candidate else None
+            parts.append(f"Part: **{name}**" if name else "Part: *(pick below)*")
+        return "Selected so far - " + " | ".join(parts)
+
     def text(self) -> str:
         header = f"**{self.vehicle.get('name')}** parts - pick a category to compare real options."
         if self.category is None:
             return header
+        summary = self._selection_summary()
         ports = self.grouped_ports.get(self.category, [])
         if len(ports) > 1 and self.selected_port is None:
-            return f"{header}\n\n**{self.category}** has {len(ports)} separate slots on this ship - pick one below."
+            return f"{header}\n\n{summary}\n\n**{self.category}** has {len(ports)} separate slots on this ship - pick one below."
         slot_label = f" - {_format_port_label(self.selected_port)}" if len(ports) > 1 and self.selected_port else ""
         if not self.candidates:
-            return f"{header}\n\nNo currently-sold {self.category}{slot_label} options found for this ship."
-        lines = [header, "", f"**{self.category}{slot_label}**"]
+            return f"{header}\n\n{summary}\n\nNo currently-sold {self.category}{slot_label} options found for this ship."
+        lines = [header, "", summary, "", f"**{self.category}{slot_label}**"]
         for detail in self.candidates[:MAX_CANDIDATES_SHOWN]:
             lines.append(_format_candidate_line(detail, selected=detail is self.selected_candidate))
         if len(self.candidates) > MAX_CANDIDATES_SHOWN:
