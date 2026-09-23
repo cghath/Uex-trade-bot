@@ -2672,22 +2672,46 @@ they're in sync).
     unrelated fields; worth checking for the same pattern whenever a new ranked list mixes
     measured and possibly-missing values.
 79. **UEX terminal names consistently follow a "Vendor - Place" convention - useful for
-    display, confirmed empirically rather than assumed.** Live testing of
-    `/ingame-item-finder` surfaced two related complaints: the shown terminal name gave no
-    way to navigate (e.g. "Green Imperial Housing Exchange" for what players actually call
-    Grim Hex), and two different vendors at the same place looked identical since only the
-    raw terminal name was shown. Splitting `terminal_name` on the LAST `" - "` (
-    `split_place_and_vendor`, `bot/uex/item_finder.py`) gives a `(place, vendor)` pair -
+    display, confirmed empirically rather than assumed. A monospace-table display built on
+    top of that split went through two more live-caught bugs before landing on plain text.**
+    Live testing of `/ingame-item-finder` surfaced two related complaints: the shown terminal
+    name gave no way to navigate (e.g. "Green Imperial Housing Exchange" for what players
+    actually call Grim Hex), and two different vendors at the same place looked identical
+    since only the raw terminal name was shown. Splitting `terminal_name` on the LAST `" - "`
+    (`split_place_and_vendor`, `bot/uex/item_finder.py`) gives a `(place, vendor)` pair -
     verified against a real `/items_prices` pull before shipping (22 live Boomtube Rocket
     listings): 18/22 identical either way, the 4 that differ are all improvements ("GrimHEX"
     vs. the formal station name, "Checkmate" vs. "Checkmate Station"). The one exception with
     no `" - "` separator at all ("Equipment Contested Zone Checkmate") falls back to the
     structured `city_name`/`outpost_name`/`space_station_name` field instead of showing the
-    whole raw terminal name. Results now render as a fixed-width monospace table (place,
-    vendor, price, distance) inside a Discord code block per star-system field, rather than
-    one bullet line per shop - keeps two same-place, different-vendor shops distinguishable
-    (confirmed live: "Guns" and "Sharp Shooters" both at Checkmate). Worth reusing this same
-    split if any future feature displays a UEX terminal name to players.
+    whole raw terminal name - still current, still correct.
+
+    The DISPLAY of that split went through two more live-caught bugs, both instructive. First
+    attempt: a fixed-width monospace table (place, vendor, price, distance) inside a Discord
+    code block, one column set at 15/17 chars. Real live data broke this immediately - four
+    genuinely different Nyx terminals ("People's Service Station Alpha/Delta/Theta/Lambda")
+    all truncated to the identical "People's Servi…", making them indistinguishable; worse,
+    Discord has no hover/tooltip mechanism for message content at all (no JS runs in a
+    message/embed), so there was no way to recover the cut-off text either. Second attempt:
+    size columns dynamically to the longest real name in each result set instead of a fixed
+    width (`PLACE_COL_MAX_WIDTH`/`VENDOR_COL_MAX_WIDTH`, capped generously) - this fixed the
+    collision, but widening the columns made rows wide enough that Discord WRAPS them inside
+    an embed field instead of scrolling horizontally, confirmed live via screenshot ("looks
+    terrible now"). The "a code block scrolls, it doesn't wrap" assumption both of these
+    attempts were built on was simply wrong. Final design, and the one actually live: no
+    table at all - `format_item_listing_line` renders plain proportional text,
+    `"**Place** (Vendor) — Price aUEC · Distance"`, one line per shop. Plain text has neither
+    failure mode a fixed-width table has: it never collapses two different names to the same
+    displayed text, and a long name just wraps like an ordinary sentence instead of
+    misaligning a column - the entire class of bug a monospace table is exposed to simply
+    doesn't apply. `build_item_listing_table`/`format_item_listing_header`/
+    `format_item_listing_row` and the column-width constants from the second attempt were
+    deleted outright once superseded, not kept around deprecated. Two generalizable lessons:
+    (1) verify a rendering assumption (does this actually scroll? does it actually wrap?)
+    against the real client before designing around it, the same "verify empirically" rule
+    this file already applies to UEX API fields; (2) reusing the underlying `(place, vendor)`
+    split for any future feature that displays a UEX terminal name is still worth it - it's
+    the DISPLAY LAYOUT choice that needed two more tries, not the data underneath it.
 
 ## Where to look for what
 

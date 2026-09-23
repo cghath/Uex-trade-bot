@@ -44,10 +44,17 @@ date - no open item, nothing to record here.
       `/terminals_distances` can't price a same-system pair, results grouped into one embed
       field per star system (`bot/uex/item_finder.py`, `bot/cogs/item_finder.py`,
       `bot/db/database.py`'s new `get_terminal_star_system`)
-- [ ] PR #43 - `/ingame-item-finder`: results render as a place+vendor table (split from the
-      terminal name's "Vendor - Place" convention, e.g. "GrimHEX" instead of the formal
-      station name) instead of one bullet line per shop (`bot/uex/item_finder.py`,
-      `bot/cogs/item_finder.py`)
+- [ ] PR #43/#45/#46 - `/ingame-item-finder`: shows place split from the terminal name's
+      "Vendor - Place" convention (e.g. "GrimHEX" instead of the formal station name) plus
+      vendor, one plain-text line per shop - `"**Place** (Vendor) — Price aUEC · Distance"`.
+      Port the NET result of these three, not #43 alone: #43 shipped a fixed-width monospace
+      table first, #45 widened its columns to fix a real truncation-collision bug, #46 then
+      replaced the table entirely with plain text after the wider columns turned out to make
+      Discord wrap the rows and break alignment anyway (see PROJECT_CONTEXT.md entry 79 for
+      the full story). `bot/uex/item_finder.py`'s `format_item_listing_line` is the only
+      formatter that matters now - `build_item_listing_table`/`format_item_listing_header`/
+      `format_item_listing_row` and the PR #45 column-width constants were deleted, don't
+      port those (`bot/uex/item_finder.py`, `bot/cogs/item_finder.py`)
 
 ## To port: aiv2 -> production
 
