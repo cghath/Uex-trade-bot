@@ -45,6 +45,7 @@ INITIAL_COGS = (
     "bot.cogs.refinery",
     "bot.cogs.mining_locations",
     "bot.cogs.blueprints",
+    "bot.cogs.item_finder",
 )
 
 
