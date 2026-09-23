@@ -52,6 +52,7 @@ class ItemFinder(commands.Cog):
             )
             return
         origin_id, origin_name = resolved
+        origin_star_system = await self.bot.db.get_terminal_star_system(origin_id)
 
         try:
             catalog = await self.bot.uex.get_item_catalog()
@@ -79,13 +80,24 @@ class ItemFinder(commands.Cog):
             int(row["id_terminal"]) for row in listings if row.get("id_terminal") is not None
         })
         distances = await self._fetch_distances(origin_id, candidate_ids)
-        ranked = rank_item_listings(listings, distances)
+        ranked = rank_item_listings(listings, distances, origin_star_system=origin_star_system)
         if not ranked:
             await interaction.followup.send(f"No shop currently lists **{item_display}** for sale.")
             return
 
         shown = ranked[:MAX_RESULTS_SHOWN]
-        lines = [format_item_listing_line(listing) for listing in shown]
+        # Grouped by star system as separate fields instead of one flat list - repeating
+        # "Pyro →" (or any system) on every single line got noisy fast on real data, where
+        # a widely-stocked item can list a dozen+ shops in the same system. dict preserves
+        # insertion order, and `shown` is already closest-first (same-system-as-origin
+        # listings sort first per rank_item_listings), so the origin's own system - if it
+        # has any results - is naturally the first group shown.
+        lines_by_system: dict[str, list[str]] = {}
+        for listing in shown:
+            system_label = listing.star_system_name or "Unknown system"
+            lines_by_system.setdefault(system_label, []).append(
+                format_item_listing_line(listing, origin_star_system=origin_star_system)
+            )
 
         # Footer set BEFORE add_chunked_fields runs (not after), matching this codebase's
         # established convention (see /price's and /where-to-mine's identical ordering) -
@@ -101,15 +113,26 @@ class ItemFinder(commands.Cog):
         )
         embed.set_footer(text=footer)
 
-        if add_chunked_fields(embed, name="Shops", lines=lines):
+        # All-or-nothing across every system group, not per group - the same
+        # disclose-don't-drop guarantee add_chunked_fields already gives one field, applied
+        # here so a result list that doesn't fully fit never sends with some systems shown
+        # and others silently missing.
+        all_fit = all(
+            add_chunked_fields(embed, name=system_label, lines=lines)
+            for system_label, lines in lines_by_system.items()
+        )
+        if all_fit:
             await interaction.followup.send(embed=embed)
             return
 
         # Plain-text fallback for a result list too large for one embed - same
         # disclose-don't-drop pattern as /mixed-routes'/multi-stop-route's own fallbacks.
-        fallback_lines = [
-            f"**{item_display} — Where to Buy**", f"Closest to **{origin_name}** first.", "", *lines, "", footer,
-        ]
+        fallback_lines = [f"**{item_display} — Where to Buy**", f"Closest to **{origin_name}** first.", ""]
+        for system_label, lines in lines_by_system.items():
+            fallback_lines.append(f"**{system_label}**")
+            fallback_lines.extend(lines)
+            fallback_lines.append("")
+        fallback_lines.append(footer)
         for chunk in chunk_lines(fallback_lines, max_length=1900):
             await interaction.followup.send(content=chunk)
 
