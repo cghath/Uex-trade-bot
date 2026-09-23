@@ -45,6 +45,7 @@ _ENDPOINT_CACHE_TTL = {
     "commodities_routes": 30 * 60,
     "commodities_prices_history": 3600,
     "items": 12 * 3600,
+    "items_prices": 24 * 3600,  # UEX's own documented Cache TTL for this endpoint (+1 day)
     "categories": 24 * 3600,
     "marketplace_trends": 3600,
     "vehicles": 12 * 3600,
@@ -355,6 +356,12 @@ class UexClient:
         Use :meth:`get_item_catalog` when a caller genuinely needs the whole catalog.
         """
         return await self._get("items", params=filters) or []
+
+    async def get_items_prices(self, **filters: Any) -> list[dict[str, Any]]:
+        """Where an item (armor, ship components, weapons, and more) is bought/sold and at
+        what price, per terminal - UEX requires id_terminal, id_item, or id_category
+        (a caller's job to supply)."""
+        return await self._get("items_prices", params=filters) or []
 
     async def get_item_catalog(self) -> list[dict[str, Any]]:
         """Load every item category once and cache the combined catalog for 12 hours.
