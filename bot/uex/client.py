@@ -46,6 +46,7 @@ _ENDPOINT_CACHE_TTL = {
     "commodities_prices_history": 3600,
     "items": 12 * 3600,
     "items_prices": 24 * 3600,  # UEX's own documented Cache TTL for this endpoint (+1 day)
+    "items_prices_all": 12 * 3600,  # UEX's own documented Cache TTL for this endpoint (+12h)
     "categories": 24 * 3600,
     "marketplace_trends": 3600,
     "vehicles": 12 * 3600,
@@ -362,6 +363,16 @@ class UexClient:
         what price, per terminal - UEX requires id_terminal, id_item, or id_category
         (a caller's job to supply)."""
         return await self._get("items_prices", params=filters) or []
+
+    async def get_items_prices_all(self) -> list[dict[str, Any]]:
+        """Every item price row across every terminal, one unfiltered call - no id_item/
+        id_terminal/id_category required, unlike get_items_prices. Confirmed on real data
+        this is a much smaller, more useful pool than the full item catalog for anything
+        that needs "items actually sold somewhere right now": of 7,769 distinct catalogued
+        item names, only 2,829 have any row here at all - the rest are cosmetics, ship
+        paint, and similar items with no real shop listing (see item_finder.py's
+        sold_item_name_autocomplete)."""
+        return await self._get("items_prices_all", params={}) or []
 
     async def get_item_catalog(self) -> list[dict[str, Any]]:
         """Load every item category once and cache the combined catalog for 12 hours.

@@ -12,7 +12,6 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from bot.cogs.marketplace import item_name_autocomplete
 from bot.cogs.prices import terminal_name_autocomplete
 from bot.uex.exceptions import UexApiError, describe_uex_api_error
 from bot.uex.item_finder import format_item_listing_line, rank_item_listings
@@ -26,6 +25,38 @@ MAX_RESULTS_SHOWN = 15
 # batched to stay well under UEX's 120/min ceiling even for a widely-stocked item, the
 # same batch_size UexClient.get_item_catalog already uses for its own per-category fetches.
 DISTANCE_BATCH_SIZE = 8
+# Discord's own autocomplete choice cap.
+MAX_AUTOCOMPLETE_CHOICES = 25
+
+
+async def sold_item_name_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
+    """Scoped to items UEX currently reports at least one real shop price for
+    (`/items_prices_all`), not the full item catalog (`item_name_autocomplete` in
+    bot/cogs/marketplace.py, used by Marketplace commands where any catalogued item can
+    legitimately be listed). Confirmed live that most catalogued items - cosmetics, ship
+    paint, and similar - have no shop listing at all: of 7,769 distinct catalog names,
+    only 2,829 ever appear in `/items_prices_all`. Suggesting the other ~5,000 just
+    guarantees "No shop currently lists X for sale" the instant a player picks one -
+    exactly the "autocomplete feels pointlessly bloated" complaint this fixes. Unlike
+    Marketplace's `traded_item_autocomplete` (which falls back to the full catalog for a
+    coverage gap in the BOT'S OWN activity tracking, not the item's real availability),
+    this deliberately does NOT fall back to the full catalog - an item genuinely absent
+    from a real shop-price pull should stay unreachable from here, not resurface as a
+    dead-end suggestion."""
+    rows = await interaction.client.uex.get_items_prices_all()
+    current_lower = current.lower()
+    seen: set[str] = set()
+    matches: list[str] = []
+    for row in rows:
+        name = row.get("item_name")
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        if current_lower in name.lower():
+            matches.append(name)
+            if len(matches) >= MAX_AUTOCOMPLETE_CHOICES:
+                break
+    return [app_commands.Choice(name=name[:100], value=name) for name in matches]
 
 
 class ItemFinder(commands.Cog):
@@ -40,7 +71,7 @@ class ItemFinder(commands.Cog):
         item="Item name (weapons, armor, ammo, and more) - autocompletes.",
         location="Terminal you're at, e.g. 'Area18' or 'Port Tressler' - autocompletes.",
     )
-    @app_commands.autocomplete(item=item_name_autocomplete, location=terminal_name_autocomplete)
+    @app_commands.autocomplete(item=sold_item_name_autocomplete, location=terminal_name_autocomplete)
     async def ingame_item_finder(self, interaction: discord.Interaction, item: str, location: str) -> None:
         await interaction.response.defer()
 
