@@ -127,6 +127,19 @@ def test_the_system_filter_keeps_a_backup_from_leaving_the_players_system():
     assert _find(rows, system="Stanton").other_destination is None
 
 
+def test_the_space_only_filter_excludes_a_surface_origin():
+    """Audit-confirmed defect: find_backup_routes never accepted a space_only parameter at
+    all, even though the shared eligible_market_rows filter it already calls (via
+    build_pair_opportunities/build_mixed_routes) has always supported one - a space-only
+    tracked route's reroute suggestion could otherwise point at a terminal that violates
+    that constraint. O (this whole test module's origin) is a plain surface terminal with
+    no id_space_station, so space_only must exclude it - same shape as the star-system
+    filter test above."""
+    rows = _neon() + _cobalt_at_d() + _scrap_at_e(105)
+    assert _find(rows).other_destination is not None
+    assert not _find(rows, space_only=True).has_alternative
+
+
 def test_a_budget_caps_the_fillers_after_the_anchor_is_paid_for():
     result = _find(_neon() + _cobalt_at_d(), budget=2100 + 100)  # 100 aUEC spare = 5 Cobalt at 20
     load = result.fuller_hold

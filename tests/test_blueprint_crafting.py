@@ -82,6 +82,40 @@ def test_item_input_uses_blueprint_quality_landmarks_and_ignores_empty_duplicate
     assert len(carinite.modifiers) == 2, "the valid group modifiers remain; the empty child duplicate is removed"
 
 
+def test_plan_rejects_an_in_range_quality_that_is_not_one_of_the_discrete_values():
+    """Audit-confirmed defect (hardening, not a live incident - Discord's own dropdown
+    never offers anything else): plan() only range-checked a chosen quality against
+    min_quality..1000, never checking it was actually one of the material's own discrete
+    quality_values (real for an item-kind ingredient with matching aspect data - here,
+    multiples of 50, same fixture as the test above). A non-UI caller could otherwise
+    submit an in-range but non-discrete value."""
+    raw = rifle()
+    group = raw['requirement_groups'][2]
+    group['key'] = 'REGULATOR'
+    group['name'] = 'Power Regulator'
+    group['children'][0].update(
+        kind='item', uuid='carinite-item', name='Carinite', quantity=1, quantity_scu=None,
+        modifiers=[{
+            'property_key': 'weapon_damage', 'label': 'Impact Force', 'better_when': 'neutral',
+            'quality_range': {'min': None, 'max': None},
+            'modifier_range': {'at_min_quality': None, 'at_max_quality': None},
+            'value_range_type': None, 'value_segments': None,
+        }],
+    )
+    raw['aspects']['aspects'].append({
+        'key': 'REGULATOR', 'input': {'uuid': 'carinite-item'},
+        'slider_min': 0, 'initial_quality': 500, 'slider_max': 1000,
+    })
+    recipe = crafting.Recipe.parse(raw)
+    carinite = next(item for item in recipe.inputs if item.name == 'Carinite')
+    assert 325 not in carinite.quality_values, "sanity check: 325 isn't a multiple of 50"
+
+    with pytest.raises(ValueError, match='Quality outside recipe limits'):
+        recipe.plan(5, {}, {carinite.path: 325})
+
+    recipe.plan(5, {}, {carinite.path: 500})  # a real discrete value must still be accepted
+
+
 def test_modifier_display_is_a_semantic_percentage_change():
     assert crafting.format_modifier(Decimal('0.976'), 'lower') == '2.40% improvement (lower)'
     assert crafting.format_modifier(Decimal('1.0918'), 'higher') == '9.18% improvement (higher)'

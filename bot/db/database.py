@@ -4291,14 +4291,26 @@ class Database:
         count - the per-command drill-down /command-usage's command option shows, meant for
         picking real users to reach out to for feedback, not just seeing a count."""
         owner_ids = owner_ids or set()
-        placeholders = ",".join("?" for _ in owner_ids) or "NULL"
+        # Built conditionally, never as a NULL placeholder - audit-confirmed defect.
+        # SQLite evaluates `x NOT IN (NULL)` as NULL for every row (never true), so
+        # `placeholders = ... or "NULL"` used to silently turn an empty owner_ids (reachable
+        # via this command's own autocomplete callback before bot.is_owner() has ever run
+        # and populated owner_id/owner_ids) into "match nobody" instead of "nobody to
+        # exclude, everyone is real."
+        if owner_ids:
+            placeholders = ",".join("?" for _ in owner_ids)
+            exclude_clause = f"AND user_id NOT IN ({placeholders})"
+            params: tuple = (command_name, *owner_ids)
+        else:
+            exclude_clause = ""
+            params = (command_name,)
         async with self.connect() as db:
             rows = await (await db.execute(
                 f"""SELECT user_id, username, use_count, last_used_at
                     FROM command_usage_by_user
-                    WHERE command_name = ? AND user_id NOT IN ({placeholders})
+                    WHERE command_name = ? {exclude_clause}
                     ORDER BY use_count DESC, last_used_at DESC""",
-                (command_name, *owner_ids),
+                params,
             )).fetchall()
             return [dict(row) for row in rows]
 
@@ -4310,21 +4322,41 @@ class Database:
         set (not a single id) to cover a team-owned Discord application, where discord.py
         populates bot.owner_ids instead of a single bot.owner_id - see UexBot.is_owner."""
         owner_ids = owner_ids or set()
-        placeholders = ",".join("?" for _ in owner_ids) or "NULL"
         async with self.connect() as db:
-            rows = await (await db.execute(
-                f"""SELECT command_name,
-                           SUM(use_count) AS total_count,
-                           SUM(CASE WHEN user_id IN ({placeholders}) THEN use_count ELSE 0 END) AS owner_count,
-                           MAX(last_used_at) AS last_used_at,
-                           MAX(CASE WHEN user_id NOT IN ({placeholders}) THEN last_used_at END)
-                               AS last_used_excluding_owner_at,
-                           COUNT(DISTINCT CASE WHEN user_id NOT IN ({placeholders}) THEN user_id END)
-                               AS distinct_real_users
-                    FROM command_usage_by_user
-                    GROUP BY command_name
-                    ORDER BY (SUM(use_count) - SUM(CASE WHEN user_id IN ({placeholders}) THEN use_count ELSE 0 END)) DESC,
-                             command_name""",
-                (*owner_ids, *owner_ids, *owner_ids, *owner_ids),
-            )).fetchall()
+            if owner_ids:
+                # Built conditionally, never as a NULL placeholder - see get_command_users'
+                # own comment for why `placeholders = ... or "NULL"` was a real bug
+                # (`x NOT IN (NULL)` is NULL, never true, for every row in SQLite).
+                placeholders = ",".join("?" for _ in owner_ids)
+                cursor = await db.execute(
+                    f"""SELECT command_name,
+                               SUM(use_count) AS total_count,
+                               SUM(CASE WHEN user_id IN ({placeholders}) THEN use_count ELSE 0 END) AS owner_count,
+                               MAX(last_used_at) AS last_used_at,
+                               MAX(CASE WHEN user_id NOT IN ({placeholders}) THEN last_used_at END)
+                                   AS last_used_excluding_owner_at,
+                               COUNT(DISTINCT CASE WHEN user_id NOT IN ({placeholders}) THEN user_id END)
+                                   AS distinct_real_users
+                        FROM command_usage_by_user
+                        GROUP BY command_name
+                        ORDER BY (SUM(use_count) - SUM(CASE WHEN user_id IN ({placeholders}) THEN use_count ELSE 0 END)) DESC,
+                                 command_name""",
+                    (*owner_ids, *owner_ids, *owner_ids, *owner_ids),
+                )
+            else:
+                # No owner id known yet (reachable via this command's own autocomplete
+                # callback before bot.is_owner() has ever run and populated owner_id/
+                # owner_ids) - nobody to exclude, so every user counts as real.
+                cursor = await db.execute(
+                    """SELECT command_name,
+                              SUM(use_count) AS total_count,
+                              0 AS owner_count,
+                              MAX(last_used_at) AS last_used_at,
+                              MAX(last_used_at) AS last_used_excluding_owner_at,
+                              COUNT(DISTINCT user_id) AS distinct_real_users
+                       FROM command_usage_by_user
+                       GROUP BY command_name
+                       ORDER BY SUM(use_count) DESC, command_name"""
+                )
+            rows = await cursor.fetchall()
             return [dict(row) for row in rows]

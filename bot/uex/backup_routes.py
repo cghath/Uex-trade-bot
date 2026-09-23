@@ -175,14 +175,15 @@ def find_backup_routes(
     anchor_buy_price: float,
     ship_capacity_scu: float,
     budget: float | None = None,
+    space_only: bool = False,
     capital_access_only: bool = False,
     auto_load_only: bool = False,
     system: str | None = None,
 ) -> BackupResult:
     """Plan B for a stock-limited route from origin_terminal_id to destination_terminal_id
     carrying anchor_scu of anchor_commodity_id, bought at anchor_buy_price. The filters are the
-    same ones the route list applied, so a backup never leaves the player's system / auto-load /
-    dock-access limits.
+    same ones the route list applied, so a backup never leaves the player's system / space-only /
+    auto-load / dock-access limits.
 
     Three independent answers (each None when not clearly better than its reference):
     fuller_hold beats simply continuing; other_destination must beat fuller_hold (or
@@ -196,7 +197,9 @@ def find_backup_routes(
         return BackupResult(None, None, None, None, BASELINE_NO_DATA)
     capital = math.inf if budget is None else max(0.0, float(budget))
 
-    filters = dict(capital_access_only=capital_access_only, auto_load_only=auto_load_only, system=system)
+    filters = dict(
+        space_only=space_only, capital_access_only=capital_access_only, auto_load_only=auto_load_only, system=system,
+    )
     eligible = eligible_market_rows(market_rows, **filters)
     origin_row = next((r for r in eligible if _int(r.get("id_terminal")) == origin_terminal_id), None)
     anchor_name = str(next(
@@ -309,6 +312,7 @@ class BackupContext:
     ship_capacity_scu: float
     ship_name: str | None = None
     budget: float | None = None
+    space_only: bool = False
     capital_access_only: bool = False
     auto_load_only: bool = False
     system: str | None = None
@@ -334,6 +338,7 @@ def run_backup_search(market_rows: list[dict[str, Any]], context: BackupContext)
         anchor_buy_price=context.anchor_buy_price,
         ship_capacity_scu=context.ship_capacity_scu,
         budget=context.budget,
+        space_only=context.space_only,
         capital_access_only=context.capital_access_only,
         auto_load_only=context.auto_load_only,
         system=context.system,

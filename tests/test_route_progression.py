@@ -2171,10 +2171,10 @@ def _leg_dict(leg: RouteLegInput) -> dict:
     }
 
 
-async def _create_thread_for_legs(db: Database, thread_id: int, legs: list[RouteLegInput]) -> None:
+async def _create_thread_for_legs(db: Database, thread_id: int, legs: list[RouteLegInput], **filters) -> None:
     await db.create_route_progression_thread(
         thread_id=thread_id, user_id=1, guild_id=1, route_kind="best_route",
-        route_snapshot={"title": "test route", "legs": [_leg_dict(leg) for leg in legs]},
+        route_snapshot={"title": "test route", "legs": [_leg_dict(leg) for leg in legs], **filters},
         legs=[_leg_dict(leg) for leg in legs],
     )
 
@@ -2752,6 +2752,111 @@ def test_handle_leg_outcome_sell_side_reroute_offloads_the_search_to_a_worker_th
         assert called_from_thread["thread"] is not threading.main_thread(), (
             "find_backup_routes ran on the main/event-loop thread - it must be offloaded via "
             "asyncio.to_thread so it can't block the bot's one event loop"
+        )
+
+    asyncio.run(run())
+
+
+def test_handle_leg_outcome_sell_side_reroute_honors_the_originating_routes_filters(tmp_path, monkeypatch):
+    """Audit-confirmed defect: _suggest_sell_shortfall_reroute used to call find_backup_routes
+    with every filter at its default (off/None), regardless of what the tracked route's own
+    search actually required - a space-only or capital-ship-only route's reroute suggestion
+    could point at a terminal that violates those constraints. The filters are now carried
+    through TrackableRoute -> route_snapshot and read back at reroute time via
+    _get_route_filters."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await _seed_market_row(db)
+        leg0 = _leg_input(id_terminal=10, id_commodity=1, quoted_price=100.0, quoted_scu=50.0, quoted_status=3)
+        leg1 = _leg_input(
+            side="sell", id_terminal=20, id_commodity=1, terminal_name="Elsewhere",
+            display_label="Sell Gold at Elsewhere", quoted_price=90.0, quoted_scu=40.0, quoted_status=2,
+        )
+        leg2 = _leg_input(
+            side="buy", id_terminal=30, id_commodity=3, terminal_name="Third Stop",
+            commodity_name="Iron", display_label="Buy Iron at Third Stop",
+            quoted_price=10.0, quoted_scu=20.0, quoted_status=3,
+        )
+        await _create_thread_for_legs(
+            db, 1, [leg0, leg1, leg2],
+            space_only=True, capital_access_only=True, auto_load_only=True, system="Stanton",
+        )
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db})()
+        cog._active_legs = {1: [leg0, leg1, leg2]}
+        channel = _fake_thread_channel()
+
+        captured_kwargs = {}
+        real_find = route_progression_module.find_backup_routes
+
+        def spy(*args, **kwargs):
+            captured_kwargs.update(kwargs)
+            return real_find(*args, **kwargs)
+
+        monkeypatch.setattr(route_progression_module, "find_backup_routes", spy)
+
+        await cog.handle_leg_outcome(channel, 1, 1, leg1, outcome="missing")
+
+        assert captured_kwargs, "find_backup_routes was never called"
+        assert captured_kwargs["space_only"] is True
+        assert captured_kwargs["capital_access_only"] is True
+        assert captured_kwargs["auto_load_only"] is True
+        assert captured_kwargs["system"] == "Stanton"
+
+    asyncio.run(run())
+
+
+def test_handle_leg_outcome_sell_side_reroute_prices_against_the_nearest_preceding_buy(tmp_path, monkeypatch):
+    """Audit-confirmed defect: the paired buy leg used to be found with a bare 'first buy row
+    anywhere in the thread matching this commodity' lookup, ignoring leg_index - a route that
+    revisits the same commodity on a later hop would silently price the shortfall against an
+    earlier, different purchase. Two buy legs for the same commodity (different prices) at
+    leg_index 0 and 2; the sell-side shortfall at leg_index 3 must pair with the leg 2 buy
+    (the nearest preceding one), not the leg 0 buy."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await _seed_market_row(db)
+        leg0 = _leg_input(id_terminal=10, id_commodity=1, quoted_price=100.0, quoted_scu=50.0, quoted_status=3)
+        leg1 = _leg_input(
+            side="sell", id_terminal=20, id_commodity=1, terminal_name="Elsewhere",
+            display_label="Sell Gold at Elsewhere", quoted_price=90.0, quoted_scu=40.0, quoted_status=2,
+        )
+        leg2 = _leg_input(
+            id_terminal=30, id_commodity=1, terminal_name="Third Stop",
+            display_label="Buy Gold at Third Stop (revisit)", quoted_price=200.0, quoted_scu=30.0, quoted_status=3,
+        )
+        leg3 = _leg_input(
+            side="sell", id_terminal=40, id_commodity=1, terminal_name="Fourth Stop",
+            display_label="Sell Gold at Fourth Stop", quoted_price=250.0, quoted_scu=30.0, quoted_status=2,
+        )
+        leg4 = _leg_input(
+            side="buy", id_terminal=50, id_commodity=3, terminal_name="Fifth Stop",
+            commodity_name="Iron", display_label="Buy Iron at Fifth Stop",
+            quoted_price=10.0, quoted_scu=20.0, quoted_status=3,
+        )
+        await _create_thread_for_legs(db, 1, [leg0, leg1, leg2, leg3, leg4])
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db})()
+        cog._active_legs = {1: [leg0, leg1, leg2, leg3, leg4]}
+        channel = _fake_thread_channel()
+
+        captured_kwargs = {}
+        real_find = route_progression_module.find_backup_routes
+
+        def spy(*args, **kwargs):
+            captured_kwargs.update(kwargs)
+            return real_find(*args, **kwargs)
+
+        monkeypatch.setattr(route_progression_module, "find_backup_routes", spy)
+
+        await cog.handle_leg_outcome(channel, 1, 3, leg3, outcome="missing")
+
+        assert captured_kwargs, "find_backup_routes was never called"
+        assert captured_kwargs["anchor_buy_price"] == 200.0, (
+            "must price against the nearest preceding buy leg (leg 2, 200.0), not the first "
+            "matching buy anywhere in the thread (leg 0, 100.0)"
         )
 
     asyncio.run(run())

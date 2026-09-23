@@ -765,6 +765,7 @@ class Prices(commands.Cog):
                     trackable_route = TrackableRoute(
                         route_kind="best_route",
                         title=f"{commodity_display}: {origin} → {dest}",
+                        auto_load_only=auto_load_only, system=system_value,
                         legs=[
                             RouteLegInput(
                                 side="buy", id_terminal=origin_id, id_commodity=id_commodity,
@@ -1237,6 +1238,8 @@ class Prices(commands.Cog):
                 trackable_route = TrackableRoute(
                     route_kind="mixed_routes",
                     title=f"#{index} {route.origin_name} → {route.destination_name}",
+                    space_only=space_only, capital_access_only=capital_access_only,
+                    auto_load_only=auto_load_only, system=system_value,
                     legs=[
                         RouteLegInput(
                             side="buy", id_terminal=route.origin_id, id_commodity=item.id_commodity,
@@ -1405,6 +1408,7 @@ class Prices(commands.Cog):
         await self._send_multi_stop_routes(
             interaction, routes, ship_vehicle=ship_vehicle, ship_query=ship_query, budget=budget,
             space_only=space_only, capital_access_only=capital_access_only, auto_load_only=auto_load_only,
+            system=system_value,
         )
 
     async def _send_multi_stop_routes(
@@ -1418,6 +1422,7 @@ class Prices(commands.Cog):
         space_only: bool,
         capital_access_only: bool,
         auto_load_only: bool,
+        system: str | None = None,
     ) -> None:
         """Shared per-route embed/tracking/fallback sending for /multi-stop-route and
         /route-from-multi - both build a `routes: list[MultiStopRoute]` differently
@@ -1597,6 +1602,8 @@ class Prices(commands.Cog):
                     if progression_legs:
                         view = RouteTrackingView(tracking_cog, [TrackableRoute(
                             route_kind="multi_stop_route", title=f"#{index} {path_label}", legs=progression_legs,
+                            space_only=space_only, capital_access_only=capital_access_only,
+                            auto_load_only=auto_load_only, system=system,
                         )])
                 try:
                     if view is not None:
@@ -1745,6 +1752,7 @@ class Prices(commands.Cog):
         await self._send_multi_stop_routes(
             interaction, routes, ship_vehicle=ship_vehicle, ship_query=ship_query, budget=budget,
             space_only=space_only, capital_access_only=capital_access_only, auto_load_only=auto_load_only,
+            system=system_value,
         )
 
     @app_commands.command(

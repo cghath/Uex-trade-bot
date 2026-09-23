@@ -158,6 +158,27 @@ def test_opening_the_list_answers_when_the_thread_update_fails():
             interaction.followup.send.assert_awaited_once()
             assert "couldn't update" in interaction.followup.send.await_args.args[0], kind
 
+
+def test_adding_a_plan_answers_when_the_thread_refresh_fails_with_a_non_discord_error():
+    """Audit-confirmed defect: add()'s post-save refresh call only caught
+    discord.Forbidden/discord.HTTPException around the SAME refresh() call open() makes a
+    few lines below with a broad except Exception - a DB read-back error, a malformed
+    stored plan, or any other non-Discord rendering failure escaped add()'s narrower catch
+    uncaught, leaving the interaction unanswered ("the application did not respond") even
+    though the plan was already saved."""
+    async def run():
+        service = ShoppingService(NS(db=NS(add_blueprint_plan=AsyncMock())))
+        service._thread = AsyncMock(return_value=FakeThread())
+        service.refresh = AsyncMock(side_effect=RuntimeError("not a discord.HTTPException/Forbidden"))
+        interaction = _interaction(NS(id=100))
+        saved = await service.add(interaction, _plan())
+        return saved, interaction
+
+    saved, interaction = asyncio.run(run())
+    assert saved is True, "the plan was already saved before the refresh failed"
+    interaction.followup.send.assert_awaited_once()
+    assert "Saved, but I couldn't refresh" in interaction.followup.send.await_args.args[0]
+
     asyncio.run(run())
 
 

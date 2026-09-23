@@ -118,7 +118,15 @@ class Diagnostics(commands.Cog):
             # would silently stop working while still looking fine at a glance.
             lines = [f"**Real users of /{command}** ({len(users)}):", ""]
             for u in users:
-                display_name = u["username"] or "(unknown name - hasn't used this command since usernames started being tracked)"
+                # A stored Discord display name is player-controlled (their own nickname/
+                # username) - audit-confirmed defect: sent unescaped, an `@everyone` or a
+                # crafted <@id>/<@&id> mention embedded in someone's own display name would
+                # actually ping when the owner ran this. escape_mentions neutralizes any
+                # mention text hiding in the NAME; the real <@user_id> mention just below is
+                # legitimate and is what allowed_mentions (see the send call) still permits.
+                display_name = discord.utils.escape_mentions(
+                    u["username"] or "(unknown name - hasn't used this command since usernames started being tracked)"
+                )
                 lines.append(
                     f"- {display_name} (<@{u['user_id']}>) - {u['use_count']} use(s), "
                     f"last {(u['last_used_at'] or '')[:10]}"
@@ -126,15 +134,32 @@ class Diagnostics(commands.Cog):
             body = "\n".join(lines)
             if len(body) > 1990:
                 body = body[:1950] + "\n... truncated ..."
-            await interaction.followup.send(body, ephemeral=True)
+            # Second, independent layer on top of escape_mentions above: even if a mention
+            # slipped past that (or Discord's own parsing has a gap escape_mentions doesn't
+            # cover), this caps what CAN ping to exactly the genuine user_ids this report is
+            # listing - never a role or @everyone/@here, regardless of what's in body.
+            await interaction.followup.send(
+                body, ephemeral=True,
+                allowed_mentions=discord.AllowedMentions(
+                    users=[discord.Object(id=u["user_id"]) for u in users], everyone=False, roles=False,
+                ),
+            )
             return
 
         stats = await self.bot.db.get_command_usage_stats(owner_ids)
-        tracked_names = {row["command_name"] for row in stats}
         # walk_commands() is the live command surface right now - a name in it with no
         # matching stats row has never been invoked by anyone, including the owner, which is
         # the strongest possible "nobody is touching this" signal for trimming.
         all_names = {cmd.qualified_name for cmd in self.bot.tree.walk_commands()}
+        # Audit-confirmed defect: a command removed from the tree (e.g. /my-ship, retired
+        # this same session) still has historical rows in command_usage_by_user. Nothing
+        # filtered the report against the CURRENT command tree, so a retired command kept
+        # appearing in least/most-used and inflated "have at least one recorded invocation"
+        # below - split before building anything, and surface retired ones on their own
+        # labeled line instead of silently dropping that history.
+        live_stats = [row for row in stats if row["command_name"] in all_names]
+        retired_stats = [row for row in stats if row["command_name"] not in all_names]
+        tracked_names = {row["command_name"] for row in live_stats}
         never_invoked = sorted(all_names - tracked_names)
 
         rows = [
@@ -145,7 +170,7 @@ class Diagnostics(commands.Cog):
                 "users": row["distinct_real_users"],
                 "last_real": (row["last_used_excluding_owner_at"] or "never")[:10],
             }
-            for row in stats
+            for row in live_stats
         ]
         least_used = sorted(rows, key=lambda r: r["real"])[:15]
         most_used = sorted(rows, key=lambda r: -r["real"])[:10]
@@ -164,6 +189,13 @@ class Diagnostics(commands.Cog):
         if never_invoked:
             lines.append("")
             lines.append("Never invoked at all: " + ", ".join(f"/{n}" for n in never_invoked))
+        if retired_stats:
+            lines.append("")
+            retired_summary = ", ".join(
+                f"/{row['command_name']} ({row['total_count'] - row['owner_count']} real)"
+                for row in retired_stats
+            )
+            lines.append(f"Retired (no longer a live command, kept for history): {retired_summary}")
         lines.append("")
         lines.append("Most used:")
         for r in most_used:

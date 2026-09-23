@@ -675,6 +675,7 @@ class Trends(commands.Cog):
                 trackable_route = TrackableRoute(
                     route_kind="top_routes",
                     title=f"{r.commodity_name}: {r.origin_terminal_name} → {r.destination_terminal_name}",
+                    auto_load_only=auto_load_only, system=system,
                     legs=[
                         RouteLegInput(
                             side="buy", id_terminal=r.origin_terminal_id, id_commodity=r.id_commodity,

@@ -110,6 +110,15 @@ class TrackableRoute:
     route_kind: str  # 'best_route' | 'top_routes' | 'mixed_routes' | 'multi_stop_route'
     title: str
     legs: list[RouteLegInput]
+    # The filters the ORIGINAL route search applied - carried through so a later reroute
+    # suggestion (_suggest_sell_shortfall_reroute) never proposes a terminal that violates
+    # them. Only /mixed-routes and /multi-stop-route ever have space_only/capital_access_only
+    # options; /best-route/top-routes-family commands only carry auto_load_only/system - a
+    # caller without a given filter simply leaves it at its default.
+    space_only: bool = False
+    capital_access_only: bool = False
+    auto_load_only: bool = False
+    system: str | None = None
 
 
 class ActualAmountModal(discord.ui.Modal):
@@ -668,6 +677,13 @@ class RouteProgression(commands.Cog):
 
             route_snapshot = {
                 "title": route.title,
+                # Free-form JSON, no schema/migration needed for these - read back by
+                # _get_route_filters at reroute time so a suggestion never violates the
+                # constraints the player's original route search applied.
+                "space_only": route.space_only,
+                "capital_access_only": route.capital_access_only,
+                "auto_load_only": route.auto_load_only,
+                "system": route.system,
                 "legs": [
                     {
                         "side": leg.side, "id_terminal": leg.id_terminal, "id_commodity": leg.id_commodity,
@@ -776,6 +792,22 @@ class RouteProgression(commands.Cog):
         if leg_index >= len(snapshot_legs):
             return None
         return _leg_input_from_snapshot(snapshot_legs[leg_index])
+
+    async def _get_route_filters(self, thread_id: int) -> dict:
+        """The originating route's own search filters, read back from route_snapshot -
+        defaults to every filter off/unset for a thread created before this field existed,
+        which matches that thread's actual search (nothing was ever filtered on the ones
+        it didn't have as options)."""
+        thread_row = await self.bot.db.get_route_progression_thread(thread_id)
+        if thread_row is None:
+            return {}
+        snapshot = json.loads(thread_row["route_snapshot"])
+        return {
+            "space_only": snapshot.get("space_only", False),
+            "capital_access_only": snapshot.get("capital_access_only", False),
+            "auto_load_only": snapshot.get("auto_load_only", False),
+            "system": snapshot.get("system"),
+        }
 
     async def _post_leg_prompt(
         self, thread: discord.Thread, thread_id: int, leg_index: int, leg: RouteLegInput
@@ -931,9 +963,18 @@ class RouteProgression(commands.Cog):
             return
         try:
             legs = await self.bot.db.get_route_progression_legs(thread_id)
-            paired_sell = next(
-                (row for row in legs if row["side"] == "sell" and row["id_commodity"] == leg.id_commodity), None,
-            )
+            # Nearest-FOLLOWING sell leg for this commodity, by leg_index - not just the
+            # first one anywhere in the thread. A multi-stop chain that revisits the same
+            # commodity on a later hop has more than one sell leg matching id_commodity;
+            # only the one immediately after THIS buy is the leg this shortfall was
+            # actually meant for. Audit-confirmed defect, same shape as the paired-buy fix
+            # in _suggest_sell_shortfall_reroute below.
+            candidates = [
+                row for row in legs
+                if row["side"] == "sell" and row["id_commodity"] == leg.id_commodity
+                and row["leg_index"] > leg_index
+            ]
+            paired_sell = min(candidates, key=lambda row: row["leg_index"], default=None)
             if paired_sell is None:
                 return
             remaining_budget = (leg.quoted_price * shortfall_scu) if leg.quoted_price else None
@@ -1009,9 +1050,21 @@ class RouteProgression(commands.Cog):
             return
         try:
             legs = await self.bot.db.get_route_progression_legs(thread_id)
-            paired_buy = next(
-                (row for row in legs if row["side"] == "buy" and row["id_commodity"] == leg.id_commodity), None,
-            )
+            # Nearest-PRECEDING buy leg for this commodity, by leg_index - not just the
+            # first one anywhere in the thread. A multi-stop chain that revisits the same
+            # commodity on a later hop has more than one buy leg matching id_commodity;
+            # a bare commodity-only search across the whole thread could silently price
+            # this shortfall against an earlier, different purchase. Audit-confirmed
+            # defect: since a hop's own buy legs always sit immediately before that same
+            # hop's sell legs in the flattened per-leg list, the buy with the HIGHEST
+            # leg_index that's still less than this sell's leg_index is always the one
+            # this shortfall was actually bought at.
+            candidates = [
+                row for row in legs
+                if row["side"] == "buy" and row["id_commodity"] == leg.id_commodity
+                and row["leg_index"] < leg_index
+            ]
+            paired_buy = max(candidates, key=lambda row: row["leg_index"], default=None)
             if paired_buy is None:
                 return
             buy_price = (
@@ -1020,6 +1073,7 @@ class RouteProgression(commands.Cog):
             if not buy_price:
                 return
             market_rows = await self.bot.db.get_mixed_route_market_rows()
+            filters = await self._get_route_filters(thread_id)
             # find_backup_routes always computes without_anchor internally (build_mixed_routes
             # over the full market snapshot, even though this caller never reads that field) -
             # dense market data can make that expensive enough to matter, and this call would
@@ -1032,6 +1086,10 @@ class RouteProgression(commands.Cog):
                 origin_terminal_id=leg.id_terminal, destination_terminal_id=leg.id_terminal,
                 anchor_commodity_id=leg.id_commodity, anchor_scu=shortfall_scu, anchor_buy_price=float(buy_price),
                 ship_capacity_scu=shortfall_scu,
+                space_only=filters.get("space_only", False),
+                capital_access_only=filters.get("capital_access_only", False),
+                auto_load_only=filters.get("auto_load_only", False),
+                system=filters.get("system"),
             )
             if result.other_destination is None:
                 await channel.send(
