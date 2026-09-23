@@ -201,6 +201,41 @@ def test_get_command_users_returns_nothing_for_an_unknown_command(tmp_path):
     asyncio.run(run())
 
 
+def test_get_command_users_with_empty_owner_ids_treats_everyone_as_real(tmp_path):
+    """Audit-confirmed defect: placeholders = ",".join(...) or "NULL" made an empty
+    owner_ids build the SQL fragment `user_id NOT IN (NULL)` - SQLite evaluates that as
+    NULL (never true) for every row, silently matching nobody instead of the intended
+    "nobody to exclude, everyone counts as real." Reachable via this command's own
+    autocomplete callback (tracked_command_autocomplete) before bot.is_owner() has ever
+    run once to populate bot.owner_id/owner_ids."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await db.record_command_usage("price", 111, "PlayerOne")
+
+        return await db.get_command_users("price", set())
+
+    users = asyncio.run(run())
+    assert len(users) == 1, "an empty owner_ids must exclude nobody, not silently match nobody"
+    assert users[0]["user_id"] == 111
+
+
+def test_get_command_usage_stats_with_empty_owner_ids_treats_everyone_as_real(tmp_path):
+    """Same NOT IN (NULL) defect as get_command_users, in the aggregate stats query."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await db.record_command_usage("price", 111, "PlayerOne")
+
+        return (await db.get_command_usage_stats(set()))[0]
+
+    row = asyncio.run(run())
+    assert row["total_count"] == 1
+    assert row["owner_count"] == 0
+    assert row["distinct_real_users"] == 1, "with nobody to exclude, the one real user must still be counted"
+    assert row["last_used_excluding_owner_at"] is not None
+
+
 # -- UexBot.on_app_command_completion (bot/main.py) ---------------------------------------
 
 def test_on_app_command_completion_records_the_command_user_and_display_name():
@@ -432,6 +467,80 @@ def test_command_usage_with_a_command_flags_a_user_predating_username_tracking()
         assert "unknown name" in body
 
     asyncio.run(run())
+
+
+def test_command_usage_with_a_command_escapes_mentions_hiding_in_display_names():
+    """Audit-confirmed defect: a stored Discord display name is player-controlled (their
+    own nickname/username) and used to be sent completely unescaped - an @everyone, or a
+    crafted <@id>/<@&id> mention embedded in someone's own display name, would actually
+    ping when the owner ran this. Two independent layers now guard it: escape_mentions on
+    the name text itself, and an explicit AllowedMentions restricting what CAN ping to
+    only the genuine target user_ids this report is listing."""
+    async def run():
+        # A realistic-length fake snowflake (18 digits) - discord.utils.escape_mentions'
+        # own regex only escapes IDs matching a real Discord snowflake's 17-20 digit
+        # length, so a too-short fake id (e.g. "999999") wouldn't be a real mention risk
+        # in the first place and wouldn't exercise the fix.
+        users_by_command = {
+            "best-route": [_user_row(222, "@everyone fake <@123456789012345678> ping", use_count=3)],
+        }
+        cog = _cog(
+            is_owner=True, stats=[], live_command_names=["best-route"],
+            users_by_command=users_by_command,
+        )
+        interaction = _FakeInteraction()
+
+        await cog.command_usage.callback(cog, interaction, "best-route")
+
+        body = interaction.followup.send.call_args.args[0]
+        kwargs = interaction.followup.send.call_args.kwargs
+        return body, kwargs
+
+    body, kwargs = asyncio.run(run())
+    assert "@everyone" not in body, "a mention hiding in the stored display name must be neutralized"
+    assert "<@123456789012345678>" not in body, "a fabricated mention embedded in the display name must be neutralized"
+    assert "<@222>" in body, "the real, legitimate target mention must still render"
+    allowed = kwargs.get("allowed_mentions")
+    assert allowed is not None, "must restrict what can actually ping, as a second independent layer"
+    assert {obj.id for obj in allowed.users} == {222}
+    assert allowed.everyone is False
+    assert allowed.roles is False
+
+
+def test_command_usage_aggregate_report_excludes_retired_commands_from_ranking():
+    """Audit-confirmed defect: a command removed from the live tree (e.g. /my-ship,
+    retired the same session) can still have historical rows in command_usage_by_user -
+    nothing filtered the aggregate report against the CURRENT command tree, so a retired
+    command kept appearing in least/most-used and inflated the 'have at least one
+    recorded invocation' count. Retired usage must be surfaced separately instead of
+    silently dropped or left polluting the live ranking."""
+    async def run():
+        stats = [
+            _usage_row("best-route", total=12, owner=2, users=3, last_real="2026-09-22 01:00:00"),
+            _usage_row("my-ship", total=40, owner=0, users=8, last_real="2026-09-20 00:00:00"),
+        ]
+        cog = _cog(
+            is_owner=True, stats=stats,
+            live_command_names=["best-route"],  # my-ship is no longer in the live tree
+        )
+        interaction = _FakeInteraction()
+
+        await cog.command_usage.callback(cog, interaction, None)
+
+        return interaction.followup.send.call_args.args[0]
+
+    body = asyncio.run(run())
+    assert "1 live commands" in body, "my-ship must not be counted as a live command"
+    assert "1 have at least one recorded" in body, "my-ship must not inflate the live-tracked count"
+    assert "Retired" in body and "/my-ship" in body, "retired usage must still be surfaced, just separately"
+    least_used_lines = body.split("Least used")[1].split("Most used")[0].splitlines()
+    # A real ranked row is formatted as "  /{name:<28} ...", i.e. starts with "/" once
+    # stripped - the retired-disclosure line ("Retired (...): /my-ship (...)") also falls
+    # inside this header-delimited slice but does NOT start with "/my-ship", so this still
+    # distinguishes "polluting the ranking" from "merely mentioned in the disclosure line."
+    assert not any(line.strip().startswith("/my-ship") for line in least_used_lines), (
+        "a retired command must not pollute the live least-used ranking"
+    )
 
 
 def test_command_usage_with_a_command_no_real_usage_says_so():

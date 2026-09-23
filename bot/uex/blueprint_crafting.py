@@ -175,8 +175,16 @@ class Recipe:
         ingredients = []
         for item in self.selected(choices):
             quality = qualities.get(item.path)
-            if quality is not None and not item.min_quality <= number(quality) <= 1000:
-                raise ValueError('Quality outside recipe limits')
+            if quality is not None:
+                value = number(quality)
+                if not item.min_quality <= value <= 1000:
+                    raise ValueError('Quality outside recipe limits')
+                # Range-valid isn't enough for an ingredient with real discrete quality
+                # steps (e.g. multiples of 50 for an item-kind ingredient with matching
+                # aspect data) - Discord's own dropdown never offers anything else, so this
+                # is defense-in-depth for a non-UI caller, not a live-reachable gap.
+                if item.quality_values and value not in {Decimal(v) for v in item.quality_values}:
+                    raise ValueError('Quality outside recipe limits')
             ingredients.append({'identity': item.identity, 'name': item.name, 'unit': item.unit,
                                 'amount': str(item.amount * count), 'quality': quality, 'aspect': item.aspect,
                                 'path': item.path})

@@ -142,7 +142,12 @@ class ShoppingService:
             return False
         try:
             await self.refresh(thread, interaction.user.id, interaction.guild_id)
-        except (discord.Forbidden, discord.HTTPException):
+        except Exception:
+            # Not just discord.Forbidden/HTTPException - a DB read-back error, a malformed
+            # stored plan, or any other rendering failure here must still get a reply, or
+            # the interaction is left unanswered ("the application did not respond") even
+            # though the plan was already saved. Matches open()'s identical refresh call
+            # just below, which already had this broader catch.
             logger.exception("Blueprint list saved but Discord refresh failed")
             await interaction.followup.send(f"Saved, but I couldn't refresh {thread.mention}. Use Refresh list there.",
                                             ephemeral=True)
