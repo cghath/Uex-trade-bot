@@ -927,9 +927,10 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
   accumulate rows with no built-in pressure-release mechanism, and add bounded, time-based
   cleanup wherever one's missing - the same problem `scripts/sync_pi_backups.sh` already
   fixed for Pi backup snapshots (52 accumulated, 1.7GB, before that script existed), just
-  not yet checked for elsewhere. First concrete candidate: the in-design Ship Parts Finder
-  (personal-shopping-list command, currently in design discussion, not yet built) needs a
-  session-state table so its Discord Select-menu selections survive a bot restart -
+  not yet checked for elsewhere. First concrete candidate: `/ship-parts-finder`
+  (personal-shopping-list command, built and registered, not yet deployed to production)
+  needs its session-state table (`ship_parts_shopping_entries`) so its Discord Select-menu
+  selections survive a bot restart -
   "no automatic cleanup yet" was a deliberate v1 choice, deferred on purpose rather than
   solved, specifically flagged here so it doesn't quietly become another unbounded table
   nobody notices until it's a pile.
