@@ -6,6 +6,7 @@ from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock
 
 from cryptography.fernet import Fernet
+import discord
 
 from bot.cogs import ship_parts_finder
 from bot.cogs.ship_parts_finder import ShipPartsFinder, ShipPartsShoppingService, ShipPartsShoppingView, _format_candidate_line, _format_stat_block
@@ -575,3 +576,62 @@ def test_format_port_label_reads_and_cleans_the_raw_port_name():
 def test_format_port_label_shows_a_size_range_when_min_and_max_differ():
     port = ShipPort(name="hardpoint_turret", port_type="Turret", size_min=2, size_max=4)
     assert "(S2-4)" in ship_parts_finder._format_port_label(port)
+
+
+# -- dropdowns keep showing the picked value once collapsed, not just the placeholder -------
+# Discord only shows a chosen value on a collapsed Select if the matching SelectOption has
+# default=True - found live in testing (looked exactly like the pick was lost, even though
+# the message text and lock-in both worked correctly underneath).
+
+def test_mark_default_sets_only_the_matching_option():
+    options = [discord.SelectOption(label="A", value="a"), discord.SelectOption(label="B", value="b")]
+    ship_parts_finder._mark_default(options, "b")
+    assert [o.default for o in options] == [False, True]
+    ship_parts_finder._mark_default(options, "a")
+    assert [o.default for o in options] == [True, False]
+
+
+def test_category_select_marks_the_chosen_category_as_default():
+    async def run():
+        cog = NS(candidates_for_port=AsyncMock(return_value=[]))
+        port = ShipPort(name="hp", port_type="PowerPlant", size_min=1, size_max=1)
+        view = ship_parts_finder.PartsBrowserView(cog, {"id": 100, "name": "X"}, (1, "Origin"),
+                                                    {"Power Plants": [port], "Coolers": [port]})
+        select = view.category_select
+        select._values = ["Coolers"]
+        await select.callback(_component_interaction())
+        return select
+
+    select = asyncio.run(run())
+    assert {o.value: o.default for o in select.options} == {"Power Plants": False, "Coolers": True}
+
+
+def test_slot_select_marks_the_chosen_slot_as_default():
+    async def run():
+        cog = NS(candidates_for_port=AsyncMock(return_value=[]))
+        left = ShipPort(name="hp_left", port_type="Turret", size_min=3, size_max=3)
+        nose = ShipPort(name="hp_nose", port_type="Turret", size_min=4, size_max=4)
+        view = ship_parts_finder.PartsBrowserView(cog, {"id": 100, "name": "X"}, (1, "Origin"),
+                                                    {"Turrets": [left, nose]})
+        select = ship_parts_finder._SlotSelect(view, [left, nose])
+        select._values = ["1"]
+        await select.callback(_component_interaction())
+        return select
+
+    select = asyncio.run(run())
+    assert [o.default for o in select.options] == [False, True]
+
+
+def test_part_select_marks_the_chosen_part_as_default():
+    async def run():
+        port = ShipPort(name="hp", port_type="PowerPlant", size_min=1, size_max=1)
+        view = ship_parts_finder.PartsBrowserView(NS(), {"id": 100, "name": "X"}, (1, "Origin"), {"Power Plants": [port]})
+        candidates = [_detail("PowerBolt", uuid="ua"), _detail("Atlas", uuid="ub")]
+        select = ship_parts_finder._PartSelect(view, candidates)
+        select._values = ["1"]
+        await select.callback(_component_interaction())
+        return select, view
+
+    select, view = asyncio.run(run())
+    assert [o.default for o in select.options] == [False, True]
+    assert view.selected_candidate["name"] == "Atlas"

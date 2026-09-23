@@ -455,6 +455,16 @@ class PartsBrowserView(discord.ui.View):
         await self.lock_in_selected(interaction)
 
 
+def _mark_default(options: list[discord.SelectOption], value: str) -> None:
+    """Discord's own collapsed-dropdown display shows the placeholder again after every
+    pick UNLESS the chosen SelectOption has default=True - found live in testing (looked
+    exactly like a lost selection, even though the message text and lock-in still worked).
+    Every other option's default is cleared first, so re-picking a different value doesn't
+    leave two options marked."""
+    for option in options:
+        option.default = option.value == value
+
+
 class _CategorySelect(discord.ui.Select):
     def __init__(self, parent: PartsBrowserView) -> None:
         options = [discord.SelectOption(label=category[:100], value=category)
@@ -463,6 +473,7 @@ class _CategorySelect(discord.ui.Select):
         self.parent_view = parent
 
     async def callback(self, interaction: discord.Interaction) -> None:
+        _mark_default(self.options, self.values[0])
         await self.parent_view.show_category(interaction, self.values[0])
 
 
@@ -476,6 +487,7 @@ class _SlotSelect(discord.ui.Select):
         self._ports = ports
 
     async def callback(self, interaction: discord.Interaction) -> None:
+        _mark_default(self.options, self.values[0])
         await self.parent_view.show_slot(interaction, self._ports[int(self.values[0])])
 
 
@@ -490,6 +502,7 @@ class _PartSelect(discord.ui.Select):
         self._candidates = candidates
 
     async def callback(self, interaction: discord.Interaction) -> None:
+        _mark_default(self.options, self.values[0])
         self.parent_view.selected_candidate = self._candidates[int(self.values[0])]
         await interaction.response.edit_message(content=self.parent_view.text(), view=self.parent_view)
 
