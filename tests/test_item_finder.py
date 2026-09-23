@@ -7,7 +7,13 @@ from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock
 
 from bot.cogs.item_finder import ItemFinder, MAX_RESULTS_SHOWN
-from bot.uex.item_finder import ItemListing, format_item_listing_line, location_breadcrumb, rank_item_listings
+from bot.uex.item_finder import (
+    ItemListing,
+    format_item_listing_header,
+    format_item_listing_row,
+    rank_item_listings,
+    split_place_and_vendor,
+)
 
 
 def _row(id_terminal, terminal_name, price_buy, **overrides):
@@ -16,35 +22,53 @@ def _row(id_terminal, terminal_name, price_buy, **overrides):
     return base
 
 
-# -- location_breadcrumb -------------------------------------------------------------
+def _table_rows(field_value: str) -> list[str]:
+    """Strip the ```code fence``` and header row from one system field's value, returning
+    just the data rows - the shape every /ingame-item-finder field value now has."""
+    lines = field_value.splitlines()
+    assert lines[0] == "```" and lines[-1] == "```", "table must be a single fenced code block"
+    body = lines[1:-1]
+    header, *rows = body
+    assert header == format_item_listing_header()
+    return rows
 
-def test_location_breadcrumb_excludes_star_system():
-    """Star system is deliberately left out here - it's the field/section header in the
-    cog, not repeated on every line."""
+
+# -- split_place_and_vendor -----------------------------------------------------------
+
+def test_split_place_and_vendor_splits_on_the_vendor_dash_place_convention():
+    row = _row(10, "Skutters - GrimHEX", 100)
+    assert split_place_and_vendor(row) == ("GrimHEX", "Skutters")
+
+
+def test_split_place_and_vendor_splits_on_the_last_separator_only():
+    row = _row(10, "Guns - Ammo - Checkmate", 100)
+    assert split_place_and_vendor(row) == ("Checkmate", "Guns - Ammo")
+
+
+def test_split_place_and_vendor_falls_back_to_structured_field_with_no_separator():
+    """Real exception found in live data: 'Equipment Contested Zone Checkmate' has no
+    ' - ' separator at all - falls back to the structured location field instead of
+    showing the whole raw terminal name as the place."""
+    row = _row(10, "Equipment Contested Zone Checkmate", 100, space_station_name="Checkmate Station")
+    assert split_place_and_vendor(row) == ("Checkmate Station", None)
+
+
+def test_split_place_and_vendor_fallback_prefers_city_over_outpost_over_space_station():
     row = _row(
-        10, "Dumper's Depot", 100,
-        star_system_name="Stanton", planet_name="ArcCorp", city_name="Area18",
+        10, "No Separator Here", 100,
+        city_name="Area18", outpost_name="Some Outpost", space_station_name="Some Station",
     )
-    assert location_breadcrumb(row) == "ArcCorp → Area18 → Dumper's Depot"
+    assert split_place_and_vendor(row) == ("Area18", None)
 
 
-def test_location_breadcrumb_skips_missing_levels():
-    row = _row(10, "Some Outpost", 100, outpost_name=None, city_name=None)
-    assert location_breadcrumb(row) == "Some Outpost"
-
-
-def test_location_breadcrumb_falls_back_to_bare_terminal_name_with_no_location_data():
+def test_split_place_and_vendor_falls_back_to_bare_terminal_name_with_no_location_data():
     row = _row(10, "Mystery Shop", 100)
-    assert location_breadcrumb(row) == "Mystery Shop"
+    assert split_place_and_vendor(row) == ("Mystery Shop", None)
 
 
-def test_location_breadcrumb_prefers_moon_over_orbit_and_outpost_over_space_station():
-    row = _row(
-        10, "Klescher Trading Post", 100,
-        orbit_name="Crusader", moon_name="Aberdeen",
-        space_station_name="Some Station", outpost_name="Klescher",
-    )
-    assert location_breadcrumb(row) == "Aberdeen → Klescher → Klescher Trading Post"
+def test_split_place_and_vendor_strips_whitespace_around_both_parts():
+    row = _row(10, "Guns  -  Orbituary", 100)
+    assert split_place_and_vendor(row) == ("Orbituary", "Guns")
 
 
 # -- rank_item_listings ----------------------------------------------------------------
@@ -111,60 +135,93 @@ def test_rank_item_listings_excludes_a_row_with_no_terminal_id():
     assert [r.id_terminal for r in ranked] == [1]
 
 
-def test_rank_item_listings_carries_the_location_label_system_and_price_through():
-    listings = [_row(1, "Dumper's Depot", 1234.5, star_system_name="Stanton")]
+def test_rank_item_listings_carries_the_place_vendor_system_and_price_through():
+    listings = [_row(1, "Skutters - GrimHEX", 1234.5, star_system_name="Stanton")]
     ranked = rank_item_listings(listings, {1: 2.5})
     assert ranked[0].price_buy == 1234.5
-    assert ranked[0].location_label == "Dumper's Depot"
+    assert ranked[0].place_label == "GrimHEX"
+    assert ranked[0].vendor_label == "Skutters"
     assert ranked[0].star_system_name == "Stanton"
     assert ranked[0].distance_gm == 2.5
 
 
-# -- format_item_listing_line -----------------------------------------------------------
+# -- format_item_listing_header / format_item_listing_row -------------------------------
 
-def test_format_item_listing_line_shows_distance_and_price():
+def test_format_item_listing_header_names_every_column():
+    header = format_item_listing_header()
+    assert "Place" in header
+    assert "Vendor" in header
+    assert "Price" in header
+    assert "Distance" in header
+
+
+def test_format_item_listing_row_shows_place_vendor_price_and_distance():
     listing = ItemListing(
-        id_terminal=1, terminal_name="X", location_label="X", star_system_name="Stanton",
-        price_buy=1500, distance_gm=3.25,
+        id_terminal=1, terminal_name="Skutters - GrimHEX", place_label="GrimHEX", vendor_label="Skutters",
+        star_system_name="Stanton", price_buy=1500, distance_gm=3.25,
     )
-    line = format_item_listing_line(listing)
-    assert "1,500 aUEC" in line
-    assert "3.2 Gm away" in line
+    row = format_item_listing_row(listing)
+    assert "GrimHEX" in row
+    assert "Skutters" in row
+    assert "1,500" in row
+    assert "3.2 Gm" in row
 
 
-def test_format_item_listing_line_zero_distance_says_already_here():
+def test_format_item_listing_row_zero_distance_says_here():
     listing = ItemListing(
-        id_terminal=1, terminal_name="X", location_label="X", star_system_name="Stanton",
-        price_buy=100, distance_gm=0.0,
+        id_terminal=1, terminal_name="X", place_label="X", vendor_label=None,
+        star_system_name="Stanton", price_buy=100, distance_gm=0.0,
     )
-    assert "you're already here" in format_item_listing_line(listing)
+    assert "here" in format_item_listing_row(listing)
 
 
-def test_format_item_listing_line_unknown_distance_with_no_origin_system_says_so_plainly():
+def test_format_item_listing_row_unknown_distance_with_no_origin_system_says_so_plainly():
     listing = ItemListing(
-        id_terminal=1, terminal_name="X", location_label="X", star_system_name="Pyro",
-        price_buy=100, distance_gm=None,
+        id_terminal=1, terminal_name="X", place_label="X", vendor_label=None,
+        star_system_name="Pyro", price_buy=100, distance_gm=None,
     )
-    assert format_item_listing_line(listing).endswith("distance unknown")
+    row = format_item_listing_row(listing)
+    assert "unknown" in row
+    assert "same system" not in row
 
 
-def test_format_item_listing_line_unknown_distance_in_the_players_own_system_says_so():
+def test_format_item_listing_row_unknown_distance_in_the_players_own_system_says_so():
     listing = ItemListing(
-        id_terminal=1, terminal_name="X", location_label="X", star_system_name="Stanton",
-        price_buy=100, distance_gm=None,
+        id_terminal=1, terminal_name="X", place_label="X", vendor_label=None,
+        star_system_name="Stanton", price_buy=100, distance_gm=None,
     )
-    line = format_item_listing_line(listing, origin_star_system="Stanton")
-    assert "same system, exact distance unknown" in line
+    row = format_item_listing_row(listing, origin_star_system="Stanton")
+    assert "same system" in row
 
 
-def test_format_item_listing_line_unknown_distance_in_a_different_system_says_plain_unknown():
+def test_format_item_listing_row_unknown_distance_in_a_different_system_says_plain_unknown():
     listing = ItemListing(
-        id_terminal=1, terminal_name="X", location_label="X", star_system_name="Pyro",
-        price_buy=100, distance_gm=None,
+        id_terminal=1, terminal_name="X", place_label="X", vendor_label=None,
+        star_system_name="Pyro", price_buy=100, distance_gm=None,
     )
-    line = format_item_listing_line(listing, origin_star_system="Stanton")
-    assert line.endswith("distance unknown")
-    assert "same system" not in line
+    row = format_item_listing_row(listing, origin_star_system="Stanton")
+    assert "unknown" in row
+    assert "same system" not in row
+
+
+def test_format_item_listing_row_no_vendor_shows_a_placeholder():
+    listing = ItemListing(
+        id_terminal=1, terminal_name="Mystery Shop", place_label="Mystery Shop", vendor_label=None,
+        star_system_name="Stanton", price_buy=100, distance_gm=1.0,
+    )
+    row = format_item_listing_row(listing)
+    assert "-" in row
+
+
+def test_format_item_listing_row_truncates_an_overlong_place_or_vendor():
+    listing = ItemListing(
+        id_terminal=1, terminal_name="X",
+        place_label="A Very Long Place Name That Overflows The Column",
+        vendor_label="An Extremely Long Vendor Name That Also Overflows",
+        star_system_name="Stanton", price_buy=100, distance_gm=1.0,
+    )
+    row = format_item_listing_row(listing)
+    assert row.count("…") == 2, "both an overlong place and an overlong vendor must be truncated"
 
 
 # -- /ingame-item-finder command end to end ----------------------------------------------
@@ -221,10 +278,10 @@ def test_ingame_item_finder_happy_path_sorts_closest_first_grouped_by_system():
     embed = interaction.followup.send.call_args.kwargs["embed"]
     assert "P4-AR" in embed.title
     stanton_field = next(f for f in embed.fields if f.name == "Stanton")
-    lines = stanton_field.value.splitlines()
-    assert lines[0].startswith("**Near Armory**"), "closest terminal must be listed first"
-    assert "1,300 aUEC" in lines[0] and "2.0 Gm away" in lines[0]
-    assert "1,200 aUEC" in lines[1] and "50.0 Gm away" in lines[1]
+    rows = _table_rows(stanton_field.value)
+    assert rows[0].startswith("Near Armory"), "closest terminal must be listed first"
+    assert "1,300" in rows[0] and "2.0 Gm" in rows[0]
+    assert "1,200" in rows[1] and "50.0 Gm" in rows[1]
 
 
 def test_ingame_item_finder_groups_results_into_one_field_per_star_system():
@@ -281,8 +338,39 @@ def test_ingame_item_finder_real_bug_grim_hex_same_system_unknown_distance_still
     interaction = asyncio.run(run())
     embed = interaction.followup.send.call_args.kwargs["embed"]
     stanton_field = next(f for f in embed.fields if f.name == "Stanton")
-    assert "Skutters - GrimHEX" in stanton_field.value
-    assert "same system, exact distance unknown" in stanton_field.value
+    assert "GrimHEX" in stanton_field.value
+    assert "Skutters" in stanton_field.value
+    assert "same system" in stanton_field.value
+
+
+def test_ingame_item_finder_shows_vendor_for_two_shops_at_the_same_place():
+    """The whole reason for a separate vendor column: two different shops at the SAME
+    place (e.g. two gun stores both at Checkmate Station) must stay distinguishable, not
+    collapse into two identical-looking rows."""
+    async def run():
+        cog = _cog(
+            resolved_terminal=(1, "Area18 TDD"),
+            catalog=[{"id": 5, "name": "P4-AR"}],
+            items_prices=[
+                _row(437, "Guns - Checkmate", 1200, item_name="P4-AR", star_system_name="Stanton"),
+                _row(438, "Sharp Shooters - Checkmate", 1300, item_name="P4-AR", star_system_name="Stanton"),
+            ],
+            distance_by_pair={(1, 437): {"distance": 10.0}, (1, 438): {"distance": 10.0}},
+            origin_star_system="Stanton",
+        )
+        interaction = _FakeInteraction()
+
+        await cog.ingame_item_finder.callback(cog, interaction, item="P4-AR", location="Area18 TDD")
+        return interaction
+
+    interaction = asyncio.run(run())
+    embed = interaction.followup.send.call_args.kwargs["embed"]
+    stanton_field = next(f for f in embed.fields if f.name == "Stanton")
+    rows = _table_rows(stanton_field.value)
+    assert len(rows) == 2
+    assert all("Checkmate" in row for row in rows), "both rows share the same place"
+    assert "Guns" in rows[0] and "Sharp Shooters" not in rows[0]
+    assert "Sharp Shooters" in rows[1] and "Guns" not in rows[1]
 
 
 def test_ingame_item_finder_unknown_location_says_so_and_makes_no_other_calls():
@@ -349,21 +437,21 @@ def test_ingame_item_finder_origin_terminal_itself_never_gets_a_live_distance_ca
     cog.bot.uex.get_terminal_distance.assert_not_awaited()
     embed = interaction.followup.send.call_args.kwargs["embed"]
     stanton_field = next(f for f in embed.fields if f.name == "Stanton")
-    assert "you're already here" in stanton_field.value
+    assert "here" in stanton_field.value
 
 
 def test_ingame_item_finder_a_cross_system_distance_lookup_failure_still_shows_the_listing():
     """A single failed /terminals_distances call for a genuinely cross-system pair must
-    not crash the whole command or silently drop that shop - it shows with 'distance
-    unknown' (no same-system fallback applies, since it isn't the origin's system) and
+    not crash the whole command or silently drop that shop - it shows with 'unknown'
+    distance (no same-system fallback applies, since it isn't the origin's system) and
     sorts after every successfully-measured option in its own system group."""
     async def run():
         cog = _cog(
             resolved_terminal=(1, "Area18 TDD"),
             catalog=[{"id": 5, "name": "P4-AR"}],
             items_prices=[
-                _row(10, "Broken Distance Shop", 1200, item_name="P4-AR", star_system_name="Pyro"),
-                _row(11, "Normal Pyro Shop", 1300, item_name="P4-AR", star_system_name="Pyro"),
+                _row(10, "Broken Shop", 1200, item_name="P4-AR", star_system_name="Pyro"),
+                _row(11, "Normal Shop", 1300, item_name="P4-AR", star_system_name="Pyro"),
             ],
             distance_by_pair={(1, 11): {"distance": 5.0}},  # (1, 10) deliberately absent -> None
             origin_star_system="Stanton",
@@ -376,9 +464,9 @@ def test_ingame_item_finder_a_cross_system_distance_lookup_failure_still_shows_t
     interaction = asyncio.run(run())
     embed = interaction.followup.send.call_args.kwargs["embed"]
     pyro_field = next(f for f in embed.fields if f.name == "Pyro")
-    lines = pyro_field.value.splitlines()
-    assert "Normal Pyro Shop" in lines[0], "the successfully-measured shop must sort first"
-    assert "distance unknown" in lines[1]
+    rows = _table_rows(pyro_field.value)
+    assert "Normal Shop" in rows[0], "the successfully-measured shop must sort first"
+    assert "unknown" in rows[1]
 
 
 def test_ingame_item_finder_truncates_and_discloses_omitted_count():
@@ -400,5 +488,5 @@ def test_ingame_item_finder_truncates_and_discloses_omitted_count():
     interaction = asyncio.run(run())
     embed = interaction.followup.send.call_args.kwargs["embed"]
     stanton_field = next(f for f in embed.fields if f.name == "Stanton")
-    assert len(stanton_field.value.splitlines()) == MAX_RESULTS_SHOWN
+    assert len(_table_rows(stanton_field.value)) == MAX_RESULTS_SHOWN
     assert "5 more shop(s) omitted" in embed.footer.text

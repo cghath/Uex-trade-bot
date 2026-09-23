@@ -9,12 +9,21 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+# Fixed-width columns for the monospace table row format (see format_item_listing_row) -
+# Discord has no real <table>, so a ```code block``` with padded columns is the only way
+# to get aligned rows, the same pattern /command-usage's aggregate report already uses.
+PLACE_COL_WIDTH = 15
+VENDOR_COL_WIDTH = 17
+PRICE_COL_WIDTH = 9
+DISTANCE_COL_WIDTH = 12
+
 
 @dataclass(frozen=True)
 class ItemListing:
     id_terminal: int
     terminal_name: str
-    location_label: str
+    place_label: str
+    vendor_label: str | None
     star_system_name: str | None
     price_buy: float
     # None when /terminals_distances couldn't price this pair. Confirmed on real data this
@@ -33,17 +42,23 @@ def _positive_float(value: Any) -> float | None:
     return number if number > 0 else None
 
 
-def location_breadcrumb(row: dict[str, Any]) -> str:
-    """Planet/moon/orbit -> city/outpost/space station -> terminal, skipping whichever
-    levels a given /items_prices row doesn't carry. Deliberately excludes star system -
-    results are grouped by system as their own section (see the cog), not repeated on
-    every line, which got noisy fast on real data (a widely-stocked item can list a dozen+
-    shops in the same system)."""
-    mid = row.get("planet_name") or row.get("moon_name") or row.get("orbit_name")
-    local = row.get("city_name") or row.get("outpost_name") or row.get("space_station_name")
-    breadcrumb = " → ".join(str(part) for part in (mid, local) if part)
-    terminal_name = str(row.get("terminal_name") or "Unknown terminal")
-    return f"{breadcrumb} → {terminal_name}" if breadcrumb else terminal_name
+def split_place_and_vendor(row: dict[str, Any]) -> tuple[str, str | None]:
+    """UEX terminal names consistently follow a 'Vendor - Place' convention (e.g.
+    'Skutters - GrimHEX', 'Cubby Blast - Area 18') - splitting on the LAST ' - ' and
+    taking the place (the part after it) gives a shorter, more commonly-recognized name
+    than the separate city_name/outpost_name/space_station_name field in every case a
+    real /items_prices pull disagreed (e.g. 'Checkmate' vs 'Checkmate Station', and
+    'GrimHEX' vs the formal 'Green Imperial Housing Exchange' from space_station_name) -
+    confirmed against live UEX data (18/22 identical, 4/22 differ, every difference an
+    improvement), not assumed. A terminal name with no ' - ' separator (e.g. 'Equipment
+    Contested Zone Checkmate') falls back to the structured location field instead of the
+    whole raw name, with no separate vendor."""
+    terminal_name = str(row.get("terminal_name") or "")
+    if " - " in terminal_name:
+        vendor, _, place = terminal_name.rpartition(" - ")
+        return place.strip(), (vendor.strip() or None)
+    fallback = row.get("city_name") or row.get("outpost_name") or row.get("space_station_name")
+    return str(fallback or terminal_name or "Unknown"), None
 
 
 def rank_item_listings(
@@ -74,10 +89,12 @@ def rank_item_listings(
             id_terminal = int(raw_terminal_id)
         except (TypeError, ValueError):
             continue
+        place_label, vendor_label = split_place_and_vendor(row)
         result.append(ItemListing(
             id_terminal=id_terminal,
             terminal_name=str(row.get("terminal_name") or "Unknown"),
-            location_label=location_breadcrumb(row),
+            place_label=place_label,
+            vendor_label=vendor_label,
             star_system_name=row.get("star_system_name"),
             price_buy=price,
             distance_gm=distances.get(id_terminal),
@@ -91,14 +108,39 @@ def rank_item_listings(
     return result
 
 
-def format_item_listing_line(listing: ItemListing, *, origin_star_system: str | None = None) -> str:
+def _truncate(text: str, width: int) -> str:
+    return text if len(text) <= width else text[: width - 1] + "…"
+
+
+def _distance_label(listing: ItemListing, *, origin_star_system: str | None = None) -> str:
     if listing.distance_gm is None:
         if origin_star_system is not None and listing.star_system_name == origin_star_system:
-            distance = "same system, exact distance unknown"
-        else:
-            distance = "distance unknown"
-    elif listing.distance_gm == 0:
-        distance = "you're already here"
-    else:
-        distance = f"{listing.distance_gm:.1f} Gm away"
-    return f"**{listing.location_label}** — {listing.price_buy:,.0f} aUEC · {distance}"
+            return "same system"
+        return "unknown"
+    if listing.distance_gm == 0:
+        return "here"
+    return f"{listing.distance_gm:.1f} Gm"
+
+
+def format_item_listing_header() -> str:
+    """Column header for format_item_listing_row's table - both share the same fixed
+    widths, so this is the one place those need to stay in sync."""
+    return (
+        f"{'Place':<{PLACE_COL_WIDTH}} {'Vendor':<{VENDOR_COL_WIDTH}} "
+        f"{'Price':>{PRICE_COL_WIDTH}} {'Distance':>{DISTANCE_COL_WIDTH}}"
+    )
+
+
+def format_item_listing_row(listing: ItemListing, *, origin_star_system: str | None = None) -> str:
+    """One fixed-width monospace row, meant to sit inside a ```code block``` alongside
+    format_item_listing_header()'s header row - Discord embeds have no real <table>, and
+    a code block is the only way to get real column alignment (the same pattern
+    /command-usage's aggregate report already uses)."""
+    place = _truncate(listing.place_label, PLACE_COL_WIDTH)
+    vendor = _truncate(listing.vendor_label or "-", VENDOR_COL_WIDTH)
+    price = f"{listing.price_buy:,.0f}"
+    distance = _distance_label(listing, origin_star_system=origin_star_system)
+    return (
+        f"{place:<{PLACE_COL_WIDTH}} {vendor:<{VENDOR_COL_WIDTH}} "
+        f"{price:>{PRICE_COL_WIDTH}} {distance:>{DISTANCE_COL_WIDTH}}"
+    )
