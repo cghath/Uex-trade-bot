@@ -6,7 +6,7 @@ import asyncio
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock
 
-from bot.cogs.item_finder import ItemFinder, MAX_RESULTS_SHOWN
+from bot.cogs.item_finder import ItemFinder, MAX_RESULTS_SHOWN, sold_item_name_autocomplete
 from bot.uex.item_finder import ItemListing, format_item_listing_line, rank_item_listings, split_place_and_vendor
 
 
@@ -202,6 +202,64 @@ def test_format_item_listing_line_two_different_long_places_stay_distinguishable
     assert line_a != line_b
     assert "Alpha" in line_a
     assert "Lambda" in line_b
+
+
+# -- sold_item_name_autocomplete ---------------------------------------------------------
+
+def _price_row(item_name):
+    return {"item_name": item_name}
+
+
+def test_sold_item_name_autocomplete_filters_by_current_input():
+    async def run():
+        rows = [_price_row("Omnisky III Cannon"), _price_row("Karna Rifle"), _price_row("Arclight Pistol")]
+        interaction = NS(client=NS(uex=NS(get_items_prices_all=AsyncMock(return_value=rows))))
+
+        choices = await sold_item_name_autocomplete(interaction, "arc")
+
+        assert {c.value for c in choices} == {"Arclight Pistol"}
+
+    asyncio.run(run())
+
+
+def test_sold_item_name_autocomplete_never_suggests_an_item_with_no_price_row():
+    """The whole point of this autocomplete: an item that's only in the catalog, with no
+    real shop listing (cosmetics, ship paint, and similar - confirmed live that ~5,000 of
+    7,769 catalog items are like this), must never appear as a suggestion - unlike
+    Marketplace's traded_item_autocomplete, there is no fallback to the full catalog here."""
+    async def run():
+        rows = [_price_row("Omnisky III Cannon")]
+        interaction = NS(client=NS(uex=NS(get_items_prices_all=AsyncMock(return_value=rows))))
+
+        choices = await sold_item_name_autocomplete(interaction, "livery")
+
+        assert choices == []
+
+    asyncio.run(run())
+
+
+def test_sold_item_name_autocomplete_dedupes_the_same_item_across_many_terminals():
+    async def run():
+        rows = [_price_row("Omnisky III Cannon") for _ in range(50)]
+        interaction = NS(client=NS(uex=NS(get_items_prices_all=AsyncMock(return_value=rows))))
+
+        choices = await sold_item_name_autocomplete(interaction, "omnisky")
+
+        assert len(choices) == 1
+
+    asyncio.run(run())
+
+
+def test_sold_item_name_autocomplete_caps_at_discords_25_choice_limit():
+    async def run():
+        rows = [_price_row(f"Test Item {i}") for i in range(40)]
+        interaction = NS(client=NS(uex=NS(get_items_prices_all=AsyncMock(return_value=rows))))
+
+        choices = await sold_item_name_autocomplete(interaction, "test")
+
+        assert len(choices) == 25
+
+    asyncio.run(run())
 
 
 # -- /ingame-item-finder command end to end ----------------------------------------------

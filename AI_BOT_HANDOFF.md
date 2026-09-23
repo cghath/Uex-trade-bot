@@ -55,6 +55,15 @@ date - no open item, nothing to record here.
       formatter that matters now - `build_item_listing_table`/`format_item_listing_header`/
       `format_item_listing_row` and the PR #45 column-width constants were deleted, don't
       port those (`bot/uex/item_finder.py`, `bot/cogs/item_finder.py`)
+- [ ] PR #50 - `/ingame-item-finder`'s `item` autocomplete now scopes to items UEX reports at
+      least one real shop price for (`/items_prices_all`), not the full catalog - confirmed
+      live that ~5,000 of 7,769 catalogued items (cosmetics, ship paint, and similar) have no
+      shop listing at all and were suggesting dead ends ("No shop currently lists X for
+      sale") every time. New `UexClient.get_items_prices_all()` +
+      `sold_item_name_autocomplete` (`bot/uex/client.py`, `bot/cogs/item_finder.py`) -
+      deliberately does NOT fall back to the full catalog the way Marketplace's
+      `traded_item_autocomplete` does, since an item missing here means it's genuinely not
+      sold anywhere, not just a gap in the bot's own tracking
 
 ## To port: aiv2 -> production
 
