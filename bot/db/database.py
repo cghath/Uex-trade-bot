@@ -2282,6 +2282,22 @@ class Database:
                 return candidates[0]["id_terminal"], candidates[0]["terminal_name"]
         return None
 
+    async def get_terminal_star_system(self, id_terminal: int) -> str | None:
+        """The star system a terminal belongs to, from the cached terminal_reference table.
+        Used by /ingame-item-finder as a same-system fallback signal when a live
+        /terminals_distances lookup returns no usable distance for a specific pair - a real,
+        observed UEX data gap for some pairs (not just a network hiccup): e.g. Admin -
+        Seraphim -> Skutters - GrimHEX, both in Crusader orbit and effectively neighbors,
+        returns a bare `false`. Without this, that neighbor sorts dead last behind every
+        successfully-measured but genuinely cross-system option and can fall off the
+        display entirely on a widely-stocked item."""
+        async with self.connect() as db:
+            cursor = await db.execute(
+                "SELECT star_system_name FROM terminal_reference WHERE id_terminal = ?", (id_terminal,)
+            )
+            row = await cursor.fetchone()
+            return row["star_system_name"] if row else None
+
     async def find_terminal_market_names(self, commodity_name: str, query: str, limit: int = 10) -> list[str]:
         """Suggest known terminal names when an exact /terminal-history lookup misses."""
         async with self.connect() as db:
