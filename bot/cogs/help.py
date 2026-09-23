@@ -26,7 +26,7 @@ CATEGORIES: list[tuple[str, str, list[str]]] = [
         "trending", "movers", "commodity-history",
     ]),
     ("🚀 Ship & Cargo", "Save a ship once to calculate cargo limits and per-run profit.", [
-        "set-default-ship", "clear-default-ship",
+        "set-default-ship", "clear-default-ship", "ship-parts-finder",
     ]),
     ("⚙️ Trading Preferences", "Save route-filter defaults once instead of repeating them every call.", [
         "set-trading-preferences", "clear-trading-preferences", "my-trading-preferences",

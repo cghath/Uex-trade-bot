@@ -761,6 +761,47 @@ CREATE TABLE IF NOT EXISTS command_usage_by_user (
     last_used_at TEXT NOT NULL,
     PRIMARY KEY (command_name, user_id)
 );
+
+-- Ship Parts Finder (in design, not yet user-facing): one row per (ship, hardpoint) -
+-- daily-refreshed reference data bridging a ship's real component slots (sourced from the
+-- Star Citizen Wiki API - UEX has no equivalent) to UEX's own item catalog by category+size.
+-- Replaced wholesale per ship on each collector run, same "never patch reference data in
+-- place" convention as terminal_reference/commodity_reference above.
+CREATE TABLE IF NOT EXISTS ship_parts_reference (
+    id_vehicle INTEGER NOT NULL,
+    vehicle_name TEXT NOT NULL,
+    port_name TEXT NOT NULL,
+    port_type TEXT NOT NULL,
+    size_min INTEGER NOT NULL,
+    size_max INTEGER NOT NULL,
+    PRIMARY KEY (id_vehicle, port_name)
+);
+CREATE INDEX IF NOT EXISTS idx_ship_parts_reference_vehicle_name ON ship_parts_reference (vehicle_name);
+
+-- One locked-in part per (user, guild, ship, slot category) - re-locking a category for the
+-- same ship replaces the row rather than accumulating duplicates, unlike
+-- blueprint_shopping_entries (which combines many distinct plans, not one slot per category).
+CREATE TABLE IF NOT EXISTS ship_parts_shopping_entries (
+    user_id INTEGER NOT NULL,
+    guild_id INTEGER NOT NULL,
+    id_vehicle INTEGER NOT NULL,
+    vehicle_name TEXT NOT NULL,
+    category TEXT NOT NULL,
+    id_item INTEGER NOT NULL,
+    item_name TEXT NOT NULL,
+    id_terminal INTEGER,
+    terminal_name TEXT,
+    price_buy REAL,
+    locked_at TEXT NOT NULL,
+    PRIMARY KEY (user_id, guild_id, id_vehicle, category)
+);
+CREATE TABLE IF NOT EXISTS ship_parts_shopping_threads (
+    user_id INTEGER NOT NULL,
+    guild_id INTEGER NOT NULL,
+    thread_id INTEGER NOT NULL UNIQUE,
+    message_id INTEGER,
+    PRIMARY KEY(user_id, guild_id)
+);
 """
 
 
@@ -4278,6 +4319,98 @@ class Database:
         async with self.connect() as db:
             await db.execute(
                 "DELETE FROM blueprint_shopping_threads WHERE user_id=? AND guild_id=?", (user_id, guild_id),
+            )
+            await db.commit()
+
+    async def replace_ship_parts_reference(self, id_vehicle: int, vehicle_name: str, ports: list[dict]) -> None:
+        """Wholesale replace one ship's port rows in one transaction - never a patch-in-place,
+        so a failed or partial collector run for this ship can't leave a half-old, half-new
+        mix. Each port dict needs name/port_type/size_min/size_max (matches
+        bot.uex.ship_parts.ShipPort's fields)."""
+        async with self.connect() as db:
+            await db.execute("DELETE FROM ship_parts_reference WHERE id_vehicle=?", (id_vehicle,))
+            await db.executemany(
+                """INSERT INTO ship_parts_reference (id_vehicle, vehicle_name, port_name, port_type, size_min, size_max)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                [
+                    (id_vehicle, vehicle_name, port["name"], port["port_type"], port["size_min"], port["size_max"])
+                    for port in ports
+                ],
+            )
+            await db.commit()
+
+    async def get_ship_parts_reference(self, id_vehicle: int) -> list[dict]:
+        async with self.connect() as db:
+            rows = await (await db.execute(
+                "SELECT * FROM ship_parts_reference WHERE id_vehicle=? ORDER BY port_name", (id_vehicle,),
+            )).fetchall()
+            return [dict(row) for row in rows]
+
+    async def set_ship_parts_entry(
+        self, user_id: int, guild_id: int, id_vehicle: int, vehicle_name: str, category: str,
+        id_item: int, item_name: str, id_terminal: int | None, terminal_name: str | None,
+        price_buy: float | None, locked_at: str,
+    ) -> None:
+        """Locks in one slot's part for (user, guild, ship, category) - replaces any
+        previously locked part for that same slot rather than accumulating duplicates."""
+        async with self.connect() as db:
+            await db.execute(
+                """INSERT INTO ship_parts_shopping_entries
+                   (user_id, guild_id, id_vehicle, vehicle_name, category, id_item, item_name,
+                    id_terminal, terminal_name, price_buy, locked_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(user_id, guild_id, id_vehicle, category) DO UPDATE SET
+                       id_item=excluded.id_item, item_name=excluded.item_name,
+                       id_terminal=excluded.id_terminal, terminal_name=excluded.terminal_name,
+                       price_buy=excluded.price_buy, locked_at=excluded.locked_at""",
+                (user_id, guild_id, id_vehicle, vehicle_name, category, id_item, item_name,
+                 id_terminal, terminal_name, price_buy, locked_at),
+            )
+            await db.commit()
+
+    async def get_ship_parts_entries(self, user_id: int, guild_id: int) -> list[dict]:
+        async with self.connect() as db:
+            rows = await (await db.execute(
+                """SELECT * FROM ship_parts_shopping_entries WHERE user_id=? AND guild_id=?
+                   ORDER BY vehicle_name, category""",
+                (user_id, guild_id),
+            )).fetchall()
+            return [dict(row) for row in rows]
+
+    async def clear_ship_parts_entries(self, user_id: int, guild_id: int) -> None:
+        async with self.connect() as db:
+            await db.execute(
+                "DELETE FROM ship_parts_shopping_entries WHERE user_id=? AND guild_id=?", (user_id, guild_id),
+            )
+            await db.commit()
+
+    async def get_ship_parts_thread(self, user_id: int, guild_id: int) -> dict | None:
+        async with self.connect() as db:
+            row = await (await db.execute(
+                "SELECT * FROM ship_parts_shopping_threads WHERE user_id=? AND guild_id=?", (user_id, guild_id),
+            )).fetchone()
+            return dict(row) if row else None
+
+    async def get_ship_parts_thread_owner(self, thread_id: int) -> dict | None:
+        async with self.connect() as db:
+            row = await (await db.execute(
+                "SELECT * FROM ship_parts_shopping_threads WHERE thread_id=?", (thread_id,),
+            )).fetchone()
+            return dict(row) if row else None
+
+    async def set_ship_parts_thread(self, user_id: int, guild_id: int, thread_id: int, message_id: int | None) -> None:
+        async with self.connect() as db:
+            await db.execute(
+                """INSERT INTO ship_parts_shopping_threads (user_id, guild_id, thread_id, message_id) VALUES (?, ?, ?, ?)
+                   ON CONFLICT(user_id, guild_id) DO UPDATE SET thread_id=excluded.thread_id, message_id=excluded.message_id""",
+                (user_id, guild_id, thread_id, message_id),
+            )
+            await db.commit()
+
+    async def delete_ship_parts_thread(self, user_id: int, guild_id: int) -> None:
+        async with self.connect() as db:
+            await db.execute(
+                "DELETE FROM ship_parts_shopping_threads WHERE user_id=? AND guild_id=?", (user_id, guild_id),
             )
             await db.commit()
 
