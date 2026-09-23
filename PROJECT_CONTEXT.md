@@ -2671,6 +2671,23 @@ they're in sync).
     status field and entry 62's demand-status-code override both already established for
     unrelated fields; worth checking for the same pattern whenever a new ranked list mixes
     measured and possibly-missing values.
+79. **UEX terminal names consistently follow a "Vendor - Place" convention - useful for
+    display, confirmed empirically rather than assumed.** Live testing of
+    `/ingame-item-finder` surfaced two related complaints: the shown terminal name gave no
+    way to navigate (e.g. "Green Imperial Housing Exchange" for what players actually call
+    Grim Hex), and two different vendors at the same place looked identical since only the
+    raw terminal name was shown. Splitting `terminal_name` on the LAST `" - "` (
+    `split_place_and_vendor`, `bot/uex/item_finder.py`) gives a `(place, vendor)` pair -
+    verified against a real `/items_prices` pull before shipping (22 live Boomtube Rocket
+    listings): 18/22 identical either way, the 4 that differ are all improvements ("GrimHEX"
+    vs. the formal station name, "Checkmate" vs. "Checkmate Station"). The one exception with
+    no `" - "` separator at all ("Equipment Contested Zone Checkmate") falls back to the
+    structured `city_name`/`outpost_name`/`space_station_name` field instead of showing the
+    whole raw terminal name. Results now render as a fixed-width monospace table (place,
+    vendor, price, distance) inside a Discord code block per star-system field, rather than
+    one bullet line per shop - keeps two same-place, different-vendor shops distinguishable
+    (confirmed live: "Guns" and "Sharp Shooters" both at Checkmate). Worth reusing this same
+    split if any future feature displays a UEX terminal name to players.
 
 ## Where to look for what
 

@@ -33,3 +33,11 @@ reverse direction (aiv2 -> here), so aiv2 already has those fixes; nothing to po
 - [ ] PR #40 - Add `/ingame-item-finder`: which shops sell a weapon/armor/ammo/other item,
       closest to a given location first (`bot/cogs/item_finder.py`, `bot/uex/item_finder.py`,
       `bot/uex/client.py`'s new `get_items_prices`, `bot/cogs/help.py`, `bot/main.py`)
+- [ ] PR #42 - `/ingame-item-finder`: same-system fallback sort tier for when
+      `/terminals_distances` can't price a same-system pair, results grouped into one embed
+      field per star system (`bot/uex/item_finder.py`, `bot/cogs/item_finder.py`,
+      `bot/db/database.py`'s new `get_terminal_star_system`)
+- [ ] PR #43 - `/ingame-item-finder`: results render as a place+vendor table (split from the
+      terminal name's "Vendor - Place" convention, e.g. "GrimHEX" instead of the formal
+      station name) instead of one bullet line per shop (`bot/uex/item_finder.py`,
+      `bot/cogs/item_finder.py`)
