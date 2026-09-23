@@ -9,6 +9,9 @@ from unittest.mock import AsyncMock
 from bot.cogs.item_finder import ItemFinder, MAX_RESULTS_SHOWN
 from bot.uex.item_finder import (
     ItemListing,
+    PLACE_COL_MAX_WIDTH,
+    VENDOR_COL_MAX_WIDTH,
+    build_item_listing_table,
     format_item_listing_header,
     format_item_listing_row,
     rank_item_listings,
@@ -22,14 +25,29 @@ def _row(id_terminal, terminal_name, price_buy, **overrides):
     return base
 
 
+def _listing(id_terminal, place_label, price_buy, *, vendor_label=None, star_system_name="Stanton",
+             distance_gm=1.0):
+    return ItemListing(
+        id_terminal=id_terminal, terminal_name=f"{vendor_label or 'V'} - {place_label}",
+        place_label=place_label, vendor_label=vendor_label, star_system_name=star_system_name,
+        price_buy=price_buy, distance_gm=distance_gm,
+    )
+
+
 def _table_rows(field_value: str) -> list[str]:
-    """Strip the ```code fence``` and header row from one system field's value, returning
-    just the data rows - the shape every /ingame-item-finder field value now has."""
-    lines = field_value.splitlines()
-    assert lines[0] == "```" and lines[-1] == "```", "table must be a single fenced code block"
-    body = lines[1:-1]
-    header, *rows = body
-    assert header == format_item_listing_header()
+    """Extract every data row from one system field's value, which may contain one or more
+    ```fenced``` table blocks (see build_item_listing_table) - each block's own header line
+    is verified and stripped, since only rows carry per-listing data."""
+    parts = field_value.split("```")
+    fenced_contents = parts[1::2]
+    assert fenced_contents, "field value must contain at least one fenced code block"
+    rows: list[str] = []
+    for content in fenced_contents:
+        lines = [line for line in content.split("\n") if line != ""]
+        assert lines, "fenced block must not be empty"
+        header, *block_rows = lines
+        assert "Place" in header and "Vendor" in header and "Price" in header and "Distance" in header
+        rows.extend(block_rows)
     return rows
 
 
@@ -148,7 +166,7 @@ def test_rank_item_listings_carries_the_place_vendor_system_and_price_through():
 # -- format_item_listing_header / format_item_listing_row -------------------------------
 
 def test_format_item_listing_header_names_every_column():
-    header = format_item_listing_header()
+    header = format_item_listing_header(10, 10)
     assert "Place" in header
     assert "Vendor" in header
     assert "Price" in header
@@ -156,11 +174,8 @@ def test_format_item_listing_header_names_every_column():
 
 
 def test_format_item_listing_row_shows_place_vendor_price_and_distance():
-    listing = ItemListing(
-        id_terminal=1, terminal_name="Skutters - GrimHEX", place_label="GrimHEX", vendor_label="Skutters",
-        star_system_name="Stanton", price_buy=1500, distance_gm=3.25,
-    )
-    row = format_item_listing_row(listing)
+    listing = _listing(1, "GrimHEX", 1500, vendor_label="Skutters", distance_gm=3.25)
+    row = format_item_listing_row(listing, 20, 20)
     assert "GrimHEX" in row
     assert "Skutters" in row
     assert "1,500" in row
@@ -168,60 +183,105 @@ def test_format_item_listing_row_shows_place_vendor_price_and_distance():
 
 
 def test_format_item_listing_row_zero_distance_says_here():
-    listing = ItemListing(
-        id_terminal=1, terminal_name="X", place_label="X", vendor_label=None,
-        star_system_name="Stanton", price_buy=100, distance_gm=0.0,
-    )
-    assert "here" in format_item_listing_row(listing)
+    listing = _listing(1, "X", 100, distance_gm=0.0)
+    assert "here" in format_item_listing_row(listing, 10, 10)
 
 
 def test_format_item_listing_row_unknown_distance_with_no_origin_system_says_so_plainly():
-    listing = ItemListing(
-        id_terminal=1, terminal_name="X", place_label="X", vendor_label=None,
-        star_system_name="Pyro", price_buy=100, distance_gm=None,
-    )
-    row = format_item_listing_row(listing)
+    listing = _listing(1, "X", 100, star_system_name="Pyro", distance_gm=None)
+    row = format_item_listing_row(listing, 10, 10)
     assert "unknown" in row
     assert "same system" not in row
 
 
 def test_format_item_listing_row_unknown_distance_in_the_players_own_system_says_so():
-    listing = ItemListing(
-        id_terminal=1, terminal_name="X", place_label="X", vendor_label=None,
-        star_system_name="Stanton", price_buy=100, distance_gm=None,
-    )
-    row = format_item_listing_row(listing, origin_star_system="Stanton")
+    listing = _listing(1, "X", 100, star_system_name="Stanton", distance_gm=None)
+    row = format_item_listing_row(listing, 10, 10, origin_star_system="Stanton")
     assert "same system" in row
 
 
 def test_format_item_listing_row_unknown_distance_in_a_different_system_says_plain_unknown():
-    listing = ItemListing(
-        id_terminal=1, terminal_name="X", place_label="X", vendor_label=None,
-        star_system_name="Pyro", price_buy=100, distance_gm=None,
-    )
-    row = format_item_listing_row(listing, origin_star_system="Stanton")
+    listing = _listing(1, "X", 100, star_system_name="Pyro", distance_gm=None)
+    row = format_item_listing_row(listing, 10, 10, origin_star_system="Stanton")
     assert "unknown" in row
     assert "same system" not in row
 
 
 def test_format_item_listing_row_no_vendor_shows_a_placeholder():
-    listing = ItemListing(
-        id_terminal=1, terminal_name="Mystery Shop", place_label="Mystery Shop", vendor_label=None,
-        star_system_name="Stanton", price_buy=100, distance_gm=1.0,
-    )
-    row = format_item_listing_row(listing)
+    listing = _listing(1, "Mystery Shop", 100, vendor_label=None)
+    row = format_item_listing_row(listing, 15, 15)
     assert "-" in row
 
 
-def test_format_item_listing_row_truncates_an_overlong_place_or_vendor():
-    listing = ItemListing(
-        id_terminal=1, terminal_name="X",
-        place_label="A Very Long Place Name That Overflows The Column",
-        vendor_label="An Extremely Long Vendor Name That Also Overflows",
-        star_system_name="Stanton", price_buy=100, distance_gm=1.0,
+def test_format_item_listing_row_truncates_when_narrower_than_the_given_name():
+    listing = _listing(
+        1, "A Very Long Place Name That Overflows The Column",
+        100, vendor_label="An Extremely Long Vendor Name That Also Overflows",
     )
-    row = format_item_listing_row(listing)
+    row = format_item_listing_row(listing, 15, 17)
     assert row.count("…") == 2, "both an overlong place and an overlong vendor must be truncated"
+
+
+# -- build_item_listing_table ------------------------------------------------------------
+
+def test_build_item_listing_table_returns_nothing_for_an_empty_list():
+    assert build_item_listing_table([]) == []
+
+
+def test_build_item_listing_table_widens_columns_to_fit_the_longest_real_name():
+    """Real bug, caught live: a fixed 15-char place column truncated 'People's Service
+    Station Alpha' and 'People's Service Station Lambda' down to the identical
+    'People's Servi…' - two genuinely different shops became indistinguishable, and
+    Discord has no hover/tooltip to recover the rest. Column width must be sized to the
+    actual data (up to the cap) instead."""
+    listings = [
+        _listing(1, "People's Service Station Alpha", 100, vendor_label="Weapons and Armor"),
+        _listing(2, "People's Service Station Lambda", 100, vendor_label="Weapons and Armor"),
+    ]
+    blocks = build_item_listing_table(listings)
+    assert len(blocks) == 1
+    lines = blocks[0].splitlines()
+    rows = lines[2:-1]
+    assert len(rows) == 2
+    assert rows[0] != rows[1], "two different real places must not render identically"
+    assert "Alpha" in rows[0]
+    assert "Lambda" in rows[1]
+    assert "…" not in rows[0] and "…" not in rows[1]
+
+
+def test_build_item_listing_table_still_caps_at_a_maximum_width():
+    """A single genuinely extreme outlier name must still be bounded, so one absurdly long
+    name can't blow out the whole table's width or Discord's field-size budget."""
+    listings = [_listing(1, "X" * (PLACE_COL_MAX_WIDTH + 20), 100, vendor_label="V" * (VENDOR_COL_MAX_WIDTH + 20))]
+    blocks = build_item_listing_table(listings)
+    header, row = blocks[0].splitlines()[1], blocks[0].splitlines()[2]
+    assert header == format_item_listing_header(PLACE_COL_MAX_WIDTH, VENDOR_COL_MAX_WIDTH)
+    assert "…" in row
+
+
+def test_build_item_listing_table_uses_a_tight_width_for_short_names():
+    """Short, typical names shouldn't be padded out to the maximum cap - column width
+    tracks the actual longest name in THIS result set, not a fixed global constant."""
+    listings = [_listing(1, "GrimHEX", 100, vendor_label="Skutters")]
+    blocks = build_item_listing_table(listings)
+    header = blocks[0].splitlines()[1]
+    expected_place_width = max(len("Place"), len("GrimHEX"))
+    expected_vendor_width = max(len("Vendor"), len("Skutters"))
+    assert header == format_item_listing_header(expected_place_width, expected_vendor_width)
+    assert header != format_item_listing_header(PLACE_COL_MAX_WIDTH, VENDOR_COL_MAX_WIDTH)
+
+
+def test_build_item_listing_table_splits_into_multiple_blocks_when_too_large():
+    listings = [_listing(i, f"Place {i:02d}", 100, vendor_label="Vendor") for i in range(20)]
+    blocks = build_item_listing_table(listings, block_char_budget=200)
+    assert len(blocks) > 1
+    for block in blocks:
+        assert block.startswith("```\n") and block.endswith("\n```")
+    all_rows = []
+    for block in blocks:
+        lines = block.splitlines()
+        all_rows.extend(lines[2:-1])
+    assert len(all_rows) == 20, "no row may be dropped when splitting across blocks"
 
 
 # -- /ingame-item-finder command end to end ----------------------------------------------
@@ -371,6 +431,41 @@ def test_ingame_item_finder_shows_vendor_for_two_shops_at_the_same_place():
     assert all("Checkmate" in row for row in rows), "both rows share the same place"
     assert "Guns" in rows[0] and "Sharp Shooters" not in rows[0]
     assert "Sharp Shooters" in rows[1] and "Guns" not in rows[1]
+
+
+def test_ingame_item_finder_long_similar_place_names_stay_distinguishable():
+    """End-to-end regression for the live-reported truncation-collision bug: four
+    real-shaped Nyx terminals sharing a long common prefix ('People's Service Station
+    Alpha/Delta/Theta/Lambda') must each still show their own distinguishing suffix, not
+    all collapse to the same displayed text the way a fixed 15-char column did."""
+    async def run():
+        cog = _cog(
+            resolved_terminal=(1, "Aparelli - New Babbage"),
+            catalog=[{"id": 5, "name": "Scalpel Sniper Rifle"}],
+            items_prices=[
+                _row(
+                    100 + i, f"Weapons and Armor - People's Service Station {suffix}", 9519,
+                    item_name="Scalpel Sniper Rifle", star_system_name="Nyx",
+                )
+                for i, suffix in enumerate(["Alpha", "Delta", "Theta", "Lambda"])
+            ],
+            distance_by_pair={(1, 100 + i): {"distance": 100.0 + i} for i in range(4)},
+        )
+        interaction = _FakeInteraction()
+
+        await cog.ingame_item_finder.callback(
+            cog, interaction, item="Scalpel Sniper Rifle", location="Aparelli - New Babbage",
+        )
+        return interaction
+
+    interaction = asyncio.run(run())
+    embed = interaction.followup.send.call_args.kwargs["embed"]
+    nyx_field = next(f for f in embed.fields if f.name == "Nyx")
+    rows = _table_rows(nyx_field.value)
+    assert len(rows) == 4
+    assert len(set(rows)) == 4, "four different real places must render as four distinct rows"
+    for suffix in ["Alpha", "Delta", "Theta", "Lambda"]:
+        assert any(suffix in row for row in rows), f"{suffix} must still be visible, not truncated away"
 
 
 def test_ingame_item_finder_unknown_location_says_so_and_makes_no_other_calls():

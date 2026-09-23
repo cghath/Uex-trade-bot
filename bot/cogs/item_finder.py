@@ -15,11 +15,7 @@ from discord.ext import commands
 from bot.cogs.marketplace import item_name_autocomplete
 from bot.cogs.prices import terminal_name_autocomplete
 from bot.uex.exceptions import UexApiError, describe_uex_api_error
-from bot.uex.item_finder import (
-    format_item_listing_header,
-    format_item_listing_row,
-    rank_item_listings,
-)
+from bot.uex.item_finder import ItemListing, build_item_listing_table, rank_item_listings
 from bot.uex.marketplace import find_item_id_by_name
 from bot.uex.route_presentation import add_chunked_fields, chunk_lines
 
@@ -97,18 +93,16 @@ class ItemFinder(commands.Cog):
         # listings sort first per rank_item_listings), so the origin's own system - if it
         # has any results - is naturally the first group shown.
         #
-        # Each group renders as a fixed-width monospace table (place, vendor, price,
-        # distance) inside a ```code block``` - Discord embeds have no real <table>, and a
-        # code block is the only way to get real column alignment. Place (not the raw
+        # Each group renders as a monospace table (place, vendor, price, distance) inside
+        # one or more ```code blocks``` - Discord embeds have no real <table>, and a code
+        # block is the only way to get real column alignment. Place (not the raw
         # "Vendor - Place" terminal name) is the primary label so results are actually
         # navigable, and a separate vendor column keeps two shops at the same place (e.g.
         # two different gun stores both at Checkmate Station) distinguishable.
-        rows_by_system: dict[str, list[str]] = {}
+        listings_by_system: dict[str, list[ItemListing]] = {}
         for listing in shown:
             system_label = listing.star_system_name or "Unknown system"
-            rows_by_system.setdefault(system_label, []).append(
-                format_item_listing_row(listing, origin_star_system=origin_star_system)
-            )
+            listings_by_system.setdefault(system_label, []).append(listing)
 
         # Footer set BEFORE add_chunked_fields runs (not after), matching this codebase's
         # established convention (see /price's and /where-to-mine's identical ordering) -
@@ -124,14 +118,13 @@ class ItemFinder(commands.Cog):
         )
         embed.set_footer(text=footer)
 
-        # Each system's header+rows collapses to a single table_text "line" (embedded
-        # newlines and all) before going through add_chunked_fields/chunk_lines - safe
-        # because even the worst case (all MAX_RESULTS_SHOWN rows in one system) stays
-        # under 1024 chars, so chunk_lines' character-count splitting never has to cut
-        # into the middle of a fenced code block.
-        table_by_system: dict[str, str] = {
-            system_label: "```\n" + "\n".join([format_item_listing_header(), *rows]) + "\n```"
-            for system_label, rows in rows_by_system.items()
+        # Each system's table is built as a LIST of already-fenced blocks (usually one,
+        # more if the row count needs splitting - see build_item_listing_table) so
+        # add_chunked_fields/chunk_lines only ever has to pack whole blocks together, never
+        # hard-split one mid-row, which would break its fences.
+        table_by_system: dict[str, list[str]] = {
+            system_label: build_item_listing_table(group, origin_star_system=origin_star_system)
+            for system_label, group in listings_by_system.items()
         }
 
         # All-or-nothing across every system group, not per group - the same
@@ -139,8 +132,8 @@ class ItemFinder(commands.Cog):
         # here so a result list that doesn't fully fit never sends with some systems shown
         # and others silently missing.
         all_fit = all(
-            add_chunked_fields(embed, name=system_label, lines=[table_text])
-            for system_label, table_text in table_by_system.items()
+            add_chunked_fields(embed, name=system_label, lines=blocks)
+            for system_label, blocks in table_by_system.items()
         )
         if all_fit:
             await interaction.followup.send(embed=embed)
@@ -153,9 +146,9 @@ class ItemFinder(commands.Cog):
             f"Closest to **{origin_name}** first. Prices in aUEC.",
             "",
         ]
-        for system_label, table_text in table_by_system.items():
+        for system_label, blocks in table_by_system.items():
             fallback_lines.append(f"**{system_label}**")
-            fallback_lines.append(table_text)
+            fallback_lines.extend(blocks)
             fallback_lines.append("")
         fallback_lines.append(footer)
         for chunk in chunk_lines(fallback_lines, max_length=1900):
