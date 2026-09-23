@@ -93,15 +93,34 @@ def _format_stat_block(detail: dict) -> str:
     LifeSupportGenerator genuinely has no dedicated stat block at all (confirmed live, not
     a lookup bug - only general physical properties like mass/dimension exist for it), so
     this degrades to no stat line for that one category rather than guessing at a key that
-    isn't there."""
+    isn't there.
+
+    Quantum drives are a special case, found live in testing: the single most important
+    stat - travel speed - lives nested two levels deep
+    (quantum_drive.standard_jump.drive_speed_formatted), not as a top-level scalar like
+    every other category's headline stat. The generic top-level-only scan below explicitly
+    skips dict/list values, so it silently dropped speed entirely until this was added -
+    confirmed missing, not just unformatted."""
     for raw_key in (detail.get("type"), detail.get("sub_type")):
         if not raw_key:
             continue
-        block = detail.get(_snake_case(str(raw_key)))
-        if isinstance(block, dict):
-            lines = [f"{key}: {value}" for key, value in block.items() if value is not None and not isinstance(value, (dict, list))]
-            if lines:
-                return " · ".join(lines[:4])
+        key = _snake_case(str(raw_key))
+        block = detail.get(key)
+        if not isinstance(block, dict):
+            continue
+        lines: list[str] = []
+        if key == "quantum_drive":
+            standard_jump = block.get("standard_jump")
+            if isinstance(standard_jump, dict) and standard_jump.get("drive_speed_formatted"):
+                lines.append(f"speed: {standard_jump['drive_speed_formatted']}")
+            travel_time = block.get("travel_time_10gm")
+            if isinstance(travel_time, dict) and travel_time.get("formatted"):
+                lines.append(f"10 Gm in: {travel_time['formatted']}")
+        lines.extend(
+            f"{k}: {v}" for k, v in block.items() if v is not None and not isinstance(v, (dict, list))
+        )
+        if lines:
+            return " · ".join(lines[:4])
     return ""
 
 
@@ -121,31 +140,41 @@ def _format_port_label(port: ShipPort) -> str:
 
 
 def _format_candidate_line(detail: dict, *, selected: bool = False) -> str:
+    """'**Name** — Price aUEC @ Shop · Distance' as the primary line, matching
+    /ingame-item-finder's own proven plain-text format (bot/uex/item_finder.py's
+    format_item_listing_line) rather than a monospace column table - that table shipped
+    for this exact bot once, broke live once real name-length variance showed up (a fixed
+    width truncated distinct names to identical text; widening it made Discord wrap the
+    row instead of scrolling, breaking alignment anyway), and was replaced with plain text
+    for good. A second, shorter line carries the details a shop listing doesn't need but a
+    component comparison does: size/grade/manufacturer and the stat highlight."""
     name = detail.get("name") or "Unknown"
-    size = detail.get("size")
-    grade = detail.get("grade")
-    manufacturer = (detail.get("manufacturer") or {}).get("name") if isinstance(detail.get("manufacturer"), dict) else None
     cheapest = _cheapest_purchase(detail)
     price = cheapest.get("price_buy")
     terminal = cheapest.get("terminal_name")
-    marker = "✅ " if selected else ""
-    header = f"{marker}**{name}**"
-    if size is not None:
-        header += f" (S{size})"
-    if grade:
-        header += f" · Grade {grade}"
-    if manufacturer:
-        header += f" · {manufacturer}"
-    price_part = f"{price:,.0f} aUEC @ {terminal}" if price is not None and terminal else "price unknown"
     distance = detail.get("_distance_gm")
-    distance_part = f"{distance:.1f} Gm away" if distance is not None else "distance unknown"
+    marker = "✅ " if selected else ""
+    price_part = f"{price:,.0f} aUEC @ {terminal}" if price is not None and terminal else "price unknown"
+    distance_part = f"{distance:.1f} Gm" if distance is not None else "distance unknown"
+    primary = f"{marker}**{name}** — {price_part} · {distance_part}"
+
+    details = []
+    size = detail.get("size")
+    if size is not None:
+        details.append(f"S{size}")
+    grade = detail.get("grade")
+    if grade:
+        details.append(f"Grade {grade}")
+    manufacturer = (detail.get("manufacturer") or {}).get("name") if isinstance(detail.get("manufacturer"), dict) else None
+    if manufacturer:
+        details.append(manufacturer)
     stat_line = _format_stat_block(detail)
-    body = f"{header}\n   {price_part} · {distance_part}"
     if stat_line:
-        body += f"\n   {stat_line}"
+        details.append(stat_line)
     if selected:
-        body += "\n   (selected - press \"Lock in selected part\" to save it)"
-    return body
+        details.append('selected - press "Lock in selected part" to save it')
+
+    return f"{primary}\n{' · '.join(details)}" if details else primary
 
 
 class ShipPartsShoppingService:
@@ -350,17 +379,34 @@ class PartsBrowserView(discord.ui.View):
         self.category_select = _CategorySelect(self)
         self.add_item(self.category_select)
 
+    def _selection_summary(self) -> str:
+        # Plain-text mirror of the dropdowns' own state, independent of whether Discord's
+        # collapsed-Select `default=True` rendering actually shows the pick in a given
+        # client - requested directly by the user as a fallback after the dropdown-collapse
+        # bug, so this stays even once that fix is confirmed working.
+        if self.category is None:
+            return ""
+        parts = [f"Category: **{self.category}**"]
+        ports = self.grouped_ports.get(self.category, [])
+        if len(ports) > 1:
+            parts.append(f"Slot: **{_format_port_label(self.selected_port)}**" if self.selected_port else "Slot: *(pick below)*")
+        if self.selected_port is not None or len(ports) <= 1:
+            name = self.selected_candidate.get("name") if self.selected_candidate else None
+            parts.append(f"Part: **{name}**" if name else "Part: *(pick below)*")
+        return "Selected so far - " + " | ".join(parts)
+
     def text(self) -> str:
         header = f"**{self.vehicle.get('name')}** parts - pick a category to compare real options."
         if self.category is None:
             return header
+        summary = self._selection_summary()
         ports = self.grouped_ports.get(self.category, [])
         if len(ports) > 1 and self.selected_port is None:
-            return f"{header}\n\n**{self.category}** has {len(ports)} separate slots on this ship - pick one below."
+            return f"{header}\n\n{summary}\n\n**{self.category}** has {len(ports)} separate slots on this ship - pick one below."
         slot_label = f" - {_format_port_label(self.selected_port)}" if len(ports) > 1 and self.selected_port else ""
         if not self.candidates:
-            return f"{header}\n\nNo currently-sold {self.category}{slot_label} options found for this ship."
-        lines = [header, "", f"**{self.category}{slot_label}**"]
+            return f"{header}\n\n{summary}\n\nNo currently-sold {self.category}{slot_label} options found for this ship."
+        lines = [header, "", summary, "", f"**{self.category}{slot_label}**"]
         for detail in self.candidates[:MAX_CANDIDATES_SHOWN]:
             lines.append(_format_candidate_line(detail, selected=detail is self.selected_candidate))
         if len(self.candidates) > MAX_CANDIDATES_SHOWN:
@@ -426,6 +472,16 @@ class PartsBrowserView(discord.ui.View):
         await self.lock_in_selected(interaction)
 
 
+def _mark_default(options: list[discord.SelectOption], value: str) -> None:
+    """Discord's own collapsed-dropdown display shows the placeholder again after every
+    pick UNLESS the chosen SelectOption has default=True - found live in testing (looked
+    exactly like a lost selection, even though the message text and lock-in still worked).
+    Every other option's default is cleared first, so re-picking a different value doesn't
+    leave two options marked."""
+    for option in options:
+        option.default = option.value == value
+
+
 class _CategorySelect(discord.ui.Select):
     def __init__(self, parent: PartsBrowserView) -> None:
         options = [discord.SelectOption(label=category[:100], value=category)
@@ -434,6 +490,7 @@ class _CategorySelect(discord.ui.Select):
         self.parent_view = parent
 
     async def callback(self, interaction: discord.Interaction) -> None:
+        _mark_default(self.options, self.values[0])
         await self.parent_view.show_category(interaction, self.values[0])
 
 
@@ -447,6 +504,7 @@ class _SlotSelect(discord.ui.Select):
         self._ports = ports
 
     async def callback(self, interaction: discord.Interaction) -> None:
+        _mark_default(self.options, self.values[0])
         await self.parent_view.show_slot(interaction, self._ports[int(self.values[0])])
 
 
@@ -461,6 +519,7 @@ class _PartSelect(discord.ui.Select):
         self._candidates = candidates
 
     async def callback(self, interaction: discord.Interaction) -> None:
+        _mark_default(self.options, self.values[0])
         self.parent_view.selected_candidate = self._candidates[int(self.values[0])]
         await interaction.response.edit_message(content=self.parent_view.text(), view=self.parent_view)
 
@@ -638,8 +697,21 @@ class ShipPartsFinder(commands.Cog):
             )
             return
 
+        # Browsing lives inside the same private thread as the locked-in list, not as an
+        # ephemeral reply wherever the command happened to be run - live testing flagged
+        # having to jump between the two as exactly the "too much mess in the chat" friction
+        # this feature was meant to avoid in the first place.
+        thread = await self.shopping._thread(interaction)
+        if thread is None:
+            await interaction.followup.send(
+                "I couldn't open your private ship parts thread. Check thread permissions.", ephemeral=True,
+            )
+            return
         view = PartsBrowserView(self, vehicle, resolved_location, grouped)
-        await interaction.followup.send(content=view.text(), view=view, ephemeral=True)
+        await thread.send(content=view.text(), view=view, allowed_mentions=NO_MENTIONS)
+        await interaction.followup.send(
+            f"Opened {thread.mention} - browse **{vehicle.get('name')}**'s parts there.", ephemeral=True,
+        )
 
 
 async def setup(bot: commands.Bot) -> None:

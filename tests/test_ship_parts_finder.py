@@ -6,6 +6,7 @@ from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock
 
 from cryptography.fernet import Fernet
+import discord
 
 from bot.cogs import ship_parts_finder
 from bot.cogs.ship_parts_finder import ShipPartsFinder, ShipPartsShoppingService, ShipPartsShoppingView, _format_candidate_line, _format_stat_block
@@ -38,6 +39,29 @@ def test_format_stat_block_skips_nested_dict_and_list_values():
     assert _format_stat_block(detail) == "max_health: 2244"
 
 
+def test_format_stat_block_surfaces_quantum_drive_speed_despite_being_nested_two_levels_deep():
+    # Real shape confirmed live (Expedition QD): speed and travel time live under
+    # standard_jump/travel_time_10gm, not as top-level scalars like every other category's
+    # headline stat - the generic scan alone would silently drop them entirely.
+    detail = {
+        "type": "QuantumDrive",
+        "quantum_drive": {
+            "quantum_fuel_requirement": 0.0098,
+            "jump_range_formatted": "Unlimited",
+            "standard_jump": {"drive_speed": 189309100, "drive_speed_formatted": "189.3 Mm/s"},
+            "travel_time_10gm": {"seconds": 68, "formatted": "1:07"},
+        },
+    }
+    result = _format_stat_block(detail)
+    assert "speed: 189.3 Mm/s" in result
+    assert "10 Gm in: 1:07" in result
+
+
+def test_format_stat_block_quantum_drive_degrades_when_speed_data_is_missing():
+    detail = {"type": "QuantumDrive", "quantum_drive": {"quantum_fuel_requirement": 0.0098}}
+    assert _format_stat_block(detail) == "quantum_fuel_requirement: 0.0098"
+
+
 # -- _format_candidate_line ------------------------------------------------------------------
 
 def test_format_candidate_line_shows_the_cheapest_listing():
@@ -50,9 +74,10 @@ def test_format_candidate_line_shows_the_cheapest_listing():
         ]},
     }
     line = _format_candidate_line(detail)
-    assert "**PowerBolt**" in line and "(S1)" in line and "Grade C" in line and "Lightning Power Ltd." in line
+    assert "**PowerBolt**" in line and "S1" in line and "Grade C" in line and "Lightning Power Ltd." in line
     assert "18,701 aUEC @ Dumper's Depot - Area 18" in line
     assert "power_segment_generation: 14" in line
+    assert "—" in line, "primary line matches /ingame-item-finder's proven em-dash format"
 
 
 def test_format_candidate_line_handles_no_price_data():
@@ -340,6 +365,40 @@ def test_command_reports_an_unresolvable_ship():
     assert "NotAShip" in interaction.followup.send.await_args.args[0]
 
 
+def test_command_posts_the_browsing_view_inside_the_thread_not_ephemeral_elsewhere(tmp_path, monkeypatch):
+    """Live testing flagged having to jump between an ephemeral reply (wherever the
+    command was run) and the separate thread holding the list - the whole point of the
+    thread is that browsing and the list live in the SAME place."""
+    async def run():
+        db_real = Database(tmp_path / "cmd.sqlite", Fernet(Fernet.generate_key()))
+        await db_real.init()
+        await db_real.replace_ship_parts_reference(1, "Cutlass Black", [
+            {"name": "hardpoint_power_plant", "port_type": "PowerPlant", "size_min": 1, "size_max": 1},
+        ])
+        db_real.resolve_terminal_id_by_name = AsyncMock(return_value=(1, "Some Terminal"))
+        thread = FakeThread()
+        channel = FakeChannel(thread)
+        monkeypatch.setattr(ship_parts_finder.discord, "TextChannel", FakeChannel)
+        uex = NS(get_vehicles=AsyncMock(return_value=[{"id": 1, "name": "Cutlass Black"}]))
+        cog = ShipPartsFinder(NS(db=db_real, uex=uex), wiki_client=NS(), start_refresh=False)
+        cog.bot = NS(db=db_real, uex=uex)
+        interaction = _interaction(channel, user_id=1)
+        await cog.ship_parts_finder.callback(cog, interaction, "Cutlass Black", "Some Terminal")
+        return interaction, thread, channel
+
+    interaction, thread, channel = asyncio.run(run())
+    channel.create_thread.assert_awaited_once()
+    # Two sends on a brand-new thread: _thread()'s own welcome/list message, then the
+    # browsing view posted by the command itself - both belong in the thread, neither in
+    # an ephemeral reply elsewhere.
+    assert thread.send.await_count == 2
+    browsing_call = thread.send.await_args_list[-1]
+    assert isinstance(browsing_call.kwargs.get("view"), ship_parts_finder.PartsBrowserView)
+    assert "Cutlass Black" in browsing_call.kwargs["content"]
+    pointer = interaction.followup.send.await_args
+    assert thread.mention in pointer.args[0] and pointer.kwargs["ephemeral"] is True
+
+
 # -- audit fixes: deferred category select, multi-slot, distance wiring, selected marker ----
 
 def _component_interaction(*, user_id=1):
@@ -459,6 +518,43 @@ def test_selected_candidate_is_visibly_marked_in_the_rendered_text():
     assert "✅ **PowerBolt**" not in text and "**PowerBolt**" in text
 
 
+def test_selection_summary_is_blank_before_any_category_is_chosen():
+    cog = NS()
+    view = ship_parts_finder.PartsBrowserView(cog, {"id": 100, "name": "Avenger Stalker"}, (1, "Origin"), {})
+    assert view._selection_summary() == ""
+    assert "Selected so far" not in view.text()
+
+
+def test_selection_summary_shows_pick_below_for_an_unresolved_slot_or_part():
+    cog = NS()
+    left = ShipPort(name="hardpoint_turret_left", port_type="Turret", size_min=3, size_max=3)
+    nose = ShipPort(name="hardpoint_turret_nose", port_type="Turret", size_min=4, size_max=4)
+    view = ship_parts_finder.PartsBrowserView(cog, {"id": 100, "name": "Avenger Stalker"}, (1, "Origin"),
+                                                {"Turrets": [left, nose]})
+    view.category = "Turrets"
+    summary = view._selection_summary()
+    assert "Category: **Turrets**" in summary
+    assert "Slot: *(pick below)*" in summary
+    assert "Part:" not in summary
+    assert summary in view.text()
+
+
+def test_selection_summary_reflects_a_chosen_slot_and_part_plainly_regardless_of_dropdown_state():
+    cog = NS()
+    port = ShipPort(name="hardpoint_power_plant", port_type="PowerPlant", size_min=1, size_max=1)
+    view = ship_parts_finder.PartsBrowserView(cog, {"id": 100, "name": "Avenger Stalker"}, (1, "Origin"),
+                                                {"Power Plants": [port]})
+    view.category = "Power Plants"
+    view.selected_port = port
+    view.candidates = [_detail("Atlas", uuid="ua")]
+    view.selected_candidate = view.candidates[0]
+    summary = view._selection_summary()
+    assert "Category: **Power Plants**" in summary
+    assert "Slot:" not in summary  # single-port category never shows a redundant slot line
+    assert "Part: **Atlas**" in summary
+    assert summary in view.text()
+
+
 # -- _attach_distances ------------------------------------------------------------------------
 
 def test_attach_distances_sorts_closest_first_and_unknown_last():
@@ -517,3 +613,62 @@ def test_format_port_label_reads_and_cleans_the_raw_port_name():
 def test_format_port_label_shows_a_size_range_when_min_and_max_differ():
     port = ShipPort(name="hardpoint_turret", port_type="Turret", size_min=2, size_max=4)
     assert "(S2-4)" in ship_parts_finder._format_port_label(port)
+
+
+# -- dropdowns keep showing the picked value once collapsed, not just the placeholder -------
+# Discord only shows a chosen value on a collapsed Select if the matching SelectOption has
+# default=True - found live in testing (looked exactly like the pick was lost, even though
+# the message text and lock-in both worked correctly underneath).
+
+def test_mark_default_sets_only_the_matching_option():
+    options = [discord.SelectOption(label="A", value="a"), discord.SelectOption(label="B", value="b")]
+    ship_parts_finder._mark_default(options, "b")
+    assert [o.default for o in options] == [False, True]
+    ship_parts_finder._mark_default(options, "a")
+    assert [o.default for o in options] == [True, False]
+
+
+def test_category_select_marks_the_chosen_category_as_default():
+    async def run():
+        cog = NS(candidates_for_port=AsyncMock(return_value=[]))
+        port = ShipPort(name="hp", port_type="PowerPlant", size_min=1, size_max=1)
+        view = ship_parts_finder.PartsBrowserView(cog, {"id": 100, "name": "X"}, (1, "Origin"),
+                                                    {"Power Plants": [port], "Coolers": [port]})
+        select = view.category_select
+        select._values = ["Coolers"]
+        await select.callback(_component_interaction())
+        return select
+
+    select = asyncio.run(run())
+    assert {o.value: o.default for o in select.options} == {"Power Plants": False, "Coolers": True}
+
+
+def test_slot_select_marks_the_chosen_slot_as_default():
+    async def run():
+        cog = NS(candidates_for_port=AsyncMock(return_value=[]))
+        left = ShipPort(name="hp_left", port_type="Turret", size_min=3, size_max=3)
+        nose = ShipPort(name="hp_nose", port_type="Turret", size_min=4, size_max=4)
+        view = ship_parts_finder.PartsBrowserView(cog, {"id": 100, "name": "X"}, (1, "Origin"),
+                                                    {"Turrets": [left, nose]})
+        select = ship_parts_finder._SlotSelect(view, [left, nose])
+        select._values = ["1"]
+        await select.callback(_component_interaction())
+        return select
+
+    select = asyncio.run(run())
+    assert [o.default for o in select.options] == [False, True]
+
+
+def test_part_select_marks_the_chosen_part_as_default():
+    async def run():
+        port = ShipPort(name="hp", port_type="PowerPlant", size_min=1, size_max=1)
+        view = ship_parts_finder.PartsBrowserView(NS(), {"id": 100, "name": "X"}, (1, "Origin"), {"Power Plants": [port]})
+        candidates = [_detail("PowerBolt", uuid="ua"), _detail("Atlas", uuid="ub")]
+        select = ship_parts_finder._PartSelect(view, candidates)
+        select._values = ["1"]
+        await select.callback(_component_interaction())
+        return select, view
+
+    select, view = asyncio.run(run())
+    assert [o.default for o in select.options] == [False, True]
+    assert view.selected_candidate["name"] == "Atlas"
