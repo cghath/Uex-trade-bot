@@ -293,3 +293,6 @@ Run through this before considering a feature finished:
       `copy_global_to` bridge is missing (see "The #2 rule" above)
 - [ ] With authorization, ran the new command(s) in a real Discord server; otherwise
       explicitly recorded live validation as not performed
+- [ ] `AI_BOT_HANDOFF.md` has an entry for this change under the right direction (see the
+      file's own "How to use this" section) - a PR isn't done until this is added, not
+      something to backfill later once it's noticed missing
