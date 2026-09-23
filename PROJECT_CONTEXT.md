@@ -2645,6 +2645,33 @@ they're in sync).
     message that needs both a code block's alignment AND a clickable mention has to pick
     one or split the two into separate lines/sections, not assume both work together.
 
+78. **`/ingame-item-finder` (which shops sell a weapon/armor/ammo/other item, closest to a
+    given location first) needed almost no new plumbing - three pieces of existing infra
+    covered item resolution and location handling outright.** `item_name_autocomplete`/
+    `find_item_id_by_name` (Marketplace's own item matcher, `bot/uex/marketplace.py`) and
+    `terminal_name_autocomplete`/`resolve_terminal_id_by_name` (the same location-anchoring
+    `/routes-from` already uses) were imported directly into the new cog rather than
+    reimplemented - confirmed via `/categories?type=item`'s docs that `/items` has no
+    name-search parameter of its own (only `id_category`/`id_company`/`uuid`/`size`), so
+    reusing the already-warm, already-tested full-catalog matcher was the only sane option
+    anyway. No new DB table or config was needed either: `/items_prices` (UEX's own
+    documented +1 day cache TTL, added to `UexClient._ENDPOINT_CACHE_TTL`) is read live
+    through `UexClient`'s existing in-memory cache, the same shape `/price` already uses for
+    `/commodities_prices` - a genuinely new *kind* of data (shop inventory, not commodity
+    trading) still didn't need a new persistence layer, since nothing about it needs to
+    accumulate history the way the `intelligence.py` collectors do. The one piece that
+    needed real design thought: `/terminals_distances` has no batch form (one live call per
+    origin/destination pair), so ranking N candidate shops by distance means N live calls -
+    batched via `asyncio.gather` in groups of 8 (matching `get_item_catalog`'s own per-
+    category batch size, for consistency more than necessity) and short-circuited entirely
+    when the player's own location is itself one of the candidate shops (distance is
+    trivially 0, no call needed). A failed/unpriceable distance lookup (a transient error,
+    or a genuinely cross-system pair) sorts LAST, never first or as a fabricated 0 - the
+    same "never let unknown look like the best case" principle entry 55's terminal-health
+    status field and entry 62's demand-status-code override both already established for
+    unrelated fields; worth checking for the same pattern whenever a new ranked list mixes
+    measured and possibly-missing values.
+
 ## Where to look for what
 
 Six docs, deliberately scoped so they don't duplicate each other:
