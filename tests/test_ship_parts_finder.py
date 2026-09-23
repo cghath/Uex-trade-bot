@@ -55,11 +55,43 @@ def test_format_stat_block_surfaces_quantum_drive_speed_despite_being_nested_two
     result = _format_stat_block(detail)
     assert "speed: 189.3 Mm/s" in result
     assert "10 Gm in: 1:07" in result
+    # Fuel-mechanic internals with no comparison value to a player - excluded outright.
+    assert "quantum_fuel_requirement" not in result
 
 
 def test_format_stat_block_quantum_drive_degrades_when_speed_data_is_missing():
+    # No standard_jump/travel_time_10gm, and the one field present is an excluded
+    # fuel-mechanic internal - nothing useful to show, so this degrades to empty rather
+    # than falling back to a raw internal constant.
     detail = {"type": "QuantumDrive", "quantum_drive": {"quantum_fuel_requirement": 0.0098}}
-    assert _format_stat_block(detail) == "quantum_fuel_requirement: 0.0098"
+    assert _format_stat_block(detail) == ""
+
+
+def test_format_stat_block_prefers_a_formatted_sibling_over_a_raw_sentinel_value():
+    # Real live bug: jump_range's raw value is literally float32's max (a "no limit"
+    # sentinel) with a clean jump_range_formatted ("Unlimited") sitting right next to it -
+    # the raw 3.402823e+38 must never be shown when the formatted sibling exists.
+    detail = {
+        "type": "QuantumDrive",
+        "quantum_drive": {
+            "jump_range": 3.402823e+38,
+            "jump_range_formatted": "Unlimited",
+            "disconnect_range": 34693,
+            "disconnect_range_formatted": "35 km",
+        },
+    }
+    result = _format_stat_block(detail)
+    assert "jump_range: Unlimited" in result
+    assert "disconnect_range: 35 km" in result
+    assert "3.402823e" not in result
+    assert "34693" not in result
+
+
+def test_format_stat_block_formatted_sibling_preference_applies_to_any_category():
+    # Not QD-specific - any mapped category's block gets this preference if it ever
+    # carries a raw/formatted pair.
+    detail = {"type": "Shield", "shield": {"max_health": 2244, "max_health_formatted": "2.24k"}}
+    assert _format_stat_block(detail) == "max_health: 2.24k"
 
 
 # -- _format_candidate_line ------------------------------------------------------------------
@@ -215,6 +247,106 @@ def test_persistent_controls_reject_a_non_owner(tmp_path):
     interaction.response.send_message.assert_awaited_once_with(
         "This shopping list belongs to another player.", ephemeral=True,
     )
+
+
+# -- Remove a part (per-entry removal, not just Clear list) ---------------------------------
+
+def test_remove_button_reports_when_the_list_is_empty():
+    async def run():
+        db = NS(get_ship_parts_thread_owner=AsyncMock(return_value={"user_id": 1, "guild_id": 10}),
+                get_ship_parts_entries=AsyncMock(return_value=[]))
+        service = ShipPartsShoppingService(NS(db=db))
+        view = ShipPartsShoppingView(service)
+        interaction = _interaction(NS(id=100), user_id=1)
+        await view.remove_button.callback(interaction)
+        return interaction
+
+    interaction = asyncio.run(run())
+    interaction.response.send_message.assert_awaited_once_with(
+        "Your list is empty - nothing to remove.", ephemeral=True,
+    )
+
+
+def test_remove_button_opens_a_select_populated_from_current_entries():
+    async def run():
+        entries = [
+            {"user_id": 1, "guild_id": 10, "id_vehicle": 100, "vehicle_name": "Avenger Stalker",
+             "category": "Power Plants", "port_name": "hardpoint_power_plant", "item_name": "PowerBolt"},
+            {"user_id": 1, "guild_id": 10, "id_vehicle": 100, "vehicle_name": "Avenger Stalker",
+             "category": "Turrets", "port_name": "hardpoint_turret_left", "item_name": "VariPuck S3"},
+        ]
+        db = NS(get_ship_parts_thread_owner=AsyncMock(return_value={"user_id": 1, "guild_id": 10}),
+                get_ship_parts_entries=AsyncMock(return_value=entries))
+        service = ShipPartsShoppingService(NS(db=db))
+        view = ShipPartsShoppingView(service)
+        interaction = _interaction(NS(id=100), user_id=1)
+        await view.remove_button.callback(interaction)
+        return interaction
+
+    interaction = asyncio.run(run())
+    kwargs = interaction.response.send_message.await_args.kwargs
+    assert kwargs["ephemeral"] is True
+    select = kwargs["view"].children[0]
+    assert [o.label for o in select.options] == ["PowerBolt (Power Plants)", "VariPuck S3 (Turrets)"]
+    assert [o.description for o in select.options] == ["Avenger Stalker - Power Plant", "Avenger Stalker - Turret Left"]
+
+
+def test_remove_button_notes_truncation_past_25_entries():
+    async def run():
+        entries = [
+            {"user_id": 1, "guild_id": 10, "id_vehicle": 100, "vehicle_name": "Avenger Stalker",
+             "category": "Power Plants", "port_name": f"hp_{i}", "item_name": f"Part {i}"}
+            for i in range(30)
+        ]
+        db = NS(get_ship_parts_thread_owner=AsyncMock(return_value={"user_id": 1, "guild_id": 10}),
+                get_ship_parts_entries=AsyncMock(return_value=entries))
+        service = ShipPartsShoppingService(NS(db=db))
+        view = ShipPartsShoppingView(service)
+        interaction = _interaction(NS(id=100), user_id=1)
+        await view.remove_button.callback(interaction)
+        return interaction
+
+    interaction = asyncio.run(run())
+    args, kwargs = interaction.response.send_message.await_args
+    assert "showing the first 25 of 30" in args[0]
+    assert len(kwargs["view"].children[0].options) == 25
+
+
+def test_remove_entry_select_removes_one_entry_and_refreshes_the_list():
+    async def run():
+        entry = {"user_id": 1, "guild_id": 10, "id_vehicle": 100, "vehicle_name": "Avenger Stalker",
+                 "category": "Power Plants", "port_name": "hardpoint_power_plant", "item_name": "PowerBolt"}
+        db = NS(remove_ship_parts_entry=AsyncMock())
+        service = ShipPartsShoppingService(NS(db=db))
+        service.refresh = AsyncMock()
+        select = ship_parts_finder._RemoveEntrySelect(service, [entry])
+        select._values = ["0"]
+        interaction = _interaction(NS(id=100), user_id=1)
+        await select.callback(interaction)
+        return db, service, interaction
+
+    db, service, interaction = asyncio.run(run())
+    db.remove_ship_parts_entry.assert_awaited_once_with(1, 10, 100, "Power Plants", "hardpoint_power_plant")
+    service.refresh.assert_awaited_once()
+    interaction.followup.send.assert_awaited_once_with("Removed **PowerBolt** (Power Plants).", ephemeral=True)
+
+
+def test_remove_entry_select_reports_when_the_db_delete_fails():
+    async def run():
+        entry = {"user_id": 1, "guild_id": 10, "id_vehicle": 100, "vehicle_name": "Avenger Stalker",
+                 "category": "Power Plants", "port_name": "hardpoint_power_plant", "item_name": "PowerBolt"}
+        db = NS(remove_ship_parts_entry=AsyncMock(side_effect=RuntimeError("db down")))
+        service = ShipPartsShoppingService(NS(db=db))
+        service.refresh = AsyncMock()
+        select = ship_parts_finder._RemoveEntrySelect(service, [entry])
+        select._values = ["0"]
+        interaction = _interaction(NS(id=100), user_id=1)
+        await select.callback(interaction)
+        return service, interaction
+
+    service, interaction = asyncio.run(run())
+    service.refresh.assert_not_awaited()
+    assert "couldn't remove" in interaction.followup.send.await_args.args[0]
 
 
 def test_oversized_private_list_uses_one_safe_attachment():
