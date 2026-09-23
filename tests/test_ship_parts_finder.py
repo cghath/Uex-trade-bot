@@ -38,6 +38,29 @@ def test_format_stat_block_skips_nested_dict_and_list_values():
     assert _format_stat_block(detail) == "max_health: 2244"
 
 
+def test_format_stat_block_surfaces_quantum_drive_speed_despite_being_nested_two_levels_deep():
+    # Real shape confirmed live (Expedition QD): speed and travel time live under
+    # standard_jump/travel_time_10gm, not as top-level scalars like every other category's
+    # headline stat - the generic scan alone would silently drop them entirely.
+    detail = {
+        "type": "QuantumDrive",
+        "quantum_drive": {
+            "quantum_fuel_requirement": 0.0098,
+            "jump_range_formatted": "Unlimited",
+            "standard_jump": {"drive_speed": 189309100, "drive_speed_formatted": "189.3 Mm/s"},
+            "travel_time_10gm": {"seconds": 68, "formatted": "1:07"},
+        },
+    }
+    result = _format_stat_block(detail)
+    assert "speed: 189.3 Mm/s" in result
+    assert "10 Gm in: 1:07" in result
+
+
+def test_format_stat_block_quantum_drive_degrades_when_speed_data_is_missing():
+    detail = {"type": "QuantumDrive", "quantum_drive": {"quantum_fuel_requirement": 0.0098}}
+    assert _format_stat_block(detail) == "quantum_fuel_requirement: 0.0098"
+
+
 # -- _format_candidate_line ------------------------------------------------------------------
 
 def test_format_candidate_line_shows_the_cheapest_listing():
@@ -50,9 +73,10 @@ def test_format_candidate_line_shows_the_cheapest_listing():
         ]},
     }
     line = _format_candidate_line(detail)
-    assert "**PowerBolt**" in line and "(S1)" in line and "Grade C" in line and "Lightning Power Ltd." in line
+    assert "**PowerBolt**" in line and "S1" in line and "Grade C" in line and "Lightning Power Ltd." in line
     assert "18,701 aUEC @ Dumper's Depot - Area 18" in line
     assert "power_segment_generation: 14" in line
+    assert "—" in line, "primary line matches /ingame-item-finder's proven em-dash format"
 
 
 def test_format_candidate_line_handles_no_price_data():
@@ -338,6 +362,40 @@ def test_command_reports_an_unresolvable_ship():
 
     interaction = asyncio.run(run())
     assert "NotAShip" in interaction.followup.send.await_args.args[0]
+
+
+def test_command_posts_the_browsing_view_inside_the_thread_not_ephemeral_elsewhere(tmp_path, monkeypatch):
+    """Live testing flagged having to jump between an ephemeral reply (wherever the
+    command was run) and the separate thread holding the list - the whole point of the
+    thread is that browsing and the list live in the SAME place."""
+    async def run():
+        db_real = Database(tmp_path / "cmd.sqlite", Fernet(Fernet.generate_key()))
+        await db_real.init()
+        await db_real.replace_ship_parts_reference(1, "Cutlass Black", [
+            {"name": "hardpoint_power_plant", "port_type": "PowerPlant", "size_min": 1, "size_max": 1},
+        ])
+        db_real.resolve_terminal_id_by_name = AsyncMock(return_value=(1, "Some Terminal"))
+        thread = FakeThread()
+        channel = FakeChannel(thread)
+        monkeypatch.setattr(ship_parts_finder.discord, "TextChannel", FakeChannel)
+        uex = NS(get_vehicles=AsyncMock(return_value=[{"id": 1, "name": "Cutlass Black"}]))
+        cog = ShipPartsFinder(NS(db=db_real, uex=uex), wiki_client=NS(), start_refresh=False)
+        cog.bot = NS(db=db_real, uex=uex)
+        interaction = _interaction(channel, user_id=1)
+        await cog.ship_parts_finder.callback(cog, interaction, "Cutlass Black", "Some Terminal")
+        return interaction, thread, channel
+
+    interaction, thread, channel = asyncio.run(run())
+    channel.create_thread.assert_awaited_once()
+    # Two sends on a brand-new thread: _thread()'s own welcome/list message, then the
+    # browsing view posted by the command itself - both belong in the thread, neither in
+    # an ephemeral reply elsewhere.
+    assert thread.send.await_count == 2
+    browsing_call = thread.send.await_args_list[-1]
+    assert isinstance(browsing_call.kwargs.get("view"), ship_parts_finder.PartsBrowserView)
+    assert "Cutlass Black" in browsing_call.kwargs["content"]
+    pointer = interaction.followup.send.await_args
+    assert thread.mention in pointer.args[0] and pointer.kwargs["ephemeral"] is True
 
 
 # -- audit fixes: deferred category select, multi-slot, distance wiring, selected marker ----

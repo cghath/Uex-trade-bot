@@ -93,15 +93,34 @@ def _format_stat_block(detail: dict) -> str:
     LifeSupportGenerator genuinely has no dedicated stat block at all (confirmed live, not
     a lookup bug - only general physical properties like mass/dimension exist for it), so
     this degrades to no stat line for that one category rather than guessing at a key that
-    isn't there."""
+    isn't there.
+
+    Quantum drives are a special case, found live in testing: the single most important
+    stat - travel speed - lives nested two levels deep
+    (quantum_drive.standard_jump.drive_speed_formatted), not as a top-level scalar like
+    every other category's headline stat. The generic top-level-only scan below explicitly
+    skips dict/list values, so it silently dropped speed entirely until this was added -
+    confirmed missing, not just unformatted."""
     for raw_key in (detail.get("type"), detail.get("sub_type")):
         if not raw_key:
             continue
-        block = detail.get(_snake_case(str(raw_key)))
-        if isinstance(block, dict):
-            lines = [f"{key}: {value}" for key, value in block.items() if value is not None and not isinstance(value, (dict, list))]
-            if lines:
-                return " · ".join(lines[:4])
+        key = _snake_case(str(raw_key))
+        block = detail.get(key)
+        if not isinstance(block, dict):
+            continue
+        lines: list[str] = []
+        if key == "quantum_drive":
+            standard_jump = block.get("standard_jump")
+            if isinstance(standard_jump, dict) and standard_jump.get("drive_speed_formatted"):
+                lines.append(f"speed: {standard_jump['drive_speed_formatted']}")
+            travel_time = block.get("travel_time_10gm")
+            if isinstance(travel_time, dict) and travel_time.get("formatted"):
+                lines.append(f"10 Gm in: {travel_time['formatted']}")
+        lines.extend(
+            f"{k}: {v}" for k, v in block.items() if v is not None and not isinstance(v, (dict, list))
+        )
+        if lines:
+            return " · ".join(lines[:4])
     return ""
 
 
@@ -121,31 +140,41 @@ def _format_port_label(port: ShipPort) -> str:
 
 
 def _format_candidate_line(detail: dict, *, selected: bool = False) -> str:
+    """'**Name** — Price aUEC @ Shop · Distance' as the primary line, matching
+    /ingame-item-finder's own proven plain-text format (bot/uex/item_finder.py's
+    format_item_listing_line) rather than a monospace column table - that table shipped
+    for this exact bot once, broke live once real name-length variance showed up (a fixed
+    width truncated distinct names to identical text; widening it made Discord wrap the
+    row instead of scrolling, breaking alignment anyway), and was replaced with plain text
+    for good. A second, shorter line carries the details a shop listing doesn't need but a
+    component comparison does: size/grade/manufacturer and the stat highlight."""
     name = detail.get("name") or "Unknown"
-    size = detail.get("size")
-    grade = detail.get("grade")
-    manufacturer = (detail.get("manufacturer") or {}).get("name") if isinstance(detail.get("manufacturer"), dict) else None
     cheapest = _cheapest_purchase(detail)
     price = cheapest.get("price_buy")
     terminal = cheapest.get("terminal_name")
-    marker = "✅ " if selected else ""
-    header = f"{marker}**{name}**"
-    if size is not None:
-        header += f" (S{size})"
-    if grade:
-        header += f" · Grade {grade}"
-    if manufacturer:
-        header += f" · {manufacturer}"
-    price_part = f"{price:,.0f} aUEC @ {terminal}" if price is not None and terminal else "price unknown"
     distance = detail.get("_distance_gm")
-    distance_part = f"{distance:.1f} Gm away" if distance is not None else "distance unknown"
+    marker = "✅ " if selected else ""
+    price_part = f"{price:,.0f} aUEC @ {terminal}" if price is not None and terminal else "price unknown"
+    distance_part = f"{distance:.1f} Gm" if distance is not None else "distance unknown"
+    primary = f"{marker}**{name}** — {price_part} · {distance_part}"
+
+    details = []
+    size = detail.get("size")
+    if size is not None:
+        details.append(f"S{size}")
+    grade = detail.get("grade")
+    if grade:
+        details.append(f"Grade {grade}")
+    manufacturer = (detail.get("manufacturer") or {}).get("name") if isinstance(detail.get("manufacturer"), dict) else None
+    if manufacturer:
+        details.append(manufacturer)
     stat_line = _format_stat_block(detail)
-    body = f"{header}\n   {price_part} · {distance_part}"
     if stat_line:
-        body += f"\n   {stat_line}"
+        details.append(stat_line)
     if selected:
-        body += "\n   (selected - press \"Lock in selected part\" to save it)"
-    return body
+        details.append('selected - press "Lock in selected part" to save it')
+
+    return f"{primary}\n{' · '.join(details)}" if details else primary
 
 
 class ShipPartsShoppingService:
@@ -638,8 +667,21 @@ class ShipPartsFinder(commands.Cog):
             )
             return
 
+        # Browsing lives inside the same private thread as the locked-in list, not as an
+        # ephemeral reply wherever the command happened to be run - live testing flagged
+        # having to jump between the two as exactly the "too much mess in the chat" friction
+        # this feature was meant to avoid in the first place.
+        thread = await self.shopping._thread(interaction)
+        if thread is None:
+            await interaction.followup.send(
+                "I couldn't open your private ship parts thread. Check thread permissions.", ephemeral=True,
+            )
+            return
         view = PartsBrowserView(self, vehicle, resolved_location, grouped)
-        await interaction.followup.send(content=view.text(), view=view, ephemeral=True)
+        await thread.send(content=view.text(), view=view, allowed_mentions=NO_MENTIONS)
+        await interaction.followup.send(
+            f"Opened {thread.mention} - browse **{vehicle.get('name')}**'s parts there.", ephemeral=True,
+        )
 
 
 async def setup(bot: commands.Bot) -> None:
