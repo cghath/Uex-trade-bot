@@ -195,14 +195,24 @@ class WikiApiClient:
         user query, the same "resolve to exactly one candidate first" convention every other
         name-matching helper in this codebase follows.
         """
+        ports, _ = await self.get_vehicle_loadout(vehicle_name)
+        return ports
+
+    async def get_vehicle_loadout(self, vehicle_name: str) -> tuple[list[dict[str, Any]], list[str]]:
+        """get_vehicle_ports plus the ship's own `port_tags` (e.g. ['AEGS_Avenger_Base']) -
+        a ship-specific part like the 'Reliant Toshima Turret' carries `required_tags`
+        (['MISC_Reliant_Base']) that only a ship with those tags satisfies. ([], []) when
+        the name doesn't resolve to exactly one ship."""
         body = await self._get_json("/vehicles", {"filter[name]": vehicle_name, "page[size]": 10})
         rows = self._rows(body, "/vehicles")
         target = vehicle_name.strip().lower()
         exact = [row for row in rows if (row.get("name") or "").strip().lower() == target]
         if len(exact) != 1:
-            return []
+            return [], []
         ports = exact[0].get("ports")
-        return ports if isinstance(ports, list) else []
+        tags = exact[0].get("port_tags")
+        return (ports if isinstance(ports, list) else [],
+                [t for t in tags if isinstance(t, str)] if isinstance(tags, list) else [])
 
     async def get_item_detail(self, item_uuid: str) -> dict[str, Any]:
         """One component's real stats (e.g. `power_plant.power_segment_generation`) plus
@@ -219,3 +229,28 @@ class WikiApiClient:
         if not isinstance(detail, dict) or detail.get("uuid") != item_uuid:
             raise WikiApiError("item detail identity mismatch")
         return detail
+
+    async def find_item_detail_by_name(self, item_name: str) -> dict[str, Any] | None:
+        """A component's detail by exact name, for when UEX's uuid for it doesn't exist on
+        the wiki (most radars: 'Fleming', 'Capston', 'Observer-Go' all have a UEX uuid the
+        wiki doesn't know, but the same name does resolve). `filter[name]` matches by
+        substring, so - same as get_vehicle_ports - only a single exact, case-insensitive
+        name match counts; zero or several returns None rather than a guess."""
+        exact = await self.find_item_variants_by_name(item_name)
+        if len(exact) != 1 or not _UUID_RE.fullmatch(exact[0].get("uuid") or ""):
+            return None
+        return await self.get_item_detail(exact[0]["uuid"])
+
+    async def find_item_variants_by_name(self, item_name: str) -> list[dict[str, Any]]:
+        """Every wiki item whose name is exactly `item_name` (case-insensitive). One shop
+        name can be several game items: 'VariPuck S4 Gimbal Mount' is 6, one generic and
+        five ship-specific ones (Polaris, M80, ...) with their own `required_tags` - and
+        UEX's uuid for it points at the Polaris-only one. The list rows are full records,
+        required_tags included, so no per-variant detail call is needed."""
+        target = (item_name or "").strip().lower()
+        if not target:
+            return []
+        body = await self._get_json("/items", {"filter[name]": item_name.strip(), "page[size]": 25})
+        rows = self._rows(body, "/items")
+        return [row for row in rows
+                if isinstance(row, dict) and (row.get("name") or "").strip().lower() == target]

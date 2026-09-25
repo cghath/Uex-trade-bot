@@ -1,28 +1,23 @@
-"""Ship Parts Finder (/ship-parts-finder, in design - not yet finalized): for one ship,
-browse its real component slots (power plant, coolers, shields, quantum drive, turrets,
-missile racks, radar, life support - see bot/uex/ship_parts.py's PORT_TYPE_TO_UEX_CATEGORY
-for the full, deliberately partial list) and lock in a specific part per slot into a
-private, persistent shopping list - same spirit as the blueprint shopping list
+"""Ship Parts Finder (/ship-parts-finder, still being refined): for one ship, browse its
+real component slots (weapons, gun mounts, power plant, coolers, shields, quantum drive,
+missile racks, radar - see bot/uex/ship_parts.py) and lock in a specific part per slot
+into a private, persistent shopping list - same spirit as the blueprint shopping list
 (bot/cogs/blueprint_planner.py), whose ShoppingService/ShoppingView pattern this reuses
 directly rather than reinventing.
 
 Loadout data (which slots exist, what size/type fits) comes from the Star Citizen Wiki API
 (api.star-citizen.wiki) - UEX has no equivalent (its own id_vehicle FK on /items is
 cosmetics-only, confirmed empirically against live catalog data). Candidate parts for a
-slot are found in UEX's own item catalog (category+size match) and filtered to ones UEX
-reports a real, current shop listing for. Stats and price/terminal for each candidate come
-from the wiki's own /items/{uuid} detail endpoint, which embeds UEX-sourced pricing
-directly (uex_prices.purchase) - verified live that its terminal_id values are UEX's own
-real terminal ids, not an independent copy. Component hardware prices move far less often
-than commodity market prices, so this embedded copy is used directly rather than a second
-live UEX price lookup per candidate.
+slot are found in UEX's own item catalog by category and filtered to ones UEX reports a
+real, current shop listing for; whether each one fits the slot is decided by the wiki's
+size, since UEX's catalog size disagrees with it in almost every category. Price and shop come from UEX's own
+/items_prices_all rows, not the copy embedded in the wiki's item detail, which was
+missing for many parts UEX really lists. Stats come from the wiki's /items/{uuid} detail;
+a part the wiki has no detail for is still shown, just without stats.
 
-Every mapped category's per-component stat sub-block has been checked live except
-LifeSupportGenerator, which genuinely has none (confirmed, not a lookup gap - see
-_format_stat_block's docstring). PowerPlant/Cooler/Shield/QuantumDrive/Turret/Radar key
-their block by the item's own `type` field; MissileLauncher keys it by `sub_type` instead
-("MissileRack" -> "missile_rack") - _format_stat_block checks both rather than hardcoding
-one shape.
+Candidates are priced, located, and sorted closest-first BEFORE being cut to the display
+limit, so the closest shops can't be cut off unseen - the repo's "filter before
+truncating" lesson. Display labels live in bot/uex/ship_part_display.py.
 
 An outside audit before merge found four real P2s, all fixed: (1) selecting a category ran
 the full catalog/price/wiki lookup before acknowledging the interaction, risking Discord's
@@ -49,7 +44,20 @@ from discord.ext import commands, tasks
 from bot.cogs.prices import terminal_name_autocomplete
 from bot.cogs.ships import ship_name_autocomplete
 from bot.uex.exceptions import UexApiError, describe_uex_api_error
-from bot.uex.ship_parts import ShipPort, candidate_items_for_port, filter_to_sold_items, group_ports_by_category, parse_ports, sold_item_ids
+from bot.uex.ship_part_display import format_part_list, format_port_label, shop_text
+from bot.uex.ship_parts import (
+    GUNS_CATEGORY,
+    MOUNTS_CATEGORY,
+    ShipPort,
+    candidate_items_for_port,
+    category_label,
+    cheapest_listing_by_item,
+    group_ports_by_category,
+    parse_ports,
+    part_fits_port,
+    pick_fitting_variant,
+    tags_allow,
+)
 from bot.uex.ships import resolve_ship
 from bot.wiki_api import WikiApiClient, WikiApiError
 
@@ -80,121 +88,49 @@ def _pages(lines: list[str], limit: int = 1900) -> list[str]:
     return pages + ([current] if current else [])
 
 
-def _snake_case(camel: str) -> str:
-    return "".join(["_" + c.lower() if c.isupper() else c for c in camel]).lstrip("_")
-
-
-def _format_stat_block(detail: dict) -> str:
-    """Whatever functional stat sub-object the wiki has for this component, shown as plain
-    key: value lines. Checked live for every mapped category (module docstring has the
-    verification note): PowerPlant/Cooler/Shield/QuantumDrive/Turret/Radar all key their
-    stat block by the item's own `type` field snake-cased (e.g. "power_plant") - but
-    MissileLauncher's is keyed by `sub_type` instead ("MissileRack" -> "missile_rack"), and
-    LifeSupportGenerator genuinely has no dedicated stat block at all (confirmed live, not
-    a lookup bug - only general physical properties like mass/dimension exist for it), so
-    this degrades to no stat line for that one category rather than guessing at a key that
-    isn't there.
-
-    Quantum drives are a special case, found live in testing: the single most important
-    stat - travel speed - lives nested two levels deep
-    (quantum_drive.standard_jump.drive_speed_formatted), not as a top-level scalar like
-    every other category's headline stat. The generic top-level-only scan below explicitly
-    skips dict/list values, so it silently dropped speed entirely until this was added -
-    confirmed missing, not just unformatted.
-
-    Found live in a real user report: the generic scan was also showing raw garbage for
-    some fields that have a nicer sibling right next to them - quantum drives'
-    `jump_range` is literally float32's max value (3.402823e+38) used as a "no limit"
-    sentinel, with `jump_range_formatted` already reading "Unlimited" one key over. The
-    scan now prefers `f"{key}_formatted"` over a raw value whenever that sibling exists,
-    for any category, not just quantum drives (checked live: no other mapped category
-    currently has any `_formatted` sibling, so this only changes quantum drives' output
-    today, but the fix isn't QD-specific). Quantum drives' remaining raw-only fields
-    (`quantum_fuel_requirement`, `fuel_rate`, `fuel_consumption_scu_per_gm`,
-    `fuel_efficiency`) are internal fuel-mechanic constants with no formatted counterpart
-    and no comparison value to a player picking a drive, so they're excluded outright
-    rather than shown as more raw decimals."""
-    quantum_drive_internal_keys = {
-        "quantum_fuel_requirement", "fuel_rate", "fuel_consumption_scu_per_gm", "fuel_efficiency",
-    }
-    for raw_key in (detail.get("type"), detail.get("sub_type")):
-        if not raw_key:
-            continue
-        key = _snake_case(str(raw_key))
-        block = detail.get(key)
-        if not isinstance(block, dict):
-            continue
-        lines: list[str] = []
-        skip_keys: set[str] = set()
-        if key == "quantum_drive":
-            standard_jump = block.get("standard_jump")
-            if isinstance(standard_jump, dict) and standard_jump.get("drive_speed_formatted"):
-                lines.append(f"speed: {standard_jump['drive_speed_formatted']}")
-            travel_time = block.get("travel_time_10gm")
-            if isinstance(travel_time, dict) and travel_time.get("formatted"):
-                lines.append(f"10 Gm in: {travel_time['formatted']}")
-            skip_keys = quantum_drive_internal_keys
-        for k, v in block.items():
-            if k in skip_keys or k.endswith("_formatted") or v is None or isinstance(v, (dict, list)):
-                continue
-            formatted = block.get(f"{k}_formatted")
-            lines.append(f"{k}: {formatted}" if formatted is not None else f"{k}: {v}")
-        if lines:
-            return " · ".join(lines[:4])
-    return ""
-
-
-def _cheapest_purchase(detail: dict) -> dict:
-    purchases = ((detail.get("uex_prices") or {}).get("purchase")) or []
-    if not purchases:
-        return {}
-    return min(purchases, key=lambda p: p.get("price_buy") if p.get("price_buy") is not None else float("inf"))
-
-
 def _format_port_label(port: ShipPort) -> str:
-    """A physical slot's own name, e.g. "hardpoint_weapon_gun_class1_left_wing", made
-    readable - not curated per-ship, just a mechanical cleanup of the raw wiki port name."""
-    label = port.name.removeprefix("hardpoint_").replace("_", " ").strip().title()
-    size = f"S{port.size_min}" if port.size_min == port.size_max else f"S{port.size_min}-{port.size_max}"
-    return f"{label or port.name} ({size})"
+    return format_port_label(port.name, port.size_min, port.size_max)
 
 
-def _format_candidate_line(detail: dict, *, selected: bool = False) -> str:
-    """'**Name** — Price aUEC @ Shop · Distance' as the primary line, matching
-    /ingame-item-finder's own proven plain-text format (bot/uex/item_finder.py's
-    format_item_listing_line) rather than a monospace column table - that table shipped
-    for this exact bot once, broke live once real name-length variance showed up (a fixed
-    width truncated distinct names to identical text; widening it made Discord wrap the
-    row instead of scrolling, breaking alignment anyway), and was replaced with plain text
-    for good. A second, shorter line carries the details a shop listing doesn't need but a
-    component comparison does: size/grade/manufacturer and the stat highlight."""
-    name = detail.get("name") or "Unknown"
-    cheapest = _cheapest_purchase(detail)
-    price = cheapest.get("price_buy")
-    terminal = cheapest.get("terminal_name")
-    distance = detail.get("_distance_gm")
-    marker = "✅ " if selected else ""
-    price_part = f"{price:,.0f} aUEC @ {terminal}" if price is not None and terminal else "price unknown"
-    distance_part = f"{distance:.1f} Gm" if distance is not None else "distance unknown"
-    primary = f"{marker}**{name}** — {price_part} · {distance_part}"
+def _fits(candidate: dict, port: ShipPort, category: str) -> bool:
+    wiki_size = candidate.get("size") if candidate.get("_detail_loaded") else None
+    return (part_fits_port(port, category, wiki_size=wiki_size, uex_size=candidate["_uex_row"].get("size"))
+            and tags_allow(candidate, port))
 
-    details = []
-    size = detail.get("size")
-    if size is not None:
-        details.append(f"S{size}")
-    grade = detail.get("grade")
-    if grade:
-        details.append(f"Grade {grade}")
-    manufacturer = (detail.get("manufacturer") or {}).get("name") if isinstance(detail.get("manufacturer"), dict) else None
-    if manufacturer:
-        details.append(manufacturer)
-    stat_line = _format_stat_block(detail)
-    if stat_line:
-        details.append(stat_line)
-    if selected:
-        details.append('selected - press "Lock in selected part" to save it')
 
-    return f"{primary}\n{' · '.join(details)}" if details else primary
+def _list_heading(category: str, port: ShipPort | None) -> str:
+    """'Shield Generators · Shield Generator Left (S1)', or just 'Radar (S1)' when the
+    slot's own name only repeats the category's."""
+    label = category_label(category)
+    if port is None:
+        return label
+    slot = _format_port_label(port)
+    slot_name = format_port_label(port.name).lower()
+    if label.lower().startswith(slot_name):
+        return f"{label} {slot[len(format_port_label(port.name)):].strip()}".strip()
+    return f"{label} · {slot}"
+
+
+def _part_option_description(candidate: dict) -> str:
+    """'6,165 aUEC · GrimHEX (Dumper's Depot) · 32.0 Gm' under a part's dropdown name, so
+    parts past the message's own list can still be told apart."""
+    bits = []
+    if candidate.get("_price_buy"):
+        bits.append(f"{float(candidate['_price_buy']):,.0f} aUEC")
+    shop = shop_text(candidate.get("_terminal_name"))
+    if shop:
+        bits.append(shop)
+    if candidate.get("_distance_gm") is not None:
+        bits.append(f"{float(candidate['_distance_gm']):.1f} Gm")
+    return " · ".join(bits)
+
+
+def _entry_slot_label(entry: dict) -> str:
+    """A saved entry's slot, e.g. 'Quantum Drive' or 'Left Wing Gun (weapon)'. Weapons and
+    gun mounts can share one physical hardpoint, so those two say which one they are."""
+    label = format_port_label(entry["port_name"])
+    suffix = {GUNS_CATEGORY: " (weapon)", MOUNTS_CATEGORY: " (mount)"}.get(entry.get("category"), "")
+    return f"{label}{suffix}"
 
 
 class ShipPartsShoppingService:
@@ -257,10 +193,11 @@ class ShipPartsShoppingService:
             if entry["vehicle_name"] != current_ship:
                 current_ship = entry["vehicle_name"]
                 lines.extend(["", f"**{current_ship}**"])
-            price = f"{entry['price_buy']:,.0f} aUEC" if entry.get("price_buy") is not None else "price unknown"
-            terminal = entry.get("terminal_name") or "unknown shop"
-            port_label = entry["port_name"].removeprefix("hardpoint_").replace("_", " ").strip().title() or entry["port_name"]
-            lines.append(f"• {entry['category']} ({port_label}): {entry['item_name']} - {price} @ {terminal}")
+            parts = [f"{entry['price_buy']:,.0f} aUEC" if entry.get("price_buy") is not None else "no shop price on record"]
+            shop = shop_text(entry.get("terminal_name"))
+            if shop:
+                parts.append(shop)
+            lines.append(f"• {_entry_slot_label(entry)}: **{entry['item_name']}** — {' · '.join(parts)}")
         return _pages(lines)
 
     async def refresh(self, thread: discord.Thread, user_id: int, guild_id: int) -> None:
@@ -315,7 +252,8 @@ class ShipPartsShoppingService:
             await interaction.followup.send(f"Saved, but I couldn't refresh {thread.mention}. Use Refresh list there.",
                                             ephemeral=True)
             return True
-        await interaction.followup.send(f"Locked in **{item_name}** for {category} in {thread.mention}.", ephemeral=True)
+        await interaction.followup.send(f"Locked in **{item_name}** for {category_label(category)} in {thread.mention}.",
+                                        ephemeral=True)
         return True
 
 
@@ -331,10 +269,9 @@ class _RemoveEntrySelect(discord.ui.Select):
         self.entries = entries[:25]
         options = []
         for i, entry in enumerate(self.entries):
-            port_label = entry["port_name"].removeprefix("hardpoint_").replace("_", " ").strip().title() or entry["port_name"]
             options.append(discord.SelectOption(
-                label=f"{entry['item_name']} ({entry['category']})"[:100],
-                description=f"{entry['vehicle_name']} - {port_label}"[:100],
+                label=f"{entry['item_name']} ({category_label(entry['category'])})"[:100],
+                description=f"{entry['vehicle_name']} - {_entry_slot_label(entry)}"[:100],
                 value=str(i),
             ))
         super().__init__(placeholder="Pick a part to remove...", options=options, min_values=1, max_values=1)
@@ -359,7 +296,7 @@ class _RemoveEntrySelect(discord.ui.Select):
                 f"Removed **{entry['item_name']}**, but I couldn't update the list message. Press Refresh list.",
                 ephemeral=True)
             return
-        await interaction.followup.send(f"Removed **{entry['item_name']}** ({entry['category']}).", ephemeral=True)
+        await interaction.followup.send(f"Removed **{entry['item_name']}** ({category_label(entry['category'])}).", ephemeral=True)
 
 
 class _RemoveEntryView(discord.ui.View):
@@ -469,7 +406,7 @@ class PartsBrowserView(discord.ui.View):
         # bug, so this stays even once that fix is confirmed working.
         if self.category is None:
             return ""
-        parts = [f"Category: **{self.category}**"]
+        parts = [f"Category: **{category_label(self.category)}**"]
         ports = self.grouped_ports.get(self.category, [])
         if len(ports) > 1:
             parts.append(f"Slot: **{_format_port_label(self.selected_port)}**" if self.selected_port else "Slot: *(pick below)*")
@@ -483,18 +420,17 @@ class PartsBrowserView(discord.ui.View):
         if self.category is None:
             return header
         summary = self._selection_summary()
+        label = category_label(self.category)
         ports = self.grouped_ports.get(self.category, [])
         if len(ports) > 1 and self.selected_port is None:
-            return f"{header}\n\n{summary}\n\n**{self.category}** has {len(ports)} separate slots on this ship - pick one below."
-        slot_label = f" - {_format_port_label(self.selected_port)}" if len(ports) > 1 and self.selected_port else ""
+            return f"{header}\n\n{summary}\n\n**{label}** has {len(ports)} separate slots on this ship - pick one below."
         if not self.candidates:
-            return f"{header}\n\n{summary}\n\nNo currently-sold {self.category}{slot_label} options found for this ship."
-        lines = [header, "", summary, "", f"**{self.category}{slot_label}**"]
-        for detail in self.candidates[:MAX_CANDIDATES_SHOWN]:
-            lines.append(_format_candidate_line(detail, selected=detail is self.selected_candidate))
-        if len(self.candidates) > MAX_CANDIDATES_SHOWN:
-            lines.append(f"...and {len(self.candidates) - MAX_CANDIDATES_SHOWN} more, showing the first {MAX_CANDIDATES_SHOWN}.")
-        return "\n".join(lines)[:1900]
+            return f"{header}\n\n{summary}\n\nNo currently-sold {label.lower()} found for this slot."
+        lines = [header, "", summary, "", f"**{_list_heading(self.category, self.selected_port)}**"]
+        port = self.selected_port
+        fixed = port.size_min if port is not None and port.size_min == port.size_max else None
+        lines.extend(format_part_list(self.candidates, selected=self.selected_candidate, slot_size=fixed))
+        return "\n".join(lines)
 
     def _remove_items(self, *types: type) -> None:
         for child in [c for c in self.children if isinstance(c, types)]:
@@ -527,7 +463,7 @@ class PartsBrowserView(discord.ui.View):
         if port is not None:
             try:
                 self.candidates = await self.cog.candidates_for_port(
-                    port, limit=MAX_CANDIDATES_SHOWN, origin_id=self.origin_terminal[0],
+                    port, category=self.category, limit=MAX_CANDIDATES_SHOWN, origin_id=self.origin_terminal[0],
                 )
             except (UexApiError, WikiApiError) as exc:
                 await interaction.edit_original_response(content=f"Couldn't load {self.category} options: {exc}", view=self)
@@ -543,11 +479,10 @@ class PartsBrowserView(discord.ui.View):
             return
         await interaction.response.defer(ephemeral=True)
         detail = self.selected_candidate
-        cheapest = _cheapest_purchase(detail)
         await self.cog.shopping.lock_in(
             interaction, self.vehicle["id"], self.vehicle.get("name") or "", self.category,
             self.selected_port.name, detail.get("_uex_id"), detail.get("name") or "unknown",
-            cheapest.get("terminal_id"), cheapest.get("terminal_name"), cheapest.get("price_buy"),
+            detail.get("_id_terminal"), detail.get("_terminal_name"), detail.get("_price_buy"),
         )
 
     @discord.ui.button(label="Lock in selected part", style=discord.ButtonStyle.success, row=4)
@@ -567,7 +502,7 @@ def _mark_default(options: list[discord.SelectOption], value: str) -> None:
 
 class _CategorySelect(discord.ui.Select):
     def __init__(self, parent: PartsBrowserView) -> None:
-        options = [discord.SelectOption(label=category[:100], value=category)
+        options = [discord.SelectOption(label=category_label(category)[:100], value=category)
                    for category in list(parent.grouped_ports.keys())[:25]]
         super().__init__(placeholder="Choose a component category", options=options)
         self.parent_view = parent
@@ -594,7 +529,8 @@ class _SlotSelect(discord.ui.Select):
 class _PartSelect(discord.ui.Select):
     def __init__(self, parent: PartsBrowserView, candidates: list[dict]) -> None:
         options = [
-            discord.SelectOption(label=(c.get("name") or "Unknown")[:100], value=str(i))
+            discord.SelectOption(label=(c.get("name") or "Unknown")[:100], value=str(i),
+                                 description=_part_option_description(c)[:100] or None)
             for i, c in enumerate(candidates[:25])
         ]
         super().__init__(placeholder="Choose a part to lock in", options=options)
@@ -639,11 +575,11 @@ class ShipPartsFinder(commands.Cog):
                 name = vehicle.get("name")
                 if not name:
                     continue
-                raw_ports = await self._wiki.get_vehicle_ports(name)
-                ports = parse_ports(raw_ports)
+                ports = await self._wiki_ports(vehicle)
                 await self.bot.db.replace_ship_parts_reference(
                     id_vehicle, name,
-                    [{"name": p.name, "port_type": p.port_type, "size_min": p.size_min, "size_max": p.size_max} for p in ports],
+                    [{"name": p.name, "port_type": p.port_type, "size_min": p.size_min, "size_max": p.size_max,
+                      "accepts_guns": p.accepts_guns, "port_tags": sorted(p.tags)} for p in ports],
                 )
             except (TypeError, ValueError, WikiApiError):
                 logger.warning("Ship parts reference refresh failed for vehicle %r", vehicle.get("name"))
@@ -658,62 +594,170 @@ class ShipPartsFinder(commands.Cog):
         id_vehicle = int(vehicle["id"])
         rows = await self.bot.db.get_ship_parts_reference(id_vehicle)
         if rows:
-            return [ShipPort(name=r["port_name"], port_type=r["port_type"], size_min=r["size_min"], size_max=r["size_max"])
+            return [ShipPort(name=r["port_name"], port_type=r["port_type"], size_min=r["size_min"], size_max=r["size_max"],
+                             accepts_guns=bool(r.get("accepts_guns")),
+                             tags=frozenset((r.get("port_tags") or "").split()))
                     for r in rows]
         # Collector hasn't run for this ship yet (fresh deploy, or a ship added since the
         # last daily cycle) - fall back to a live lookup rather than a dead end.
-        raw_ports = await self._wiki.get_vehicle_ports(vehicle.get("name") or "")
-        return parse_ports(raw_ports)
+        return await self._wiki_ports(vehicle)
 
-    async def _item_detail_cached(self, item_uuid: str) -> dict | None:
+    async def _wiki_ports(self, vehicle: dict) -> list[ShipPort]:
+        """The wiki names some ships with their maker ('MISC Reliant Tana', 'MISC
+        Freelancer') where UEX's `name` doesn't ('Reliant Tana') - UEX's own `name_full`
+        matches those, so it's tried second (21 of the 88 UEX ships the wiki didn't match
+        by name; most of the rest are concept ships the wiki's game data doesn't have)."""
+        names = [vehicle.get("name"), vehicle.get("name_full")]
+        for name in dict.fromkeys(n.strip() for n in names if isinstance(n, str) and n.strip()):
+            raw_ports, vehicle_tags = await self._wiki.get_vehicle_loadout(name)
+            if raw_ports:
+                return parse_ports(raw_ports, vehicle_tags)
+        return []
+
+    async def _item_detail_cached(self, uex_row: dict) -> dict | None:
+        """Wiki detail for one UEX catalog row: by its uuid, else by its exact name (UEX's
+        uuid for most radars doesn't exist on the wiki, but the name does). Misses are
+        cached too, so a part the wiki genuinely lacks isn't re-looked-up every browse."""
+        item_uuid = uex_row.get("uuid") or ""
+        name = (uex_row.get("name") or "").strip()
+        key = item_uuid or f"name:{name.lower()}"
         now = time.monotonic()
-        cached = self._detail_cache.get(item_uuid)
+        cached = self._detail_cache.get(key)
+        if cached and cached[0] > now:
+            return cached[1]
+        detail = None
+        try:
+            if item_uuid:
+                detail = await self._wiki.get_item_detail(item_uuid)
+        except WikiApiError:
+            detail = None
+        if detail is None and name:
+            try:
+                detail = await self._wiki.find_item_detail_by_name(name)
+            except WikiApiError:
+                detail = None
+        if len(self._detail_cache) >= DETAIL_CACHE_MAX:
+            self._detail_cache.pop(next(iter(self._detail_cache)))
+        self._detail_cache[key] = (now + DETAIL_CACHE_SECONDS, detail)
+        return detail
+
+    async def candidates_for_port(
+        self, port: ShipPort, *, category: str | None = None, limit: int, origin_id: int | None = None,
+    ) -> list[dict]:
+        """Every sold part that fits this slot under `category`, priced from UEX's own shop
+        rows, sorted closest-first to origin_id (unknown distance last, then cheapest), and
+        only THEN cut to `limit` - cutting first used to drop the closest shops unseen.
+        Fit is decided by the wiki's size (UEX's is unreliable - see
+        bot/uex/ship_parts.py), so wiki detail is loaded in that closest-first order, a
+        batch at a time, until `limit` parts that fit are found - not for every part up
+        front. Details are cached, so later browses cost nothing."""
+        category = category or port.uex_category
+        catalog = await self.bot.uex.get_item_catalog()
+        cheapest = cheapest_listing_by_item(await self.bot.uex.get_items_prices_all())
+        candidates: list[dict] = []
+        for row in candidate_items_for_port(catalog, port, category):
+            try:
+                id_item = int(row.get("id"))
+            except (TypeError, ValueError):
+                continue
+            listing = cheapest.get(id_item)
+            if listing is None:
+                continue
+            candidates.append({
+                "_uex_row": row, "_uex_id": id_item, "_price_buy": float(listing["price_buy"]),
+                "_id_terminal": listing.get("id_terminal"), "_terminal_name": listing.get("terminal_name"),
+            })
+        await self._attach_full_terminal_names(candidates)
+        if origin_id is not None:
+            await self._attach_distances(candidates, origin_id)
+        candidates.sort(key=lambda c: (c.get("_distance_gm") is None, c.get("_distance_gm") or 0.0, c["_price_buy"]))
+
+        kept: list[dict] = []
+        position = 0
+        while len(kept) < limit and position < len(candidates):
+            batch = candidates[position:position + max(limit - len(kept), DETAIL_BATCH_SIZE)]
+            position += len(batch)
+            await self._attach_details(batch)
+            await self._swap_in_fitting_variants([c for c in batch if not tags_allow(c, port)], port)
+            kept.extend(c for c in batch if _fits(c, port, category))
+        return kept[:limit]
+
+    async def _variants_cached(self, name: str) -> list[dict]:
+        key = f"variants:{name.lower()}"
+        now = time.monotonic()
+        cached = self._detail_cache.get(key)
         if cached and cached[0] > now:
             return cached[1]
         try:
-            detail = await self._wiki.get_item_detail(item_uuid)
+            rows = await self._wiki.find_item_variants_by_name(name)
         except WikiApiError:
-            return None
+            return []
         if len(self._detail_cache) >= DETAIL_CACHE_MAX:
             self._detail_cache.pop(next(iter(self._detail_cache)))
-        self._detail_cache[item_uuid] = (now + DETAIL_CACHE_SECONDS, detail)
-        return detail
+        self._detail_cache[key] = (now + DETAIL_CACHE_SECONDS, rows)
+        return rows
 
-    async def candidates_for_port(self, port: ShipPort, *, limit: int, origin_id: int | None = None) -> list[dict]:
-        catalog = await self.bot.uex.get_item_catalog()
-        candidates = candidate_items_for_port(catalog, port)
-        price_rows = await self.bot.uex.get_items_prices_all()
-        candidates = filter_to_sold_items(candidates, sold_item_ids(price_rows))
-        candidates = [row for row in candidates if row.get("uuid")][:limit]
-        details: list[dict] = []
-        for start in range(0, len(candidates), DETAIL_BATCH_SIZE):
-            batch = candidates[start:start + DETAIL_BATCH_SIZE]
+    async def _swap_in_fitting_variants(self, candidates: list[dict], port: ShipPort) -> None:
+        """A part that fails the tag check on the detail its UEX uuid led to may still be
+        a generic part with ship-specific namesakes (see pick_fitting_variant) - replace
+        its wiki fields with the variant that fits this ship, stats included. Only runs
+        for the few parts that fail the tag check."""
+        named = [c for c in candidates if c.get("name")]
+        results = await asyncio.gather(*(self._variants_cached(str(c["name"])) for c in named),
+                                       return_exceptions=True)
+        for candidate, rows in zip(named, results):
+            variant = pick_fitting_variant(rows, port) if isinstance(rows, list) else None
+            if variant is None:
+                continue
+            for key in [k for k in candidate if not k.startswith("_")]:
+                del candidate[key]
+            candidate.update({k: v for k, v in variant.items() if not k.startswith("_")})
+
+    async def _attach_full_terminal_names(self, candidates: list[dict]) -> None:
+        """/items_prices_all only carries a short terminal name ('Dumper's Area 18'); the
+        collected terminal_reference table has the full 'Vendor - Place' one the display
+        splits into Place (Vendor). Falls back to the short name if it isn't collected."""
+        ids = [c["_id_terminal"] for c in candidates if c.get("_id_terminal") is not None]
+        if not ids:
+            return
+        try:
+            references = await self.bot.db.get_terminal_references_by_ids(ids)
+        except Exception:
+            logger.warning("Couldn't load full terminal names for ship parts", exc_info=True)
+            return
+        for candidate in candidates:
+            reference = references.get(candidate.get("_id_terminal"))
+            if reference and reference.get("terminal_name"):
+                candidate["_terminal_name"] = reference["terminal_name"]
+
+    async def _attach_details(self, candidates: list[dict]) -> None:
+        """Merge each candidate's wiki detail (stats, grade, maker) into it. A part the wiki
+        has no detail for (its UEX uuid missing or not matching the wiki's) keeps a minimal
+        name/size from UEX's own row and is still shown, instead of silently vanishing."""
+        pending = [c for c in candidates if "_detail_loaded" not in c]
+        for start in range(0, len(pending), DETAIL_BATCH_SIZE):
+            batch = pending[start:start + DETAIL_BATCH_SIZE]
             results = await asyncio.gather(
-                *(self._item_detail_cached(row["uuid"]) for row in batch), return_exceptions=True,
+                *(self._item_detail_cached(c["_uex_row"]) for c in batch), return_exceptions=True,
             )
-            for row, result in zip(batch, results):
-                if isinstance(result, Exception) or result is None:
-                    continue
-                result = dict(result)
-                result["_uex_id"] = row.get("id")
-                details.append(result)
-        if origin_id is not None:
-            details = await self._attach_distances(details, origin_id)
-        return details
+            for candidate, detail in zip(batch, results):
+                row = candidate["_uex_row"]
+                if isinstance(detail, dict):
+                    for key, value in detail.items():
+                        candidate.setdefault(key, value)
+                else:
+                    candidate.setdefault("name", row.get("name"))
+                    candidate.setdefault("size", row.get("size"))
+                candidate["_detail_loaded"] = isinstance(detail, dict)
 
-    async def _attach_distances(self, candidates: list[dict], origin_id: int) -> list[dict]:
+    async def _attach_distances(self, candidates: list[dict], origin_id: int) -> None:
         """Real distance (gigameters) from the player's given location to each candidate's
-        own cheapest listing, batched via asyncio.gather - mirrors /ingame-item-finder's
-        own _fetch_distances. Without this, the required `location` input had no effect on
-        anything shown, a real gap an outside audit caught before merge. Candidates sort
-        closest-first, with unknown distance sorting last (matches item_finder's
-        established convention, not a new one)."""
-        terminal_ids: dict[int, int | None] = {}
-        for detail in candidates:
-            terminal_id = _cheapest_purchase(detail).get("terminal_id")
-            terminal_ids[id(detail)] = terminal_id
-
-        to_fetch = sorted({tid for tid in terminal_ids.values() if tid is not None and tid != origin_id})
+        cheapest shop, batched via asyncio.gather - mirrors /ingame-item-finder's own
+        _fetch_distances. None when UEX can't price the pair; never fabricated."""
+        to_fetch = sorted({
+            c["_id_terminal"] for c in candidates
+            if c.get("_id_terminal") is not None and c["_id_terminal"] != origin_id
+        })
         distances: dict[int, float | None] = {origin_id: 0.0}
         for start in range(0, len(to_fetch), DETAIL_BATCH_SIZE):
             batch = to_fetch[start:start + DETAIL_BATCH_SIZE]
@@ -728,12 +772,9 @@ class ShipPartsFinder(commands.Cog):
                     distances[tid] = float(result.get("distance"))
                 except (TypeError, ValueError):
                     distances[tid] = None
-
-        for detail in candidates:
-            terminal_id = terminal_ids[id(detail)]
-            detail["_distance_gm"] = distances.get(terminal_id) if terminal_id is not None else None
-        candidates.sort(key=lambda d: (d["_distance_gm"] is None, d["_distance_gm"] or 0.0))
-        return candidates
+        for candidate in candidates:
+            terminal_id = candidate.get("_id_terminal")
+            candidate["_distance_gm"] = distances.get(terminal_id) if terminal_id is not None else None
 
     @app_commands.command(
         name="ship-parts-finder",

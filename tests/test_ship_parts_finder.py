@@ -9,112 +9,9 @@ from cryptography.fernet import Fernet
 import discord
 
 from bot.cogs import ship_parts_finder
-from bot.cogs.ship_parts_finder import ShipPartsFinder, ShipPartsShoppingService, ShipPartsShoppingView, _format_candidate_line, _format_stat_block
+from bot.cogs.ship_parts_finder import ShipPartsFinder, ShipPartsShoppingService, ShipPartsShoppingView
 from bot.db.database import Database
 from bot.uex.ship_parts import ShipPort
-
-
-# -- _format_stat_block: type-keyed, sub_type-keyed, and genuinely absent -------------------
-
-def test_format_stat_block_reads_the_type_keyed_block():
-    detail = {"type": "PowerPlant", "power_plant": {"power_segment_generation": 14, "power_output": None}}
-    assert _format_stat_block(detail) == "power_segment_generation: 14"
-
-
-def test_format_stat_block_falls_back_to_the_sub_type_keyed_block():
-    # MissileLauncher's real stat block is keyed "missile_rack" (its sub_type), not
-    # "missile_launcher" (its type) - confirmed live, see the module docstring.
-    detail = {"type": "MissileLauncher", "sub_type": "MissileRack", "missile_rack": {"missile_count": 2, "missile_size": 2}}
-    assert _format_stat_block(detail) == "missile_count: 2 · missile_size: 2"
-
-
-def test_format_stat_block_returns_empty_when_no_block_exists():
-    # LifeSupportGenerator genuinely has no dedicated stat block - confirmed live, not a bug.
-    detail = {"type": "LifeSupportGenerator", "sub_type": "UNDEFINED", "dimension": {"x": 1}}
-    assert _format_stat_block(detail) == ""
-
-
-def test_format_stat_block_skips_nested_dict_and_list_values():
-    detail = {"type": "Shield", "shield": {"max_health": 2244, "reserve_pool": {"regen_rate": 1065}, "tags": [1, 2]}}
-    assert _format_stat_block(detail) == "max_health: 2244"
-
-
-def test_format_stat_block_surfaces_quantum_drive_speed_despite_being_nested_two_levels_deep():
-    # Real shape confirmed live (Expedition QD): speed and travel time live under
-    # standard_jump/travel_time_10gm, not as top-level scalars like every other category's
-    # headline stat - the generic scan alone would silently drop them entirely.
-    detail = {
-        "type": "QuantumDrive",
-        "quantum_drive": {
-            "quantum_fuel_requirement": 0.0098,
-            "jump_range_formatted": "Unlimited",
-            "standard_jump": {"drive_speed": 189309100, "drive_speed_formatted": "189.3 Mm/s"},
-            "travel_time_10gm": {"seconds": 68, "formatted": "1:07"},
-        },
-    }
-    result = _format_stat_block(detail)
-    assert "speed: 189.3 Mm/s" in result
-    assert "10 Gm in: 1:07" in result
-    # Fuel-mechanic internals with no comparison value to a player - excluded outright.
-    assert "quantum_fuel_requirement" not in result
-
-
-def test_format_stat_block_quantum_drive_degrades_when_speed_data_is_missing():
-    # No standard_jump/travel_time_10gm, and the one field present is an excluded
-    # fuel-mechanic internal - nothing useful to show, so this degrades to empty rather
-    # than falling back to a raw internal constant.
-    detail = {"type": "QuantumDrive", "quantum_drive": {"quantum_fuel_requirement": 0.0098}}
-    assert _format_stat_block(detail) == ""
-
-
-def test_format_stat_block_prefers_a_formatted_sibling_over_a_raw_sentinel_value():
-    # Real live bug: jump_range's raw value is literally float32's max (a "no limit"
-    # sentinel) with a clean jump_range_formatted ("Unlimited") sitting right next to it -
-    # the raw 3.402823e+38 must never be shown when the formatted sibling exists.
-    detail = {
-        "type": "QuantumDrive",
-        "quantum_drive": {
-            "jump_range": 3.402823e+38,
-            "jump_range_formatted": "Unlimited",
-            "disconnect_range": 34693,
-            "disconnect_range_formatted": "35 km",
-        },
-    }
-    result = _format_stat_block(detail)
-    assert "jump_range: Unlimited" in result
-    assert "disconnect_range: 35 km" in result
-    assert "3.402823e" not in result
-    assert "34693" not in result
-
-
-def test_format_stat_block_formatted_sibling_preference_applies_to_any_category():
-    # Not QD-specific - any mapped category's block gets this preference if it ever
-    # carries a raw/formatted pair.
-    detail = {"type": "Shield", "shield": {"max_health": 2244, "max_health_formatted": "2.24k"}}
-    assert _format_stat_block(detail) == "max_health: 2.24k"
-
-
-# -- _format_candidate_line ------------------------------------------------------------------
-
-def test_format_candidate_line_shows_the_cheapest_listing():
-    detail = {
-        "name": "PowerBolt", "size": 1, "grade": "C", "manufacturer": {"name": "Lightning Power Ltd."},
-        "type": "PowerPlant", "power_plant": {"power_segment_generation": 14},
-        "uex_prices": {"purchase": [
-            {"price_buy": 22051, "terminal_name": "Dumper's Depot - GrimHEX"},
-            {"price_buy": 18701, "terminal_name": "Dumper's Depot - Area 18"},
-        ]},
-    }
-    line = _format_candidate_line(detail)
-    assert "**PowerBolt**" in line and "S1" in line and "Grade C" in line and "Lightning Power Ltd." in line
-    assert "18,701 aUEC @ Dumper's Depot - Area 18" in line
-    assert "power_segment_generation: 14" in line
-    assert "—" in line, "primary line matches /ingame-item-finder's proven em-dash format"
-
-
-def test_format_candidate_line_handles_no_price_data():
-    detail = {"name": "Mystery Part", "type": "Cooler"}
-    assert "price unknown" in _format_candidate_line(detail)
 
 
 class FakeMessage:
@@ -287,8 +184,8 @@ def test_remove_button_opens_a_select_populated_from_current_entries():
     kwargs = interaction.response.send_message.await_args.kwargs
     assert kwargs["ephemeral"] is True
     select = kwargs["view"].children[0]
-    assert [o.label for o in select.options] == ["PowerBolt (Power Plants)", "VariPuck S3 (Turrets)"]
-    assert [o.description for o in select.options] == ["Avenger Stalker - Power Plant", "Avenger Stalker - Turret Left"]
+    assert [o.label for o in select.options] == ["PowerBolt (Power Plants)", "VariPuck S3 (Gun Mounts)"]
+    assert [o.description for o in select.options] == ["Avenger Stalker - Power Plant", "Avenger Stalker - Turret Left (mount)"]
 
 
 def test_remove_button_notes_truncation_past_25_entries():
@@ -381,60 +278,187 @@ def test_render_groups_entries_by_ship():
     text = "\n".join(pages)
     assert "**Avenger Stalker**" in text and "**Cutlass Black**" in text
     assert "PowerBolt" in text and "19,998 aUEC" in text and "Power Plant" in text
-    assert "price unknown" in text and "unknown shop" in text
+    assert "no shop price on record" in text
+    assert "HUR-L5 (Platinum Bay)" in text, "shop shown as Place (Vendor), same as /ingame-item-finder"
 
 
 # -- candidates_for_port: full pipeline against fake UEX/wiki clients ------------------------
 
-def test_candidates_for_port_filters_sold_items_and_batches_wiki_lookups():
+def _wiki(details=None, *, by_name=None, variants=None):
+    """Fake wiki client: `details` maps uuid -> detail (a missing uuid raises, like the
+    real one), `by_name` maps name -> detail, `variants` maps name -> variant rows."""
+    details, by_name, variants = details or {}, by_name or {}, variants or {}
+
+    async def get_item_detail(uuid):
+        if uuid not in details:
+            raise ship_parts_finder.WikiApiError("not found")
+        return details[uuid]
+
+    return NS(
+        get_item_detail=AsyncMock(side_effect=get_item_detail),
+        find_item_detail_by_name=AsyncMock(side_effect=lambda name: by_name.get(name)),
+        find_item_variants_by_name=AsyncMock(side_effect=lambda name: variants.get(name, [])),
+    )
+
+
+def _uex(catalog, price_rows, distances=None):
+    distances = distances or {}
+    return NS(
+        get_item_catalog=AsyncMock(return_value=catalog),
+        get_items_prices_all=AsyncMock(return_value=price_rows),
+        get_terminal_distance=AsyncMock(side_effect=lambda origin, dest: (
+            {"distance": distances[dest]} if dest in distances else None)),
+    )
+
+
+def _price(id_item, price, terminal):
+    return {"id_item": id_item, "price_buy": price, "id_terminal": terminal, "terminal_name": f"Shop {terminal}"}
+
+
+def test_candidates_for_port_filters_sold_items_and_checks_the_wikis_size():
     async def run():
         catalog = [
             {"id": 1, "uuid": "u1", "category": "Power Plants", "size": "1", "name": "Sold"},
             {"id": 2, "uuid": "u2", "category": "Power Plants", "size": "1", "name": "Unsold"},
-            {"id": 3, "uuid": "u3", "category": "Power Plants", "size": "5", "name": "WrongSize"},
+            {"id": 3, "uuid": "u3", "category": "Power Plants", "size": "1", "name": "ReallyS3"},
+            {"id": 4, "uuid": "u4", "category": "Power Plants", "size": "3", "name": "ReallyS1"},
         ]
-        price_rows = [{"id_item": 1}]  # only item 1 has a real listing
-        uex = NS(
-            get_item_catalog=AsyncMock(return_value=catalog),
-            get_items_prices_all=AsyncMock(return_value=price_rows),
-        )
-        wiki = NS(get_item_detail=AsyncMock(return_value={"uuid": "u1", "name": "Sold", "type": "PowerPlant"}))
-        bot = NS(uex=uex)
-        cog = ShipPartsFinder(bot, wiki_client=wiki, start_refresh=False)
-        port = ShipPort(name="hp", port_type="PowerPlant", size_min=1, size_max=1)
-        return await cog.candidates_for_port(port, limit=10), wiki
-
-    candidates, wiki = asyncio.run(run())
-    assert len(candidates) == 1 and candidates[0]["name"] == "Sold" and candidates[0]["_uex_id"] == 1
-    wiki.get_item_detail.assert_awaited_once_with("u1")
-
-
-def test_candidates_for_port_skips_a_failed_wiki_detail_lookup():
-    async def run():
-        catalog = [{"id": 1, "uuid": "u1", "category": "Power Plants", "size": "1", "name": "X"}]
-        uex = NS(
-            get_item_catalog=AsyncMock(return_value=catalog),
-            get_items_prices_all=AsyncMock(return_value=[{"id_item": 1}]),
-        )
-        wiki = NS(get_item_detail=AsyncMock(side_effect=ship_parts_finder.WikiApiError("boom")))
+        uex = _uex(catalog, [_price(1, 1000, 5), _price(3, 2000, 5), _price(4, 3000, 5)])
+        wiki = _wiki({
+            "u1": {"uuid": "u1", "name": "Sold", "size": 1},
+            # UEX's size is wrong for both of these - the wiki's decides (confirmed live:
+            # FullForce Pro listed S1, really S3; GUARD listed S1, really S3).
+            "u3": {"uuid": "u3", "name": "ReallyS3", "size": 3},
+            "u4": {"uuid": "u4", "name": "ReallyS1", "size": 1},
+        })
         cog = ShipPartsFinder(NS(uex=uex), wiki_client=wiki, start_refresh=False)
         port = ShipPort(name="hp", port_type="PowerPlant", size_min=1, size_max=1)
         return await cog.candidates_for_port(port, limit=10)
 
-    assert asyncio.run(run()) == []
+    candidates = asyncio.run(run())
+    assert [c["name"] for c in candidates] == ["Sold", "ReallyS1"]
+    assert candidates[0]["_uex_id"] == 1 and candidates[0]["_price_buy"] == 1000.0
 
 
-def test_item_detail_cache_reuses_a_warm_entry_without_a_second_wiki_call():
+def test_candidates_for_port_keeps_a_part_the_wiki_has_no_detail_for():
     async def run():
-        wiki = NS(get_item_detail=AsyncMock(return_value={"uuid": "u1", "name": "X"}))
+        catalog = [{"id": 1, "uuid": "u1", "category": "Power Plants", "size": "1", "name": "X"}]
+        cog = ShipPartsFinder(NS(uex=_uex(catalog, [_price(1, 500, 5)])), wiki_client=_wiki(), start_refresh=False)
+        port = ShipPort(name="hp", port_type="PowerPlant", size_min=1, size_max=1)
+        return await cog.candidates_for_port(port, limit=10)
+
+    candidates = asyncio.run(run())
+    assert [c["name"] for c in candidates] == ["X"], "falls back to UEX's own name and size, not dropped"
+    assert candidates[0]["_detail_loaded"] is False
+
+
+def test_candidates_for_port_leaves_out_a_missile_rack_the_wiki_cant_size():
+    async def run():
+        catalog = [
+            {"id": 1, "uuid": "u1", "category": "Missile Racks", "size": "6", "name": "MSD-322"},
+            {"id": 2, "uuid": "u2", "category": "Missile Racks", "size": "3", "name": "Unknown Rack"},
+        ]
+        uex = _uex(catalog, [_price(1, 4760, 5), _price(2, 100, 5)])
+        wiki = _wiki({"u1": {"uuid": "u1", "name": "MSD-322", "size": 3}})
+        cog = ShipPartsFinder(NS(uex=uex), wiki_client=wiki, start_refresh=False)
+        port = ShipPort(name="hp_rack", port_type="MissileLauncher", size_min=3, size_max=3)
+        return await cog.candidates_for_port(port, limit=10)
+
+    # UEX lists every MSD rack as size 6, so its size is never trusted for racks.
+    assert [c["name"] for c in asyncio.run(run())] == ["MSD-322"]
+
+
+def test_candidates_for_port_sorts_closest_first_before_cutting_to_the_limit():
+    async def run():
+        catalog = [{"id": i, "uuid": f"u{i}", "category": "Coolers", "size": "1", "name": f"C{i}"} for i in (1, 2, 3)]
+        # Item 3 is the most expensive but at the closest shop; item 1 has no known distance.
+        uex = _uex(catalog, [_price(1, 100, 11), _price(2, 200, 12), _price(3, 900, 13)], distances={12: 40.0, 13: 5.0})
+        wiki = _wiki({f"u{i}": {"uuid": f"u{i}", "name": f"C{i}", "size": 1} for i in (1, 2, 3)})
+        cog = ShipPartsFinder(NS(uex=uex), wiki_client=wiki, start_refresh=False)
+        port = ShipPort(name="hp", port_type="Cooler", size_min=1, size_max=1)
+        return await cog.candidates_for_port(port, limit=2, origin_id=99)
+
+    candidates = asyncio.run(run())
+    assert [c["name"] for c in candidates] == ["C3", "C2"], "the closest shop survives the cut; unknown distance goes last"
+    assert candidates[0]["_distance_gm"] == 5.0
+
+
+def test_candidates_for_port_keeps_loading_details_until_the_limit_is_filled():
+    async def run():
+        # The 9 closest parts all turn out (by the wiki's size) not to fit; the 10th does.
+        catalog = [{"id": i, "uuid": f"u{i}", "category": "Coolers", "size": "1", "name": f"C{i}"} for i in range(10)]
+        uex = _uex(catalog, [_price(i, 100, 100 + i) for i in range(10)], distances={100 + i: float(i) for i in range(10)})
+        wiki = _wiki({f"u{i}": {"uuid": f"u{i}", "name": f"C{i}", "size": 1 if i == 9 else 2} for i in range(10)})
+        cog = ShipPartsFinder(NS(uex=uex), wiki_client=wiki, start_refresh=False)
+        port = ShipPort(name="hp", port_type="Cooler", size_min=1, size_max=1)
+        return await cog.candidates_for_port(port, limit=1, origin_id=99)
+
+    assert [c["name"] for c in asyncio.run(run())] == ["C9"]
+
+
+def test_candidates_for_port_leaves_out_another_ships_own_parts():
+    async def run():
+        catalog = [
+            {"id": 1, "uuid": "u1", "category": "Turrets", "size": "4", "name": "Reliant Toshima Turret"},
+            {"id": 2, "uuid": "u2", "category": "Turrets", "size": "4", "name": "VariPuck S4 Gimbal Mount"},
+        ]
+        uex = _uex(catalog, [_price(1, 100, 5), _price(2, 200, 5)])
+        wiki = _wiki(
+            {
+                "u1": {"uuid": "u1", "name": "Reliant Toshima Turret", "size": 4, "required_tags": ["MISC_Reliant_Base"]},
+                # Confirmed live: UEX's uuid for the generic shop VariPuck S4 is the wiki's
+                # Polaris-only variant, which would both fail the tag check and carry the
+                # wrong variant's stats.
+                "u2": {"uuid": "u2", "name": "VariPuck S4 Gimbal Mount", "size": 4, "required_tags": ["RSI_Polaris"],
+                       "turret": {"mounts": 1, "min_size": 4, "max_size": 4}},
+            },
+            variants={
+                "Reliant Toshima Turret": [{"name": "Reliant Toshima Turret", "required_tags": ["MISC_Reliant_Base"]}],
+                "VariPuck S4 Gimbal Mount": [
+                    {"uuid": "polaris", "name": "VariPuck S4 Gimbal Mount", "size": 4, "required_tags": ["RSI_Polaris"]},
+                    {"uuid": "generic", "name": "VariPuck S4 Gimbal Mount", "size": 4, "required_tags": [],
+                     "turret": {"mounts": 1, "min_size": 3, "max_size": 3}},
+                ],
+            },
+        )
+        cog = ShipPartsFinder(NS(uex=uex), wiki_client=wiki, start_refresh=False)
+        port = ShipPort(name="hardpoint_weapon_class2_nose", port_type="Turret", size_min=4, size_max=4,
+                        accepts_guns=True, tags=frozenset({"AEGS_Avenger_Base"}))
+        return await cog.candidates_for_port(port, category="Turrets", limit=10)
+
+    candidates = asyncio.run(run())
+    assert [c["name"] for c in candidates] == ["VariPuck S4 Gimbal Mount"]
+    assert candidates[0]["uuid"] == "generic" and candidates[0]["turret"]["max_size"] == 3, \
+        "the fitting variant's own record replaces the ship-specific one"
+    assert candidates[0]["_price_buy"] == 200.0, "UEX's own price/shop fields survive the swap"
+
+
+def test_item_detail_falls_back_to_an_exact_name_lookup():
+    async def run():
+        # Most radars: UEX's uuid doesn't exist on the wiki, but the same name resolves.
+        wiki = _wiki(by_name={"Fleming": {"uuid": "wiki-fleming", "name": "Fleming"}})
         cog = ShipPartsFinder(NS(), wiki_client=wiki, start_refresh=False)
-        first = await cog._item_detail_cached("u1")
-        second = await cog._item_detail_cached("u1")
+        return await cog._item_detail_cached({"uuid": "uex-fleming", "name": "Fleming"}), wiki
+
+    detail, wiki = asyncio.run(run())
+    assert detail == {"uuid": "wiki-fleming", "name": "Fleming"}
+    wiki.find_item_detail_by_name.assert_awaited_once_with("Fleming")
+
+
+def test_item_detail_cache_reuses_a_warm_entry_and_caches_misses_too():
+    async def run():
+        wiki = _wiki({"u1": {"uuid": "u1", "name": "X"}})
+        cog = ShipPartsFinder(NS(), wiki_client=wiki, start_refresh=False)
+        first = await cog._item_detail_cached({"uuid": "u1", "name": "X"})
+        second = await cog._item_detail_cached({"uuid": "u1", "name": "X"})
+        await cog._item_detail_cached({"uuid": "missing", "name": "Nope"})
+        await cog._item_detail_cached({"uuid": "missing", "name": "Nope"})
         return first, second, wiki
 
     first, second, wiki = asyncio.run(run())
     assert first == second == {"uuid": "u1", "name": "X"}
-    wiki.get_item_detail.assert_awaited_once()
+    assert wiki.get_item_detail.await_count == 2, "one for u1, one for the miss - neither repeated"
+    wiki.find_item_detail_by_name.assert_awaited_once_with("Nope")
 
 
 # -- _ports_for_vehicle: DB reference vs. live fallback --------------------------------------
@@ -442,29 +466,47 @@ def test_item_detail_cache_reuses_a_warm_entry_without_a_second_wiki_call():
 def test_ports_for_vehicle_falls_back_to_a_live_wiki_lookup_when_reference_is_cold():
     async def run():
         db = NS(get_ship_parts_reference=AsyncMock(return_value=[]))
-        wiki = NS(get_vehicle_ports=AsyncMock(return_value=[
-            {"name": "hp_power", "type": "PowerPlant", "sizes": {"min": 1, "max": 1}},
-        ]))
+        wiki = NS(get_vehicle_loadout=AsyncMock(return_value=(
+            [{"name": "hp_power", "type": "PowerPlant", "sizes": {"min": 1, "max": 1}}], ["AEGS_Avenger_Base"],
+        )))
         cog = ShipPartsFinder(NS(db=db), wiki_client=wiki, start_refresh=False)
         return await cog._ports_for_vehicle({"id": 100, "name": "Avenger Stalker"}), wiki
 
     ports, wiki = asyncio.run(run())
-    assert ports == [ShipPort(name="hp_power", port_type="PowerPlant", size_min=1, size_max=1)]
-    wiki.get_vehicle_ports.assert_awaited_once_with("Avenger Stalker")
+    assert ports == [ShipPort(name="hp_power", port_type="PowerPlant", size_min=1, size_max=1,
+                              tags=frozenset({"AEGS_Avenger_Base"}))]
+    wiki.get_vehicle_loadout.assert_awaited_once_with("Avenger Stalker")
+
+
+def test_ports_for_vehicle_retries_with_uexs_full_name():
+    async def run():
+        # The wiki calls it 'MISC Reliant Tana'; UEX's `name` is 'Reliant Tana' and its
+        # `name_full` matches the wiki's.
+        db = NS(get_ship_parts_reference=AsyncMock(return_value=[]))
+        loadouts = {"MISC Reliant Tana": ([{"name": "hp_power", "type": "PowerPlant", "sizes": {"min": 1, "max": 1}}], [])}
+        wiki = NS(get_vehicle_loadout=AsyncMock(side_effect=lambda name: loadouts.get(name, ([], []))))
+        cog = ShipPartsFinder(NS(db=db), wiki_client=wiki, start_refresh=False)
+        return await cog._ports_for_vehicle({"id": 7, "name": "Reliant Tana", "name_full": "MISC Reliant Tana"}), wiki
+
+    ports, wiki = asyncio.run(run())
+    assert [p.name for p in ports] == ["hp_power"]
+    assert [c.args[0] for c in wiki.get_vehicle_loadout.await_args_list] == ["Reliant Tana", "MISC Reliant Tana"]
 
 
 def test_ports_for_vehicle_prefers_the_warm_db_reference_over_a_live_call():
     async def run():
         db = NS(get_ship_parts_reference=AsyncMock(return_value=[
-            {"port_name": "hp_power", "port_type": "PowerPlant", "size_min": 1, "size_max": 1},
+            {"port_name": "hp_power", "port_type": "PowerPlant", "size_min": 1, "size_max": 1,
+             "accepts_guns": 0, "port_tags": "AEGS_Avenger_Base"},
         ]))
-        wiki = NS(get_vehicle_ports=AsyncMock())
+        wiki = NS(get_vehicle_loadout=AsyncMock())
         cog = ShipPartsFinder(NS(db=db), wiki_client=wiki, start_refresh=False)
         return await cog._ports_for_vehicle({"id": 100, "name": "Avenger Stalker"}), wiki
 
     ports, wiki = asyncio.run(run())
-    assert ports == [ShipPort(name="hp_power", port_type="PowerPlant", size_min=1, size_max=1)]
-    wiki.get_vehicle_ports.assert_not_awaited()
+    assert ports == [ShipPort(name="hp_power", port_type="PowerPlant", size_min=1, size_max=1,
+                              tags=frozenset({"AEGS_Avenger_Base"}))]
+    wiki.get_vehicle_loadout.assert_not_awaited()
 
 
 # -- /ship-parts-finder command: resolution failure paths -----------------------------------
@@ -541,10 +583,10 @@ def _component_interaction(*, user_id=1):
     )
 
 
-def _detail(name, uuid="u1", price=1000.0, terminal_id=1, terminal_name="Some Shop"):
+def _detail(name, uuid="u1", price=1000.0, terminal_id=1, terminal_name="Platinum Bay - HUR-L5"):
     return {
-        "uuid": uuid, "name": name, "type": "PowerPlant", "_uex_id": 1,
-        "uex_prices": {"purchase": [{"price_buy": price, "terminal_id": terminal_id, "terminal_name": terminal_name}]},
+        "uuid": uuid, "name": name, "type": "PowerPlant", "size": 1, "_uex_id": 1, "_detail_loaded": True,
+        "_price_buy": price, "_id_terminal": terminal_id, "_terminal_name": terminal_name,
     }
 
 
@@ -552,7 +594,7 @@ def test_show_category_defers_before_the_slow_candidate_lookup():
     async def run():
         seen_defer_count = None
 
-        async def slow_candidates(port, *, limit, origin_id=None):
+        async def slow_candidates(port, *, category=None, limit, origin_id=None):
             nonlocal seen_defer_count
             seen_defer_count = interaction.response.defer.await_count
             return [_detail("PowerBolt")]
@@ -594,8 +636,8 @@ def test_selecting_a_slot_loads_candidates_for_that_specific_port():
     async def run():
         calls = []
 
-        async def track(port, *, limit, origin_id=None):
-            calls.append(port.name)
+        async def track(port, *, category=None, limit, origin_id=None):
+            calls.append((port.name, category))
             return [_detail("VariPuck S3")]
 
         cog = NS(candidates_for_port=track)
@@ -603,11 +645,12 @@ def test_selecting_a_slot_loads_candidates_for_that_specific_port():
         nose = ShipPort(name="hardpoint_turret_nose", port_type="Turret", size_min=4, size_max=4)
         view = ship_parts_finder.PartsBrowserView(cog, {"id": 100, "name": "Avenger Stalker"}, (1, "Origin"),
                                                     {"Turrets": [left, nose]})
+        view.category = "Turrets"
         await view.show_slot(_component_interaction(), nose)
         return view, calls
 
     view, calls = asyncio.run(run())
-    assert calls == ["hardpoint_turret_nose"]
+    assert calls == [("hardpoint_turret_nose", "Turrets")]
     assert view.selected_port.name == "hardpoint_turret_nose"
 
 
@@ -633,6 +676,18 @@ def test_locking_in_passes_the_selected_ports_own_name_not_the_categorys_first_p
         return lock_calls
 
     assert asyncio.run(run()) == ["hardpoint_turret_nose"]
+
+
+def test_list_heading_drops_a_slot_name_that_only_repeats_the_category():
+    radar = ShipPort(name="hardpoint_radar", port_type="Radar", size_min=1, size_max=1)
+    cooler = ShipPort(name="hardpoint_cooler_left", port_type="Cooler", size_min=1, size_max=1)
+    assert ship_parts_finder._list_heading("Radar", radar) == "Radar (S1)"
+    assert ship_parts_finder._list_heading("Coolers", cooler) == "Coolers · Cooler Left (S1)"
+
+
+def test_part_select_options_carry_price_shop_and_distance():
+    part = dict(_detail("PowerBolt"), _distance_gm=13.0)
+    assert ship_parts_finder._part_option_description(part) == "1,000 aUEC · HUR-L5 (Platinum Bay) · 13.0 Gm"
 
 
 def test_selected_candidate_is_visibly_marked_in_the_rendered_text():
@@ -665,7 +720,7 @@ def test_selection_summary_shows_pick_below_for_an_unresolved_slot_or_part():
                                                 {"Turrets": [left, nose]})
     view.category = "Turrets"
     summary = view._selection_summary()
-    assert "Category: **Turrets**" in summary
+    assert "Category: **Gun Mounts**" in summary
     assert "Slot: *(pick below)*" in summary
     assert "Part:" not in summary
     assert summary in view.text()
@@ -689,18 +744,16 @@ def test_selection_summary_reflects_a_chosen_slot_and_part_plainly_regardless_of
 
 # -- _attach_distances ------------------------------------------------------------------------
 
-def test_attach_distances_sorts_closest_first_and_unknown_last():
+def test_attach_distances_sets_known_distances_and_none_for_unknown():
     async def run():
         uex = NS(get_terminal_distance=AsyncMock(side_effect=lambda origin, dest: {2: {"distance": 5.0}, 3: {"distance": 1.0}}.get(dest)))
         cog = ShipPartsFinder(NS(uex=uex), wiki_client=NS(), start_refresh=False)
-        far = _detail("Far", terminal_id=2)
-        near = _detail("Near", terminal_id=3)
-        unknown = _detail("Unknown", terminal_id=4)
-        return await cog._attach_distances([far, near, unknown], origin_id=1)
+        parts = [_detail("Far", terminal_id=2), _detail("Near", terminal_id=3), _detail("Unknown", terminal_id=4)]
+        await cog._attach_distances(parts, origin_id=1)
+        return parts
 
     result = asyncio.run(run())
-    assert [d["name"] for d in result] == ["Near", "Far", "Unknown"]
-    assert result[0]["_distance_gm"] == 1.0 and result[1]["_distance_gm"] == 5.0 and result[2]["_distance_gm"] is None
+    assert [d["_distance_gm"] for d in result] == [5.0, 1.0, None]
 
 
 def test_attach_distances_treats_the_origin_terminal_itself_as_zero():
@@ -708,7 +761,8 @@ def test_attach_distances_treats_the_origin_terminal_itself_as_zero():
         uex = NS(get_terminal_distance=AsyncMock())
         cog = ShipPartsFinder(NS(uex=uex), wiki_client=NS(), start_refresh=False)
         here = _detail("Here", terminal_id=1)
-        return await cog._attach_distances([here], origin_id=1), uex
+        await cog._attach_distances([here], origin_id=1)
+        return [here], uex
 
     result, uex = asyncio.run(run())
     assert result[0]["_distance_gm"] == 0.0
@@ -718,12 +772,8 @@ def test_attach_distances_treats_the_origin_terminal_itself_as_zero():
 def test_candidates_for_port_attaches_distances_only_when_origin_is_given():
     async def run():
         catalog = [{"id": 1, "uuid": "u1", "category": "Power Plants", "size": "1", "name": "X"}]
-        uex = NS(
-            get_item_catalog=AsyncMock(return_value=catalog),
-            get_items_prices_all=AsyncMock(return_value=[{"id_item": 1}]),
-            get_terminal_distance=AsyncMock(return_value={"distance": 2.5}),
-        )
-        wiki = NS(get_item_detail=AsyncMock(return_value=_detail("X", uuid="u1", terminal_id=9)))
+        uex = _uex(catalog, [_price(1, 100, 9)], distances={9: 2.5})
+        wiki = _wiki({"u1": {"uuid": "u1", "name": "X", "size": 1}})
         cog = ShipPartsFinder(NS(uex=uex), wiki_client=wiki, start_refresh=False)
         port = ShipPort(name="hp", port_type="PowerPlant", size_min=1, size_max=1)
         without_origin = await cog.candidates_for_port(port, limit=10)
@@ -739,7 +789,7 @@ def test_candidates_for_port_attaches_distances_only_when_origin_is_given():
 
 def test_format_port_label_reads_and_cleans_the_raw_port_name():
     port = ShipPort(name="hardpoint_weapon_gun_class1_left_wing", port_type="Turret", size_min=3, size_max=3)
-    assert ship_parts_finder._format_port_label(port) == "Weapon Gun Class1 Left Wing (S3)"
+    assert ship_parts_finder._format_port_label(port) == "Left Wing Gun (S3)"
 
 
 def test_format_port_label_shows_a_size_range_when_min_and_max_differ():
