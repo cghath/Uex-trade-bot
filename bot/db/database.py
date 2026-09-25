@@ -762,8 +762,8 @@ CREATE TABLE IF NOT EXISTS command_usage_by_user (
     PRIMARY KEY (command_name, user_id)
 );
 
--- Ship Parts Finder (/ship-parts-finder, registered as a slash command, not yet deployed to
--- production): one row per (ship, hardpoint) - daily-refreshed reference data bridging a
+-- Ship Parts Finder (/ship-parts-finder, registered and deployed to production, still being
+-- refined): one row per (ship, hardpoint) - daily-refreshed reference data bridging a
 -- ship's real component slots (sourced from the Star Citizen Wiki API - UEX has no
 -- equivalent) to UEX's own item catalog by category+size. Replaced wholesale per ship on
 -- each collector run, same "never patch reference data in place" convention as
@@ -829,6 +829,7 @@ class Database:
             )
             await self._migrate_pricing_strategy_check(db)
             await self._migrate_negotiation_message_seen_scope(db)
+            await self._migrate_ship_parts_entries_port_name(db)
             await self._migrate_ship_preference_into_trading_preferences(db)
             # Must run before the two CREATE UNIQUE INDEX statements below - see
             # _migrate_dedupe_route_progression_pending_actions's own docstring.
@@ -958,6 +959,49 @@ class Database:
             )
         await db.execute("DROP TABLE negotiation_message_seen_pre_scope")
         logger.info("Migrated negotiation_message_seen to scope seen-state per user")
+
+    async def _migrate_ship_parts_entries_port_name(self, db: aiosqlite.Connection) -> None:
+        """The first /ship-parts-finder commit (370e232) keyed ship_parts_shopping_entries on
+        (user, guild, ship, category) with no port_name column; the next one added port_name
+        to the key so two slots in one category can hold different parts. CREATE TABLE IF NOT
+        EXISTS never upgrades an existing table, so a database created by that first commit
+        failed every lock-in with "no column named port_name". Rebuild once, detected by the
+        missing column. An old row has no record of which physical slot it was for, so it
+        keeps its part under the placeholder slot 'unknown_slot' (shown as "Unknown Slot")
+        rather than being dropped or guessed onto a real port; re-locking that category's
+        real slot adds a correct row, and "Remove a part" clears the placeholder."""
+        cursor = await db.execute("PRAGMA table_info(ship_parts_shopping_entries)")
+        columns = {r[1] for r in await cursor.fetchall()}
+        if not columns or "port_name" in columns:
+            return
+        await db.execute("ALTER TABLE ship_parts_shopping_entries RENAME TO ship_parts_shopping_entries_pre_port")
+        await db.execute(
+            """CREATE TABLE ship_parts_shopping_entries (
+                user_id INTEGER NOT NULL,
+                guild_id INTEGER NOT NULL,
+                id_vehicle INTEGER NOT NULL,
+                vehicle_name TEXT NOT NULL,
+                category TEXT NOT NULL,
+                port_name TEXT NOT NULL,
+                id_item INTEGER NOT NULL,
+                item_name TEXT NOT NULL,
+                id_terminal INTEGER,
+                terminal_name TEXT,
+                price_buy REAL,
+                locked_at TEXT NOT NULL,
+                PRIMARY KEY (user_id, guild_id, id_vehicle, category, port_name)
+            )"""
+        )
+        await db.execute(
+            """INSERT INTO ship_parts_shopping_entries
+               (user_id, guild_id, id_vehicle, vehicle_name, category, port_name, id_item,
+                item_name, id_terminal, terminal_name, price_buy, locked_at)
+               SELECT user_id, guild_id, id_vehicle, vehicle_name, category, 'unknown_slot', id_item,
+                      item_name, id_terminal, terminal_name, price_buy, locked_at
+               FROM ship_parts_shopping_entries_pre_port"""
+        )
+        await db.execute("DROP TABLE ship_parts_shopping_entries_pre_port")
+        logger.info("Migrated ship_parts_shopping_entries to key on port_name")
 
     async def _migrate_ship_preference_into_trading_preferences(self, db: aiosqlite.Connection) -> None:
         """One-time-per-user backfill: user_ship_preference predates user_trading_preferences,

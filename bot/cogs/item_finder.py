@@ -7,16 +7,20 @@ instead of mineable ore.
 from __future__ import annotations
 
 import asyncio
+import logging
 
 import discord
 from discord import app_commands
 from discord.ext import commands
 
+from bot.autocomplete import gather_within
 from bot.cogs.prices import terminal_name_autocomplete
 from bot.uex.exceptions import UexApiError, describe_uex_api_error
 from bot.uex.item_finder import format_item_listing_line, rank_item_listings
 from bot.uex.marketplace import find_item_id_by_name
 from bot.uex.route_presentation import add_chunked_fields, chunk_lines
+
+logger = logging.getLogger(__name__)
 
 # A finder result list longer than this stops being a quick lookup - the closest matches
 # are always the most useful ones anyway, since results are already distance-sorted.
@@ -43,10 +47,11 @@ async def sold_item_name_autocomplete(interaction: discord.Interaction, current:
     this deliberately does NOT fall back to the full catalog - an item genuinely absent
     from a real shop-price pull should stay unreachable from here, not resurface as a
     dead-end suggestion."""
-    try:
-        rows = await interaction.client.uex.get_items_prices_all()
-    except UexApiError:
+    (rows,) = await gather_within(interaction.client.uex.get_items_prices_all())
+    if isinstance(rows, (UexApiError, TimeoutError)):
         return []
+    if isinstance(rows, BaseException):
+        raise rows
     current_lower = current.lower()
     seen: set[str] = set()
     matches: list[str] = []
@@ -65,6 +70,22 @@ async def sold_item_name_autocomplete(interaction: discord.Interaction, current:
 class ItemFinder(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
+        self._warm_task: asyncio.Task | None = None
+
+    async def cog_load(self) -> None:
+        # Fill the autocomplete's 12h cache at startup, so the first person to type after a
+        # restart isn't the one who pays for the cold fetch (see bot/autocomplete.py).
+        self._warm_task = asyncio.create_task(self._warm_autocomplete_cache())
+
+    async def cog_unload(self) -> None:
+        if self._warm_task is not None:
+            self._warm_task.cancel()
+
+    async def _warm_autocomplete_cache(self) -> None:
+        try:
+            await self.bot.uex.get_items_prices_all()
+        except UexApiError as exc:
+            logger.warning("Couldn't pre-load /ingame-item-finder autocomplete data: %s", exc)
 
     @app_commands.command(
         name="ingame-item-finder",

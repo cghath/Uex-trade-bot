@@ -13,6 +13,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from bot.autocomplete import gather_within
 from bot.uex.exceptions import UexApiError, describe_uex_api_error
 from bot.uex.route_presentation import add_chunked_fields, chunk_lines
 from bot.uex.ship_shops import (
@@ -36,31 +37,34 @@ NO_MENTIONS = discord.AllowedMentions.none()
 FOOTER_TEXT = "Prices from UEX Corp datarunner reports, cached up to 12h."
 
 
-def _raise_unexpected(*results: object) -> None:
-    """gather(return_exceptions=True) hands back every exception as a value - only a
-    UexApiError is an expected, reportable failure; anything else is a bug and re-raised."""
+def _raise_unexpected(*results: object, expected: tuple[type[BaseException], ...] = (UexApiError,)) -> None:
+    """gather(return_exceptions=True) hands back every exception as a value - only the
+    `expected` types are reportable failures; anything else is a bug and re-raised."""
     for result in results:
-        if isinstance(result, BaseException) and not isinstance(result, UexApiError):
+        if isinstance(result, BaseException) and not isinstance(result, expected):
             raise result
+
+
+_AUTOCOMPLETE_FAILURES = (UexApiError, TimeoutError)
 
 
 async def listed_ship_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
     """Only ships UEX has at least one in-game buy OR rent row for - the same lesson as
     /ingame-item-finder's sold_item_name_autocomplete: suggesting every one of /vehicles'
     ~280 ships (only 174 are buyable or rentable) just guarantees a dead-end "no location
-    on record" answer for the rest. If one *_all call fails, the other one's ships are
-    still offered; if both (or /vehicles itself) fail, no suggestions rather than an error."""
+    on record" answer for the rest. If one *_all call fails or runs past the autocomplete
+    deadline, the other one's ships are still offered; if both (or /vehicles itself) do,
+    no suggestions rather than an error."""
     uex = interaction.client.uex
-    vehicles, purchase_rows, rental_rows = await asyncio.gather(
+    vehicles, purchase_rows, rental_rows = await gather_within(
         uex.get_vehicles(),
         uex.get_vehicle_purchase_prices_all(),
         uex.get_vehicle_rental_prices_all(),
-        return_exceptions=True,
     )
-    _raise_unexpected(vehicles, purchase_rows, rental_rows)
-    if isinstance(vehicles, UexApiError):
+    _raise_unexpected(vehicles, purchase_rows, rental_rows, expected=_AUTOCOMPLETE_FAILURES)
+    if isinstance(vehicles, _AUTOCOMPLETE_FAILURES):
         return []
-    loaded = [rows for rows in (purchase_rows, rental_rows) if not isinstance(rows, UexApiError)]
+    loaded = [rows for rows in (purchase_rows, rental_rows) if not isinstance(rows, _AUTOCOMPLETE_FAILURES)]
     if not loaded:
         return []
     names = ship_autocomplete_names(
@@ -72,6 +76,27 @@ async def listed_ship_autocomplete(interaction: discord.Interaction, current: st
 class ShipShops(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
+        self._warm_task: asyncio.Task | None = None
+
+    async def cog_load(self) -> None:
+        # Fill the autocomplete's three 12h caches at startup, so the first person to type
+        # after a restart isn't the one who pays for the cold fetches (see bot/autocomplete.py).
+        self._warm_task = asyncio.create_task(self._warm_autocomplete_cache())
+
+    async def cog_unload(self) -> None:
+        if self._warm_task is not None:
+            self._warm_task.cancel()
+
+    async def _warm_autocomplete_cache(self) -> None:
+        results = await asyncio.gather(
+            self.bot.uex.get_vehicles(),
+            self.bot.uex.get_vehicle_purchase_prices_all(),
+            self.bot.uex.get_vehicle_rental_prices_all(),
+            return_exceptions=True,
+        )
+        for result in results:
+            if isinstance(result, BaseException):
+                logger.warning("Couldn't pre-load /where-to-buy-ship autocomplete data: %r", result)
 
     async def _star_systems_for(self, id_terminals: set[int]) -> dict[int, str]:
         """System per terminal from the cached terminal_reference table, for the few rows
