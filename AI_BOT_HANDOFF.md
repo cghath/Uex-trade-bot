@@ -64,6 +64,19 @@ date - no open item, nothing to record here.
       deliberately does NOT fall back to the full catalog the way Marketplace's
       `traded_item_autocomplete` does, since an item missing here means it's genuinely not
       sold anywhere, not just a gap in the bot's own tracking
+- [ ] PR #TBD (branch `feature/where-to-buy-ship` - fill in the number once opened) - Add
+      `/where-to-buy-ship`: every in-game terminal that sells or rents one ship, aUEC prices
+      cheapest first, rentals grouped per star system and labelled as the 1-day rate. No
+      location option or distance sort, deliberately (only 7 terminals sell ships). A buy or
+      rent row UEX sends with no star system takes its terminal's system from
+      `terminal_reference` via the existing `Database.get_terminal_star_system`. Autocomplete
+      only offers ships with at least one buy or rent row (same lesson as PR #50). See
+      PROJECT_CONTEXT.md entry 81. Four new `UexClient` methods, `get_vehicle_purchase_prices`/
+      `get_vehicle_rental_prices`/`get_vehicle_purchase_prices_all`/
+      `get_vehicle_rental_prices_all`, each with a 12h `_ENDPOINT_CACHE_TTL` entry
+      (`bot/uex/client.py`, new `bot/uex/ship_shops.py`, new `bot/cogs/ship_shops.py`,
+      `bot/main.py`'s `INITIAL_COGS`, `bot/cogs/help.py`'s `CATEGORIES`, new
+      `tests/test_ship_shops.py`)
 
 ## To port: aiv2 -> production
 

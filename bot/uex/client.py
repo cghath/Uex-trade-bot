@@ -50,6 +50,11 @@ _ENDPOINT_CACHE_TTL = {
     "categories": 24 * 3600,
     "marketplace_trends": 3600,
     "vehicles": 12 * 3600,
+    # UEX's own documented Cache TTL for all four vehicle shop endpoints (+12h)
+    "vehicles_purchases_prices": 12 * 3600,
+    "vehicles_purchases_prices_all": 12 * 3600,
+    "vehicles_rentals_prices": 12 * 3600,
+    "vehicles_rentals_prices_all": 12 * 3600,
     "commodities_status": 24 * 3600,
     "data_monitor": 3600,
     "fuel_prices": 30 * 60,
@@ -443,6 +448,27 @@ class UexClient:
         No auth required. Filter with id_company if needed.
         """
         return await self._get("vehicles", params=filters) or []
+
+    async def get_vehicle_purchase_prices(self, id_vehicle: int) -> list[dict[str, Any]]:
+        """In-game (aUEC) purchase price per terminal for one ship, with the terminal's full
+        name and star system. Pledge-store (real money) prices are a different endpoint."""
+        return await self._get("vehicles_purchases_prices", params={"id_vehicle": id_vehicle}) or []
+
+    async def get_vehicle_rental_prices(self, id_vehicle: int) -> list[dict[str, Any]]:
+        """In-game rental price per terminal for one ship. price_rent is the 1-day rate
+        (see bot/uex/ship_shops.py's RENTAL_RATE_NOTE)."""
+        return await self._get("vehicles_rentals_prices", params={"id_vehicle": id_vehicle}) or []
+
+    async def get_vehicle_purchase_prices_all(self) -> list[dict[str, Any]]:
+        """Every vehicle purchase row in one call. Only id_vehicle/id_terminal/price and a
+        SHORT terminal_name ('New Deal Lorville', not the per-vehicle endpoint's 'New Deal -
+        Teasa Spaceport - Lorville') - good for "which ships are sold anywhere", not display."""
+        return await self._get("vehicles_purchases_prices_all", params={}) or []
+
+    async def get_vehicle_rental_prices_all(self) -> list[dict[str, Any]]:
+        """Every vehicle rental row in one call - same short shape as
+        get_vehicle_purchase_prices_all."""
+        return await self._get("vehicles_rentals_prices_all", params={}) or []
 
     async def get_categories(self, **filters: Any) -> list[dict[str, Any]]:
         """Marketplace listing categories. Filter with type='item'|'service'|'contract'."""

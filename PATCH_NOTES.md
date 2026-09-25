@@ -1,7 +1,17 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.11.
+the oldest entry below); the next new entry is 2.12.
+
+---
+
+## 2.11 - 2026-09-25 - Where to Buy a Ship
+
+**New**
+- `/where-to-buy-ship` - Find every in-game shop that sells a ship for aUEC, and every terminal that rents it,
+  cheapest first. Rentals are grouped by star system and show the 1-day rate. Each line also says how long ago
+  its price was last reported. The ship list only suggests ships you can actually buy or rent in-game. Listed
+  under Ship & Cargo in `/intro`, next to `/ship-parts-finder`.
 
 ---
 

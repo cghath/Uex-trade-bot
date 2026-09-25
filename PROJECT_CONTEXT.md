@@ -2739,6 +2739,80 @@ they're in sync).
     unreleased items, discontinued items) that have nothing to do with gaps in the bot's own
     data collection.
 
+81. **`/where-to-buy-ship` (every in-game terminal that sells or rents one ship, aUEC prices
+    cheapest first) was shaped almost entirely by how little ship-shop data there really is.
+    It has no location option and no distance sort, unlike `/ingame-item-finder`.** It reads
+    UEX's per-ship `/vehicles_purchases_prices` and `/vehicles_rentals_prices` (both keyed on
+    `id_vehicle`, fetched concurrently, 12h `_ENDPOINT_CACHE_TTL` per UEX's own docs) and pure
+    helpers in `bot/uex/ship_shops.py` rank each list cheapest first. Rows with a missing or
+    non-positive price are dropped, never shown as 0, and a fixed tie-break keeps equal prices
+    in a stable order. The embed has one "Buy" field with the star system on each line, then
+    one "Rent — <system>" field per star system. Lines reuse entry 79's
+    `split_place_and_vendor` unchanged, in the same plain-text shape as `/ingame-item-finder`:
+    `**Place** (Vendor) — Price aUEC · System · updated <t:…:R>`. For three-part terminal
+    names the middle segment lands with the vendor (`**Lorville** (New Deal - Teasa
+    Spaceport)`), which usefully names the spaceport. The relative timestamp is there because
+    `price_buy`/`price_rent` are documented as `// last`, the most recent datarunner report,
+    and real rows are often weeks old. In-game aUEC only, never pledge-store prices.
+
+    Live facts checked against real UEX data (2026-09-25) before writing this up:
+    - **Only 7 terminals sell ships**, across 4 vendor brands: New Deal (Crusader Showroom in
+      Orison, Teasa Spaceport in Lorville), Astro Armada (Area 18), Buy and Fly (Ruin
+      Station, Checkmate, Orbituary) and Teach's Ship Shop (Levski).
+    - **174 of `/vehicles`' 282 ships can be bought.** 109 of those are sold at exactly one
+      terminal (median 1, max 7 for the ATLS and ATLS GEO). With one shop for most ships,
+      "closest first" answers nothing, so there is no `location` option or distance sort:
+      the user's call when scoping, and price plus system is what the embed shows instead.
+    - **Rentals are the wide side:** 46 ships are rentable across 32 terminals (Vantage
+      Rentals 17, Traveler Rentals 13, Regal Luxury Rentals 1, Teach's Rentals 1), up to 32
+      locations for one ship (Salvation; MOLE 29, Cutlass Black and Prospector 28). That
+      spread is why rentals are grouped per star system. The largest real outputs are about
+      3,260 chars, well under Discord's 6,000 total, but the embed still goes through
+      `add_chunked_fields` all-or-nothing (footer set before the loop, per the earlier
+      footer-budget lesson), falling back to plain text rather than a partial embed.
+    - **Every rentable ship is also buyable**, so the rental-only path is covered by tests
+      only; no live ship reaches it today.
+    - **108 ships have nothing listed at all**, e.g. the Idris-P. Those get one plain message
+      ("UEX has no in-game purchase or rental location on record for **Idris-P**"). If only
+      one of the two fetches fails, that section says it couldn't load, even when the other
+      section is empty, so "couldn't check" never reads as "nothing on record."
+    - **4 of 339 rental rows arrive with no star system** (`star_system_name` null,
+      `id_star_system` 0): MOTH at terminals 814, 559 and 773, and Aurora Mk II at 150, even
+      though other rows at those same terminals carry one. `terminal_ids_missing_star_system`
+      collects just those ids and the cog looks them up through the existing
+      `Database.get_terminal_star_system` (the `terminal_reference` cache). The row's own
+      system always wins; a failed (`sqlite3.Error`) or empty lookup leaves the row in an
+      "Unknown system" group shown last, never guessed and never dropped.
+
+    **Autocomplete only offers ships with at least one buy or rent row** - entry 80's PR #50
+    lesson applied up front instead of after live complaints: suggesting all 282 ships would
+    guarantee a dead-end reply for the 108 with nothing listed. It's built from
+    `/vehicles_purchases_prices_all` and `/vehicles_rentals_prices_all`, matched on
+    `id_vehicle`, not names. Those two endpoints return only short terminal names ("New Deal
+    Lorville", not "New Deal - Teasa Spaceport - Lorville"), so they feed the autocomplete and
+    nothing on screen. If one `_all` call fails the other's ships are still offered; if both,
+    or `/vehicles` itself, fail it offers no suggestions rather than an error.
+
+    **Rental prices are labelled as a 1-day rate.** UEX documents `price_rent` only as `float
+    // last`, with no duration. Evidence behind the label, recorded in
+    `bot/uex/ship_shops.py`'s `RENTAL_RATE_NOTE` comment: UEX's own terminal rent tabs label
+    the figure "UEC / Day", and Cornerstone's per-duration listings match it at the 1-day
+    price only. The 3/7/30-day prices differ from it, and not by one fixed discount (it varies
+    per ship), so no multi-day price is derived. Live data agrees: the cheapest rent is 1.5% to
+    2.8% of the cheapest buy price across all 46 rentable ships (median 2.5%; Cutlass Black
+    50,274 vs 2,010,960), the scale of a single day, not a month. Each rent line says
+    "aUEC / day", and the caveat "Rental prices are the 1-day rate; longer rentals are
+    discounted in-game" appears once in the embed description (and the plain-text fallback),
+    not repeated on up to 32 lines.
+
+    Known leftovers: "Sabre Raven EX" is two `/vehicles` ids (290 and 291) and `resolve_ship`
+    picks the first, harmless today since neither is sold or rented. It's deliberately
+    standalone rather than wired into `/ship-parts-finder` (the user's choice when scoping,
+    over a "where to buy" section inside the parts thread); the two only share `/intro`'s
+    "🚀 Ship & Cargo" category. Every message
+    is sent with `AllowedMentions.none()`, since ship names and whatever the user typed are
+    echoed back verbatim.
+
 ## Where to look for what
 
 Six docs, deliberately scoped so they don't duplicate each other:

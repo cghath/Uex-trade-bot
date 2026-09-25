@@ -26,6 +26,8 @@ Current features:
   alerts, and a configurable daily digest.
 - **Personal tools** — a local trade ledger, server leaderboard, saved cargo ship, and private UEX
   account linking for personal trade, listing, favorite, and negotiation data.
+- **Ship shopping** — `/where-to-buy-ship` lists every in-game terminal that sells or rents a ship,
+  with aUEC prices cheapest first and rentals grouped by star system (1-day rate).
 
 Run `/intro` in Discord for the complete categorized command guide.
 
@@ -222,6 +224,7 @@ bot/
     data_health.py       terminal data-freshness scoring
     practical_routes.py  practical route checks (container limits, cargo infra, refuel/repair/services)
     ships.py         ship data lookups
+    ship_shops.py    ship buy/rent location ranking + formatting (pure functions, unit tested)
     stock_alerts.py  terminal stock-level change detection
     leaderboard.py   UEX leaderboard fetching
     status.py        /commodities_status code definitions
@@ -243,6 +246,7 @@ bot/
     liquidity.py           /liquidity-rank, /liquidity-trends
     stock_alerts.py       terminal stock alerts + background poller
     ships.py              ship info commands
+    ship_shops.py         /where-to-buy-ship
     digest.py             scheduled guild digest posts
     intelligence.py       background market/data-health/fuel/reference collectors, no slash commands
     intelligence_brief.py /intelligence-brief on-demand deep view
@@ -262,7 +266,6 @@ that window don't re-hit the API.
 
 ## Ideas for what else the UEX API enables (not yet built)
 
-- `/vehicles`, `/vehicles_prices` — ship purchase/rental price comparisons across terminals
 - `/fuel_prices` — cheapest refuel stops
 - `/marketplace_listings` — player-to-player marketplace search
 - `/companies`, `/factions` — reputation/contact info lookups
