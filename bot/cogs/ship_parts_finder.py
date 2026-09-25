@@ -58,6 +58,7 @@ from bot.uex.ship_parts import (
     MOUNTS_CATEGORY,
     ShipPort,
     candidate_items_for_port,
+    child_gun_ports,
     category_label,
     cheapest_listing_by_item,
     group_ports_by_category,
@@ -471,7 +472,13 @@ class PartsBrowserView(discord.ui.View):
         page = self.pages[self.page] if self.pages else []
         lines.extend(format_part_page(page, shared=self._shared, selected=self.selected_candidate))
         if len(self.pages) > 1:
-            lines.extend(["", f"Page {self.page + 1} of {len(self.pages)}"])
+            # Says how many more are waiting: live, a player read "7 parts" on a 6-part page
+            # and took the one on page 2 (Attrition-5, lowest DPS) as missing.
+            footer = f"Page {self.page + 1} of {len(self.pages)}"
+            later = sum(len(p) for p in self.pages[self.page + 1:])
+            if later:
+                footer += f" · {later} more on the next page{'s' if len(self.pages) - self.page > 2 else ''}"
+            lines.extend(["", footer])
         return "\n".join(lines)
 
     def _set_candidates(self, candidates: list[dict]) -> None:
@@ -660,7 +667,8 @@ class ShipPartsFinder(commands.Cog):
                 await self.bot.db.replace_ship_parts_reference(
                     id_vehicle, name,
                     [{"name": p.name, "port_type": p.port_type, "size_min": p.size_min, "size_max": p.size_max,
-                      "accepts_guns": p.accepts_guns, "port_tags": sorted(p.tags)} for p in ports],
+                      "accepts_guns": p.accepts_guns, "port_tags": sorted(p.tags), "editable": p.editable,
+                      "required_tags": sorted(p.required_tags), "equipped_uuid": p.equipped_uuid} for p in ports],
                 )
             except (TypeError, ValueError, WikiApiError):
                 logger.warning("Ship parts reference refresh failed for vehicle %r", vehicle.get("name"))
@@ -675,13 +683,37 @@ class ShipPartsFinder(commands.Cog):
         id_vehicle = int(vehicle["id"])
         rows = await self.bot.db.get_ship_parts_reference(id_vehicle)
         if rows:
-            return [ShipPort(name=r["port_name"], port_type=r["port_type"], size_min=r["size_min"], size_max=r["size_max"],
-                             accepts_guns=bool(r.get("accepts_guns")),
-                             tags=frozenset((r.get("port_tags") or "").split()))
-                    for r in rows]
-        # Collector hasn't run for this ship yet (fresh deploy, or a ship added since the
-        # last daily cycle) - fall back to a live lookup rather than a dead end.
-        return await self._wiki_ports(vehicle)
+            ports = [ShipPort(name=r["port_name"], port_type=r["port_type"], size_min=r["size_min"],
+                              size_max=r["size_max"], accepts_guns=bool(r.get("accepts_guns")),
+                              tags=frozenset((r.get("port_tags") or "").split()),
+                              editable=r.get("editable", 1) != 0,
+                              required_tags=frozenset((r.get("required_tags") or "").split()),
+                              equipped_uuid=r.get("equipped_uuid") or None)
+                     for r in rows]
+        else:
+            # Collector hasn't run for this ship yet (fresh deploy, or a ship added since the
+            # last daily cycle) - fall back to a live lookup rather than a dead end.
+            ports = await self._wiki_ports(vehicle)
+        return await self._with_child_gun_ports(ports)
+
+    async def _with_child_gun_ports(self, ports: list[ShipPort]) -> list[ShipPort]:
+        """Add the gun slots inside each turret whose guns aren't in the ship's own slot
+        (the Perseus's remote turrets hold 2 S3 guns each). Looked up here, when a ship is
+        opened, from the turret's cached wiki detail - not in the daily refresh, which
+        would cost a wiki call per turret on all 282 ships. A failed lookup just means no
+        gun slots for that turret, never a failed command."""
+        parents = [p for p in ports if p.needs_child_gun_ports]
+        if not parents:
+            return ports
+        details = await asyncio.gather(
+            *(self._item_detail_cached({"uuid": p.equipped_uuid}) for p in parents), return_exceptions=True,
+        )
+        children = {p.name: child_gun_ports(p, d if isinstance(d, dict) else None) for p, d in zip(parents, details)}
+        result: list[ShipPort] = []
+        for port in ports:
+            result.append(port)
+            result.extend(children.get(port.name, []))
+        return result
 
     async def _wiki_ports(self, vehicle: dict) -> list[ShipPort]:
         """The wiki names some ships with their maker ('MISC Reliant Tana', 'MISC

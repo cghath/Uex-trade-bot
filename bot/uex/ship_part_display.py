@@ -68,11 +68,12 @@ def _weapon_stats(weapon: dict) -> list[Stat]:
     capacity = _number(weapon.get("capacity"))
     if capacity:
         stats.append(("ammo", f"{capacity:,.0f} rounds"))
-    # Burst DPS alone hides how differently guns hit: the M6A Cannon does 615 per shot at
-    # 100 rpm, the AD4B Gatling 84 per shot at 900 rpm.
+    # Burst DPS alone hides how differently guns hit: the M6A Cannon's alpha (damage per
+    # shot) is 615 at 100 rpm, the AD4B Gatling's 84 at 900 rpm. Labelled "alpha", the
+    # word players use, at the owner's request.
     alpha = _number(damage.get("alpha_total"))
     if alpha:
-        stats.append(("alpha", f"{alpha:,.0f} per shot"))
+        stats.append(("alpha", f"{alpha:,.0f} alpha"))
     rpm = _number(weapon.get("rpm"))
     if rpm:
         stats.append(("rpm", f"{rpm:,.0f} rpm"))
@@ -251,7 +252,12 @@ def shared_stats(details: list[dict]) -> list[str]:
 
 def format_port_label(port_name: str, size_min: int | None = None, size_max: int | None = None) -> str:
     """'hardpoint_weapon_gun_class1_left_wing' -> 'Left Wing Gun (S3)'. A mechanical
-    cleanup of the wiki's raw port name, not a per-ship curated label."""
+    cleanup of the wiki's raw port name, not a per-ship curated label. A gun slot inside a
+    turret ('hardpoint_turret_remote_top/hardpoint_gimbal_left') reads 'Turret Remote Top ·
+    Gimbal Left'."""
+    if "/" in port_name:
+        label = " · ".join(format_port_label(part) for part in port_name.split("/") if part)
+        return format_port_label_size(label, size_min, size_max)
     words = [w for w in port_name.lower().split("_") if w and w != "hardpoint"]
     words = [w for w in words if not (w.startswith("class") and w[5:].isdigit())]
     trailing = []
@@ -262,6 +268,10 @@ def format_port_label(port_name: str, size_min: int | None = None, size_max: int
     if "weapon" in words and len(words) > 1:
         words.remove("weapon")
     label = " ".join(words + trailing).title() or port_name
+    return format_port_label_size(label, size_min, size_max)
+
+
+def format_port_label_size(label: str, size_min: int | None, size_max: int | None) -> str:
     if size_min is None:
         return label
     size = f"S{size_min}" if size_min == size_max else f"S{size_min}-{size_max}"

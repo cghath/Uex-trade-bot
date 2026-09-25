@@ -28,6 +28,8 @@ Current features:
   account linking for personal trade, listing, favorite, and negotiation data.
 - **Ship shopping** — `/where-to-buy-ship` lists every in-game terminal that sells or rents a ship,
   with aUEC prices cheapest first and rentals grouped by star system (1-day rate).
+  `/ship-parts-finder` (ready for testing) browses a ship's component slots, lists only parts that
+  fit and are sold, ranked by each slot's key stat, and keeps a private shopping list of locked-in parts.
 
 Run `/intro` in Discord for the complete categorized command guide.
 
@@ -247,6 +249,7 @@ bot/
     stock_alerts.py       terminal stock alerts + background poller
     ships.py              ship info commands
     ship_shops.py         /where-to-buy-ship
+    ship_parts_finder.py  /ship-parts-finder + daily ship-slot reference refresh
     digest.py             scheduled guild digest posts
     intelligence.py       background market/data-health/fuel/reference collectors, no slash commands
     intelligence_brief.py /intelligence-brief on-demand deep view

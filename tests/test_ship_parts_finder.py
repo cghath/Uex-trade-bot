@@ -935,3 +935,45 @@ def test_a_single_page_has_no_page_buttons():
     view = _paged_view(3)
     assert len(view.pages) == 1 and _page_buttons(view) == []
     assert "Page 1 of" not in view.text()
+
+
+def test_ports_for_vehicle_adds_the_gun_slots_inside_a_locked_turret():
+    from tests.test_ship_parts import PERSEUS_TOP_TURRET
+
+    async def run():
+        db = NS(get_ship_parts_reference=AsyncMock(return_value=[
+            {"port_name": "hardpoint_turret_remote_top", "port_type": "Turret", "size_min": 3, "size_max": 3,
+             "accepts_guns": 0, "port_tags": "rsi_perseus", "editable": 0,
+             "required_tags": "RSI_Perseus_Remote_Turret_Top", "equipped_uuid": "turret-uuid"},
+            {"port_name": "hardpoint_power_plant", "port_type": "PowerPlant", "size_min": 3, "size_max": 3,
+             "accepts_guns": 0, "port_tags": "rsi_perseus", "editable": 1, "required_tags": "", "equipped_uuid": ""},
+        ]))
+        wiki = _wiki({"turret-uuid": PERSEUS_TOP_TURRET})
+        cog = ShipPartsFinder(NS(db=db), wiki_client=wiki, start_refresh=False)
+        return await cog._ports_for_vehicle({"id": 1, "name": "Perseus"}), wiki
+
+    ports, wiki = asyncio.run(run())
+    assert [p.name for p in ports] == ["hardpoint_turret_remote_top", "hardpoint_turret_remote_top/hardpoint_gimbal_left",
+                                       "hardpoint_turret_remote_top/hardpoint_gimbal_right", "hardpoint_power_plant"]
+    grouped = ship_parts_finder.group_ports_by_category(ports)
+    assert [p.name.split("/")[-1] for p in grouped["Guns"]] == ["hardpoint_gimbal_left", "hardpoint_gimbal_right"]
+    wiki.get_item_detail.assert_awaited_once_with("turret-uuid")
+
+
+def test_a_failed_turret_lookup_just_means_no_gun_slots():
+    async def run():
+        db = NS(get_ship_parts_reference=AsyncMock(return_value=[
+            {"port_name": "hp_turret", "port_type": "Turret", "size_min": 3, "size_max": 3, "accepts_guns": 0,
+             "port_tags": "", "editable": 0, "required_tags": "", "equipped_uuid": "missing"},
+        ]))
+        cog = ShipPartsFinder(NS(db=db), wiki_client=_wiki(), start_refresh=False)
+        return await cog._ports_for_vehicle({"id": 1, "name": "X"})
+
+    assert [p.name for p in asyncio.run(run())] == ["hp_turret"]
+
+
+def test_the_page_line_says_how_many_more_parts_there_are():
+    view = _paged_view(7)
+    assert "Page 1 of 2 · 1 more on the next page" in view.text()
+    view.page = 1
+    assert "Page 2 of 2" in view.text() and "more on the next page" not in view.text()

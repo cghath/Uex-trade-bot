@@ -31,6 +31,9 @@ PORT_TYPE_TO_UEX_CATEGORY: dict[str, str] = {
     "Turret": "Turrets",
     "MissileLauncher": "Missile Racks",
     "Radar": "Radar",
+    # A bare gun hardpoint. Rare at ship level, but it's what a turret's own gun slots are
+    # (child_gun_ports).
+    "WeaponGun": "Guns",
 }
 
 # The wiki types every gun hardpoint as a "Turret" port, and UEX's "Turrets" category is
@@ -58,6 +61,18 @@ class ShipPort:
     accepts_guns: bool = False
     # The ship's own port_tags plus this port's; a part's required_tags must all be here.
     tags: frozenset[str] = frozenset()
+    # The wiki's own flag (from the game data) for whether a player can swap what's in the
+    # port. The Perseus's remote turrets are False: the housing is fixed, only the guns in
+    # it change.
+    editable: bool = True
+    # The port's own requirement on the part: every one must be in the part's `tags`. A
+    # Perseus remote turret slot requires 'RSI_Perseus_Remote_Turret_Top'; a PDC slot 'PDC'.
+    required_tags: frozenset[str] = frozenset()
+    # The stock item's wiki uuid - for a turret, where its own gun slots come from.
+    equipped_uuid: str | None = None
+    # Whether a gun mount (UEX "Turrets") can go here: always for a turret port, and for a
+    # gun slot whose compatible_types list Turret too (a gimbal).
+    accepts_mounts: bool | None = None
 
     @property
     def uex_category(self) -> str | None:
@@ -65,20 +80,49 @@ class ShipPort:
 
     @property
     def categories(self) -> list[str]:
-        """Every UEX category this port can be shopped under, guns before mounts."""
+        """Every UEX category this port can be shopped under, guns before mounts. A weapon
+        port the game doesn't let the player change is shopped under neither."""
         base = self.uex_category
         if base is None:
             return []
-        if base == MOUNTS_CATEGORY and self.accepts_guns:
-            return [GUNS_CATEGORY, MOUNTS_CATEGORY]
-        return [base]
+        if self.port_type not in ("Turret", "WeaponGun"):
+            return [base]
+        if not self.editable:
+            return []
+        mounts = self.accepts_mounts if self.accepts_mounts is not None else self.port_type == "Turret"
+        categories = [GUNS_CATEGORY] if self.accepts_guns or self.port_type == "WeaponGun" else []
+        return categories + ([MOUNTS_CATEGORY] if mounts else [])
+
+    @property
+    def needs_child_gun_ports(self) -> bool:
+        """A turret whose guns sit in its own ports, not in the ship's slot (the Perseus's
+        remote turrets): child_gun_ports finds them from the stock item's detail."""
+        return self.port_type == "Turret" and not self.accepts_guns and bool(self.equipped_uuid)
+
+
+def _compatible(row: dict[str, Any], port_type: str) -> bool:
+    return any(
+        isinstance(entry, dict) and entry.get("type") == port_type
+        for entry in row.get("compatible_types") or []
+    )
 
 
 def _accepts_guns(row: dict[str, Any]) -> bool:
-    return any(
-        isinstance(entry, dict) and entry.get("type") == "WeaponGun"
-        for entry in row.get("compatible_types") or []
-    )
+    return _compatible(row, "WeaponGun")
+
+
+def _sizes(row: dict[str, Any]) -> tuple[int, int] | None:
+    sizes = row.get("sizes") or {}
+    low, high = sizes.get("min"), sizes.get("max")
+    if not isinstance(low, int) or not isinstance(high, int) or isinstance(low, bool) or isinstance(high, bool):
+        return None
+    return low, high
+
+
+def _equipped_uuid(row: dict[str, Any]) -> str | None:
+    equipped = row.get("equipped_item") if isinstance(row.get("equipped_item"), dict) else {}
+    uuid = row.get("equipped_item_uuid") or equipped.get("uuid")
+    return uuid if isinstance(uuid, str) and uuid else None
 
 
 def _tag_list(value: Any) -> list[str]:
@@ -98,18 +142,43 @@ def parse_ports(raw_ports: list[dict[str, Any]], vehicle_tags: list[str] | None 
         if port_type not in PORT_TYPE_TO_UEX_CATEGORY:
             continue
         name = row.get("name")
-        if not name:
-            continue
-        sizes = row.get("sizes") or {}
-        size_min, size_max = sizes.get("min"), sizes.get("max")
-        if not isinstance(size_min, int) or not isinstance(size_max, int):
-            continue
-        if isinstance(size_min, bool) or isinstance(size_max, bool):
+        sizes = _sizes(row)
+        if not name or sizes is None:
             continue
         result.append(ShipPort(
-            name=name, port_type=port_type, size_min=size_min, size_max=size_max,
-            accepts_guns=port_type == "Turret" and _accepts_guns(row),
+            name=name, port_type=port_type, size_min=sizes[0], size_max=sizes[1],
+            accepts_guns=port_type == "WeaponGun" or (port_type == "Turret" and _accepts_guns(row)),
             tags=frozenset(base_tags | set(_tag_list(row.get("port_tags")))),
+            editable=row.get("editable") is not False,
+            required_tags=frozenset(_tag_list(row.get("required_tags"))),
+            equipped_uuid=_equipped_uuid(row),
+        ))
+    return result
+
+
+def child_gun_ports(parent: ShipPort, equipped: dict[str, Any] | None) -> list[ShipPort]:
+    """The gun slots inside a turret, from its stock item's wiki detail (`ports`): e.g. the
+    Perseus's top remote turret holds two S3 guns ('hardpoint_gimbal_left'/'_right'), which
+    the ship's own slot never shows. Named '<turret port>/<gun port>' so a saved entry
+    stays tied to that exact slot. A gun slot the game locks (the Perseus PDCs' own gun)
+    is left out, like any other locked weapon port."""
+    if not isinstance(equipped, dict):
+        return []
+    item_tags = set(_tag_list(equipped.get("tags")))
+    result: list[ShipPort] = []
+    for row in equipped.get("ports") or []:
+        if not isinstance(row, dict) or not row.get("name"):
+            continue
+        if row.get("type") != "WeaponGun" and not _accepts_guns(row):
+            continue
+        sizes = _sizes(row)
+        if sizes is None or row.get("editable") is False:
+            continue
+        result.append(ShipPort(
+            name=f"{parent.name}/{row['name']}", port_type="WeaponGun", size_min=sizes[0], size_max=sizes[1],
+            accepts_guns=True, tags=frozenset(parent.tags | item_tags | set(_tag_list(row.get("port_tags")))),
+            required_tags=frozenset(_tag_list(row.get("required_tags"))),
+            accepts_mounts=_compatible(row, "Turret"),
         ))
     return result
 
@@ -119,8 +188,15 @@ def tags_allow(part: dict[str, Any], port: ShipPort) -> bool:
     ['MISC_Reliant_Base']) only fits a port whose ship/port tags include every one of them
     - the game's own fit rule. Without it, an S4 Avenger nose was offered the Reliant's
     and the Buccaneer's own turrets just because their size matched. A part with no
-    required_tags (or no wiki detail to say) isn't restricted."""
-    return set(_tag_list(part.get("required_tags"))) <= port.tags
+    required_tags (or no wiki detail to say) isn't restricted.
+
+    It's checked the other way too: a port with its own required_tags only takes a part
+    carrying all of them in its `tags` (a PDC slot needs 'PDC'), so an ordinary gimbal isn't
+    offered for it. A part with no wiki detail can't show those tags, so it doesn't fit such
+    a port."""
+    if not set(_tag_list(part.get("required_tags"))) <= port.tags:
+        return False
+    return port.required_tags <= set(_tag_list(part.get("tags")))
 
 
 def pick_fitting_variant(variants: list[dict[str, Any]], port: ShipPort) -> dict[str, Any] | None:
@@ -131,7 +207,12 @@ def pick_fitting_variant(variants: list[dict[str, Any]], port: ShipPort) -> dict
     check for every other ship and carried the Polaris variant's own stats."""
     fitting = [v for v in variants if tags_allow(v, port)]
     unrestricted = [v for v in fitting if not _tag_list(v.get("required_tags"))]
-    return (unrestricted or fitting or [None])[0]
+    # Of the rest, the plain one: 12 wiki items are named "VariPuck S3 Gimbal Mount", and
+    # the first unrestricted one listed is 'Mount_Gimbal_S3_AllSizes' (holds S1-S13), not
+    # the plain 'Mount_Gimbal_S3' the shop sells. The shortest class name is the base one.
+    pool = unrestricted or fitting
+    pool.sort(key=lambda v: len(str(v.get("class_name") or "")))
+    return pool[0] if pool else None
 
 
 def group_ports_by_category(ports: list[ShipPort]) -> dict[str, list[ShipPort]]:
