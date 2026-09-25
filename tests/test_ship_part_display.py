@@ -233,3 +233,8 @@ def test_shop_text_is_place_then_vendor():
 
 def test_shop_text_doesnt_stack_parentheses():
     assert shop_text("Ship Weapons - Pyro Gateway (Stanton)") == "Ship Weapons at Pyro Gateway (Stanton)"
+
+
+def test_a_turret_gun_slot_label_names_both_parts():
+    assert format_port_label("hardpoint_turret_remote_top/hardpoint_gimbal_left", 3, 3) == \
+        "Turret Remote Top · Gimbal Left (S3)"

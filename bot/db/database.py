@@ -778,6 +778,11 @@ CREATE TABLE IF NOT EXISTS ship_parts_reference (
     accepts_guns INTEGER NOT NULL DEFAULT 0,
     -- Space-separated ship + port tags a ship-specific part's required_tags must match.
     port_tags TEXT NOT NULL DEFAULT '',
+    -- The wiki's own "can the player swap this" flag, the port's own required tags (the
+    -- part must carry them), and the stock item's uuid (where a turret's gun slots are).
+    editable INTEGER NOT NULL DEFAULT 1,
+    required_tags TEXT NOT NULL DEFAULT '',
+    equipped_uuid TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (id_vehicle, port_name)
 );
 CREATE INDEX IF NOT EXISTS idx_ship_parts_reference_vehicle_name ON ship_parts_reference (vehicle_name);
@@ -1270,6 +1275,9 @@ class Database:
             # reference refresh (which also runs at startup) rewrites every ship.
             "ALTER TABLE ship_parts_reference ADD COLUMN accepts_guns INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE ship_parts_reference ADD COLUMN port_tags TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE ship_parts_reference ADD COLUMN editable INTEGER NOT NULL DEFAULT 1",
+            "ALTER TABLE ship_parts_reference ADD COLUMN required_tags TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE ship_parts_reference ADD COLUMN equipped_uuid TEXT NOT NULL DEFAULT ''",
         ]
         for statement in migrations:
             try:
@@ -4384,16 +4392,20 @@ class Database:
         """Wholesale replace one ship's port rows in one transaction - never a patch-in-place,
         so a failed or partial collector run for this ship can't leave a half-old, half-new
         mix. Each port dict needs name/port_type/size_min/size_max and optionally
-        accepts_guns and port_tags, a list (matches bot.uex.ship_parts.ShipPort's fields)."""
+        accepts_guns, port_tags and required_tags (lists), editable, and equipped_uuid
+        (matches bot.uex.ship_parts.ShipPort's fields)."""
         async with self.connect() as db:
             await db.execute("DELETE FROM ship_parts_reference WHERE id_vehicle=?", (id_vehicle,))
             await db.executemany(
                 """INSERT INTO ship_parts_reference
-                   (id_vehicle, vehicle_name, port_name, port_type, size_min, size_max, accepts_guns, port_tags)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                   (id_vehicle, vehicle_name, port_name, port_type, size_min, size_max, accepts_guns, port_tags,
+                    editable, required_tags, equipped_uuid)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 [
                     (id_vehicle, vehicle_name, port["name"], port["port_type"], port["size_min"], port["size_max"],
-                     1 if port.get("accepts_guns") else 0, " ".join(port.get("port_tags") or []))
+                     1 if port.get("accepts_guns") else 0, " ".join(port.get("port_tags") or []),
+                     0 if port.get("editable") is False else 1, " ".join(port.get("required_tags") or []),
+                     port.get("equipped_uuid") or "")
                     for port in ports
                 ],
             )

@@ -2979,6 +2979,44 @@ they're in sync).
     Measured live: the largest page was 1,521 chars (Discord's limit is 2,000). The Titan's
     S1 coolers show all 19, where the cap had hidden 4.
 
+86. **Guns inside turrets, locked weapon ports, and tag checks in both directions.** Live
+    report on the Perseus: "Turret Remote Top (S3)" offered only Gun Mounts (a generic
+    VariPuck, labelled "Holds 1× S1-S13 gun"), with no way to buy guns for it. The wiki's
+    game data showed three separate gaps:
+    - **The guns sit inside the turret.** The ship's slot is the "Remote Turret" housing
+      (`compatible_types` Turret only), and its two S3 gun hardpoints
+      (`hardpoint_gimbal_left`/`_right`) live in that item's own `ports`. New
+      `child_gun_ports` (`bot/uex/ship_parts.py`) reads them from the stock item's wiki
+      detail. The cog's `_with_child_gun_ports` adds them when a ship is opened, from the
+      cached detail, not in the daily refresh (that would be a wiki call per turret across
+      all 282 ships). They're named `<turret port>/<gun port>` so a saved entry stays tied
+      to that exact slot, and shown as "Turret Remote Top · Gimbal Left (S3)". A gun slot
+      whose `compatible_types` also list Turret offers Gun Mounts too. The Perseus now
+      offers 4 gun slots with the 18 real S3 guns.
+    - **Locked ports.** The wiki's `editable` flag (from the game data) is false for the
+      Perseus's remote turret housings and for the PDCs' own guns. A weapon or turret port
+      the player can't change is no longer shopped under either category. Other component
+      types don't read the flag yet, to limit the change to what the report showed. The
+      owner wasn't sure these guns can really be changed in-game. The finder follows the
+      game data's flag, which marks them editable.
+    - **Port-side tag requirements.** Only the part's `required_tags` were checked against
+      the ship. A port's own `required_tags` must also all be in the part's `tags`: the
+      Perseus turret slot requires `RSI_Perseus_Remote_Turret_Top`, a PDC slot requires
+      `PDC`. PDC slots now offer only the Pepperbox, not ordinary gimbals. A part with no
+      wiki detail can't show its tags, so it doesn't fit a tag-gated port.
+    - **The S1-S13 label**: twelve wiki items are named "VariPuck S3 Gimbal Mount", and
+      `pick_fitting_variant` took the first unrestricted one, `Mount_Gimbal_S3_AllSizes`.
+      It now prefers the shortest class name, i.e. the plain `Mount_Gimbal_S3`.
+
+    Three new `ship_parts_reference` columns: `editable`, `required_tags` and
+    `equipped_uuid`. Old rows default to editable, no tags and no stock item until the
+    startup refresh rewrites them, which is the same behavior as before this change.
+
+    Same round: "the list is missing the S5 Attrition laser repeater" (Constellation
+    Andromeda) turned out to be page 2. At 875 DPS in the game data it's the lowest of the
+    7, and page 1 holds 6. The page line now says how many more are waiting ("Page 1 of 2 ·
+    1 more on the next page").
+
 ## Where to look for what
 
 Six docs, deliberately scoped so they don't duplicate each other:

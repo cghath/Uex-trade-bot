@@ -100,6 +100,11 @@ date - no open item, nothing to record here.
       15-part cap removed) and ranks each category by its key stat, highest first
       (`bot/uex/ship_part_display.py`, `bot/cogs/ship_parts_finder.py`). Only relevant if
       aiv2 ever ports `/ship-parts-finder`. See PROJECT_CONTEXT.md entry 85
+- [ ] (PR pending) - `/ship-parts-finder` shops the guns inside turrets (`child_gun_ports`),
+      skips weapon ports the game locks, and checks a port's own required_tags against the
+      part's tags (`bot/uex/ship_parts.py`, `bot/cogs/ship_parts_finder.py`, three new
+      `ship_parts_reference` columns). Only relevant if aiv2 ever ports `/ship-parts-finder`.
+      See PROJECT_CONTEXT.md entry 86
 
 ## To port: aiv2 -> production
 

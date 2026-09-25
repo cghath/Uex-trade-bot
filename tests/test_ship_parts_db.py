@@ -174,3 +174,21 @@ def test_ship_parts_entries_lock_one_slot_per_ship_per_port_and_survive_restart(
         await db2.delete_ship_parts_thread(1, 10)
         assert await db2.get_ship_parts_thread(1, 10) is None
     asyncio.run(run())
+
+
+def test_ship_parts_reference_stores_editable_required_tags_and_equipped_item(tmp_path):
+    async def run():
+        db, _ = _db(tmp_path)
+        await db.init()
+        await db.replace_ship_parts_reference(1, "Perseus", [
+            {"name": "hp_turret", "port_type": "Turret", "size_min": 3, "size_max": 3, "editable": False,
+             "required_tags": ["RSI_Perseus_Remote_Turret_Top"], "equipped_uuid": "turret-uuid"},
+            {"name": "hp_power", "port_type": "PowerPlant", "size_min": 3, "size_max": 3},
+        ])
+        return {row["port_name"]: row for row in await db.get_ship_parts_reference(1)}
+
+    rows = asyncio.run(run())
+    turret, power = rows["hp_turret"], rows["hp_power"]
+    assert (turret["editable"], turret["required_tags"], turret["equipped_uuid"]) == \
+        (0, "RSI_Perseus_Remote_Turret_Top", "turret-uuid")
+    assert (power["editable"], power["required_tags"], power["equipped_uuid"]) == (1, "", "")

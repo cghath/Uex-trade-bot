@@ -8,6 +8,7 @@ from bot.uex.ship_parts import (
     WIKI_SIZE_ONLY_CATEGORIES,
     ShipPort,
     candidate_items_for_port,
+    child_gun_ports,
     category_label,
     cheapest_listing_by_item,
     group_ports_by_category,
@@ -188,3 +189,77 @@ def test_candidate_items_for_port_returns_empty_for_an_unmapped_port_type():
     port = ShipPort(name="x", port_type="Armor", size_min=1, size_max=1)
     catalog = [_catalog_row(1, "Miscellaneous", "1")]
     assert candidate_items_for_port(catalog, port) == []
+
+
+# -- turret gun slots, locked ports, and two-way tag checks (the Perseus) -------------------
+
+PERSEUS_TOP_TURRET = {
+    "name": "Remote Turret", "class_name": "RSI_Perseus_Remote_Turret_Top_S3",
+    "tags": ["RSI_Perseus_Remote_Turret_Top"], "required_tags": ["RSI_Perseus_Remote_Turret_Top"],
+    "ports": [
+        {"name": "hardpoint_gimbal_left", "type": "WeaponGun", "sizes": {"min": 3, "max": 3}, "editable": True,
+         "compatible_types": [{"type": "WeaponGun"}, {"type": "Turret"}], "required_tags": []},
+        {"name": "hardpoint_gimbal_right", "type": "WeaponGun", "sizes": {"min": 3, "max": 3}, "editable": True,
+         "compatible_types": [{"type": "WeaponGun"}, {"type": "Turret"}], "required_tags": []},
+        {"name": "hardpoint_locked", "type": "WeaponGun", "sizes": {"min": 1, "max": 1}, "editable": False,
+         "compatible_types": [{"type": "WeaponGun"}]},
+        {"name": "hardpoint_camera", "type": "Misc", "sizes": {"min": 1, "max": 1}},
+    ],
+}
+
+
+def _perseus_top_slot():
+    [port] = parse_ports([{
+        "name": "hardpoint_turret_remote_top", "type": "Turret", "sizes": {"min": 3, "max": 3}, "editable": False,
+        "compatible_types": [{"type": "Turret", "sub_types": ["TopTurret"]}],
+        "required_tags": ["RSI_Perseus_Remote_Turret_Top"], "equipped_item_uuid": "turret-uuid",
+    }], ["rsi_perseus"])
+    return port
+
+
+def test_a_locked_turret_isnt_offered_but_its_own_gun_slots_are():
+    port = _perseus_top_slot()
+    assert port.editable is False and port.equipped_uuid == "turret-uuid"
+    assert port.required_tags == frozenset({"RSI_Perseus_Remote_Turret_Top"})
+    assert port.categories == [], "the housing can't be swapped, so no Gun Mounts for it"
+    assert port.needs_child_gun_ports
+    guns = child_gun_ports(port, PERSEUS_TOP_TURRET)
+    assert [g.name for g in guns] == ["hardpoint_turret_remote_top/hardpoint_gimbal_left",
+                                     "hardpoint_turret_remote_top/hardpoint_gimbal_right"], "locked gun slot left out"
+    assert all((g.size_min, g.size_max) == (3, 3) for g in guns)
+    assert guns[0].categories == [GUNS_CATEGORY, MOUNTS_CATEGORY], "a gimbal can go in that gun slot too"
+    assert "rsi_perseus" in guns[0].tags and "RSI_Perseus_Remote_Turret_Top" in guns[0].tags
+
+
+def test_no_gun_slots_without_the_turrets_detail():
+    assert child_gun_ports(_perseus_top_slot(), None) == []
+
+
+def test_a_turret_that_takes_guns_directly_needs_no_child_lookup():
+    [nose] = parse_ports([{"name": "hp_nose", "type": "Turret", "sizes": {"min": 4, "max": 4}, "editable": True,
+                           "compatible_types": [{"type": "Turret"}, {"type": "WeaponGun"}],
+                           "equipped_item": {"uuid": "varipuck"}}])
+    assert nose.categories == [GUNS_CATEGORY, MOUNTS_CATEGORY] and not nose.needs_child_gun_ports
+
+
+def test_a_port_with_required_tags_only_takes_parts_carrying_them():
+    pdc = ShipPort(name="hp_pdc", port_type="Turret", size_min=2, size_max=2,
+                   tags=frozenset({"PDC"}), required_tags=frozenset({"PDC"}))
+    assert tags_allow({"name": "PPB-116 Pepperbox", "tags": ["PDC"], "required_tags": ["PDC"]}, pdc)
+    assert not tags_allow({"name": "VariPuck S2 Gimbal Mount", "tags": ["gimbalMount"]}, pdc)
+    assert not tags_allow({"name": "No detail"}, pdc), "unverifiable tags don't fit a tag-gated port"
+
+
+def test_the_plain_variant_wins_over_an_odd_unrestricted_one():
+    port = ShipPort(name="x", port_type="Turret", size_min=3, size_max=3)
+    variants = [
+        {"class_name": "Mount_Gimbal_S3_Polaris", "required_tags": ["RSI_Polaris"]},
+        {"class_name": "Mount_Gimbal_S3_AllSizes", "required_tags": []},
+        {"class_name": "Mount_Gimbal_S3", "required_tags": []},
+    ]
+    assert pick_fitting_variant(variants, port)["class_name"] == "Mount_Gimbal_S3"
+
+
+def test_a_bare_gun_hardpoint_is_shopped_for_weapons():
+    [gun] = parse_ports([{"name": "hp_gun", "type": "WeaponGun", "sizes": {"min": 2, "max": 2}}])
+    assert gun.categories == [GUNS_CATEGORY] and gun.accepts_guns
