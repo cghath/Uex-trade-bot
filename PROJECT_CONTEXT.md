@@ -2813,6 +2813,32 @@ they're in sync).
     is sent with `AllowedMentions.none()`, since ship names and whatever the user typed are
     echoed back verbatim.
 
+82. **An outside audit of `370e232..d8a0bc2` found a missing migration and unbounded
+    autocomplete latency.** (a) P1: `ship_parts_shopping_entries`' first shape (commit
+    `370e232`) had no `port_name` column; #55 added it to the table's `CREATE TABLE IF NOT
+    EXISTS`, which never upgrades an existing table, so any database created by `370e232`
+    alone would fail every lock-in with "no column named port_name". Production was never
+    exposed: the Pi jumped from `1b3fad9` straight to `4be1b26` (which already had the new
+    shape), and a live lock-in afterward succeeded. The only old-shape table was the local
+    dev DB's, dropped by hand at the time. Still fixed properly:
+    `_migrate_ship_parts_entries_port_name` rebuilds the table when `port_name` is missing
+    (the same detect-and-rebuild pattern as `_migrate_negotiation_message_seen_scope`).
+    Old rows have no record of their physical slot, so they keep their part under the
+    placeholder slot `unknown_slot` rather than being dropped or guessed. The regression
+    test builds the exact `370e232` table and reproduces the audit's error when the
+    migration call is removed. The lesson: a fix that changes an existing table's shape in
+    `SCHEMA` needs a migration even when "nothing deployed has the old shape yet", because
+    that is easy to be wrong about, and a migration costs little. (b) P2: `/where-to-buy-ship`'s
+    and `/ingame-item-finder`'s autocompletes caught `UexApiError` but had no time limit.
+    `UexClient` allows a 15s timeout with retries, and Discord drops an autocomplete answer
+    after about 3s, so a cold cache quietly produced no suggestions. New
+    `bot/autocomplete.py` `gather_within()` stops waiting after 2.5s but deliberately does
+    not cancel the slow fetches, so they finish and fill the 12h cache for the next
+    keystroke. Both cogs also pre-load those caches in `cog_load`, so the first user after a
+    restart isn't the one who pays for the cold fetch. Other autocompletes in the bot
+    (e.g. `ship_name_autocomplete`, `terminal_name_autocomplete`) weren't in the audit's
+    scope and still wait without a limit.
+
 ## Where to look for what
 
 Six docs, deliberately scoped so they don't duplicate each other:

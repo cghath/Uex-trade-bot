@@ -1,4 +1,5 @@
 import asyncio
+import sqlite3
 from cryptography.fernet import Fernet
 from bot.db.database import Database
 
@@ -31,6 +32,46 @@ def test_ship_parts_reference_is_replaced_wholesale_per_ship(tmp_path):
         ])
         assert len(await db.get_ship_parts_reference(100)) == 2
         assert len(await db.get_ship_parts_reference(200)) == 1
+    asyncio.run(run())
+
+
+def test_an_old_category_keyed_entries_table_is_migrated_to_the_port_name_key(tmp_path):
+    # The exact table shape commit 370e232 created, before port_name joined the key.
+    # CREATE TABLE IF NOT EXISTS alone left it in place and every lock-in failed with
+    # "table ship_parts_shopping_entries has no column named port_name".
+    path = tmp_path / "old.sqlite"
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            """CREATE TABLE ship_parts_shopping_entries (
+                user_id INTEGER NOT NULL, guild_id INTEGER NOT NULL, id_vehicle INTEGER NOT NULL,
+                vehicle_name TEXT NOT NULL, category TEXT NOT NULL, id_item INTEGER NOT NULL,
+                item_name TEXT NOT NULL, id_terminal INTEGER, terminal_name TEXT, price_buy REAL,
+                locked_at TEXT NOT NULL,
+                PRIMARY KEY (user_id, guild_id, id_vehicle, category)
+            )"""
+        )
+        conn.execute(
+            "INSERT INTO ship_parts_shopping_entries VALUES (1, 10, 100, 'Avenger Stalker', 'Power Plants', "
+            "500, 'PowerBolt', 139, 'Platinum Bay - HUR-L5', 19998.0, '2026-09-23 00:00:00')"
+        )
+
+    async def run():
+        db = Database(path, Fernet(Fernet.generate_key()))
+        await db.init()
+        # The pre-existing part survives, under a placeholder slot, not dropped.
+        [old] = await db.get_ship_parts_entries(1, 10)
+        assert (old["item_name"], old["port_name"]) == ("PowerBolt", "unknown_slot")
+        # Locking a real slot now works, and doesn't collide with the placeholder row.
+        await db.set_ship_parts_entry(
+            1, 10, 100, "Avenger Stalker", "Power Plants", "hp_power", 501, "Atlas", 114,
+            "Dumper's Depot - Area 18", 21000.0, "2026-09-25 00:00:00",
+        )
+        assert {e["port_name"] for e in await db.get_ship_parts_entries(1, 10)} == {"unknown_slot", "hp_power"}
+        await db.remove_ship_parts_entry(1, 10, 100, "Power Plants", "unknown_slot")
+        assert [e["item_name"] for e in await db.get_ship_parts_entries(1, 10)] == ["Atlas"]
+        # Running init() again on the migrated database is a no-op.
+        await Database(path, db._fernet).init()
+        assert [e["item_name"] for e in await db.get_ship_parts_entries(1, 10)] == ["Atlas"]
     asyncio.run(run())
 
 

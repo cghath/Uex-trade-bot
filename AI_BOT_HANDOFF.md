@@ -77,6 +77,13 @@ date - no open item, nothing to record here.
       (`bot/uex/client.py`, new `bot/uex/ship_shops.py`, new `bot/cogs/ship_shops.py`,
       `bot/main.py`'s `INITIAL_COGS`, `bot/cogs/help.py`'s `CATEGORIES`, new
       `tests/test_ship_shops.py`)
+- [ ] PR #TBD - Time-limit `/ingame-item-finder`'s (and `/where-to-buy-ship`'s) autocomplete
+      so a slow or cold UEX response returns no suggestions within Discord's ~3s deadline,
+      instead of silently timing out: new `bot/autocomplete.py` `gather_within()` (stops
+      waiting at 2.5s without cancelling, so the fetch still fills the cache), plus a
+      `cog_load` cache pre-load in both cogs. Port the item-finder half if aiv2 has
+      `/ingame-item-finder`. The same PR's `ship_parts_shopping_entries` migration only
+      matters if aiv2 ever ported `/ship-parts-finder`. See PROJECT_CONTEXT.md entry 82.
 
 ## To port: aiv2 -> production
 
