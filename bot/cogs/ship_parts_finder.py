@@ -44,7 +44,15 @@ from discord.ext import commands, tasks
 from bot.cogs.prices import terminal_name_autocomplete
 from bot.cogs.ships import ship_name_autocomplete
 from bot.uex.exceptions import UexApiError, describe_uex_api_error
-from bot.uex.ship_part_display import format_part_list, format_port_label, shop_text
+from bot.uex.ship_part_display import (
+    format_part_page,
+    format_port_label,
+    list_shared,
+    paginate_parts,
+    ranked_by_label,
+    ranking_stat,
+    shop_text,
+)
 from bot.uex.ship_parts import (
     GUNS_CATEGORY,
     MOUNTS_CATEGORY,
@@ -68,11 +76,19 @@ REFERENCE_REFRESH_HOURS = 24
 # Component hardware prices move far less often than commodity market prices (deliberate
 # design decision, not a placeholder) - see module docstring.
 DETAIL_CACHE_SECONDS = 24 * 3600
-DETAIL_CACHE_MAX = 500
+# Every sold part in a browsed category gets its detail loaded now (to rank it), so the
+# cache has to hold them all: about 370 sold parts across the 8 categories, plus
+# name-lookup misses and variant lists. Entries are slimmed first (_slim_detail).
+DETAIL_CACHE_MAX = 1000
+# Wiki detail fields no display or fit check reads - dropped before caching, so a full
+# cache stays small on the Pi.
+_UNUSED_DETAIL_KEYS = frozenset({
+    "images", "description", "description_data", "shops", "uex_prices", "blueprint",
+    "variants", "entity_tag_map", "entity_tags", "interactions", "dimension", "base_variant",
+})
 # One wiki call per candidate item - batched so a slot with many real candidates doesn't
 # serialize dozens of live lookups, same pattern as /ingame-item-finder's _fetch_distances.
 DETAIL_BATCH_SIZE = 8
-MAX_CANDIDATES_SHOWN = 15
 
 
 def _pages(lines: list[str], limit: int = 1900) -> list[str]:
@@ -90,6 +106,21 @@ def _pages(lines: list[str], limit: int = 1900) -> list[str]:
 
 def _format_port_label(port: ShipPort) -> str:
     return format_port_label(port.name, port.size_min, port.size_max)
+
+
+def _slim_detail(detail: dict | None) -> dict | None:
+    if not isinstance(detail, dict):
+        return detail
+    return {k: v for k, v in detail.items() if k not in _UNUSED_DETAIL_KEYS}
+
+
+def _rank_key(candidate: dict) -> tuple:
+    """Best ranking stat first (see ship_part_display.ranking_stat), a part with nothing to
+    rank on after every ranked one; ties go to the closer shop, then the cheaper one."""
+    stat = ranking_stat(candidate)
+    distance = candidate.get("_distance_gm")
+    return (stat is None, -(stat[1] if stat else 0.0), distance is None, distance or 0.0,
+            candidate.get("_price_buy") or 0.0)
 
 
 def _fits(candidate: dict, port: ShipPort, category: str) -> bool:
@@ -396,6 +427,11 @@ class PartsBrowserView(discord.ui.View):
         self.selected_port: ShipPort | None = None
         self.candidates: list[dict] = []
         self.selected_candidate: dict | None = None
+        # Pages of whole parts, rebuilt whenever candidates change; nothing is ever cut off.
+        self.pages: list[list[dict]] = []
+        self.page = 0
+        self._header_shared: list[str] = []
+        self._shared: list[str] = []
         self.category_select = _CategorySelect(self)
         self.add_item(self.category_select)
 
@@ -427,10 +463,41 @@ class PartsBrowserView(discord.ui.View):
         if not self.candidates:
             return f"{header}\n\n{summary}\n\nNo currently-sold {label.lower()} found for this slot."
         lines = [header, "", summary, "", f"**{_list_heading(self.category, self.selected_port)}**"]
+        if self._header_shared:
+            lines.append(f"All options: {' · '.join(self._header_shared)}")
+        ranked_by = ranked_by_label(self.candidates)
+        count = f"{len(self.candidates)} parts" if len(self.candidates) != 1 else "1 part"
+        lines.append(f"{count}, best {ranked_by} first" if ranked_by else count)
+        page = self.pages[self.page] if self.pages else []
+        lines.extend(format_part_page(page, shared=self._shared, selected=self.selected_candidate))
+        if len(self.pages) > 1:
+            lines.extend(["", f"Page {self.page + 1} of {len(self.pages)}"])
+        return "\n".join(lines)
+
+    def _set_candidates(self, candidates: list[dict]) -> None:
+        self.candidates = candidates
         port = self.selected_port
         fixed = port.size_min if port is not None and port.size_min == port.size_max else None
-        lines.extend(format_part_list(self.candidates, selected=self.selected_candidate, slot_size=fixed))
-        return "\n".join(lines)
+        self._header_shared, self._shared = list_shared(candidates, fixed)
+        self.pages = paginate_parts(candidates, shared=self._shared)
+        self.page = 0
+        self._show_page()
+
+    def _show_page(self) -> None:
+        """Rebuild the page's own dropdown (only this page's parts, so it can never hit
+        Discord's 25-option limit however big the slot) and the page buttons."""
+        self._remove_items(_PartSelect, _PageButton)
+        if not self.pages:
+            return
+        self.add_item(_PartSelect(self, self.pages[self.page]))
+        if len(self.pages) > 1:
+            self.add_item(_PageButton(self, -1))
+            self.add_item(_PageButton(self, +1))
+
+    async def turn_page(self, interaction: discord.Interaction, delta: int) -> None:
+        self.page = max(0, min(len(self.pages) - 1, self.page + delta))
+        self._show_page()
+        await interaction.response.edit_message(content=self.text(), view=self)
 
     def _remove_items(self, *types: type) -> None:
         for child in [c for c in self.children if isinstance(c, types)]:
@@ -440,8 +507,8 @@ class PartsBrowserView(discord.ui.View):
         self.category = category
         self.selected_port = None
         self.selected_candidate = None
-        self.candidates = []
-        self._remove_items(_SlotSelect, _PartSelect)
+        self._set_candidates([])
+        self._remove_items(_SlotSelect, _PartSelect, _PageButton)
         ports = self.grouped_ports.get(category, [])
         if len(ports) > 1:
             self.add_item(_SlotSelect(self, ports))
@@ -459,18 +526,17 @@ class PartsBrowserView(discord.ui.View):
         # deadline on a cold cache, which surfaced as "Interaction failed" before this fix.
         await interaction.response.defer()
         self.selected_port = port
-        self.candidates = []
+        candidates: list[dict] = []
         if port is not None:
             try:
-                self.candidates = await self.cog.candidates_for_port(
-                    port, category=self.category, limit=MAX_CANDIDATES_SHOWN, origin_id=self.origin_terminal[0],
+                candidates = await self.cog.candidates_for_port(
+                    port, category=self.category, origin_id=self.origin_terminal[0],
                 )
             except (UexApiError, WikiApiError) as exc:
+                self._set_candidates([])
                 await interaction.edit_original_response(content=f"Couldn't load {self.category} options: {exc}", view=self)
                 return
-        self._remove_items(_PartSelect)
-        if self.candidates:
-            self.add_item(_PartSelect(self, self.candidates))
+        self._set_candidates(candidates)
         await interaction.edit_original_response(content=self.text(), view=self)
 
     async def lock_in_selected(self, interaction: discord.Interaction) -> None:
@@ -526,11 +592,26 @@ class _SlotSelect(discord.ui.Select):
         await self.parent_view.show_slot(interaction, self._ports[int(self.values[0])])
 
 
+class _PageButton(discord.ui.Button):
+    """Previous/Next, beside "Lock in selected part". A picked part stays picked across
+    pages - the "Selected so far" line keeps naming it."""
+    def __init__(self, parent: PartsBrowserView, delta: int) -> None:
+        at_edge = parent.page == 0 if delta < 0 else parent.page >= len(parent.pages) - 1
+        super().__init__(label="◀ Previous" if delta < 0 else "Next ▶", style=discord.ButtonStyle.secondary,
+                         row=4, disabled=at_edge)
+        self.parent_view = parent
+        self.delta = delta
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await self.parent_view.turn_page(interaction, self.delta)
+
+
 class _PartSelect(discord.ui.Select):
     def __init__(self, parent: PartsBrowserView, candidates: list[dict]) -> None:
         options = [
             discord.SelectOption(label=(c.get("name") or "Unknown")[:100], value=str(i),
-                                 description=_part_option_description(c)[:100] or None)
+                                 description=_part_option_description(c)[:100] or None,
+                                 default=c is parent.selected_candidate)
             for i, c in enumerate(candidates[:25])
         ]
         super().__init__(placeholder="Choose a part to lock in", options=options)
@@ -638,19 +719,24 @@ class ShipPartsFinder(commands.Cog):
                 detail = None
         if len(self._detail_cache) >= DETAIL_CACHE_MAX:
             self._detail_cache.pop(next(iter(self._detail_cache)))
+        detail = _slim_detail(detail)
         self._detail_cache[key] = (now + DETAIL_CACHE_SECONDS, detail)
         return detail
 
     async def candidates_for_port(
-        self, port: ShipPort, *, category: str | None = None, limit: int, origin_id: int | None = None,
+        self, port: ShipPort, *, category: str | None = None, limit: int | None = None,
+        origin_id: int | None = None,
     ) -> list[dict]:
         """Every sold part that fits this slot under `category`, priced from UEX's own shop
-        rows, sorted closest-first to origin_id (unknown distance last, then cheapest), and
-        only THEN cut to `limit` - cutting first used to drop the closest shops unseen.
-        Fit is decided by the wiki's size (UEX's is unreliable - see
-        bot/uex/ship_parts.py), so wiki detail is loaded in that closest-first order, a
-        batch at a time, until `limit` parts that fit are found - not for every part up
-        front. Details are cached, so later browses cost nothing."""
+        rows and ranked by the category's key stat, highest first (quantum speed, power
+        generation, DPS... - see ship_part_display.ranking_stat), ties going to the closer
+        shop, then the cheaper one. The owner asked for this over closest-first once the
+        list got page buttons, since nothing is cut off any more.
+
+        Ranking needs every part's wiki detail, and so does the fit check (UEX's size is
+        unreliable - see bot/uex/ship_parts.py), so all of them are loaded, batched and
+        cached for 24h: a category's first browse is the slow one. `limit` is only an
+        optional cap after ranking; the browser passes none, since it pages."""
         category = category or port.uex_category
         catalog = await self.bot.uex.get_item_catalog()
         cheapest = cheapest_listing_by_item(await self.bot.uex.get_items_prices_all())
@@ -670,17 +756,10 @@ class ShipPartsFinder(commands.Cog):
         await self._attach_full_terminal_names(candidates)
         if origin_id is not None:
             await self._attach_distances(candidates, origin_id)
-        candidates.sort(key=lambda c: (c.get("_distance_gm") is None, c.get("_distance_gm") or 0.0, c["_price_buy"]))
-
-        kept: list[dict] = []
-        position = 0
-        while len(kept) < limit and position < len(candidates):
-            batch = candidates[position:position + max(limit - len(kept), DETAIL_BATCH_SIZE)]
-            position += len(batch)
-            await self._attach_details(batch)
-            await self._swap_in_fitting_variants([c for c in batch if not tags_allow(c, port)], port)
-            kept.extend(c for c in batch if _fits(c, port, category))
-        return kept[:limit]
+        await self._attach_details(candidates)
+        await self._swap_in_fitting_variants([c for c in candidates if not tags_allow(c, port)], port)
+        kept = sorted((c for c in candidates if _fits(c, port, category)), key=_rank_key)
+        return kept if limit is None else kept[:limit]
 
     async def _variants_cached(self, name: str) -> list[dict]:
         key = f"variants:{name.lower()}"
@@ -694,6 +773,7 @@ class ShipPartsFinder(commands.Cog):
             return []
         if len(self._detail_cache) >= DETAIL_CACHE_MAX:
             self._detail_cache.pop(next(iter(self._detail_cache)))
+        rows = [_slim_detail(row) for row in rows if isinstance(row, dict)]
         self._detail_cache[key] = (now + DETAIL_CACHE_SECONDS, rows)
         return rows
 
