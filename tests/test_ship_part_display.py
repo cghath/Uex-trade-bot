@@ -2,8 +2,12 @@
 shapes taken from real wiki item details."""
 from bot.uex.ship_part_display import (
     format_part_block,
-    format_part_list,
+    format_part_page,
     format_port_label,
+    list_shared,
+    paginate_parts,
+    ranked_by_label,
+    ranking_stat,
     part_stats,
     shared_stats,
     shop_text,
@@ -114,17 +118,18 @@ def test_unknown_shape_gets_no_stats_rather_than_a_field_dump():
 def test_shared_stats_are_said_once_in_the_header_not_on_every_part():
     parts = [_shield("INK", 2160, 389, 5.55), _shield("Bulwark", 2160, 410, 5.3)]
     assert shared_stats(parts) == ["S1", "2,160 HP", "decay 25%"]
-    lines = format_part_list(parts)
-    assert lines[0] == "All options: S1 · 2,160 HP · decay 25%"
-    body = "\n".join(lines[1:])
+    header, shared = list_shared(parts)
+    assert header == ["S1", "2,160 HP", "decay 25%"]
+    body = "\n".join(format_part_page(parts, shared=shared))
     assert "2,160 HP" not in body and "decay" not in body and "S1" not in body
     assert "regens 389/s" in body and "regens 410/s" in body
 
 
 def test_a_fixed_slot_size_is_not_repeated_under_all_options():
     parts = [_shield("INK", 2160, 389, 5.55), _shield("Trenta", 6400, 1216, 5.3)]
-    lines = format_part_list(parts, slot_size=1)
-    assert lines[0] == "All options: decay 25%", "the heading already says (S1)"
+    header, shared = list_shared(parts, slot_size=1)
+    assert header == ["decay 25%"], "the heading already says (S1)"
+    assert "S1" in shared, "so a part of that size doesn't repeat it either"
 
 
 def test_a_single_part_shares_nothing():
@@ -153,20 +158,62 @@ def test_part_block_without_price_or_distance_says_so():
     assert block.split("\n")[1] == "no shop price on record · distance unknown"
 
 
-def test_part_list_stops_at_the_budget_in_order_and_counts_the_rest():
-    parts = [_shield(f"Part{i}", 1000 + i, 300 + i, 5.0) for i in range(10)]
-    lines = format_part_list(parts, budget=400)
-    shown = [block.split("\n")[0] for block in lines if block.startswith("**Part")]
-    assert shown == [f"**Part{i}** · Grade C · Civilian · Seal Corporation" for i in range(len(shown))], \
-        "closest-first order kept, never skipping ahead to a shorter part"
-    assert 0 < len(shown) < 10
-    assert lines[-1] == f"+ {10 - len(shown)} more in the dropdown below."
+def test_pages_keep_order_and_never_drop_a_part():
+    parts = [_shield(f"Part{i}", 1000 + i, 300 + i, 5.0) for i in range(20)]
+    pages = paginate_parts(parts, shared=[])
+    assert [p for page in pages for p in page] == parts, "every part on some page, in ranked order"
+    assert all(len(page) <= 6 for page in pages)
+    assert len(pages) == 4
 
 
-def test_part_list_always_shows_the_selected_part_even_past_the_budget():
-    parts = [_shield(f"Part{i}", 1000 + i, 300 + i, 5.0) for i in range(10)]
-    lines = format_part_list(parts, selected=parts[9], budget=400)
-    assert any(line.startswith("✅ **Part9**") for line in lines)
+def test_a_page_stops_early_when_the_next_part_would_not_fit():
+    parts = [_shield(f"Part{i}", 1000 + i, 300 + i, 5.0) for i in range(6)]
+    block = len(format_part_block(parts[0], shared=[])) + 2
+    pages = paginate_parts(parts, shared=[], budget=block * 3 + 20)
+    assert [len(page) for page in pages] == [2, 2, 2], "room for the Selected note is kept free"
+
+
+def test_selecting_a_part_never_reflows_pages():
+    parts = [_shield(f"Part{i}", 1000 + i, 300 + i, 5.0) for i in range(12)]
+    pages = paginate_parts(parts, shared=[], budget=700)
+    for page in pages:
+        for part in page:
+            text = "\n".join(format_part_page(page, shared=[], selected=part))
+            assert len(text) <= 700
+
+
+def test_only_the_selected_part_on_a_page_is_marked():
+    parts = [_shield("INK", 2160, 389, 5.55), _shield("WEB", 2160, 410, 5.3)]
+    text = "\n".join(format_part_page(parts, shared=[], selected=parts[1]))
+    assert "✅ **WEB**" in text and "✅ **INK**" not in text
+    assert "✅" not in "\n".join(format_part_page(parts, shared=[], selected={"name": "elsewhere"}))
+
+
+# -- ranking stat (the owner's "quant speed, power generation, etc") -------------------------
+
+def test_each_category_is_ranked_by_its_key_stat():
+    qd = {"type": "QuantumDrive", "quantum_drive": {"standard_jump": {"drive_speed": 629300000}}}
+    power = {"type": "PowerPlant", "power_plant": {"power_segment_generation": 16}}
+    cooler = {"type": "Cooler", "cooler": {"coolant_segment_generation": 32}}
+    shield = _shield("INK", 2160, 389, 5.55)
+    gun = {"vehicle_weapon": {"damage": {"burst": 1266.4}}}
+    radar = {"type": "Radar", "radar": {"aim_assist": {"distance_min_assignment": 585, "distance_max_assignment": 569}}}
+    mount = {"type": "Turret", "turret": {"mounts": 2, "max_size": 3}}
+    rack = {"type": "MissileLauncher", "sub_type": "MissileRack", "missile_rack": {"missile_count": 4, "missile_size": 1}}
+    assert ranking_stat(qd) == ("quantum speed", 629300000)
+    assert ranking_stat(power) == ("power generation", 16)
+    assert ranking_stat(cooler) == ("cooling", 32)
+    assert ranking_stat(shield) == ("shield HP", 2160)
+    assert ranking_stat(gun) == ("DPS", 1266.4)
+    assert ranking_stat(radar) == ("aim assist range", 585)
+    assert ranking_stat(mount) == ("gun size held", 302)
+    assert ranking_stat(rack) == ("missile size", 104)
+
+
+def test_a_part_without_detail_has_no_ranking_stat():
+    assert ranking_stat({"name": "No detail"}) is None
+    assert ranked_by_label([{"name": "No detail"}, _shield("INK", 2160, 389, 5.55)]) == "shield HP"
+    assert ranked_by_label([{"name": "No detail"}]) is None
 
 
 # -- labels ---------------------------------------------------------------------------------

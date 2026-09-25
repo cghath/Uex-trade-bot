@@ -18,7 +18,7 @@ from bot.uex.item_finder import split_place_and_vendor
 
 # Discord rejects message content over 2000 characters; the browsing view's text also
 # carries a header and selection summary around this list.
-LIST_BUDGET_CHARS = 1400
+LIST_BUDGET_CHARS = 1350
 
 Stat = tuple[str, str]
 
@@ -311,37 +311,110 @@ def format_part_block(detail: dict, *, shared: list[str], selected: bool = False
     if own:
         lines.append(" · ".join(own))
     if selected:
-        lines.append('Selected - press "Lock in selected part" to save it.')
+        lines.append(SELECTED_NOTE)
     return "\n".join(lines)
 
 
-def format_part_list(details: list[dict], *, selected: dict | None = None,
-                     budget: int = LIST_BUDGET_CHARS, slot_size: int | None = None) -> list[str]:
-    """One block per part, stopping before the budget (whole parts only, never a part cut
-    mid-line) and saying how many more are in the dropdown. The selected part is always
-    shown, even when it's past the budget. `slot_size` is a fixed-size slot's size, which
-    the heading already says - a part of exactly that size doesn't repeat it."""
-    shared = shared_stats(details)
-    header_shared = shared
-    if slot_size is not None:
-        known = f"S{slot_size}"
-        header_shared = [text for text in shared if text != known]
-        shared = header_shared + [known]
-    lines = [f"All options: {' · '.join(header_shared)}"] if header_shared else []
-    used = sum(len(line) + 1 for line in lines)
-    shown = 0
-    full = False
+# How many whole parts one page shows at most. A page also stops early if the next part
+# wouldn't fit PAGE_BUDGET_CHARS - weapon blocks are long enough that 6 can overflow.
+PAGE_SIZE = 6
+SELECTED_NOTE = 'Selected - press "Lock in selected part" to save it.'
+
+
+def _jump_speed(block: dict) -> float | None:
+    jump = block.get("standard_jump") if isinstance(block.get("standard_jump"), dict) else {}
+    return _number(jump.get("drive_speed"))
+
+
+def _aim_assist_reach(block: dict) -> float | None:
+    assist = block.get("aim_assist") if isinstance(block.get("aim_assist"), dict) else {}
+    values = [v for v in (_number(assist.get("distance_min_assignment")),
+                          _number(assist.get("distance_max_assignment"))) if v is not None]
+    return max(values) if values else None
+
+
+def _mount_rank(block: dict) -> float | None:
+    size = _number(block.get("max_size"))
+    return None if size is None else size * 100 + (_number(block.get("mounts")) or 0)
+
+
+def _rack_rank(block: dict) -> float | None:
+    size = _number(block.get("missile_size"))
+    return None if size is None else size * 100 + (_number(block.get("missile_count")) or 0)
+
+
+# The one stat each category is ranked by, highest first - the owner's call ("quant speed,
+# power generation, etc"). (stat block key -> label shown in the header, value getter).
+_RANKED_BY = {
+    "quantum_drive": ("quantum speed", _jump_speed),
+    "power_plant": ("power generation", lambda b: _number(b.get("power_segment_generation"))),
+    "cooler": ("cooling", lambda b: _number(b.get("coolant_segment_generation"))),
+    "shield": ("shield HP", lambda b: _number(b.get("max_health"))),
+    "radar": ("aim assist range", _aim_assist_reach),
+    "turret": ("gun size held", _mount_rank),
+    "missile_rack": ("missile size", _rack_rank),
+}
+
+
+def ranking_stat(detail: dict) -> tuple[str, float] | None:
+    """(label, value) of the stat this part's category is ranked by, or None when the part
+    has no wiki detail (or no value) to rank on - those sort after every ranked part."""
+    weapon = detail.get("vehicle_weapon")
+    if isinstance(weapon, dict):
+        damage = weapon.get("damage") if isinstance(weapon.get("damage"), dict) else {}
+        burst = _number(damage.get("burst"))
+        return ("DPS", burst) if burst is not None else None
+    key, block = _stat_block(detail)
+    if key not in _RANKED_BY:
+        return None
+    label, getter = _RANKED_BY[key]
+    value = getter(block)
+    return (label, value) if value is not None else None
+
+
+def ranked_by_label(details: list[dict]) -> str | None:
     for detail in details:
-        block = format_part_block(detail, shared=shared, selected=detail is selected)
-        # Once one part doesn't fit, stop there rather than skipping ahead to a shorter
-        # one - the list is closest-first, and skipping would scramble that order.
-        full = full or (shown > 0 and used + len(block) + 2 > budget)
-        if full and detail is not selected:
-            continue
-        lines.extend(["", block])
-        used += len(block) + 2
-        shown += 1
-    hidden = len(details) - shown
-    if hidden:
-        lines.extend(["", f"+ {hidden} more in the dropdown below."])
+        stat = ranking_stat(detail)
+        if stat:
+            return stat[0]
+    return None
+
+
+def list_shared(details: list[dict], slot_size: int | None = None) -> tuple[list[str], list[str]]:
+    """(texts for the header's "All options" line, texts left off every part's own line).
+    Computed across every page, so the header reads the same on each. `slot_size` is a
+    fixed-size slot's size, which the heading already says, so it isn't repeated."""
+    shared = shared_stats(details)
+    if slot_size is None:
+        return shared, shared
+    known = f"S{slot_size}"
+    header = [text for text in shared if text != known]
+    return header, header + [known]
+
+
+def paginate_parts(details: list[dict], *, shared: list[str], budget: int = LIST_BUDGET_CHARS,
+                   per_page: int = PAGE_SIZE) -> list[list[dict]]:
+    """Split the (already ranked) parts into pages of whole parts, in order: at most
+    `per_page`, and fewer when the next part would push a page past `budget`. Room for the
+    one "Selected" note is reserved on every page, so picking a part never reflows pages.
+    Every part lands on some page - nothing is cut off, unlike the old single list."""
+    pages: list[list[dict]] = []
+    page: list[dict] = []
+    used = len(SELECTED_NOTE) + 1
+    for detail in details:
+        size = len(format_part_block(detail, shared=shared)) + 2
+        if page and (len(page) >= per_page or used + size > budget):
+            pages.append(page)
+            page, used = [], len(SELECTED_NOTE) + 1
+        page.append(detail)
+        used += size
+    if page:
+        pages.append(page)
+    return pages
+
+
+def format_part_page(page: list[dict], *, shared: list[str], selected: dict | None = None) -> list[str]:
+    lines: list[str] = []
+    for detail in page:
+        lines.extend(["", format_part_block(detail, shared=shared, selected=detail is selected)])
     return lines

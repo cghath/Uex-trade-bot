@@ -96,6 +96,10 @@ date - no open item, nothing to record here.
       projectile speed; signature and component HP for radar, power plants, coolers,
       shields and quantum drives), all in `bot/uex/ship_part_display.py`. Only relevant
       if aiv2 ever ports `/ship-parts-finder`. See PROJECT_CONTEXT.md entry 84
+- [ ] PR #62 - `/ship-parts-finder` pages its list (Previous/Next, dropdown per page,
+      15-part cap removed) and ranks each category by its key stat, highest first
+      (`bot/uex/ship_part_display.py`, `bot/cogs/ship_parts_finder.py`). Only relevant if
+      aiv2 ever ports `/ship-parts-finder`. See PROJECT_CONTEXT.md entry 85
 
 ## To port: aiv2 -> production
 

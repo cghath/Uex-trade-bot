@@ -594,7 +594,7 @@ def test_show_category_defers_before_the_slow_candidate_lookup():
     async def run():
         seen_defer_count = None
 
-        async def slow_candidates(port, *, category=None, limit, origin_id=None):
+        async def slow_candidates(port, *, category=None, limit=None, origin_id=None):
             nonlocal seen_defer_count
             seen_defer_count = interaction.response.defer.await_count
             return [_detail("PowerBolt")]
@@ -636,7 +636,7 @@ def test_selecting_a_slot_loads_candidates_for_that_specific_port():
     async def run():
         calls = []
 
-        async def track(port, *, category=None, limit, origin_id=None):
+        async def track(port, *, category=None, limit=None, origin_id=None):
             calls.append((port.name, category))
             return [_detail("VariPuck S3")]
 
@@ -698,7 +698,7 @@ def test_selected_candidate_is_visibly_marked_in_the_rendered_text():
     view.category = "Power Plants"
     view.selected_port = port
     a, b = _detail("PowerBolt", uuid="ua"), _detail("Atlas", uuid="ub")
-    view.candidates = [a, b]
+    view._set_candidates([a, b])
     view.selected_candidate = b
     text = view.text()
     assert "✅ **Atlas**" in text
@@ -733,7 +733,7 @@ def test_selection_summary_reflects_a_chosen_slot_and_part_plainly_regardless_of
                                                 {"Power Plants": [port]})
     view.category = "Power Plants"
     view.selected_port = port
-    view.candidates = [_detail("Atlas", uuid="ua")]
+    view._set_candidates([_detail("Atlas", uuid="ua")])
     view.selected_candidate = view.candidates[0]
     summary = view._selection_summary()
     assert "Category: **Power Plants**" in summary
@@ -854,3 +854,84 @@ def test_part_select_marks_the_chosen_part_as_default():
     select, view = asyncio.run(run())
     assert [o.default for o in select.options] == [False, True]
     assert view.selected_candidate["name"] == "Atlas"
+
+
+# -- ranked by key stat, paged (no part cut off, dropdown never past one page) -------------
+
+def _qd(name, speed, terminal=1, price=1000.0):
+    return {"uuid": name, "name": name, "type": "QuantumDrive", "size": 1, "_uex_id": 1, "_detail_loaded": True,
+            "quantum_drive": {"standard_jump": {"drive_speed": speed, "drive_speed_formatted": f"{speed / 1e6:.1f} Mm/s"}},
+            "_price_buy": price, "_id_terminal": terminal, "_terminal_name": "Platinum Bay - HUR-L5"}
+
+
+def test_candidates_for_port_ranks_by_the_key_stat_not_distance():
+    async def run():
+        catalog = [{"id": i, "uuid": f"u{i}", "category": "Quantum Drives", "size": "1", "name": f"Q{i}"} for i in (1, 2, 3)]
+        # Q1 is the closest shop but the slowest drive; Q3 the fastest but farthest.
+        uex = _uex(catalog, [_price(1, 100, 11), _price(2, 100, 12), _price(3, 100, 13)],
+                   distances={11: 5.0, 12: 10.0, 13: 40.0})
+        speeds = {1: 188e6, 2: 259e6, 3: 629e6}
+        wiki = _wiki({f"u{i}": {"uuid": f"u{i}", "name": f"Q{i}", "size": 1, "type": "QuantumDrive",
+                                "quantum_drive": {"standard_jump": {"drive_speed": speeds[i]}}} for i in (1, 2, 3)})
+        cog = ShipPartsFinder(NS(uex=uex), wiki_client=wiki, start_refresh=False)
+        port = ShipPort(name="hp_qd", port_type="QuantumDrive", size_min=1, size_max=1)
+        return await cog.candidates_for_port(port, origin_id=99)
+
+    assert [c["name"] for c in asyncio.run(run())] == ["Q3", "Q2", "Q1"]
+
+
+def test_equal_stats_fall_back_to_the_closer_shop():
+    parts = [_qd("Far", 500e6, terminal=2), _qd("Near", 500e6, terminal=3), _qd("NoDetail", 0)]
+    parts[0]["_distance_gm"], parts[1]["_distance_gm"] = 30.0, 5.0
+    del parts[2]["quantum_drive"]
+    assert [p["name"] for p in sorted(parts, key=ship_parts_finder._rank_key)] == ["Near", "Far", "NoDetail"]
+
+
+def _paged_view(count):
+    port = ShipPort(name="hp_qd", port_type="QuantumDrive", size_min=1, size_max=1)
+    view = ship_parts_finder.PartsBrowserView(NS(), {"id": 100, "name": "Perseus"}, (1, "Origin"),
+                                                {"Quantum Drives": [port]})
+    view.category, view.selected_port = "Quantum Drives", port
+    view._set_candidates([_qd(f"QD{i}", 600e6 - i * 1e6) for i in range(count)])
+    return view
+
+
+def _page_buttons(view):
+    return [c for c in view.children if isinstance(c, ship_parts_finder._PageButton)]
+
+
+def test_a_big_slot_is_paged_and_each_dropdown_holds_only_its_page():
+    view = _paged_view(30)
+    assert len(view.pages) > 1 and sum(len(p) for p in view.pages) == 30, "every part is on some page"
+    select = next(c for c in view.children if isinstance(c, ship_parts_finder._PartSelect))
+    assert len(select.options) == len(view.pages[0]) <= 6, "far below Discord's 25-option limit"
+    prev, nxt = _page_buttons(view)
+    assert prev.disabled and not nxt.disabled
+    text = view.text()
+    assert f"Page 1 of {len(view.pages)}" in text and "30 parts, best quantum speed first" in text
+    assert len(text) < 2000
+
+
+def test_turning_the_page_swaps_the_list_and_dropdown_and_keeps_the_pick():
+    async def run():
+        view = _paged_view(14)
+        view.selected_candidate = view.pages[0][1]
+        interaction = _component_interaction()
+        await view.turn_page(interaction, +1)
+        return view, interaction
+
+    view, interaction = asyncio.run(run())
+    assert view.page == 1
+    select = next(c for c in view.children if isinstance(c, ship_parts_finder._PartSelect))
+    assert [o.label for o in select.options] == [c["name"] for c in view.pages[1]]
+    content = interaction.response.edit_message.await_args.kwargs["content"]
+    assert "Page 2 of" in content and "Part: **QD1**" in content, "the pick from page 1 is still named"
+    assert "✅" not in content, "it isn't marked on a page it isn't on"
+    prev, nxt = _page_buttons(view)
+    assert not prev.disabled
+
+
+def test_a_single_page_has_no_page_buttons():
+    view = _paged_view(3)
+    assert len(view.pages) == 1 and _page_buttons(view) == []
+    assert "Page 1 of" not in view.text()

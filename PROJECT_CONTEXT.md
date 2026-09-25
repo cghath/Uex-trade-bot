@@ -2946,6 +2946,39 @@ they're in sync).
     available, and it's the same 200 HP on every rack. Real messages still land at
     1,450-1,650 chars.
 
+85. **`/ship-parts-finder` pages its list and ranks each category by its key stat.** Live
+    feedback on a Perseus quantum-drive list: only 7 of 12 parts fit in one message, and
+    the rest were only reachable through the dropdown. It was worse than it looked: each
+    slot was also capped at 15 parts, so in the biggest slots (about 25 sold S2 guns, 19 S1
+    coolers) some parts weren't in the dropdown either. The owner picked page buttons from
+    mockups, over two columns (phones stack them), one-liners for the overflow, or one
+    long embed. Worries raised when choosing: a slot too big for any single page, and the
+    dropdown's 25-option limit.
+    - **Pages** (`paginate_parts`, `bot/uex/ship_part_display.py`): whole parts in ranked
+      order, at most 6 per page (`PAGE_SIZE`). A page also stops early if the next part
+      would pass the 1,350-char list budget. Room for the one "Selected" note is reserved
+      on every page, so picking a part never reflows the pages. Previous/Next sit beside
+      "Lock in selected part", with "Page N of M" under the list. The 15-part cap
+      (`MAX_CANDIDATES_SHOWN`) is gone. Every fitting part is on some page.
+    - **Dropdown per page**: `_PartSelect` holds only the current page's parts, so it can't
+      hit Discord's 25-option limit however big the slot. A picked part stays picked across
+      pages. The "Selected so far" line keeps naming it, and it's only marked (✅) on its
+      own page.
+    - **Ranking** (`ranking_stat`): highest first by quantum speed (drive speed), power
+      generation, cooling, shield HP, DPS (burst), radar aim assist range, gun mount max
+      gun size held (then mount count), and missile size (then count). Ties go to the
+      closer shop, then the cheaper one. A part with no wiki detail ranks last. The header
+      says "N parts, best <stat> first". This replaces closest-first, which the owner had
+      accepted before paging made nothing get cut off.
+    - **All details load up front now**, since ranking needs every part's stat. Cold first
+      loads measured 0.2-4.7s per category (Perseus and Avenger Titan, live), then 0s from
+      the 24h cache. To keep a full cache small on the Pi, `DETAIL_CACHE_MAX` went 500 to
+      1,000 and cached details are stripped of fields nothing reads (`_slim_detail`:
+      images, descriptions, shop lists, variants...).
+
+    Measured live: the largest page was 1,521 chars (Discord's limit is 2,000). The Titan's
+    S1 coolers show all 19, where the cap had hidden 4.
+
 ## Where to look for what
 
 Six docs, deliberately scoped so they don't duplicate each other:
