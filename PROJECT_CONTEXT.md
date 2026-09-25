@@ -2839,6 +2839,91 @@ they're in sync).
     (e.g. `ship_name_autocomplete`, `terminal_name_autocomplete`) weren't in the audit's
     scope and still wait without a limit.
 
+83. **`/ship-parts-finder`'s comparison text was rebuilt from mockups, and making it
+    readable exposed that most of what it listed was wrong for the slot.** The owner's
+    verdict on the old text was "looks terrible": each part was one line of raw wiki field names
+    (`max_health: 72000 · decay_ratio: 0.25`), with values every option shared repeated on
+    every line. The owner picked layout "A" from mockups against real shield data and asked
+    for the same treatment per category. New `bot/uex/ship_part_display.py` (pure):
+    - A heading names the slot (`Shield Generators · Shield Generator Left (S1)`, or just
+      `Radar (S1)` when the port name only repeats the category), then an "All options:"
+      line for any stat every part shares.
+    - Each part gets three lines: name · grade · class · maker, then price · shop ·
+      distance, then labeled stats that differ. `part_stats` has one handler per category
+      (weapon, shield, quantum drive, mount, missile rack, radar, power plant, cooler). A
+      shape it doesn't know gets no stats, never a field dump.
+    - Whole parts are shown up to a 1,400-char budget, stopping at the first that doesn't fit
+      (closest-first order kept), plus "+ N more in the dropdown below". The selected part is
+      always shown. Real Avenger Titan messages land at 1,500-1,600 chars.
+    - The shop is "Place (Vendor)" like `/ingame-item-finder`, or "Vendor at Place" when the
+      place already ends in parentheses (`Ship Weapons at Pyro Gateway (Stanton)`).
+
+    **Weapons were unreachable, and are now their own category.** The wiki types every gun
+    hardpoint as `Turret`, and UEX's "Turrets" category is gimbal/spinal mounts, so there was
+    no way to shop for a gun. A Turret port whose `compatible_types` include `WeaponGun`
+    (`ShipPort.accepts_guns`, stored as a new `ship_parts_reference.accepts_guns` column) is
+    now offered under both UEX "Guns" (shown as "Weapons") and "Turrets" (shown as "Gun
+    Mounts"), separately (the owner's call). UEX category names stay the stored keys, so
+    saved entries don't change; `category_label` is display only. Life support was dropped on
+    the owner's call: almost none are sold, and the wiki has no stats to compare.
+
+    **Prices come from UEX's `/items_prices_all`, not the wiki's embedded copy.** That copy
+    was missing for many parts UEX really lists (Stronghold, 7CA 'Nargun', Durango all showed
+    "price unknown"). `cheapest_listing_by_item` picks each part's cheapest shop row, and full
+    terminal names come from `terminal_reference`. Candidates are now priced, located and
+    sorted closest-first before being cut to 15. Previously the cut came first and silently
+    dropped the closest shops (the "filter before truncating" lesson again).
+
+    **UEX's catalog `size` is wrong often enough that it no longer decides fit.** Checked
+    every sold part against the wiki's own size (2026-09-25):
+    - Missile racks: 18 of 19 listed as "6", including the MSD-322, which is really S3. The
+      Avenger Titan's S3 rack slots showed nothing at all.
+    - Guns: 7 of 86 wrong (AD4B Ballistic Gatling listed S1, really S4; Revenant Gatling
+      listed S4, really S3).
+    - Shields: 6 of 41 wrong (GUARD listed S1, but its 72,000 HP is S3-class).
+    - Power plants: 4 of 41 wrong (FullForce Pro listed S1, really S3).
+    - Gun mounts: 9 of 19 wrong, several with no UEX size at all, so never offered.
+    - Coolers: 1 of 52 wrong. Radar: 6 of 56 wrong. Quantum drives: 0 of 44.
+
+    `part_fits_port` uses the wiki's size, with UEX's only as a fallback when the wiki has
+    none (it reports 0 for a few, e.g. IonWave). Missile racks never fall back
+    (`WIKI_SIZE_ONLY_CATEGORIES`). `candidate_items_for_port` now filters by category only.
+    `candidates_for_port` loads wiki detail in closest-first order, a batch at a time, until
+    the limit is filled, so a slot doesn't cost a detail call per sold part in its category.
+    Details (and misses) are cached 24h.
+
+    **Radars mostly had no wiki detail, because UEX's uuid for them doesn't exist on the
+    wiki.** The same name does resolve, so `WikiApiClient.find_item_detail_by_name` is the
+    fallback. It takes a single exact, case-insensitive match only, the same rule as
+    `get_vehicle_ports`, because `filter[name]` matches substrings. A name with several exact
+    matches returns None rather than a guess.
+
+    **Size alone offered other ships' own turrets.** An S4 Avenger nose was offered the
+    "Reliant Toshima Turret" and the "Drake Buccaneer Spinal Mount". Wiki items carry
+    `required_tags` (`MISC_Reliant_Base`), and a ship carries `port_tags`
+    (`AEGS_Avenger_Base`, via new `WikiApiClient.get_vehicle_loadout`, stored space-separated
+    in a new `ship_parts_reference.port_tags` column). `tags_allow` applies the game's own
+    rule: every required tag must be present.
+
+    That rule then hid the generic VariPuck S4 too. UEX's uuid for "VariPuck S4 Gimbal
+    Mount" is the wiki's Polaris-only variant, one of six wiki items with that exact name
+    (generic, Polaris, M80, Wolf, Intrepid, Stinger). So a part that fails the tag check gets
+    every same-named variant (`find_item_variants_by_name`; the list rows are full records),
+    and `pick_fitting_variant` swaps in an unrestricted one, else one this ship's tags allow.
+    That also replaces the wrong variant's stats.
+
+    **Some ships had no slots at all, because of name mismatches.** The wiki names some ships
+    with their maker ("MISC Reliant Tana", "MISC Freelancer") where UEX's `name` doesn't.
+    `_wiki_ports` retries with UEX's `name_full`, which recovers 21 of the 88 UEX ships the
+    wiki didn't match by name. Most of the other 67 are concept ships or special editions the
+    wiki's game data doesn't have.
+
+    **After deploy:** existing `ship_parts_reference` rows get `accepts_guns=0` and
+    `port_tags=''` from the ALTERs until the startup/daily refresh rewrites them. Until then
+    there's no Weapons category, and ship-specific parts are hidden (never wrongly offered).
+    Still not in `PATCH_NOTES.md` or the Trading Console artifact, per the owner: the finder
+    isn't announced until they say it's ready.
+
 ## Where to look for what
 
 Six docs, deliberately scoped so they don't duplicate each other:

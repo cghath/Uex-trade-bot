@@ -765,7 +765,7 @@ CREATE TABLE IF NOT EXISTS command_usage_by_user (
 -- Ship Parts Finder (/ship-parts-finder, registered and deployed to production, still being
 -- refined): one row per (ship, hardpoint) - daily-refreshed reference data bridging a
 -- ship's real component slots (sourced from the Star Citizen Wiki API - UEX has no
--- equivalent) to UEX's own item catalog by category+size. Replaced wholesale per ship on
+-- equivalent) to UEX's own item catalog by category (fit checked against the wiki's own size). Replaced wholesale per ship on
 -- each collector run, same "never patch reference data in place" convention as
 -- terminal_reference/commodity_reference above.
 CREATE TABLE IF NOT EXISTS ship_parts_reference (
@@ -775,6 +775,9 @@ CREATE TABLE IF NOT EXISTS ship_parts_reference (
     port_type TEXT NOT NULL,
     size_min INTEGER NOT NULL,
     size_max INTEGER NOT NULL,
+    accepts_guns INTEGER NOT NULL DEFAULT 0,
+    -- Space-separated ship + port tags a ship-specific part's required_tags must match.
+    port_tags TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (id_vehicle, port_name)
 );
 CREATE INDEX IF NOT EXISTS idx_ship_parts_reference_vehicle_name ON ship_parts_reference (vehicle_name);
@@ -1261,6 +1264,12 @@ class Database:
             # command_usage_by_user shipped without this column - added so the owner can
             # recognize who to reach out to for feedback, not just see a use count.
             "ALTER TABLE command_usage_by_user ADD COLUMN username TEXT NOT NULL DEFAULT ''",
+            # Whether a ship_parts_reference port also takes a gun directly (the wiki lists
+            # WeaponGun in a gun hardpoint's compatible_types), so /ship-parts-finder can
+            # offer Weapons as well as Gun mounts for it. 0 on old rows until the daily
+            # reference refresh (which also runs at startup) rewrites every ship.
+            "ALTER TABLE ship_parts_reference ADD COLUMN accepts_guns INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE ship_parts_reference ADD COLUMN port_tags TEXT NOT NULL DEFAULT ''",
         ]
         for statement in migrations:
             try:
@@ -4374,15 +4383,17 @@ class Database:
     async def replace_ship_parts_reference(self, id_vehicle: int, vehicle_name: str, ports: list[dict]) -> None:
         """Wholesale replace one ship's port rows in one transaction - never a patch-in-place,
         so a failed or partial collector run for this ship can't leave a half-old, half-new
-        mix. Each port dict needs name/port_type/size_min/size_max (matches
-        bot.uex.ship_parts.ShipPort's fields)."""
+        mix. Each port dict needs name/port_type/size_min/size_max and optionally
+        accepts_guns and port_tags, a list (matches bot.uex.ship_parts.ShipPort's fields)."""
         async with self.connect() as db:
             await db.execute("DELETE FROM ship_parts_reference WHERE id_vehicle=?", (id_vehicle,))
             await db.executemany(
-                """INSERT INTO ship_parts_reference (id_vehicle, vehicle_name, port_name, port_type, size_min, size_max)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
+                """INSERT INTO ship_parts_reference
+                   (id_vehicle, vehicle_name, port_name, port_type, size_min, size_max, accepts_guns, port_tags)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                 [
-                    (id_vehicle, vehicle_name, port["name"], port["port_type"], port["size_min"], port["size_max"])
+                    (id_vehicle, vehicle_name, port["name"], port["port_type"], port["size_min"], port["size_max"],
+                     1 if port.get("accepts_guns") else 0, " ".join(port.get("port_tags") or []))
                     for port in ports
                 ],
             )

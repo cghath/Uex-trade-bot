@@ -84,6 +84,14 @@ date - no open item, nothing to record here.
       `cog_load` cache pre-load in both cogs. Port the item-finder half if aiv2 has
       `/ingame-item-finder`. The same PR's `ship_parts_shopping_entries` migration only
       matters if aiv2 ever ported `/ship-parts-finder`. See PROJECT_CONTEXT.md entry 82.
+- [ ] PR #60 - `/ship-parts-finder`'s
+      comparison text is rebuilt (new `bot/uex/ship_part_display.py`), with a Weapons
+      category. Fit is now decided by the wiki's size and tags instead of UEX's catalog size
+      (wrong for 18/19 missile racks, 7/86 guns, 6/41 shields). Relevant to aiv2 only if it
+      ever ports `/ship-parts-finder`. The reusable parts are new `WikiApiClient` methods
+      `get_vehicle_loadout`/`find_item_detail_by_name`/`find_item_variants_by_name`
+      (`bot/wiki_api.py`) and two new `ship_parts_reference` columns (`bot/db/database.py`).
+      See PROJECT_CONTEXT.md entry 83
 
 ## To port: aiv2 -> production
 

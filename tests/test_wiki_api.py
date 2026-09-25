@@ -298,3 +298,41 @@ def test_item_detail_rejects_a_mismatched_or_missing_identity():
     h2 = _Harness(lambda req, n: httpx.Response(200, json={"data": [1]}))
     with pytest.raises(WikiApiError):
         h2.run(lambda c: c.get_item_detail(UUID))
+
+
+def test_vehicle_loadout_also_returns_the_ships_own_port_tags():
+    row = dict(_vehicle("Avenger Titan", [{"name": "hp"}]), port_tags=["AEGS_Avenger_Base", 3])
+    h = _Harness(lambda req, n: httpx.Response(200, json={"data": [row]}))
+    assert h.run(lambda c: c.get_vehicle_loadout("Avenger Titan")) == ([{"name": "hp"}], ["AEGS_Avenger_Base"])
+    h_none = _Harness(lambda req, n: httpx.Response(200, json={"data": []}))
+    assert h_none.run(lambda c: c.get_vehicle_loadout("Avenger Titan")) == ([], [])
+
+
+# -- find_item_variants_by_name / find_item_detail_by_name -------------------------------------
+
+OTHER_UUID = "22222222-2222-4222-8222-222222222222"
+
+
+def test_item_variants_are_every_exact_name_match_only():
+    rows = [{"uuid": UUID, "name": "VariPuck S4 Gimbal Mount", "required_tags": []},
+            {"uuid": OTHER_UUID, "name": "VariPuck S4 Gimbal Mount", "required_tags": ["RSI_Polaris"]},
+            {"uuid": "x", "name": "VariPuck S4 Gimbal Mount Pro"}]
+    h = _Harness(lambda req, n: httpx.Response(200, json={"data": rows}))
+    variants = h.run(lambda c: c.find_item_variants_by_name("variPuck s4 gimbal mount"))
+    assert [v["uuid"] for v in variants] == [UUID, OTHER_UUID]
+    assert h.run(lambda c: c.find_item_variants_by_name("  ")) == []
+
+
+def test_item_detail_by_name_needs_exactly_one_exact_match():
+    def handler(req, n):
+        if req.url.path.endswith("/items"):
+            name = req.url.params["filter[name]"]
+            rows = {"Fleming": [{"uuid": UUID, "name": "Fleming"}, {"uuid": "y", "name": "Fleming Pro"}],
+                    "VariPuck": [{"uuid": UUID, "name": "VariPuck"}, {"uuid": OTHER_UUID, "name": "VariPuck"}]}
+            return httpx.Response(200, json={"data": rows.get(name, [])})
+        return httpx.Response(200, json={"data": {"uuid": UUID, "name": "Fleming", "type": "Radar"}})
+
+    h = _Harness(handler)
+    assert h.run(lambda c: c.find_item_detail_by_name("Fleming"))["type"] == "Radar"
+    assert h.run(lambda c: c.find_item_detail_by_name("VariPuck")) is None, "two same-named items: no guess"
+    assert h.run(lambda c: c.find_item_detail_by_name("Nothing")) is None

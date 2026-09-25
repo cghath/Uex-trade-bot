@@ -75,6 +75,45 @@ def test_an_old_category_keyed_entries_table_is_migrated_to_the_port_name_key(tm
     asyncio.run(run())
 
 
+def test_ship_parts_reference_stores_gun_compatibility_and_tags(tmp_path):
+    async def run():
+        db, _ = _db(tmp_path)
+        await db.init()
+        await db.replace_ship_parts_reference(100, "Avenger Titan", [
+            {"name": "hp_nose", "port_type": "Turret", "size_min": 4, "size_max": 4,
+             "accepts_guns": True, "port_tags": ["AEGS_Avenger_Base", "Nose_Tag"]},
+            {"name": "hp_power", "port_type": "PowerPlant", "size_min": 1, "size_max": 1},
+        ])
+        return {row["port_name"]: row for row in await db.get_ship_parts_reference(100)}
+
+    rows = asyncio.run(run())
+    assert rows["hp_nose"]["accepts_guns"] == 1 and rows["hp_nose"]["port_tags"] == "AEGS_Avenger_Base Nose_Tag"
+    assert rows["hp_power"]["accepts_guns"] == 0 and rows["hp_power"]["port_tags"] == ""
+
+
+def test_an_existing_ship_parts_reference_table_gains_the_new_columns(tmp_path):
+    import sqlite3
+
+    async def run():
+        db, path = _db(tmp_path)
+        # The table as the previous release created it, with one collected row.
+        con = sqlite3.connect(path)
+        con.execute("""CREATE TABLE ship_parts_reference (
+            id_vehicle INTEGER NOT NULL, vehicle_name TEXT NOT NULL, port_name TEXT NOT NULL,
+            port_type TEXT NOT NULL, size_min INTEGER NOT NULL, size_max INTEGER NOT NULL,
+            PRIMARY KEY (id_vehicle, port_name))""")
+        con.execute("INSERT INTO ship_parts_reference VALUES (100, 'Avenger Titan', 'hp_nose', 'Turret', 4, 4)")
+        con.commit()
+        con.close()
+        await db.init()
+        return await db.get_ship_parts_reference(100)
+
+    [row] = asyncio.run(run())
+    # Until the next collector run rewrites it: no gun category, and no tags - which only
+    # ever hides ship-specific parts, never offers one that doesn't fit.
+    assert row["accepts_guns"] == 0 and row["port_tags"] == ""
+
+
 def test_ship_parts_entries_lock_one_slot_per_ship_per_port_and_survive_restart(tmp_path):
     async def run():
         db, path = _db(tmp_path)
