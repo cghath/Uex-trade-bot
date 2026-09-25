@@ -2928,7 +2928,7 @@ they're in sync).
     After entry 83's layout A shipped, each category was mocked up with live Avenger Titan
     data twice, as it was and with extra wiki stats, and the owner picked one per
     category. `part_stats` (`bot/uex/ship_part_display.py`) now adds:
-    - Weapons: damage per shot, fire rate and projectile speed (`vehicle_weapon.
+    - Weapons: alpha (damage per shot, later labelled "alpha" on request), fire rate and projectile speed (`vehicle_weapon.
       damage.alpha_total`, `rpm`, `ammunition.speed`). Burst DPS alone hid that the M6A
       Cannon hits 615 per shot at 100 rpm while the AD4B Gatling hits 84 at 900 rpm.
     - Radar: cooldown (lifted into the header when every option shares it), EM

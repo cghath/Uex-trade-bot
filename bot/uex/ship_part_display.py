@@ -68,11 +68,12 @@ def _weapon_stats(weapon: dict) -> list[Stat]:
     capacity = _number(weapon.get("capacity"))
     if capacity:
         stats.append(("ammo", f"{capacity:,.0f} rounds"))
-    # Burst DPS alone hides how differently guns hit: the M6A Cannon does 615 per shot at
-    # 100 rpm, the AD4B Gatling 84 per shot at 900 rpm.
+    # Burst DPS alone hides how differently guns hit: the M6A Cannon's alpha (damage per
+    # shot) is 615 at 100 rpm, the AD4B Gatling's 84 at 900 rpm. Labelled "alpha", the
+    # word players use, at the owner's request.
     alpha = _number(damage.get("alpha_total"))
     if alpha:
-        stats.append(("alpha", f"{alpha:,.0f} per shot"))
+        stats.append(("alpha", f"{alpha:,.0f} alpha"))
     rpm = _number(weapon.get("rpm"))
     if rpm:
         stats.append(("rpm", f"{rpm:,.0f} rpm"))

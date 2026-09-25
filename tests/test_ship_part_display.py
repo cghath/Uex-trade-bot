@@ -53,7 +53,7 @@ def test_weapon_extras_are_per_shot_fire_rate_and_projectile_speed():
                                  "damage": {"burst": 1026.0, "alpha_total": 615.3, "dps": {"energy": 1026.0}},
                                  "ammunition": {"speed": 1152}}}
     assert [t for _, t in part_stats(detail)] == [
-        "Laser cannon", "energy", "1,026 DPS", "2,799 m range", "615 per shot", "100 rpm", "1,152 m/s"]
+        "Laser cannon", "energy", "1,026 DPS", "2,799 m range", "615 alpha", "100 rpm", "1,152 m/s"]
 
 
 def test_shield_extras_are_signature_reserve_and_regen_delay():
