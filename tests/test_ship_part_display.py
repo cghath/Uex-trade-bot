@@ -37,9 +37,60 @@ def test_quantum_drive_stats_skip_the_raw_jump_range_sentinel():
         "travel_time_10gm": {"formatted": "1:09"},
     }}
     texts = [text for _, text in part_stats(detail)]
-    assert texts == ["188.3 Mm/s", "10 Gm in 1:09", "spools in 5.3s", "12.5s cooldown", "0.005 SCU/Gm fuel",
-                     "unlimited jump range"]
+    # Fuel use left out on the owner's call: 0.005 SCU/Gm on every S1 drive.
+    assert texts == ["188.3 Mm/s", "10 Gm in 1:09", "spools in 5.3s", "12.5s cooldown", "unlimited jump range"]
     assert not any("e+38" in text for text in texts)
+
+
+# -- the extras the owner picked per category from mockups ---------------------------------
+
+def test_weapon_extras_are_per_shot_fire_rate_and_projectile_speed():
+    detail = {"vehicle_weapon": {"type": "Laser Cannon", "range": 2799, "rpm": 100,
+                                 "damage": {"burst": 1026.0, "alpha_total": 615.3, "dps": {"energy": 1026.0}},
+                                 "ammunition": {"speed": 1152}}}
+    assert [t for _, t in part_stats(detail)] == [
+        "Laser cannon", "energy", "1,026 DPS", "2,799 m range", "615 per shot", "100 rpm", "1,152 m/s"]
+
+
+def test_shield_extras_are_signature_reserve_and_regen_delay():
+    detail = _shield("Cloak", 2244, 404, 5.5, emission={"em_max": 250, "ir": 0})
+    detail["shield"].update(reserve_pool={"regen_rate": 1010}, regen_delay={"damage": 3.85, "downed": 11})
+    texts = [t for _, t in part_stats(detail)]
+    assert texts[-3:] == ["EM 250", "reserve 1,010/s", "regen after 3.9s"]
+    assert "IR 0" not in texts, "IR is only shown for coolers"
+
+
+def test_signature_and_component_hp_extras_per_category():
+    sig = {"emission": {"em_max": 5250, "ir": 4000}, "durability": {"health": 220}}
+    power = dict(sig, type="PowerPlant", power_plant={"power_segment_generation": 14})
+    cooler = dict(sig, type="Cooler", cooler={"coolant_segment_generation": 26})
+    radar = dict(sig, type="Radar", radar={"cooldown": 2.5, "aim_assist": {}})
+    qd = dict(sig, type="QuantumDrive", quantum_drive={"standard_jump": {"drive_speed_formatted": "259.1 Mm/s"}})
+    assert [t for _, t in part_stats(power)] == ["14 power segments", "EM 5,250", "220 HP"]
+    assert [t for _, t in part_stats(cooler)] == ["26 cooling segments", "IR 4,000", "EM 5,250", "220 HP"]
+    assert [t for _, t in part_stats(radar)] == ["2.5s cooldown", "EM 5,250", "220 HP"]
+    assert [t for _, t in part_stats(qd)] == ["259.1 Mm/s", "EM 5,250"], "no component HP for quantum drives"
+
+
+def test_a_zero_signature_is_shown_but_a_missing_one_isnt():
+    power = {"type": "PowerPlant", "power_plant": {"power_segment_generation": 14}, "emission": {"em_max": 0}}
+    assert [t for _, t in part_stats(power)] == ["14 power segments", "EM 0"]
+    power["emission"] = None
+    assert [t for _, t in part_stats(power)] == ["14 power segments"]
+
+
+def test_mounts_and_racks_get_no_extras():
+    extras = {"emission": {"em_max": 100}, "durability": {"health": 1650}}
+    mount = dict(extras, type="Turret", turret={"mounts": 1, "min_size": 4, "max_size": 4})
+    rack = dict(extras, type="MissileLauncher", sub_type="MissileRack", missile_rack={"missile_count": 2, "missile_size": 2})
+    assert [t for _, t in part_stats(mount)] == ["Holds 1× S4 gun"]
+    assert [t for _, t in part_stats(rack)] == ["Holds 2× S2 missiles"]
+
+
+def test_an_identical_radar_cooldown_moves_to_the_header():
+    radars = [{"name": n, "size": 1, "type": "Radar", "radar": {"cooldown": 2.5}, "emission": {"em_max": em}}
+              for n, em in (("Fleming", 1760), ("Capston", 1600))]
+    assert shared_stats(radars) == ["S1", "2.5s cooldown"]
 
 
 def test_mount_rack_power_and_cooler_stats():
