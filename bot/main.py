@@ -47,6 +47,7 @@ INITIAL_COGS = (
     "bot.cogs.blueprints",
     "bot.cogs.item_finder",
     "bot.cogs.ship_parts_finder",
+    "bot.cogs.ship_shops",
 )
 
 
