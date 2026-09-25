@@ -64,7 +64,7 @@ date - no open item, nothing to record here.
       deliberately does NOT fall back to the full catalog the way Marketplace's
       `traded_item_autocomplete` does, since an item missing here means it's genuinely not
       sold anywhere, not just a gap in the bot's own tracking
-- [ ] PR #TBD (branch `feature/where-to-buy-ship` - fill in the number once opened) - Add
+- [ ] PR #58 - Add
       `/where-to-buy-ship`: every in-game terminal that sells or rents one ship, aUEC prices
       cheapest first, rentals grouped per star system and labelled as the 1-day rate. No
       location option or distance sort, deliberately (only 7 terminals sell ships). A buy or
