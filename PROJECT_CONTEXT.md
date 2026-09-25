@@ -2924,6 +2924,28 @@ they're in sync).
     Still not in `PATCH_NOTES.md` or the Trading Console artifact, per the owner: the finder
     isn't announced until they say it's ready.
 
+84. **Per-category extra stats for `/ship-parts-finder`, picked by the owner from mockups.**
+    After entry 83's layout A shipped, each category was mocked up with live Avenger Titan
+    data twice, as it was and with extra wiki stats, and the owner picked one per
+    category. `part_stats` (`bot/uex/ship_part_display.py`) now adds:
+    - Weapons: damage per shot, fire rate and projectile speed (`vehicle_weapon.
+      damage.alpha_total`, `rpm`, `ammunition.speed`). Burst DPS alone hid that the M6A
+      Cannon hits 615 per shot at 100 rpm while the AD4B Gatling hits 84 at 900 rpm.
+    - Radar: cooldown (lifted into the header when every option shares it), EM
+      signature and component HP.
+    - Power plants: EM signature and component HP. Coolers: IR and EM signature (coolers
+      are the main IR source) and component HP.
+    - Shields: EM signature, reserve pool regen rate, and the delay before regen restarts
+      after a hit (`shield.regen_delay.damage`).
+    - Quantum drives: EM signature. Fuel use was dropped, since it's 0.005 SCU/Gm on every
+      S1 drive.
+
+    Signature is `emission.em_max` / `emission.ir`, and component HP is
+    `durability.health`. A zero signature is shown (worth seeing), a missing one isn't.
+    Gun mounts and missile racks stay as they were: component HP was the only extra
+    available, and it's the same 200 HP on every rack. Real messages still land at
+    1,450-1,650 chars.
+
 ## Where to look for what
 
 Six docs, deliberately scoped so they don't duplicate each other:

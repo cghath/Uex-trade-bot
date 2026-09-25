@@ -92,6 +92,10 @@ date - no open item, nothing to record here.
       `get_vehicle_loadout`/`find_item_detail_by_name`/`find_item_variants_by_name`
       (`bot/wiki_api.py`) and two new `ship_parts_reference` columns (`bot/db/database.py`).
       See PROJECT_CONTEXT.md entry 83
+- [ ] PR #61 - `/ship-parts-finder` per-category extra stats (weapon per shot/rpm/
+      projectile speed; signature and component HP for radar, power plants, coolers,
+      shields and quantum drives), all in `bot/uex/ship_part_display.py`. Only relevant
+      if aiv2 ever ports `/ship-parts-finder`. See PROJECT_CONTEXT.md entry 84
 
 ## To port: aiv2 -> production
 

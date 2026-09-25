@@ -68,6 +68,18 @@ def _weapon_stats(weapon: dict) -> list[Stat]:
     capacity = _number(weapon.get("capacity"))
     if capacity:
         stats.append(("ammo", f"{capacity:,.0f} rounds"))
+    # Burst DPS alone hides how differently guns hit: the M6A Cannon does 615 per shot at
+    # 100 rpm, the AD4B Gatling 84 per shot at 900 rpm.
+    alpha = _number(damage.get("alpha_total"))
+    if alpha:
+        stats.append(("alpha", f"{alpha:,.0f} per shot"))
+    rpm = _number(weapon.get("rpm"))
+    if rpm:
+        stats.append(("rpm", f"{rpm:,.0f} rpm"))
+    ammunition = weapon.get("ammunition") if isinstance(weapon.get("ammunition"), dict) else {}
+    speed = _number(ammunition.get("speed"))
+    if speed:
+        stats.append(("projectile_speed", f"{speed:,.0f} m/s"))
     return stats
 
 
@@ -87,6 +99,15 @@ def _shield_stats(block: dict) -> list[Stat]:
     decay = _number(block.get("decay_ratio"))
     if decay is not None:
         stats.append(("decay", f"decay {decay:.0%}"))
+    reserve = block.get("reserve_pool") if isinstance(block.get("reserve_pool"), dict) else {}
+    reserve_regen = _number(reserve.get("regen_rate"))
+    if reserve_regen:
+        stats.append(("reserve", f"reserve {reserve_regen:,.0f}/s"))
+    # regen_delay.damage: seconds after taking a hit before regen starts again.
+    delay = block.get("regen_delay") if isinstance(block.get("regen_delay"), dict) else {}
+    after_hit = _number(delay.get("damage"))
+    if after_hit:
+        stats.append(("regen_delay", f"regen after {after_hit:.1f}s"))
     return stats
 
 
@@ -104,9 +125,8 @@ def _quantum_stats(block: dict) -> list[Stat]:
     cooldown = _number(jump.get("cooldown_time"))
     if cooldown:
         stats.append(("cooldown", f"{cooldown:.1f}s cooldown"))
-    fuel = _number(block.get("fuel_consumption_scu_per_gm"))
-    if fuel:
-        stats.append(("fuel", f"{fuel:g} SCU/Gm fuel"))
+    # Fuel use (fuel_consumption_scu_per_gm) is left out on the owner's call: it's 0.005
+    # SCU/Gm on every S1 drive, so it only lengthened every line.
     # jump_range's raw value is float32's max used as a "no limit" sentinel; the
     # _formatted sibling already reads "Unlimited".
     if block.get("jump_range_formatted"):
@@ -149,31 +169,62 @@ def _radar_stats(block: dict) -> list[Stat]:
     values = {_number(sensitivity.get(k)) for k in ("infrared", "electromagnetic", "cross_section")}
     if len(values) == 1 and None not in values:
         stats.append(("sensitivity", f"sensitivity {values.pop():g}"))
+    cooldown = _number(block.get("cooldown"))
+    if cooldown:
+        stats.append(("radar_cooldown", f"{cooldown:g}s cooldown"))
     return stats
+
+
+def _signature_stats(detail: dict, *, ir: bool = False) -> list[Stat]:
+    """EM (and optionally IR) signature from the wiki's `emission` block: how visible the
+    part makes the ship. 0 is shown, since a zero-signature part is worth seeing."""
+    emission = detail.get("emission") if isinstance(detail.get("emission"), dict) else {}
+    stats: list[Stat] = []
+    if ir and _number(emission.get("ir")) is not None:
+        stats.append(("ir", f"IR {_number(emission.get('ir')):,.0f}"))
+    if _number(emission.get("em_max")) is not None:
+        stats.append(("em", f"EM {_number(emission.get('em_max')):,.0f}"))
+    return stats
+
+
+def _component_hp(detail: dict) -> list[Stat]:
+    durability = detail.get("durability") if isinstance(detail.get("durability"), dict) else {}
+    health = _number(durability.get("health"))
+    return [("component_hp", f"{health:,.0f} HP")] if health else []
 
 
 def part_stats(detail: dict) -> list[Stat]:
     """(stable key, labeled text) pairs for one candidate, in display order. The key lets
     a stat identical across every option be lifted into the header once. A category or
-    field shape this doesn't know gets no stats rather than a raw field dump."""
+    field shape this doesn't know gets no stats rather than a raw field dump.
+
+    Which extras each category gets was picked by the owner from mockups: weapons add per
+    shot/rpm/projectile speed; radar, power plants, coolers, shields and quantum drives
+    add signature (coolers IR too, the main IR source); radar, power plants and coolers
+    add the component's own HP. Gun mounts and missile racks stay as they were."""
     if isinstance(detail.get("vehicle_weapon"), dict):
         return _weapon_stats(detail["vehicle_weapon"])
     key, block = _stat_block(detail)
-    handlers = {
-        "shield": _shield_stats,
-        "quantum_drive": _quantum_stats,
-        "turret": _mount_stats,
-        "missile_rack": _rack_stats,
-        "radar": _radar_stats,
-    }
-    if key in handlers:
-        return handlers[key](block)
+    if key == "shield":
+        # Mockup order: the shield's own numbers, then EM, then reserve and regen delay.
+        stats = _shield_stats(block)
+        later = [s for s in stats if s[0] in ("reserve", "regen_delay")]
+        return [s for s in stats if s not in later] + _signature_stats(detail) + later
+    if key == "quantum_drive":
+        return _quantum_stats(block) + _signature_stats(detail)
+    if key == "radar":
+        return _radar_stats(block) + _signature_stats(detail) + _component_hp(detail)
+    if key == "turret":
+        return _mount_stats(block)
+    if key == "missile_rack":
+        return _rack_stats(block)
     power = _number(block.get("power_segment_generation"))
     if key == "power_plant" and power:
-        return [("power", f"{power:.0f} power segments")]
+        return [("power", f"{power:.0f} power segments")] + _signature_stats(detail) + _component_hp(detail)
     cooling = _number(block.get("coolant_segment_generation"))
     if key == "cooler" and cooling:
-        return [("cooling", f"{cooling:.0f} cooling segments")]
+        return ([("cooling", f"{cooling:.0f} cooling segments")] + _signature_stats(detail, ir=True)
+                + _component_hp(detail))
     return []
 
 
