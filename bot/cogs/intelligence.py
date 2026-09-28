@@ -98,6 +98,9 @@ class Intelligence(commands.Cog):
         except (UexApiError, TypeError, ValueError) as exc:
             logger.warning("Fuel snapshot could not determine refuel terminals: %s", exc)
             return
+        except Exception:
+            logger.exception("Fuel snapshot could not determine refuel terminals")
+            return
 
         fuel_rows: list[dict] = []
         for ids in _chunks(terminal_ids, FUEL_BATCH_SIZE):
@@ -105,10 +108,17 @@ class Intelligence(commands.Cog):
                 fuel_rows.extend(await self.bot.uex.get_fuel_prices(id_terminal=",".join(map(str, ids))))
             except UexApiError as exc:
                 logger.info("Fuel snapshot skipped terminal batch %s: %s", ids, exc)
+            except Exception:
+                logger.exception("Fuel snapshot skipped terminal batch %s", ids)
             await asyncio.sleep(FUEL_REQUEST_DELAY_SECONDS)
 
-        changed, total = await self.bot.db.record_fuel_price_snapshot(fuel_rows)
-        logger.info("Fuel-price snapshot: %d changed states across %d rows", changed, total)
+        try:
+            changed, total = await self.bot.db.record_fuel_price_snapshot(fuel_rows)
+            logger.info("Fuel-price snapshot: %d changed states across %d rows", changed, total)
+        except Exception:
+            # Same guard as the other collectors: an uncaught DB error here would stop this
+            # loop until a restart, since tasks.loop only recovers from network errors.
+            logger.exception("Fuel-price snapshot failed unexpectedly")
 
     @snapshot_fuel_prices.before_loop
     async def before_fuel_snapshot(self) -> None:

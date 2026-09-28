@@ -3017,6 +3017,43 @@ they're in sync).
     7, and page 1 holds 6. The page line now says how many more are waiting ("Page 1 of 2 ·
     1 more on the next page").
 
+87. **Every background loop now survives any single failure.** The 2026-09-25 full-project
+    audit (`docs/audits/2026-09-25-full-project-audit.md`, finding REL-3) found nine
+    `@tasks.loop` bodies where a DB call or a data-shaping step sat outside any
+    `try/except`, or was only covered by `except UexApiError`. discord.py restarts a loop
+    only after a narrow set of network errors. So a `sqlite3.OperationalError` ("database
+    is locked" past the 30s busy timeout) or a `TypeError` from an odd UEX row stopped that
+    loop until the next restart, with nothing visible to players. This is the same
+    incident as the earlier `snapshot_item_activity` fix. That fix, and
+    `retry_pending_route_progression_actions`'s guard, were applied per loop and never
+    swept across the rest.
+    - **Loops fixed**:
+      - `poll_alerts`, `poll_stock_alerts`, `post_scheduled_digests`,
+        `poll_marketplace_alerts`, `poll_negotiation_messages`, `poll_scanner`,
+        `poll_abandoned_threads`
+      - `snapshot_fuel_prices`: its final DB write was the only unguarded step among the
+        four collectors.
+      - `refresh_trending`: not in the audit's list, found by grepping every
+        `@tasks.loop`.
+    - **Already fully guarded, left alone**: blueprints, the other three collectors,
+      marketplace, personal inventory, the retry loop, and the ship parts refresh.
+    - **Two layers.**
+      - An outer guard: the loop's body moved into a `_..._once()` helper (or the list
+        fetch got its own try), and anything escaping it is logged and retried next cycle.
+      - A per-item guard around each alert, keyword group, user, negotiation, watcher,
+        guild or stale thread. Without it, one row that fails every time would abort the
+        whole cycle at that row and starve everything queued after it, forever.
+      - The negotiation checkpoint still only advances on success, so a failed negotiation
+        is retried rather than lost.
+    - **Tests**: `tests/test_background_loop_guards.py` starts each real loop with a failure
+      injected into its first step and asserts `not loop.failed()`. It also has three
+      one-bad-item-doesn't-block-the-next cases (price alerts, negotiation users, scanner
+      watchers). All 12 fail against the pre-fix code.
+    - **Out of scope, still open in the audit**: delivery failures still recorded as
+      success in three alert paths (REL-7), and a partial `/top-routes` refresh replacing
+      the good snapshot (REL-5). This change keeps each loop alive; it doesn't change what
+      a cycle does with a failed delivery or a half-failed fetch.
+
 ## Where to look for what
 
 Six docs, deliberately scoped so they don't duplicate each other:

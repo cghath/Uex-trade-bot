@@ -1594,16 +1594,26 @@ class RouteProgression(commands.Cog):
 
     @tasks.loop(hours=ABANDONMENT_POLL_HOURS)
     async def poll_abandoned_threads(self) -> None:
-        stale = await self.bot.db.get_stale_route_progression_threads(older_than_hours=ABANDONMENT_HOURS)
+        try:
+            stale = await self.bot.db.get_stale_route_progression_threads(older_than_hours=ABANDONMENT_HOURS)
+        except Exception:
+            # Same guard as retry_pending_route_progression_actions below: tasks.loop only
+            # recovers from network errors, so an uncaught DB error would stop this loop.
+            logger.exception("Abandonment poll: failed to load stale threads this cycle")
+            return
         for row in stale:
             thread_id = row["thread_id"]
-            channel: discord.abc.MessageableChannel | None
             try:
-                channel = self.bot.get_channel(thread_id) or await self.bot.fetch_channel(thread_id)
-            except discord.HTTPException as exc:
-                logger.info("Couldn't reach thread %s to close it: %s", thread_id, exc)
-                channel = None
-            await self.abandon_thread(channel, thread_id, reason=f"inactive for over {ABANDONMENT_HOURS:g}h")
+                channel: discord.abc.MessageableChannel | None
+                try:
+                    channel = self.bot.get_channel(thread_id) or await self.bot.fetch_channel(thread_id)
+                except discord.HTTPException as exc:
+                    logger.info("Couldn't reach thread %s to close it: %s", thread_id, exc)
+                    channel = None
+                await self.abandon_thread(channel, thread_id, reason=f"inactive for over {ABANDONMENT_HOURS:g}h")
+            except Exception:
+                # Per thread, so one failure can't block every stale thread after it.
+                logger.exception("Abandonment poll: failed to close thread %s this cycle", thread_id)
 
     @tasks.loop(minutes=RECOVERY_POLL_MINUTES)
     async def retry_pending_route_progression_actions(self) -> None:

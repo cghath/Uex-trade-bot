@@ -237,6 +237,15 @@ class Trends(commands.Cog):
 
     @tasks.loop(minutes=TRENDING_REFRESH_MINUTES)
     async def refresh_trending(self) -> None:
+        # Nothing may escape a tasks.loop body: it only restarts itself after a narrow set
+        # of network errors, so anything else would freeze /top-routes and /movers until a
+        # restart.
+        try:
+            await self._refresh_trending_once()
+        except Exception:
+            logger.exception("Trending refresh failed; keeping the previous snapshot until next cycle")
+
+    async def _refresh_trending_once(self) -> None:
         try:
             commodities = await self.bot.uex.get_commodities()
         except UexApiError as exc:
@@ -264,40 +273,44 @@ class Trends(commands.Cog):
             if not rows:
                 continue
 
-            total_trips, avg_volatility = aggregate_commodity_trips(rows)
-            if total_trips > 0:
-                best_sell = max((r.get("price_sell") or 0 for r in rows), default=0)
-                buy_candidates = [r.get("price_buy") or 0 for r in rows if (r.get("price_buy") or 0) > 0]
-                best_buy = min(buy_candidates) if buy_candidates else None
+            # Per commodity, so one commodity's odd rows can't sink the whole refresh.
+            try:
+                total_trips, avg_volatility = aggregate_commodity_trips(rows)
+                if total_trips > 0:
+                    best_sell = max((r.get("price_sell") or 0 for r in rows), default=0)
+                    buy_candidates = [r.get("price_buy") or 0 for r in rows if (r.get("price_buy") or 0) > 0]
+                    best_buy = min(buy_candidates) if buy_candidates else None
 
-                entries.append(
-                    TrendingEntry(
-                        commodity_name=name,
-                        total_trips_15d=total_trips,
-                        avg_volatility=avg_volatility,
-                        best_sell_price=best_sell,
-                        best_buy_price=best_buy,
+                    entries.append(
+                        TrendingEntry(
+                            commodity_name=name,
+                            total_trips_15d=total_trips,
+                            avg_volatility=avg_volatility,
+                            best_sell_price=best_sell,
+                            best_buy_price=best_buy,
+                        )
                     )
-                )
 
-            # Top-routes gathering, independent of trending trip volume - a commodity
-            # can have zero recent trade trips and still have real stock and a good score.
-            id_commodity = rows[0].get("id_commodity")
-            if id_commodity is not None:
-                try:
-                    route_rows = await self.bot.uex.get_commodities_routes(id_commodity=id_commodity)
-                except UexApiError as exc:
-                    logger.info("Skipping %s in top-routes refresh: %s", name, exc)
-                    route_rows = []
-                else:
-                    # Every qualifying route for this commodity, not just the top-scored
-                    # one - so a later auto-load-only/system filter has a same-commodity
-                    # alternative to fall back to instead of the commodity vanishing.
-                    route_candidates.extend(select_available_routes(name, id_commodity, route_rows))
-                    # Same route_rows, no extra API call - just a stricter filter requiring
-                    # real demand at the destination too, not just stock at the origin.
-                    in_stock_route_candidates.extend(select_in_stock_routes(name, id_commodity, route_rows))
-                await asyncio.sleep(_TRENDING_CALL_DELAY)
+                # Top-routes gathering, independent of trending trip volume - a commodity
+                # can have zero recent trade trips and still have real stock and a good score.
+                id_commodity = rows[0].get("id_commodity")
+                if id_commodity is not None:
+                    try:
+                        route_rows = await self.bot.uex.get_commodities_routes(id_commodity=id_commodity)
+                    except UexApiError as exc:
+                        logger.info("Skipping %s in top-routes refresh: %s", name, exc)
+                        route_rows = []
+                    else:
+                        # Every qualifying route for this commodity, not just the top-scored
+                        # one - so a later auto-load-only/system filter has a same-commodity
+                        # alternative to fall back to instead of the commodity vanishing.
+                        route_candidates.extend(select_available_routes(name, id_commodity, route_rows))
+                        # Same route_rows, no extra API call - just a stricter filter requiring
+                        # real demand at the destination too, not just stock at the origin.
+                        in_stock_route_candidates.extend(select_in_stock_routes(name, id_commodity, route_rows))
+                    await asyncio.sleep(_TRENDING_CALL_DELAY)
+            except Exception:
+                logger.exception("Skipping %s in trending refresh: unexpected data", name)
 
         ranked = rank_trending(entries, limit=TRENDING_KEEP_TOP)
         async with self._trending_lock:

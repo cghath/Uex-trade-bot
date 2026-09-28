@@ -87,6 +87,14 @@ class StockAlerts(commands.Cog):
 
     @tasks.loop(minutes=POLL_INTERVAL_MINUTES)
     async def poll_stock_alerts(self) -> None:
+        # Nothing may escape a tasks.loop body: it only restarts itself after a narrow set
+        # of network errors, so anything else would stop this poller until a restart.
+        try:
+            await self._poll_stock_alerts_once()
+        except Exception:
+            logger.exception("Stock alert poll failed; retrying next cycle")
+
+    async def _poll_stock_alerts_once(self) -> None:
         alerts = await self.bot.db.list_active_stock_alerts()
         if not alerts:
             return
@@ -109,33 +117,41 @@ class StockAlerts(commands.Cog):
             if not rows:
                 continue
 
-            current = compute_terminal_availability(rows)
+            try:
+                current = compute_terminal_availability(rows)
+            except (AttributeError, KeyError, TypeError, ValueError) as exc:
+                logger.warning("Skipping stock alerts for %s: unexpected price rows (%s)", commodity_name, exc)
+                continue
 
             for alert in commodity_alerts:
-                previous_state = await self.bot.db.get_stock_alert_terminal_state(alert["id"])
-                to_notify, new_state = detect_restocks(current, previous_state)
+                # Per alert, so one alert's failure can't block every alert queued after it.
+                try:
+                    previous_state = await self.bot.db.get_stock_alert_terminal_state(alert["id"])
+                    to_notify, new_state = detect_restocks(current, previous_state)
 
-                for id_terminal, state in new_state.items():
-                    await self.bot.db.upsert_stock_alert_terminal_state(
-                        alert["id"], id_terminal, state["was_available"], state["last_seen_scu"]
-                    )
+                    for id_terminal, state in new_state.items():
+                        await self.bot.db.upsert_stock_alert_terminal_state(
+                            alert["id"], id_terminal, state["was_available"], state["last_seen_scu"]
+                        )
 
-                if not to_notify:
-                    continue
+                    if not to_notify:
+                        continue
 
-                ship_query = alert.get("ship_query") or await self.bot.db.get_default_ship(alert["user_id"])
-                ship_cargo_scu = None
-                if ship_query:
-                    try:
-                        if vehicles_cache is None:
-                            vehicles_cache = await self.bot.uex.get_vehicles()
-                        vehicle = resolve_ship(vehicles_cache, ship_query)
-                        ship_cargo_scu = vehicle.get("scu") if vehicle else None
-                    except UexApiError as exc:
-                        logger.info("Vehicle lookup failed for stock alert #%s: %s", alert["id"], exc)
+                    ship_query = alert.get("ship_query") or await self.bot.db.get_default_ship(alert["user_id"])
+                    ship_cargo_scu = None
+                    if ship_query:
+                        try:
+                            if vehicles_cache is None:
+                                vehicles_cache = await self.bot.uex.get_vehicles()
+                            vehicle = resolve_ship(vehicles_cache, ship_query)
+                            ship_cargo_scu = vehicle.get("scu") if vehicle else None
+                        except UexApiError as exc:
+                            logger.info("Vehicle lookup failed for stock alert #%s: %s", alert["id"], exc)
 
-                for terminal in to_notify:
-                    await self._notify_stock_alert(alert, commodity_name, terminal, ship_cargo_scu)
+                    for terminal in to_notify:
+                        await self._notify_stock_alert(alert, commodity_name, terminal, ship_cargo_scu)
+                except Exception:
+                    logger.exception("Stock alert #%s failed this cycle", alert["id"])
 
     async def _notify_stock_alert(self, alert: dict, commodity_name: str, terminal: dict, ship_cargo_scu: float | None) -> None:
         fit_note = format_cargo_fit_note(terminal["scu_buy"], ship_cargo_scu)

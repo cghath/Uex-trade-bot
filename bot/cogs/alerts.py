@@ -179,6 +179,15 @@ class Alerts(commands.Cog):
 
     @tasks.loop(minutes=POLL_INTERVAL_MINUTES)
     async def poll_alerts(self) -> None:
+        # Nothing may escape a tasks.loop body: it only restarts itself after a narrow set
+        # of network errors, so anything else (a locked database, an odd UEX row) would
+        # stop this poller until the bot restarts.
+        try:
+            await self._poll_alerts_once()
+        except Exception:
+            logger.exception("Price alert poll failed; retrying next cycle")
+
+    async def _poll_alerts_once(self) -> None:
         alerts = await self.bot.db.list_active_alerts()
         if not alerts:
             return
@@ -196,9 +205,13 @@ class Alerts(commands.Cog):
             if not rows:
                 continue
 
-            best_sell = max((r.get("price_sell") or 0 for r in rows), default=0)
-            best_buy_candidates = [r.get("price_buy") or 0 for r in rows if (r.get("price_buy") or 0) > 0]
-            best_buy = min(best_buy_candidates) if best_buy_candidates else None
+            try:
+                best_sell = max((r.get("price_sell") or 0 for r in rows), default=0)
+                best_buy_candidates = [r.get("price_buy") or 0 for r in rows if (r.get("price_buy") or 0) > 0]
+                best_buy = min(best_buy_candidates) if best_buy_candidates else None
+            except (AttributeError, TypeError) as exc:
+                logger.warning("Skipping price alerts for %s: unexpected price rows (%s)", commodity_name, exc)
+                continue
 
             for alert in commodity_alerts:
                 triggered = False
@@ -211,7 +224,10 @@ class Alerts(commands.Cog):
                     detail = f"best buy price is now **{best_buy:.2f} aUEC/unit**"
 
                 if triggered:
-                    await self._fire_alert(alert, detail)
+                    try:
+                        await self._fire_alert(alert, detail)
+                    except Exception:
+                        logger.exception("Failed to fire price alert #%s", alert["id"])
 
     async def _fire_alert(self, alert: dict, detail: str) -> None:
         await self.bot.db.deactivate_alert(alert["id"])

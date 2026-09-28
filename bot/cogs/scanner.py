@@ -115,6 +115,14 @@ class Scanner(commands.Cog):
 
     @tasks.loop(minutes=POLL_INTERVAL_MINUTES)
     async def poll_scanner(self) -> None:
+        # Nothing may escape a tasks.loop body: it only restarts itself after a narrow set
+        # of network errors, so anything else would stop the scanner until a restart.
+        try:
+            await self._poll_scanner_once()
+        except Exception:
+            logger.exception("Scanner poll failed; retrying next cycle")
+
+    async def _poll_scanner_once(self) -> None:
         watchers = await self.bot.db.list_scanner_watchers()
         if not watchers:
             return
@@ -131,20 +139,27 @@ class Scanner(commands.Cog):
         # then fanned out to every watcher's own dedup state, same pattern as
         # marketplace_alerts.py grouping by (keyword, operation) to share one API call.
         for watcher in watchers:
-            user_id = watcher["user_id"]
-            seen_ids = await self.bot.db.get_seen_scanner_listing_ids(user_id)
-            fresh = [s for s in steals if s.listing_id not in seen_ids]
-            if not fresh:
-                continue
+            # Per watcher, so one user's failure can't block everyone after them.
+            try:
+                await self._notify_watcher(watcher, steals)
+            except Exception:
+                logger.exception("Scanner notifications failed for user %s this cycle", watcher.get("user_id"))
 
-            channel = self.bot.get_channel(watcher["channel_id"])
-            if channel is None:
-                logger.warning("Scanner channel %s not resolvable for user %s.", watcher["channel_id"], user_id)
-                continue
+    async def _notify_watcher(self, watcher: dict, steals: list[StealEntry]) -> None:
+        user_id = watcher["user_id"]
+        seen_ids = await self.bot.db.get_seen_scanner_listing_ids(user_id)
+        fresh = [s for s in steals if s.listing_id not in seen_ids]
+        if not fresh:
+            return
 
-            for steal in fresh[:MAX_NOTIFY_PER_USER_PER_POLL]:
-                await self._notify(channel, user_id, steal)
-                await self.bot.db.mark_scanner_listing_seen(user_id, steal.listing_id)
+        channel = self.bot.get_channel(watcher["channel_id"])
+        if channel is None:
+            logger.warning("Scanner channel %s not resolvable for user %s.", watcher["channel_id"], user_id)
+            return
+
+        for steal in fresh[:MAX_NOTIFY_PER_USER_PER_POLL]:
+            await self._notify(channel, user_id, steal)
+            await self.bot.db.mark_scanner_listing_seen(user_id, steal.listing_id)
 
     async def _find_current_steals(self) -> list[StealEntry]:
         """Fetch live sell listings + averages and return every current steal - shared by

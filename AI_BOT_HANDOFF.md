@@ -105,6 +105,14 @@ date - no open item, nothing to record here.
       part's tags (`bot/uex/ship_parts.py`, `bot/cogs/ship_parts_finder.py`, three new
       `ship_parts_reference` columns). Only relevant if aiv2 ever ports `/ship-parts-finder`.
       See PROJECT_CONTEXT.md entry 86
+- [ ] Background loops guarded against any single failure: an outer try/except per loop
+      body plus a per-item guard, in `alerts.py`, `stock_alerts.py`, `digest.py`,
+      `intelligence.py` (`snapshot_fuel_prices`), `marketplace_alerts.py`,
+      `negotiation_alerts.py`, `scanner.py`, `route_progression.py`
+      (`poll_abandoned_threads`) and `trends.py` (`refresh_trending`). aiv2 was cloned from
+      here, so it very likely has the same unguarded loops. Grep its own `@tasks.loop`s
+      too, including any AI-only ones. Test: `tests/test_background_loop_guards.py`.
+      See PROJECT_CONTEXT.md entry 87
 
 ## To port: aiv2 -> production
 
