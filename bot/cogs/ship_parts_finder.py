@@ -15,9 +15,10 @@ size, since UEX's catalog size disagrees with it in almost every category. Price
 missing for many parts UEX really lists. Stats come from the wiki's /items/{uuid} detail;
 a part the wiki has no detail for is still shown, just without stats.
 
-Candidates are priced, located, and sorted closest-first BEFORE being cut to the display
-limit, so the closest shops can't be cut off unseen - the repo's "filter before
-truncating" lesson. Display labels live in bot/uex/ship_part_display.py.
+Each part is shown at its cheapest shop (with that shop's distance from the player's
+location), and the list is ranked by the category's key stat - see candidates_for_port.
+Every fitting part is kept and paged, never cut to a display limit (the repo's "filter
+before truncating" lesson). Display labels live in bot/uex/ship_part_display.py.
 
 An outside audit before merge found four real P2s, all fixed: (1) selecting a category ran
 the full catalog/price/wiki lookup before acknowledging the interaction, risking Discord's
@@ -45,6 +46,7 @@ from bot.cogs.prices import terminal_name_autocomplete
 from bot.cogs.ships import ship_name_autocomplete
 from bot.uex.exceptions import UexApiError, describe_uex_api_error
 from bot.uex.ship_part_display import (
+    LIST_BUDGET_CHARS,
     format_part_page,
     format_port_label,
     list_shared,
@@ -68,7 +70,7 @@ from bot.uex.ship_parts import (
     tags_allow,
 )
 from bot.uex.ships import resolve_ship
-from bot.wiki_api import WikiApiClient, WikiApiError
+from bot.wiki_api import WikiApiClient, WikiApiError, WikiUnavailableError
 
 logger = logging.getLogger("uexbot.ship_parts_finder")
 NO_MENTIONS = discord.AllowedMentions.none()
@@ -81,12 +83,26 @@ DETAIL_CACHE_SECONDS = 24 * 3600
 # cache has to hold them all: about 370 sold parts across the 8 categories, plus
 # name-lookup misses and variant lists. Entries are slimmed first (_slim_detail).
 DETAIL_CACHE_MAX = 1000
+# How long a lookup the wiki didn't answer (an outage, not a real miss) is skipped before
+# being retried - long enough that browsing during an outage doesn't wait on every part
+# again, short enough that the finder recovers minutes after the wiki does.
+WIKI_OUTAGE_RETRY_SECONDS = 5 * 60
 # Wiki detail fields no display or fit check reads - dropped before caching, so a full
 # cache stays small on the Pi.
 _UNUSED_DETAIL_KEYS = frozenset({
     "images", "description", "description_data", "shops", "uex_prices", "blueprint",
     "variants", "entity_tag_map", "entity_tags", "interactions", "dimension", "base_variant",
 })
+class PartCandidates(list):
+    """candidates_for_port's result: the ranked parts, plus how many of the slot's sold
+    parts the wiki didn't answer for. Those have no stats and no fit check, so they may be
+    missing from the list, and the browser says so rather than showing a quietly short one."""
+
+    def __init__(self, parts=(), *, wiki_unavailable: int = 0) -> None:
+        super().__init__(parts)
+        self.wiki_unavailable = wiki_unavailable
+
+
 # One wiki call per candidate item - batched so a slot with many real candidates doesn't
 # serialize dozens of live lookups, same pattern as /ingame-item-finder's _fetch_distances.
 DETAIL_BATCH_SIZE = 8
@@ -433,6 +449,13 @@ class PartsBrowserView(discord.ui.View):
         self.page = 0
         self._header_shared: list[str] = []
         self._shared: list[str] = []
+        # Bumped on every category/slot pick. A load only applies its result if it's still
+        # the latest one - see _load_candidates.
+        self._load_seq = 0
+        # Parts in the current list's slot that the wiki didn't answer for (see PartCandidates).
+        self.parts_unanswered = 0
+        # Turrets whose gun slots are missing because the wiki didn't answer; set by the command.
+        self.turret_guns_unanswered = 0
         self.category_select = _CategorySelect(self)
         self.add_item(self.category_select)
 
@@ -452,8 +475,22 @@ class PartsBrowserView(discord.ui.View):
             parts.append(f"Part: **{name}**" if name else "Part: *(pick below)*")
         return "Selected so far - " + " | ".join(parts)
 
+    def _wiki_notes(self) -> list[str]:
+        """Say when the Star Citizen Wiki didn't answer, since a list built without its data
+        can be short or wrong-sized - otherwise that looks like a real "none for sale"."""
+        notes = []
+        if self.turret_guns_unanswered:
+            notes.append("⚠️ The Star Citizen Wiki didn't respond, so turret guns aren't listed. "
+                         "Try again in a few minutes.")
+        if self.category is not None and self.parts_unanswered:
+            count = f"{self.parts_unanswered} part{'s' if self.parts_unanswered != 1 else ''}"
+            notes.append(f"⚠️ The Star Citizen Wiki didn't respond for {count} here, so they may be missing. "
+                         "Try again in a few minutes.")
+        return notes
+
     def text(self) -> str:
-        header = f"**{self.vehicle.get('name')}** parts - pick a category to compare real options."
+        header = "\n".join([f"**{self.vehicle.get('name')}** parts - pick a category to compare real options.",
+                            *self._wiki_notes()])
         if self.category is None:
             return header
         summary = self._selection_summary()
@@ -486,7 +523,9 @@ class PartsBrowserView(discord.ui.View):
         port = self.selected_port
         fixed = port.size_min if port is not None and port.size_min == port.size_max else None
         self._header_shared, self._shared = list_shared(candidates, fixed)
-        self.pages = paginate_parts(candidates, shared=self._shared)
+        # Any outage note shares the message's 2,000-char limit, so it comes out of the list's budget.
+        notes = sum(len(note) + 1 for note in self._wiki_notes())
+        self.pages = paginate_parts(candidates, shared=self._shared, budget=LIST_BUDGET_CHARS - notes)
         self.page = 0
         self._show_page()
 
@@ -511,9 +550,11 @@ class PartsBrowserView(discord.ui.View):
             self.remove_item(child)
 
     async def show_category(self, interaction: discord.Interaction, category: str) -> None:
+        self._load_seq += 1  # supersedes any load still running for the previous pick
         self.category = category
         self.selected_port = None
         self.selected_candidate = None
+        self.parts_unanswered = 0
         self._set_candidates([])
         self._remove_items(_SlotSelect, _PartSelect, _PageButton)
         ports = self.grouped_ports.get(category, [])
@@ -532,7 +573,13 @@ class PartsBrowserView(discord.ui.View):
         # fetch plus batched wiki detail calls can exceed Discord's 3s component-interaction
         # deadline on a cold cache, which surfaced as "Interaction failed" before this fix.
         await interaction.response.defer()
+        self._load_seq += 1
+        load = self._load_seq
         self.selected_port = port
+        self.parts_unanswered = 0
+        # Drop the previous slot's parts (and their dropdown) now, not when this load
+        # finishes - otherwise one of them could be picked and locked in under this slot.
+        self._set_candidates([])
         candidates: list[dict] = []
         if port is not None:
             try:
@@ -540,9 +587,17 @@ class PartsBrowserView(discord.ui.View):
                     port, category=self.category, origin_id=self.origin_terminal[0],
                 )
             except (UexApiError, WikiApiError) as exc:
-                self._set_candidates([])
+                if load != self._load_seq:
+                    return
                 await interaction.edit_original_response(content=f"Couldn't load {self.category} options: {exc}", view=self)
                 return
+        if load != self._load_seq:
+            # The player picked another category or slot while this one loaded (a cold
+            # category's first browse is the slow one). Applying these parts now would list
+            # them under the newer pick and let one be locked in there (audit REL-2); that
+            # newer pick updates the message itself.
+            return
+        self.parts_unanswered = getattr(candidates, "wiki_unavailable", 0)
         self._set_candidates(candidates)
         await interaction.edit_original_response(content=self.text(), view=self)
 
@@ -636,6 +691,8 @@ class ShipPartsFinder(commands.Cog):
         self.bot = bot
         self._wiki = wiki_client or WikiApiClient()
         self._detail_cache: dict[str, tuple[float, dict]] = {}
+        # Detail lookups the wiki didn't answer: key -> monotonic time to retry after.
+        self._wiki_outages: dict[str, float] = {}
         self.shopping = ShipPartsShoppingService(bot)
         if start_refresh:
             self.refresh_reference.start()
@@ -729,8 +786,13 @@ class ShipPartsFinder(commands.Cog):
 
     async def _item_detail_cached(self, uex_row: dict) -> dict | None:
         """Wiki detail for one UEX catalog row: by its uuid, else by its exact name (UEX's
-        uuid for most radars doesn't exist on the wiki, but the name does). Misses are
-        cached too, so a part the wiki genuinely lacks isn't re-looked-up every browse."""
+        uuid for most radars doesn't exist on the wiki, but the name does). A real miss is
+        cached too, so a part the wiki genuinely lacks isn't re-looked-up every browse.
+
+        A lookup the wiki didn't answer at all is NOT a miss: caching it as one left parts
+        fitted by UEX's wrong size, missile racks gone and turret guns missing for a full
+        day after a brief outage (audit REL-1). That raises WikiUnavailableError instead,
+        and the key is skipped for WIKI_OUTAGE_RETRY_SECONDS, then looked up again."""
         item_uuid = uex_row.get("uuid") or ""
         name = (uex_row.get("name") or "").strip()
         key = item_uuid or f"name:{name.lower()}"
@@ -738,22 +800,46 @@ class ShipPartsFinder(commands.Cog):
         cached = self._detail_cache.get(key)
         if cached and cached[0] > now:
             return cached[1]
+        if self._wiki_outage_active(key, now):
+            raise WikiUnavailableError(f"the wiki didn't answer for {name or item_uuid} a few minutes ago")
         detail = None
+        unanswered = False
         try:
             if item_uuid:
                 detail = await self._wiki.get_item_detail(item_uuid)
+        except WikiUnavailableError:
+            unanswered = True
         except WikiApiError:
             detail = None
         if detail is None and name:
             try:
                 detail = await self._wiki.find_item_detail_by_name(name)
+            except WikiUnavailableError:
+                unanswered = True
             except WikiApiError:
                 detail = None
+        if detail is None and unanswered:
+            # Either lookup going unanswered means "no detail" isn't a known answer yet.
+            if len(self._wiki_outages) >= DETAIL_CACHE_MAX:
+                self._wiki_outages = {k: t for k, t in self._wiki_outages.items() if t > now}
+            self._wiki_outages[key] = now + WIKI_OUTAGE_RETRY_SECONDS
+            raise WikiUnavailableError(f"the wiki didn't answer for {name or item_uuid}")
+        self._wiki_outages.pop(key, None)
         if len(self._detail_cache) >= DETAIL_CACHE_MAX:
             self._detail_cache.pop(next(iter(self._detail_cache)))
         detail = _slim_detail(detail)
         self._detail_cache[key] = (now + DETAIL_CACHE_SECONDS, detail)
         return detail
+
+    def _wiki_outage_active(self, key: str | None, now: float | None = None) -> bool:
+        """Whether the wiki recently failed to answer the detail lookup for `key` (a uuid,
+        or "name:<lowercased name>")."""
+        return bool(key) and self._wiki_outages.get(key, 0.0) > (time.monotonic() if now is None else now)
+
+    def turret_gun_lookups_unanswered(self, ports: list[ShipPort]) -> int:
+        """How many of this ship's turrets have no gun slots listed only because the wiki
+        didn't answer their detail lookup - so the browser can say so."""
+        return sum(1 for p in ports if p.needs_child_gun_ports and self._wiki_outage_active(p.equipped_uuid))
 
     async def candidates_for_port(
         self, port: ShipPort, *, category: str | None = None, limit: int | None = None,
@@ -791,7 +877,8 @@ class ShipPartsFinder(commands.Cog):
         await self._attach_details(candidates)
         await self._swap_in_fitting_variants([c for c in candidates if not tags_allow(c, port)], port)
         kept = sorted((c for c in candidates if _fits(c, port, category)), key=_rank_key)
-        return kept if limit is None else kept[:limit]
+        return PartCandidates(kept if limit is None else kept[:limit],
+                              wiki_unavailable=sum(1 for c in candidates if c.get("_detail_unanswered")))
 
     async def _variants_cached(self, name: str) -> list[dict]:
         key = f"variants:{name.lower()}"
@@ -861,6 +948,7 @@ class ShipPartsFinder(commands.Cog):
                     candidate.setdefault("name", row.get("name"))
                     candidate.setdefault("size", row.get("size"))
                 candidate["_detail_loaded"] = isinstance(detail, dict)
+                candidate["_detail_unanswered"] = isinstance(detail, WikiUnavailableError)
 
     async def _attach_distances(self, candidates: list[dict], origin_id: int) -> None:
         """Real distance (gigameters) from the player's given location to each candidate's
@@ -944,6 +1032,7 @@ class ShipPartsFinder(commands.Cog):
             )
             return
         view = PartsBrowserView(self, vehicle, resolved_location, grouped)
+        view.turret_guns_unanswered = self.turret_gun_lookups_unanswered(ports)
         await thread.send(content=view.text(), view=view, allowed_mentions=NO_MENTIONS)
         await interaction.followup.send(
             f"Opened {thread.mention} - browse **{vehicle.get('name')}**'s parts there.", ephemeral=True,

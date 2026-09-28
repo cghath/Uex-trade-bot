@@ -977,3 +977,194 @@ def test_the_page_line_says_how_many_more_parts_there_are():
     assert "Page 1 of 2 · 1 more on the next page" in view.text()
     view.page = 1
     assert "Page 2 of 2" in view.text() and "more on the next page" not in view.text()
+
+
+# -- wiki outages aren't cached as misses (audit REL-1) -------------------------------------
+
+def _outage_wiki(*, fail_uuid=True, fail_name=False, detail=None):
+    """Fake wiki whose uuid and/or name lookup doesn't answer, until `.recover()`."""
+    state = {"down": True}
+
+    async def get_item_detail(uuid):
+        if state["down"] and fail_uuid:
+            raise ship_parts_finder.WikiUnavailableError("503 x3")
+        if detail is None:
+            raise ship_parts_finder.WikiApiError("HTTP 404")
+        return detail
+
+    async def find_item_detail_by_name(name):
+        if state["down"] and fail_name:
+            raise ship_parts_finder.WikiUnavailableError("503 x3")
+        return None
+
+    wiki = NS(get_item_detail=AsyncMock(side_effect=get_item_detail),
+              find_item_detail_by_name=AsyncMock(side_effect=find_item_detail_by_name),
+              find_item_variants_by_name=AsyncMock(return_value=[]))
+    wiki.recover = lambda: state.update(down=False)
+    return wiki
+
+
+def test_an_unanswered_detail_lookup_is_retried_after_the_outage_not_cached_for_a_day():
+    async def run():
+        wiki = _outage_wiki(detail={"uuid": "u1", "name": "JS-300", "size": 1})
+        cog = ShipPartsFinder(NS(), wiki_client=wiki, start_refresh=False)
+        row = {"uuid": "u1", "name": "JS-300"}
+        outcomes = []
+        for _ in range(2):  # the second try, inside the retry window, doesn't hit the wiki again
+            try:
+                await cog._item_detail_cached(row)
+            except ship_parts_finder.WikiUnavailableError:
+                outcomes.append("unavailable")
+        calls_during_outage = wiki.get_item_detail.await_count
+        wiki.recover()
+        cog._wiki_outages["u1"] = 0.0  # the retry window has passed
+        outcomes.append(await cog._item_detail_cached(row))
+        return outcomes, calls_during_outage
+
+    outcomes, calls_during_outage = asyncio.run(run())
+    assert outcomes[:2] == ["unavailable", "unavailable"]
+    assert calls_during_outage == 1, "an outage is remembered briefly, not re-asked on every browse"
+    assert outcomes[2] == {"uuid": "u1", "name": "JS-300", "size": 1}, "looked up again once the wiki answers"
+
+
+def test_a_real_miss_is_still_cached_but_a_name_lookup_outage_is_not():
+    async def run():
+        # uuid 404s (a definite miss); the name lookup then doesn't answer -> not a known miss yet.
+        wiki = _outage_wiki(fail_uuid=False, fail_name=True)
+        cog = ShipPartsFinder(NS(), wiki_client=wiki, start_refresh=False)
+        try:
+            await cog._item_detail_cached({"uuid": "u9", "name": "Fleming"})
+            raised = False
+        except ship_parts_finder.WikiUnavailableError:
+            raised = True
+        cached_during_outage = "u9" in cog._detail_cache
+        # Once the wiki answers, a genuine miss (404 + no name match) is cached like before.
+        wiki.recover()
+        cog._wiki_outages.clear()
+        assert await cog._item_detail_cached({"uuid": "u9", "name": "Fleming"}) is None
+        return raised, cached_during_outage, "u9" in cog._detail_cache
+
+    raised, cached_during_outage, cached_after = asyncio.run(run())
+    assert raised and not cached_during_outage
+    assert cached_after, "a real miss is still cached for the day"
+
+
+def test_candidates_report_how_many_parts_the_wiki_did_not_answer_for():
+    async def run():
+        catalog = [{"id": 1, "uuid": "u1", "category": "Missile Racks", "size": "1", "name": "MSD-322"}]
+        wiki = _outage_wiki(fail_name=True)
+        cog = ShipPartsFinder(NS(uex=_uex(catalog, [_price(1, 500, 5)])), wiki_client=wiki, start_refresh=False)
+        port = ShipPort(name="hp_missile", port_type="MissileLauncher", size_min=3, size_max=3)
+        return await cog.candidates_for_port(port, category="Missile Racks")
+
+    candidates = asyncio.run(run())
+    assert candidates.wiki_unavailable == 1
+
+
+def test_browser_says_when_the_wiki_did_not_answer():
+    async def run():
+        async def outage_candidates(port, *, category=None, limit=None, origin_id=None):
+            return ship_parts_finder.PartCandidates([], wiki_unavailable=3)
+
+        port = ShipPort(name="hp_missile", port_type="MissileLauncher", size_min=3, size_max=3)
+        view = ship_parts_finder.PartsBrowserView(NS(candidates_for_port=outage_candidates),
+                                                    {"id": 100, "name": "Avenger Titan"}, (1, "Origin"),
+                                                    {"Missile Racks": [port]})
+        view.turret_guns_unanswered = 1
+        await view.show_category(_component_interaction(), "Missile Racks")
+        return view.text()
+
+    text = asyncio.run(run())
+    assert "didn't respond for 3 parts here" in text
+    assert "turret guns aren't listed" in text
+    assert "No currently-sold missile racks" in text, "the empty list is still explained, just not alone"
+
+
+def test_outage_notes_never_push_a_full_page_past_discords_2000_chars():
+    port = ShipPort(name="hardpoint_weapon_gun_nose_fixed_turret_left", port_type="WeaponGun", size_min=5, size_max=5)
+    parts = [{
+        "uuid": f"u{i}", "name": f"Very Long Weapon Name Mk {i} Attrition-5 Repeater Laser", "type": "WeaponGun",
+        "size": 5, "grade": "A", "class": "Military", "manufacturer": {"name": "Hurston Dynamics Very Long Maker"},
+        "vehicle_weapon": {"damage": {"burst": 1234.5 + i, "alpha_total": 456.7}, "rpm": 600,
+                           "ammunition": {"speed": 1800}},
+        "_uex_id": i, "_detail_loaded": True, "_price_buy": 123456.0 + i, "_id_terminal": 1,
+        "_terminal_name": "Centermass - New Babbage Commons Very Long Place Name", "_distance_gm": 123.4,
+    } for i in range(30)]
+    view = ship_parts_finder.PartsBrowserView(NS(), {"id": 1, "name": "Constellation Andromeda"}, (1, "Origin"),
+                                                {"Weapons": [port, port]})
+    view.category, view.selected_port = "Weapons", port
+    view.turret_guns_unanswered, view.parts_unanswered = 2, 12
+    view._set_candidates(parts)
+    view.selected_candidate = parts[0]
+    lengths = []
+    for page in range(len(view.pages)):
+        view.page = page
+        lengths.append(len(view.text()))
+    assert max(lengths) <= 2000, lengths
+
+
+def test_turret_gun_note_counts_only_turrets_whose_lookup_went_unanswered():
+    cog = ShipPartsFinder(NS(), wiki_client=_wiki(), start_refresh=False)
+    down = NS(needs_child_gun_ports=True, equipped_uuid="t1")
+    fine = NS(needs_child_gun_ports=True, equipped_uuid="t2")
+    plain = NS(needs_child_gun_ports=False, equipped_uuid="t1")
+    cog._wiki_outages["t1"] = float("inf")
+    assert cog.turret_gun_lookups_unanswered([down, fine, plain]) == 1
+
+
+# -- a stale category/slot load can't overwrite a newer pick (audit REL-2) -------------------
+
+def test_a_slow_load_finishing_after_a_newer_pick_is_dropped():
+    async def run():
+        release_power = asyncio.Event()
+
+        async def candidates(port, *, category=None, limit=None, origin_id=None):
+            if category == "Power Plants":
+                await release_power.wait()  # a cold first browse
+                return [dict(_detail("JS-300"), type="PowerPlant")]
+            return [dict(_detail("Atlas", uuid="qd"), type="QuantumDrive")]
+
+        power = ShipPort(name="hardpoint_power_plant", port_type="PowerPlant", size_min=1, size_max=1)
+        quantum = ShipPort(name="hardpoint_quantum_drive", port_type="QuantumDrive", size_min=1, size_max=1)
+        view = ship_parts_finder.PartsBrowserView(NS(candidates_for_port=candidates),
+                                                    {"id": 100, "name": "Avenger Titan"}, (1, "Origin"),
+                                                    {"Power Plants": [power], "Quantum Drives": [quantum]})
+        slow, fast = _component_interaction(), _component_interaction()
+        slow_task = asyncio.create_task(view.show_category(slow, "Power Plants"))
+        await asyncio.sleep(0)
+        await view.show_category(fast, "Quantum Drives")
+        release_power.set()
+        await slow_task
+        return view, slow
+
+    view, slow = asyncio.run(run())
+    assert view.category == "Quantum Drives" and view.selected_port.name == "hardpoint_quantum_drive"
+    assert [c["name"] for c in view.candidates] == ["Atlas"], "the power plants from the slow load aren't applied"
+    slow.edit_original_response.assert_not_awaited()
+
+
+def test_picking_a_new_slot_drops_the_previous_slots_parts_right_away():
+    async def run():
+        release = asyncio.Event()
+
+        async def candidates(port, *, category=None, limit=None, origin_id=None):
+            await release.wait()
+            return [_detail("VariPuck S4")]
+
+        left = ShipPort(name="hardpoint_turret_left", port_type="Turret", size_min=3, size_max=3)
+        nose = ShipPort(name="hardpoint_turret_nose", port_type="Turret", size_min=4, size_max=4)
+        view = ship_parts_finder.PartsBrowserView(NS(candidates_for_port=candidates), {"id": 100, "name": "X"},
+                                                    (1, "Origin"), {"Turrets": [left, nose]})
+        view.category = "Turrets"
+        view.selected_port = left
+        view._set_candidates([_detail("VariPuck S3")])
+        task = asyncio.create_task(view.show_slot(_component_interaction(), nose))
+        await asyncio.sleep(0)
+        mid_load = (list(view.candidates), [c for c in view.children if isinstance(c, ship_parts_finder._PartSelect)])
+        release.set()
+        await task
+        return mid_load
+
+    candidates_mid_load, part_selects_mid_load = asyncio.run(run())
+    assert candidates_mid_load == [] and part_selects_mid_load == [], \
+        "the S3 slot's parts can't be picked (and locked in under the S4 slot) while it loads"
