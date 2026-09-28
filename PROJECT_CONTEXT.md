@@ -3108,6 +3108,53 @@ they're in sync).
       on a slot switch). The race and slot tests fail on the pre-fix code on behaviour
       alone.
 
+89. **Background notifications are marked done only once they're settled.** Audit findings
+    REL-4 and REL-7.
+    - **The bug**: several alert paths caught a failed send, logged it, and marked the
+      notification done anyway, which is the gap the negotiation-alert fix closed
+      earlier. Never applied to:
+      - price alerts, which were deactivated before delivery was even tried, so a failed
+        channel post plus a failed DM used the alert up;
+      - marketplace alerts, which marked the listing seen after a failed DM;
+      - the scanner, which marked the deal seen after a failed channel post and, against
+        the "any channel post can 403, fall back to DM" convention, had no DM fallback;
+      - stock alerts, not in the audit's list and found by checking every caller, which
+        saved "in stock" state for a terminal before its notification went out.
+    - **The mirror problem (REL-4)**: negotiation alerts already retried a failed DM,
+      but retried everything. A message over Discord's 2,000-char limit (UEX allows
+      65,535) or a DM to a user with closed DMs failed identically every 5 minutes,
+      forever: a lost notification plus an endless stream of refused DMs, the pattern
+      that can get a bot flagged.
+    - **The shape**: new `bot/delivery.py` gives every send one of three outcomes.
+      - `DELIVERED`.
+      - `RETRY`: 5xx, 429, network error. Leave it pending.
+      - `UNDELIVERABLE`: any other 4xx (closed DMs 403/50007, missing channel
+        permissions, unknown user, too long). Settle it and stop.
+      - `Delivery.settled` means anything but RETRY.
+      - `send_dm` and `send_to_channel_or_dm` do the sending. The latter is delivered if
+        either path works, RETRY if either failed only temporarily, and UNDELIVERABLE
+        only if neither can work.
+      - Callers mark done only when settled:
+        - A price alert is deactivated once settled.
+        - A stock alert terminal's state is saved only once its restock notice is
+          settled, so an unsent one is detected as a restock again next poll.
+        - A marketplace listing or scanner deal is marked seen once settled. After a
+          RETRY or an UNDELIVERABLE, that alert or watcher stops for the cycle rather
+          than failing on every remaining item.
+      - Negotiation DMs go through `fit_message`, which trims the body and adds a
+        "read the rest on UEX" note. Once one is UNDELIVERABLE, the rest of that
+        negotiation's new messages are marked seen without another refused send.
+    - **Accepted trade-off**: deactivating or marking seen after the send means a DB
+      failure between the two can repeat a notification next poll. A duplicate beats a
+      silently lost one.
+    - **Deliberately left alone**: `personal_inventory.py`'s status DMs. They report an
+      action that has already happened, and the job's own state is the record, so
+      there's no "seen" state for a failed DM to advance wrongly; `/inventory-resolve-
+      floor` resends the floor prompt.
+    - **Tests**: `tests/test_alert_delivery.py`, 13 tests. 8 fail on the pre-fix cogs; the
+      other 5 test the new module itself, plus two behaviours the old code already had
+      right. Existing negotiation-test fakes now return `Delivery` values instead of bools.
+
 ## Where to look for what
 
 Six docs, deliberately scoped so they don't duplicate each other:

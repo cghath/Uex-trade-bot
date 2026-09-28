@@ -23,6 +23,7 @@ from discord.ext import commands, tasks
 
 from bot.cogs.prices import commodity_name_autocomplete
 from bot.cogs.ships import ship_name_autocomplete
+from bot.delivery import Delivery, send_dm, send_to_channel_or_dm
 from bot.uex.exceptions import UexApiError
 from bot.uex.ships import resolve_ship
 from bot.uex.stock_alerts import compute_terminal_availability, detect_restocks, format_cargo_fit_note
@@ -129,74 +130,56 @@ class StockAlerts(commands.Cog):
                     previous_state = await self.bot.db.get_stock_alert_terminal_state(alert["id"])
                     to_notify, new_state = detect_restocks(current, previous_state)
 
+                    # Notify before saving the new state: a restock whose notification hit a
+                    # temporary failure keeps its old "not in stock" state, so the next poll
+                    # sees it as a restock again and retries, instead of it being lost.
+                    unsent: set[int] = set()
+                    if to_notify:
+                        ship_query = alert.get("ship_query") or await self.bot.db.get_default_ship(alert["user_id"])
+                        ship_cargo_scu = None
+                        if ship_query:
+                            try:
+                                if vehicles_cache is None:
+                                    vehicles_cache = await self.bot.uex.get_vehicles()
+                                vehicle = resolve_ship(vehicles_cache, ship_query)
+                                ship_cargo_scu = vehicle.get("scu") if vehicle else None
+                            except UexApiError as exc:
+                                logger.info("Vehicle lookup failed for stock alert #%s: %s", alert["id"], exc)
+
+                        for terminal in to_notify:
+                            outcome = await self._notify_stock_alert(alert, commodity_name, terminal, ship_cargo_scu)
+                            if not outcome.settled:
+                                unsent.add(terminal["id_terminal"])
+
                     for id_terminal, state in new_state.items():
+                        if id_terminal in unsent:
+                            continue
                         await self.bot.db.upsert_stock_alert_terminal_state(
                             alert["id"], id_terminal, state["was_available"], state["last_seen_scu"]
                         )
-
-                    if not to_notify:
-                        continue
-
-                    ship_query = alert.get("ship_query") or await self.bot.db.get_default_ship(alert["user_id"])
-                    ship_cargo_scu = None
-                    if ship_query:
-                        try:
-                            if vehicles_cache is None:
-                                vehicles_cache = await self.bot.uex.get_vehicles()
-                            vehicle = resolve_ship(vehicles_cache, ship_query)
-                            ship_cargo_scu = vehicle.get("scu") if vehicle else None
-                        except UexApiError as exc:
-                            logger.info("Vehicle lookup failed for stock alert #%s: %s", alert["id"], exc)
-
-                    for terminal in to_notify:
-                        await self._notify_stock_alert(alert, commodity_name, terminal, ship_cargo_scu)
                 except Exception:
                     logger.exception("Stock alert #%s failed this cycle", alert["id"])
 
-    async def _notify_stock_alert(self, alert: dict, commodity_name: str, terminal: dict, ship_cargo_scu: float | None) -> None:
+    async def _notify_stock_alert(
+        self, alert: dict, commodity_name: str, terminal: dict, ship_cargo_scu: float | None
+    ) -> Delivery:
         fit_note = format_cargo_fit_note(terminal["scu_buy"], ship_cargo_scu)
         body = (
             f"stock alert #{alert['id']}: **{commodity_name}** is back in stock at "
             f"**{terminal['terminal_name']}** — {terminal['price_buy']:.2f} aUEC/unit, "
             f"{terminal['scu_buy']:,.0f} SCU available ({fit_note})"
         )
-        is_personal = alert.get("scope") == "personal"
-
-        if is_personal:
+        label = f"stock alert #{alert['id']}"
+        if alert.get("scope") == "personal":
             # DM only - nothing posted to the channel, so no @-mention needed (it's
             # already unambiguously addressed to whoever's reading their own DMs).
-            await self._send_dm_or_log(alert, f"Your {body}")
-            return
-
-        message = f"<@{alert['user_id']}> {body}"
-        channel = self.bot.get_channel(alert["channel_id"])
-        if channel is not None:
-            try:
-                await channel.send(message)
-                return
-            except discord.HTTPException as exc:
-                # Covers both "channel resolved fine but the bot can't post there"
-                # (e.g. 403/50013 Missing Permissions if the bot's role/overrides
-                # changed) and any other one-off delivery hiccup - fall through to the
-                # DM fallback below instead of silently dropping a 'global' alert.
-                logger.warning(
-                    "Failed to post stock alert #%s to channel %s (%s) - falling back to DM.",
-                    alert["id"], alert["channel_id"], exc,
-                )
-        # Either the channel wasn't resolvable at all (e.g. right after a restart before
-        # the cache warms, or it was deleted) or the send above failed - try to reach the
-        # creator directly instead of dropping the notification.
-        await self._send_dm_or_log(alert, message)
-
-    async def _send_dm_or_log(self, alert: dict, message: str) -> None:
-        try:
-            user = await self.bot.fetch_user(alert["user_id"])
-            await user.send(message)
-        except discord.HTTPException as exc:
-            logger.warning(
-                "Failed to deliver stock alert #%s (DM failed, and channel post either "
-                "failed or wasn't attempted): %s", alert["id"], exc,
-            )
+            return await send_dm(self.bot, alert["user_id"], label=label, content=f"Your {body}")
+        # A 'global' alert posts in its channel, falling back to a DM when the channel
+        # can't be resolved (deleted) or refuses the post (e.g. 403/50013 Missing
+        # Permissions) instead of silently dropping it.
+        return await send_to_channel_or_dm(
+            self.bot, alert["channel_id"], alert["user_id"], label=label, content=f"<@{alert['user_id']}> {body}",
+        )
 
     @poll_stock_alerts.before_loop
     async def before_poll_stock_alerts(self) -> None:

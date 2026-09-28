@@ -11,6 +11,7 @@ from discord.ext import commands
 import httpx
 
 from bot.cogs.negotiation_alerts import NegotiationAlerts
+from bot.delivery import Delivery
 from bot.db.database import Database
 from bot.main import INITIAL_COGS
 from bot.uex.client import UexClient
@@ -242,9 +243,9 @@ def test_enable_seeds_baseline_then_only_new_messages_from_the_other_party_notif
         cog = NegotiationAlerts.__new__(NegotiationAlerts)
         cog.bot = bot
 
-        async def _fake_notify(target_user_id: int, message: str) -> bool:
+        async def _fake_notify(target_user_id: int, message: str) -> Delivery:
             sent_dms.append((target_user_id, message))
-            return True
+            return Delivery.DELIVERED
 
         cog._notify_user = _fake_notify
 
@@ -320,9 +321,9 @@ def test_new_message_notification_links_the_item_via_the_listing_lookup(tmp_path
         cog = NegotiationAlerts.__new__(NegotiationAlerts)
         cog.bot = bot
 
-        async def _fake_notify(target_user_id: int, message: str) -> bool:
+        async def _fake_notify(target_user_id: int, message: str) -> Delivery:
             sent_dms.append((target_user_id, message))
-            return True
+            return Delivery.DELIVERED
 
         cog._notify_user = _fake_notify
 
@@ -431,7 +432,7 @@ def test_failed_dm_does_not_advance_the_poll_checkpoint(tmp_path):
         cog.bot = type("FakeBot", (), {})()
         cog.bot.db = db
         cog.bot.uex = uex
-        cog._notify_user = AsyncMock(side_effect=[False, True])
+        cog._notify_user = AsyncMock(side_effect=[Delivery.RETRY, Delivery.DELIVERED])
 
         await cog.poll_negotiation_messages.coro(cog)
         await cog.poll_negotiation_messages.coro(cog)

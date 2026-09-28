@@ -12,6 +12,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from bot.cogs.prices import commodity_name_autocomplete
+from bot.delivery import Delivery, send_to_channel_or_dm
 from bot.discord_ui import send_alert_remove_picker
 from bot.uex.exceptions import UexApiError
 
@@ -230,30 +231,17 @@ class Alerts(commands.Cog):
                         logger.exception("Failed to fire price alert #%s", alert["id"])
 
     async def _fire_alert(self, alert: dict, detail: str) -> None:
-        await self.bot.db.deactivate_alert(alert["id"])
+        """One-shot: deactivated once the alert is settled - delivered, or refused outright
+        by Discord (see bot/delivery.py). A temporary failure leaves it active, so the next
+        poll tries again instead of the alert being used up without ever arriving."""
         message = f"<@{alert['user_id']}> price alert #{alert['id']} triggered for **{alert['commodity_name']}**: {detail}"
-
-        channel = self.bot.get_channel(alert["channel_id"])
-        if channel is not None:
-            try:
-                await channel.send(message)
-                return
-            except discord.HTTPException as exc:
-                # Channel resolved fine but the bot can't post there (e.g. 403/50013
-                # Missing Permissions) - fall through to the DM fallback below instead
-                # of silently dropping the notification.
-                logger.warning(
-                    "Failed to post alert #%s to channel %s (%s) - falling back to DM.",
-                    alert["id"], alert["channel_id"], exc,
-                )
-        try:
-            user = await self.bot.fetch_user(alert["user_id"])
-            await user.send(message)
-        except discord.HTTPException as exc:
-            logger.warning(
-                "Failed to deliver alert #%s (DM failed, and channel post either failed "
-                "or wasn't attempted): %s", alert["id"], exc,
-            )
+        outcome = await send_to_channel_or_dm(
+            self.bot, alert["channel_id"], alert["user_id"], label=f"price alert #{alert['id']}", content=message,
+        )
+        if outcome.settled:
+            await self.bot.db.deactivate_alert(alert["id"])
+        if outcome is Delivery.UNDELIVERABLE:
+            logger.warning("Price alert #%s couldn't reach its owner by channel or DM; deactivated", alert["id"])
 
     @poll_alerts.before_loop
     async def before_poll_alerts(self) -> None:

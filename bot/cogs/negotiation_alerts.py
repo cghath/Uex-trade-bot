@@ -14,6 +14,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
+from bot.delivery import Delivery, fit_message, send_dm
 from bot.uex.exceptions import UexApiError
 from bot.uex.marketplace import marketplace_item_link, parse_uex_number
 
@@ -172,6 +173,9 @@ class NegotiationAlerts(commands.Cog):
         id_item: int | None = None
         id_item_resolved = False
         all_delivered = True
+        # Set once Discord refuses a DM to this user outright (DMs closed, unknown user):
+        # the rest of this negotiation's new messages would be refused the same way.
+        unreachable = False
         for row in sorted(messages, key=lambda r: _as_int(r.get("date_added")) or 0):
             message_id = _as_int(row.get("id"))
             text = row.get("message")
@@ -182,20 +186,27 @@ class NegotiationAlerts(commands.Cog):
                 continue
             if await self.bot.db.is_negotiation_message_seen(user_id, message_id):
                 continue
+            if unreachable:
+                await self.bot.db.mark_negotiation_message_seen(user_id, message_id)
+                continue
             if not id_item_resolved:
                 id_item = await self._resolve_listing_item_id(negotiation.get("id_listing"))
                 id_item_resolved = True
             listing_name = marketplace_item_link(negotiation.get("listing_title") or "a listing", id_item)
-            delivered = await self._notify_user(
+            # UEX allows messages up to 65,535 chars; Discord refuses a DM over 2,000
+            # outright, so a long one is trimmed rather than never arriving (audit REL-4).
+            outcome = await self._notify_user(
                 user_id,
-                f"New negotiation message on **{listing_name}** from **{sender}**: {text}",
+                fit_message(f"New negotiation message on **{listing_name}** from **{sender}**: ", str(text)),
             )
-            # Only a delivered DM counts as "seen" - a failed send (DMs closed, a transient
-            # Discord outage) must leave the message unseen so the next 5-minute poll
-            # naturally retries it, instead of the notification being silently discarded
-            # forever the moment send() raised.
-            if delivered:
+            # A temporary failure (a Discord outage) leaves the message unseen so the next
+            # 5-minute poll retries it. A DM Discord refuses outright (DMs closed, unknown
+            # user) would be refused on every retry too - re-sending it every 5 minutes
+            # forever is exactly the pattern that gets a bot flagged - so that one is marked
+            # seen, as is anything else new in this negotiation this cycle.
+            if outcome.settled:
                 await self.bot.db.mark_negotiation_message_seen(user_id, message_id)
+                unreachable = outcome is Delivery.UNDELIVERABLE
             else:
                 all_delivered = False
         return all_delivered
@@ -213,14 +224,8 @@ class NegotiationAlerts(commands.Cog):
             return None
         return rows[0].get("id_item") if rows else None
 
-    async def _notify_user(self, user_id: int, message: str) -> bool:
-        try:
-            user = self.bot.get_user(user_id) or await self.bot.fetch_user(user_id)
-            await user.send(message)
-            return True
-        except (discord.HTTPException, AttributeError):
-            logger.warning("Could not DM negotiation alert to user %s", user_id)
-            return False
+    async def _notify_user(self, user_id: int, message: str) -> Delivery:
+        return await send_dm(self.bot, user_id, label="negotiation alert", content=message)
 
     @poll_negotiation_messages.before_loop
     async def before_poll_negotiation_messages(self) -> None:
