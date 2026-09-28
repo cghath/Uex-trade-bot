@@ -124,7 +124,8 @@ def test_one_failing_price_alert_does_not_block_the_next():
         await cog.poll_alerts.coro(cog)
 
         sent = [call.args[0] for call in channel.send.await_args_list]
-        assert len(sent) == 1 and "#2" in sent[0], sent
+        assert any("#2" in message for message in sent), sent
+        assert [call.args[0] for call in db.deactivate_alert.await_args_list] == [1, 2]
 
     asyncio.run(run())
 

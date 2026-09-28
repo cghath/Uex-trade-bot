@@ -16,6 +16,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from bot.cogs.marketplace import OPERATION_CHOICES, traded_item_autocomplete
+from bot.delivery import Delivery, send_dm
 from bot.uex.exceptions import UexApiError
 from bot.uex.marketplace import (
     exclude_sold_out,
@@ -186,13 +187,22 @@ class MarketplaceAlerts(commands.Cog):
                             await self.bot.db.mark_marketplace_listing_seen(alert["id"], listing_id)
                             continue
 
-                    await self._notify_marketplace_alert(alert, listing)
+                    outcome = await self._notify_marketplace_alert(alert, listing)
+                    if not outcome.settled:
+                        # A temporary failure: leave this listing unseen so the next poll
+                        # retries it, and don't try the rest now either.
+                        break
                     await self.bot.db.mark_marketplace_listing_seen(alert["id"], listing_id)
+                    if outcome is Delivery.UNDELIVERABLE:
+                        # Discord refused the DM (closed DMs, unknown user). The others
+                        # would be refused the same way, so they wait for a later poll
+                        # rather than each failing now.
+                        break
                     notified += 1
             except Exception:
                 logger.exception("Marketplace alert #%s failed this cycle", alert["id"])
 
-    async def _notify_marketplace_alert(self, alert: dict, listing: dict) -> None:
+    async def _notify_marketplace_alert(self, alert: dict, listing: dict) -> Delivery:
         title = listing.get("title", "Untitled listing")
         price = parse_uex_number(listing.get("price"))
         currency = listing.get("currency", "UEC")
@@ -204,11 +214,7 @@ class MarketplaceAlerts(commands.Cog):
             f"Marketplace alert #{alert['id']} ('{alert['keyword']}'): new **{alert['operation']}** listing — "
             f"**{marketplace_item_link(title, listing.get('id_item'))}** · {price_text}{quality_text} · by {seller}"
         )
-        try:
-            user = await self.bot.fetch_user(alert["user_id"])
-            await user.send(message)
-        except discord.HTTPException as exc:
-            logger.warning("Failed to DM marketplace alert #%s: %s", alert["id"], exc)
+        return await send_dm(self.bot, alert["user_id"], label=f"marketplace alert #{alert['id']}", content=message)
 
     @poll_marketplace_alerts.before_loop
     async def before_poll_marketplace_alerts(self) -> None:

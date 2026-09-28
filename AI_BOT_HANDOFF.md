@@ -119,6 +119,13 @@ date - no open item, nothing to record here.
       subclass in `bot/wiki_api.py`, raised only when retries run out. It's a subclass, so
       every existing `except WikiApiError` still catches it. Only the finder part matters,
       and only if aiv2 ever ports `/ship-parts-finder`. See PROJECT_CONTEXT.md entry 88
+- [ ] Notifications marked done only once settled: new `bot/delivery.py` (DELIVERED /
+      RETRY / UNDELIVERABLE, `send_dm`, `send_to_channel_or_dm`, `fit_message`), used by
+      `alerts.py`, `stock_alerts.py`, `marketplace_alerts.py`, `scanner.py` (which also
+      gains a DM fallback) and `negotiation_alerts.py` (long messages trimmed to fit, and
+      closed DMs no longer retried every 5 minutes). aiv2 was cloned from here, so it
+      almost certainly has the same five delivery paths. Test: `tests/test_alert_delivery.py`.
+      See PROJECT_CONTEXT.md entry 89
 
 ## To port: aiv2 -> production
 
