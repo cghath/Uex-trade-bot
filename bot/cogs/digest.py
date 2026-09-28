@@ -153,6 +153,14 @@ class Digest(commands.Cog):
 
     @tasks.loop(minutes=CHECK_INTERVAL_MINUTES)
     async def post_scheduled_digests(self) -> None:
+        # Nothing may escape a tasks.loop body: it only restarts itself after a narrow set
+        # of network errors, so anything else would stop the daily digest until a restart.
+        try:
+            await self._post_scheduled_digests_once()
+        except Exception:
+            logger.exception("Scheduled digest check failed; retrying next cycle")
+
+    async def _post_scheduled_digests_once(self) -> None:
         configs = await self.bot.db.list_enabled_guild_digest_configs()
         if not configs:
             return
@@ -174,7 +182,11 @@ class Digest(commands.Cog):
             except discord.HTTPException as exc:
                 logger.warning("Failed to post digest for guild %s: %s", config["guild_id"], exc)
                 continue
-            await self.bot.db.mark_guild_digest_posted(config["guild_id"], today_str)
+            try:
+                await self.bot.db.mark_guild_digest_posted(config["guild_id"], today_str)
+            except Exception:
+                # Per guild, so one failed write can't stop the remaining guilds' digests.
+                logger.exception("Posted the digest for guild %s but couldn't record it", config["guild_id"])
 
     @post_scheduled_digests.before_loop
     async def before_post_scheduled_digests(self) -> None:

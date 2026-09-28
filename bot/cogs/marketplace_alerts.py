@@ -92,6 +92,14 @@ class MarketplaceAlerts(commands.Cog):
 
     @tasks.loop(minutes=POLL_INTERVAL_MINUTES)
     async def poll_marketplace_alerts(self) -> None:
+        # Nothing may escape a tasks.loop body: it only restarts itself after a narrow set
+        # of network errors, so anything else would stop this poller until a restart.
+        try:
+            await self._poll_marketplace_alerts_once()
+        except Exception:
+            logger.exception("Marketplace alert poll failed; retrying next cycle")
+
+    async def _poll_marketplace_alerts_once(self) -> None:
         alerts = await self.bot.db.list_active_marketplace_alerts()
         if not alerts:
             return
@@ -124,22 +132,33 @@ class MarketplaceAlerts(commands.Cog):
             groups.setdefault(key, []).append(alert)
 
         for (keyword, operation), group_alerts in groups.items():
-            id_item = find_item_id_by_name(items, keyword)
+            # Per group, so one keyword's bad data can't block every group after it.
             try:
-                if id_item is not None:
-                    listings = await self.bot.uex.get_marketplace_listings(id_item=id_item, operation=operation)
-                else:
-                    listings = await self.bot.uex.get_marketplace_listings(operation=operation)
-                    listings = filter_listings_by_keyword(listings, keyword)
-            except UexApiError as exc:
-                logger.warning("Failed to poll marketplace listings for '%s': %s", keyword, exc)
-                continue
+                await self._poll_alert_group(keyword, operation, group_alerts, items)
+            except Exception:
+                logger.exception("Marketplace alerts for '%s' (%s) failed this cycle", keyword, operation)
 
-            listings = exclude_sold_out(listings)
-            if not listings:
-                continue
+    async def _poll_alert_group(
+        self, keyword: str, operation: str, group_alerts: list[dict], items: list[dict]
+    ) -> None:
+        id_item = find_item_id_by_name(items, keyword)
+        try:
+            if id_item is not None:
+                listings = await self.bot.uex.get_marketplace_listings(id_item=id_item, operation=operation)
+            else:
+                listings = await self.bot.uex.get_marketplace_listings(operation=operation)
+                listings = filter_listings_by_keyword(listings, keyword)
+        except UexApiError as exc:
+            logger.warning("Failed to poll marketplace listings for '%s': %s", keyword, exc)
+            return
 
-            for alert in group_alerts:
+        listings = exclude_sold_out(listings)
+        if not listings:
+            return
+
+        for alert in group_alerts:
+            # Per alert, so one alert's failure can't block the rest of this group.
+            try:
                 seen_ids = await self.bot.db.get_seen_marketplace_listing_ids(alert["id"])
                 # Quality bounds are per-alert (two alerts can share a keyword/operation group
                 # but want different quality ranges), so this filter is applied here, not
@@ -170,6 +189,8 @@ class MarketplaceAlerts(commands.Cog):
                     await self._notify_marketplace_alert(alert, listing)
                     await self.bot.db.mark_marketplace_listing_seen(alert["id"], listing_id)
                     notified += 1
+            except Exception:
+                logger.exception("Marketplace alert #%s failed this cycle", alert["id"])
 
     async def _notify_marketplace_alert(self, alert: dict, listing: dict) -> None:
         title = listing.get("title", "Untitled listing")

@@ -108,28 +108,44 @@ class NegotiationAlerts(commands.Cog):
 
     @tasks.loop(minutes=POLL_INTERVAL_MINUTES)
     async def poll_negotiation_messages(self) -> None:
-        user_ids = await self.bot.db.list_negotiation_alert_user_ids()
-        if not user_ids:
+        # Nothing may escape a tasks.loop body: it only restarts itself after a narrow set
+        # of network errors, so anything else would stop this poller until a restart.
+        try:
+            user_ids = await self.bot.db.list_negotiation_alert_user_ids()
+        except Exception:
+            logger.exception("Negotiation alert poll couldn't list users; retrying next cycle")
             return
         for user_id in user_ids:
-            secret_key = await self.bot.db.get_user_secret_key(user_id)
-            if not secret_key:
-                continue  # unlinked since enabling; nothing to poll until relinked
+            # Per user, so one user's failure can't block everyone polled after them.
             try:
-                negotiations = await self.bot.uex.get_marketplace_negotiations(secret_key=secret_key)
-            except UexApiError as exc:
-                logger.warning("Failed to poll negotiations for user %s: %s", user_id, exc)
+                await self._poll_user_negotiations(user_id)
+            except Exception:
+                logger.exception("Negotiation alert poll failed for user %s this cycle", user_id)
+
+    async def _poll_user_negotiations(self, user_id: int) -> None:
+        secret_key = await self.bot.db.get_user_secret_key(user_id)
+        if not secret_key:
+            return  # unlinked since enabling; nothing to poll until relinked
+        try:
+            negotiations = await self.bot.uex.get_marketplace_negotiations(secret_key=secret_key)
+        except UexApiError as exc:
+            logger.warning("Failed to poll negotiations for user %s: %s", user_id, exc)
+            return
+        last_modified = await self.bot.db.get_negotiation_last_modified(user_id)
+        for negotiation in negotiations:
+            id_negotiation = _as_int(negotiation.get("id"))
+            date_modified = _as_int(negotiation.get("date_modified"))
+            if id_negotiation is None or date_modified is None:
                 continue
-            last_modified = await self.bot.db.get_negotiation_last_modified(user_id)
-            for negotiation in negotiations:
-                id_negotiation = _as_int(negotiation.get("id"))
-                date_modified = _as_int(negotiation.get("date_modified"))
-                if id_negotiation is None or date_modified is None:
-                    continue
-                if date_modified <= last_modified.get(id_negotiation, 0):
-                    continue
+            if date_modified <= last_modified.get(id_negotiation, 0):
+                continue
+            # Per negotiation; the checkpoint only advances on success, so a failure
+            # here is retried next cycle rather than lost.
+            try:
                 if await self._check_negotiation(user_id, secret_key, negotiation, id_negotiation):
                     await self.bot.db.set_negotiation_last_modified(user_id, id_negotiation, date_modified)
+            except Exception:
+                logger.exception("Negotiation %s failed for user %s this cycle", id_negotiation, user_id)
 
     async def _check_negotiation(
         self, user_id: int, secret_key: str, negotiation: dict[str, Any], id_negotiation: int
