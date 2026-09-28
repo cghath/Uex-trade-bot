@@ -3054,6 +3054,60 @@ they're in sync).
       the good snapshot (REL-5). This change keeps each loop alive; it doesn't change what
       a cycle does with a failed delivery or a half-failed fetch.
 
+88. **Ship Parts Finder: wiki outages aren't cached as misses, and a stale load can't
+    overwrite a newer pick.** Audit findings REL-1, REL-2 and MSG-3, fixed together since
+    the finder is in live testing.
+    - **REL-1, outage cached as "no detail" for 24h.** `_item_detail_cached` caught every
+      `WikiApiError` as "the wiki has no such part" and cached that for
+      `DETAIL_CACHE_SECONDS` (24h). A brief outage therefore left every part loaded during
+      it with no stats and fitted by UEX's catalog size for a day. That size is wrong for
+      18/19 missile racks (entry 83), so racks vanished ("No currently-sold missile
+      racks"), and turret gun slots vanished too.
+      - The catch can't simply be dropped, because the wiki also raises for real misses. A
+        404 for a UEX uuid it doesn't know is how most radars reach the by-name fallback.
+      - So `bot/wiki_api.py` gained `WikiUnavailableError(WikiApiError)`, raised only when
+        `_get_json` runs out of retries (network errors, 429s, 5xx). Following the "classify
+        by type, not message text" lesson, it's the structural marker for "didn't answer" as
+        opposed to a definite answer.
+      - A lookup where either the uuid or the name path went unanswered, and nothing was
+        found, isn't cached. It goes in `_wiki_outages` and is skipped for
+        `WIKI_OUTAGE_RETRY_SECONDS` (5 min), then asked again, so browsing during an outage
+        doesn't wait ~96s per part every time. It raises `WikiUnavailableError`, which the
+        callers' existing `gather(return_exceptions=True)` already treats as "no detail".
+      - Real misses are still cached for 24h, as before.
+      - The player is told. `candidates_for_port` returns a `PartCandidates` (a list
+        subclass, so every caller and test still sees a list) carrying `wiki_unavailable`,
+        the count of the slot's sold parts the wiki didn't answer for, counted before the
+        fit filter drops them. The command counts turrets whose gun slots are missing for
+        the same reason (`turret_gun_lookups_unanswered`). The browser shows a ⚠️ line for
+        either.
+      - Those lines come out of the page's list budget (`LIST_BUDGET_CHARS` minus the notes)
+        rather than being added on top. Measured worst case, 30 long-named guns with both
+        notes: 1,675 chars. Before the budget change it was 1,981, too close to Discord's
+        2,000.
+    - **REL-2, a stale load overwrote a newer pick.** `show_category`/`_load_candidates` set
+      the category and port, then awaited the slow `candidates_for_port`, and applied its
+      result unconditionally.
+      - The race: pick Power Plants (cold, slow), then Quantum Drives (cached). The power
+        plants landed under the Quantum Drives heading, and "Lock in" saved one as the
+        ship's quantum drive.
+      - Fix: a `_load_seq` counter, bumped on every category or slot pick. A load whose
+        number is no longer current drops its result and doesn't touch the message, since
+        the newer pick's interaction updates it.
+      - A second hole in the same flow: `show_slot` left the previous slot's parts, and
+        their dropdown, live during the load. One could be picked and locked in under the
+        new slot. `_load_candidates` now clears the list the moment a load starts.
+    - **MSG-3.** PATCH_NOTES 2.12, the module docstring and the Trading Console (v14) all
+      said "the closest shop". Each part is actually shown at its cheapest shop, with that
+      shop's distance; closest-first ordering was replaced by stat ranking in entry 85.
+      All three now say so. Older entries here are history and stay as written.
+    - Tests: two in `tests/test_wiki_api.py` (exhausted retries raise the subclass; a 404
+      raises plain `WikiApiError`, not retried). Eight in `tests/test_ship_parts_finder.py`
+      (outage retried rather than cached, real miss still cached, the count, the notes, the
+      turret count, the 2,000-char worst case, the stale-load race, and clearing the list
+      on a slot switch). The race and slot tests fail on the pre-fix code on behaviour
+      alone.
+
 ## Where to look for what
 
 Six docs, deliberately scoped so they don't duplicate each other:

@@ -36,6 +36,12 @@ class WikiApiError(Exception):
     """The wiki API could not give a usable, complete answer."""
 
 
+class WikiUnavailableError(WikiApiError):
+    """The wiki didn't answer at all (network errors, 429s or 5xx through every retry) - a
+    temporary outage, unlike a definite answer such as a 404 or an identity mismatch. A
+    caller caching misses must not cache this one as "the wiki has no such item"."""
+
+
 def _is_count(value: Any) -> bool:
     """A real integer - `bool` is an int subclass, and `true` is not a page number."""
     return isinstance(value, int) and not isinstance(value, bool)
@@ -86,7 +92,7 @@ class WikiApiClient:
             if attempt < MAX_ATTEMPTS:
                 logger.info("Wiki API %s failed (%s); retrying in %.0fs", path, last, delay)
                 await self._sleep(delay)
-        raise WikiApiError(f"{path} failed after {MAX_ATTEMPTS} attempts: {last}") from last
+        raise WikiUnavailableError(f"{path} failed after {MAX_ATTEMPTS} attempts: {last}") from last
 
     @staticmethod
     def _rows(body: dict[str, Any], path: str) -> list[dict[str, Any]]:

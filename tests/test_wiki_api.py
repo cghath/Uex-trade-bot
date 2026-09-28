@@ -11,7 +11,7 @@ import asyncio
 import httpx
 import pytest
 
-from bot.wiki_api import MAX_ATTEMPTS, MAX_PAGES, WikiApiClient, WikiApiError
+from bot.wiki_api import MAX_ATTEMPTS, MAX_PAGES, WikiApiClient, WikiApiError, WikiUnavailableError
 
 UUID = "c098e722-902a-435b-83f8-a96cec36a012"
 
@@ -336,3 +336,20 @@ def test_item_detail_by_name_needs_exactly_one_exact_match():
     assert h.run(lambda c: c.find_item_detail_by_name("Fleming"))["type"] == "Radar"
     assert h.run(lambda c: c.find_item_detail_by_name("VariPuck")) is None, "two same-named items: no guess"
     assert h.run(lambda c: c.find_item_detail_by_name("Nothing")) is None
+
+
+def test_a_wiki_that_never_answers_raises_the_unavailable_subclass():
+    """Exhausted retries (network errors, 429s or 5xx) mean "the wiki didn't answer", which a
+    caller caching misses must tell apart from a definite "no such item" (ship parts: REL-1)."""
+    h = _Harness(lambda req, n: httpx.Response(503))
+    with pytest.raises(WikiUnavailableError):
+        h.run(lambda c: c.get_item_detail(UUID))
+    assert len(h.requests) == MAX_ATTEMPTS
+
+
+def test_a_definite_404_is_a_plain_wiki_error_not_an_outage():
+    h = _Harness(lambda req, n: httpx.Response(404))
+    with pytest.raises(WikiApiError) as info:
+        h.run(lambda c: c.get_item_detail(UUID))
+    assert not isinstance(info.value, WikiUnavailableError)
+    assert len(h.requests) == 1, "not retried"

@@ -11,8 +11,8 @@ the oldest entry below); the next new entry is 2.13.
 - `/ship-parts-finder` - Pick a ship and your location to browse every component slot on it: weapons, gun mounts,
   missile racks, power plants, coolers, shield generators, quantum drives and radar. Guns inside turrets get their
   own slots. Each slot lists only parts that really fit it and that a shop currently sells, ranked by the stat that
-  matters most (quantum speed, power generation, DPS and so on), with price, the closest shop, and the part's key
-  stats. Long lists page with Previous/Next. Lock parts into a private shopping list in your own thread, and remove
+  matters most (quantum speed, power generation, DPS and so on), with the cheapest shop selling it, how far that
+  shop is from you, and the part's key stats. Long lists page with Previous/Next. Lock parts into a private shopping list in your own thread, and remove
   them one at a time when you've bought them. Still being tested, so report anything that looks wrong.
 
 ---

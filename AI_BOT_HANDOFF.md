@@ -113,6 +113,12 @@ date - no open item, nothing to record here.
       here, so it very likely has the same unguarded loops. Grep its own `@tasks.loop`s
       too, including any AI-only ones. Test: `tests/test_background_loop_guards.py`.
       See PROJECT_CONTEXT.md entry 87
+- [ ] `/ship-parts-finder` reliability: a wiki outage is no longer cached as "no detail"
+      for 24h, and a slow category load can't overwrite a newer pick or lock a part under
+      the wrong slot (`bot/cogs/ship_parts_finder.py`). Also a new `WikiUnavailableError`
+      subclass in `bot/wiki_api.py`, raised only when retries run out. It's a subclass, so
+      every existing `except WikiApiError` still catches it. Only the finder part matters,
+      and only if aiv2 ever ports `/ship-parts-finder`. See PROJECT_CONTEXT.md entry 88
 
 ## To port: aiv2 -> production
 
