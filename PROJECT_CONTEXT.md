@@ -3300,6 +3300,55 @@ they're in sync).
       answer, a slow UEX (empty, under budget) and UEX down (empty), plus `fetch_within`
       re-raising a non-UEX exception.
 
+94. **`/ship-parts-finder` gets a ↻ Refresh button that keeps working after the browser
+    closes.** Reported live with a screenshot: after a while, the browser's dropdowns
+    answered "didn't respond in time", and a returning player had no idea how to carry on.
+    Audit REL-13's `PartsBrowserView` part and UX-7.
+    - **Two causes.** The view's `timeout=600` stopped it listening after 10 idle minutes,
+      with nothing on the message saying so. Every restart (several a day while deploying)
+      also dropped it, since only the saved list's `ShipPartsShoppingView` is persistent.
+    - **Options weighed with the user:** expire visibly; a longer timeout; a "Browse
+      parts" button on the saved list; making every control restart-proof; or one
+      restart-proof Refresh button. The user picked the Refresh button: it covers both
+      causes for one special button, leaves the view's tricky paging and stale-load code
+      alone, and is the building block if every control is ever made restart-proof later.
+    - **How it works.**
+      - The ship id, location terminal id and current category ride in the button's
+        custom_id (`ship-parts-browse:refresh:<vehicle>:<terminal>:<category>`, dropping
+        the category if it would pass Discord's 100 characters).
+      - `RefreshBrowserButton`, a `discord.ui.DynamicItem`, is registered once in
+        `cog_load` (`bot.add_dynamic_items`) and handles every click, live view or not.
+      - `refresh_browser` defers, rebuilds a fresh view via `_build_browser` (now shared
+        with the command) and edits the same message.
+      - The view comes back on the same category. `restore_category` reloads its parts,
+        or asks for the slot again on a multi-slot category. Page, slot and an unlocked
+        pick are not kept. If the reload fails, it reopens with no category and a ⚠️ note.
+      - Any unexpected error still answers the player: discord.py only logs a dynamic
+        item's exceptions, which would leave "thinking..." forever.
+    - **Idle expiry is visible.** `on_timeout` greys out everything except Refresh and
+      swaps the message's last line to "Closed after 10 minutes idle. Tap ↻ Refresh...".
+      A restart never runs `on_timeout`, so every browser message ends with "Buttons not
+      responding? Tap ↻ Refresh." Both lines count against `LIST_BUDGET_CHARS`.
+    - **A discord.py trap that shaped the design.** In 2.7, `ViewStore.remove_view` pops
+      every `DynamicItem` pattern the view contained from the bot-wide registry. Putting
+      the real `RefreshBrowserButton` inside the live view would have made the FIRST
+      browser to time out or be replaced silently kill Refresh on every message, including
+      old ones after a restart. Reproduced against a real `ViewStore`. The live view
+      instead carries `_RefreshStub`, a plain button with the same custom_id and
+      `is_dispatchable()` returning False, so the view store never tracks it.
+    - **Replacing a live view.** `ShipPartsFinder._browsers` maps message id to its live
+      view. A refresh stops the old one BEFORE editing: `remove_view` also pops
+      `_synced_message_views[message_id]`, so stopping it afterwards would drop the new
+      view's registration. `on_timeout` does nothing unless its view is still the one in
+      `_browsers`, so a replaced view can't overwrite the new browser.
+    - **Not covered:** browser messages posted before this deploy have no Refresh button;
+      rerunning the command replaces them. REL-13's other two stuck states (a failed
+      command after its defer, and the browse message after an unexpected exception) are
+      still open.
+    - Tests: `tests/test_ship_parts_refresh.py` (17), plus the 2,000-character check in
+      `tests/test_ship_parts_finder.py` now also measures the idle-closed footer. The store
+      test fails if the stub is swapped for a real `DynamicItem`, checked directly.
+
 ## Where to look for what
 
 Six docs, deliberately scoped so they don't duplicate each other:
