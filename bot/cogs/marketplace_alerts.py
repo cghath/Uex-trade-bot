@@ -19,10 +19,12 @@ from bot.cogs.marketplace import OPERATION_CHOICES, traded_item_autocomplete
 from bot.delivery import Delivery, send_dm
 from bot.uex.exceptions import UexApiError
 from bot.uex.marketplace import (
+    QUALITY_MAX,
     exclude_sold_out,
     filter_listings_by_keyword,
     filter_listings_by_quality,
     find_item_id_by_name,
+    format_quality_range,
     marketplace_item_link,
     parse_listing_quality,
     parse_uex_number,
@@ -50,8 +52,8 @@ class MarketplaceAlerts(commands.Cog):
         keyword="Item name or keyword to watch for, e.g. 'Cutlass Black' or 'Laranite'",
         operation="Watch sell listings (so you can buy) or buy listings (so you can sell into them)",
         target_price="Optional: only notify at or better than this price",
-        min_quality="Optional: only notify for listings with quality at least this (seller-set, UEX's 0-100 scale)",
-        max_quality="Optional: only notify for listings with quality at most this (seller-set, UEX's 0-100 scale)",
+        min_quality="Optional: only listings with quality at least this, 0-1000 (seller-set)",
+        max_quality="Optional: only listings with quality at most this, 0-1000 (seller-set)",
     )
     @app_commands.choices(operation=OPERATION_CHOICES)
     @app_commands.autocomplete(keyword=traded_item_autocomplete)
@@ -61,8 +63,8 @@ class MarketplaceAlerts(commands.Cog):
         keyword: str,
         operation: app_commands.Choice[str],
         target_price: float | None = None,
-        min_quality: float | None = None,
-        max_quality: float | None = None,
+        min_quality: app_commands.Range[float, 0, QUALITY_MAX] | None = None,
+        max_quality: app_commands.Range[float, 0, QUALITY_MAX] | None = None,
     ) -> None:
         alert_id = await self.bot.db.add_marketplace_alert(
             user_id=interaction.user.id,
@@ -76,9 +78,7 @@ class MarketplaceAlerts(commands.Cog):
         price_note = f" at or better than **{target_price:,.0f}**" if target_price is not None else ""
         quality_note = ""
         if min_quality is not None or max_quality is not None:
-            lo = f"{min_quality:.0f}" if min_quality is not None else "0"
-            hi = f"{max_quality:.0f}" if max_quality is not None else "100"
-            quality_note = f" and quality {lo}-{hi}"
+            quality_note = f" and quality {format_quality_range(min_quality, max_quality)}"
         quality_caveat = (
             " (note: most listings today don't have a quality value set at all, so this may match very little for now)"
             if quality_note

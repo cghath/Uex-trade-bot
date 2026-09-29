@@ -3155,6 +3155,38 @@ they're in sync).
       other 5 test the new module itself, plus two behaviours the old code already had
       right. Existing negotiation-test fakes now return `Delivery` values instead of bools.
 
+90. **Marketplace quality uses the real 0-1000 scale, movers show their own currency, and
+    the scanner can be turned off.** Audit findings MSG-1, MSG-2 and UX-3.
+    - **MSG-1.** UEX documents a listing's `quality` as 0-100, but real listings use the
+      game's 0-1000 (the "trust the data" convention in CLAUDE.md). Yet
+      `/marketplace-search`'s and `/marketplace-alert-add`'s option descriptions, the
+      search footer, and `parse_listing_quality`'s docstring all said 0-100. An alert with
+      no max quality showed "0-100" in three places: the add confirmation and both
+      `/alert-list` views.
+      - So a player typing "at least 80" meant high quality, but matched almost every
+        listing.
+      - The three range displays now share `format_quality_range` (`bot/uex/marketplace.py`),
+        and an unset max shows `QUALITY_MAX` (1000).
+      - The four options take `app_commands.Range[float, 0, 1000]`, so out-of-scale input is
+        refused by Discord itself.
+      - Checked read-only on the Pi first: the one live alert with quality bounds is 0-0,
+        so no stored alert changes meaning.
+    - **MSG-2.** `compute_marketplace_movers` dropped the row's `currency` (UEX's
+      `/marketplace_trends` sends UEC, WIF or MGS per row), and `/marketplace-movers`
+      printed "UEC" for all of them. `MarketplaceMoverEntry` now carries `currency`
+      (default UEC, like the other Marketplace parsers), and the command shows it.
+    - **UX-3.** There was no way to stop the deal scanner: no command, no DB delete.
+      - New `Database.clear_scanner_channel`, reached from a **Turn off** button on
+        `/scanner-status`'s reply (`ScannerOffView`). It's a button rather than a new
+        command, to keep the command list short for new players.
+      - The button only works for the player who ran the command, and it greys itself
+        out on timeout (the "dead buttons look live" finding, UX-7, for this one view).
+      - Seen-deal rows are kept, so turning the scanner back on doesn't re-send deals
+        already shown.
+      - `/set-scanner-channel`'s reply now points at the button.
+    - PATCH_NOTES 2.13 covers these, plus PR #66's delivery fixes, which had no player-facing
+      note yet. Tests: `tests/test_marketplace_labels_and_scanner_off.py` (8).
+
 ## Where to look for what
 
 Six docs, deliberately scoped so they don't duplicate each other:
