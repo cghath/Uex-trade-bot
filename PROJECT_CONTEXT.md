@@ -3391,6 +3391,38 @@ they're in sync).
       about due ships", "empty answer keeps saved slots" and spacing tests each fail
       against the old behaviour, checked by reintroducing it.
 
+96. **Ship Parts Finder's fitting-variant lookups go a batch at a time, and an outage there
+    is no longer silent.** Audit finding REL-15.
+    - **The burst.** `_swap_in_fitting_variants` looks up every wiki item sharing a
+      part's shop name, for each part that fails the tag check (entry 86). On a
+      tag-restricted slot, such as a PDC slot or a remote turret, that's most of the
+      category: up to ~86 lookups. They all went out in one `asyncio.gather`, while every
+      other wiki fetch in the cog goes `DETAIL_BATCH_SIZE` (8) at a time.
+    - **Found while fixing it: the REL-1 gap, one function over.** `_variants_cached`
+      turned any `WikiApiError`, including `WikiUnavailableError`, into "no variants"
+      without recording it. During an outage:
+      - the part failed the tag check and was dropped, so the slot silently listed fewer
+        parts;
+      - the browser's ⚠️ "wiki didn't respond" note didn't count it;
+      - every browse fired all the lookups again, each with its full retries.
+    - **Fix.**
+      - Lookups are batched by `DETAIL_BATCH_SIZE` and deduplicated by shop name, since
+        several parts can share one.
+      - `_variants_cached` handles outages like `_item_detail_cached`: an unanswered
+        lookup is recorded and raises `WikiUnavailableError`, and that name is skipped
+        for `WIKI_OUTAGE_RETRY_SECONDS`. A definite error (e.g. an identity mismatch) is
+        cached like any other answer.
+      - The shared bookkeeping moved into `_record_wiki_outage`, used by both lookups.
+      - A part whose variant lookup went unanswered is marked `_detail_unanswered`, so
+        `PartCandidates.wiki_unavailable`, and the note built from it, counts it. It is
+        still left out of the list, since its fit can't be confirmed.
+    - Tests: `tests/test_ship_parts_variant_lookups.py` (5): peak concurrency equals the
+      batch size across 86 lookups, one lookup per shared name, the outage flag plus its
+      5-minute skip and recovery, caching of a definite error, and the end-to-end note
+      count. All 5 fail against the old code. The dedupe test needed its fake to yield
+      like a real request: with an instant fake, the old code's cache absorbed the
+      duplicates by accident.
+
 ## Where to look for what
 
 Six docs, deliberately scoped so they don't duplicate each other:

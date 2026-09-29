@@ -168,6 +168,11 @@ date - no open item, nothing to record here.
       aiv2 `tasks.loop`: a long interval still runs on every start, so a heavy crawl
       needs its own last-run record. Test: `tests/test_ship_parts_reference_refresh.py`.
       See PROJECT_CONTEXT.md entry 95
+- [ ] Ship Parts Finder's fitting-variant lookups batched by `DETAIL_BATCH_SIZE`, once per
+      name, and `_variants_cached` treating a wiki outage as an outage (flagged in the
+      note, skipped for 5 minutes) instead of "no variants". Only matters if aiv2 ever
+      ports `/ship-parts-finder`. Test: `tests/test_ship_parts_variant_lookups.py`.
+      See PROJECT_CONTEXT.md entry 96
 
 ## To port: aiv2 -> production
 

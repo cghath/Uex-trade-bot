@@ -1000,9 +1000,7 @@ class ShipPartsFinder(commands.Cog):
                 detail = None
         if detail is None and unanswered:
             # Either lookup going unanswered means "no detail" isn't a known answer yet.
-            if len(self._wiki_outages) >= DETAIL_CACHE_MAX:
-                self._wiki_outages = {k: t for k, t in self._wiki_outages.items() if t > now}
-            self._wiki_outages[key] = now + WIKI_OUTAGE_RETRY_SECONDS
+            self._record_wiki_outage(key, now)
             raise WikiUnavailableError(f"the wiki didn't answer for {name or item_uuid}")
         self._wiki_outages.pop(key, None)
         if len(self._detail_cache) >= DETAIL_CACHE_MAX:
@@ -1010,6 +1008,11 @@ class ShipPartsFinder(commands.Cog):
         detail = _slim_detail(detail)
         self._detail_cache[key] = (now + DETAIL_CACHE_SECONDS, detail)
         return detail
+
+    def _record_wiki_outage(self, key: str, now: float) -> None:
+        if len(self._wiki_outages) >= DETAIL_CACHE_MAX:
+            self._wiki_outages = {k: t for k, t in self._wiki_outages.items() if t > now}
+        self._wiki_outages[key] = now + WIKI_OUTAGE_RETRY_SECONDS
 
     def _wiki_outage_active(self, key: str | None, now: float | None = None) -> bool:
         """Whether the wiki recently failed to answer the detail lookup for `key` (a uuid,
@@ -1061,15 +1064,25 @@ class ShipPartsFinder(commands.Cog):
                               wiki_unavailable=sum(1 for c in candidates if c.get("_detail_unanswered")))
 
     async def _variants_cached(self, name: str) -> list[dict]:
+        """Every wiki item sharing this shop name, cached for a day. Like _item_detail_cached,
+        a lookup the wiki didn't answer raises WikiUnavailableError and is skipped for
+        WIKI_OUTAGE_RETRY_SECONDS - it used to read as "no variants", which quietly dropped
+        the part from a tag-restricted slot with no outage note (audit REL-15)."""
         key = f"variants:{name.lower()}"
         now = time.monotonic()
         cached = self._detail_cache.get(key)
         if cached and cached[0] > now:
             return cached[1]
+        if self._wiki_outage_active(key, now):
+            raise WikiUnavailableError(f"the wiki didn't answer for {name} a few minutes ago")
         try:
             rows = await self._wiki.find_item_variants_by_name(name)
+        except WikiUnavailableError:
+            self._record_wiki_outage(key, now)
+            raise
         except WikiApiError:
-            return []
+            rows = []  # a definite answer, cached like one
+        self._wiki_outages.pop(key, None)
         if len(self._detail_cache) >= DETAIL_CACHE_MAX:
             self._detail_cache.pop(next(iter(self._detail_cache)))
         rows = [_slim_detail(row) for row in rows if isinstance(row, dict)]
@@ -1080,11 +1093,23 @@ class ShipPartsFinder(commands.Cog):
         """A part that fails the tag check on the detail its UEX uuid led to may still be
         a generic part with ship-specific namesakes (see pick_fitting_variant) - replace
         its wiki fields with the variant that fits this ship, stats included. Only runs
-        for the few parts that fail the tag check."""
+        for the few parts that fail the tag check - which on a PDC or remote-turret slot is
+        most of them (up to ~86), so lookups go DETAIL_BATCH_SIZE at a time, once per name,
+        instead of all at once (audit REL-15)."""
         named = [c for c in candidates if c.get("name")]
-        results = await asyncio.gather(*(self._variants_cached(str(c["name"])) for c in named),
-                                       return_exceptions=True)
-        for candidate, rows in zip(named, results):
+        names = list(dict.fromkeys(str(c["name"]) for c in named))
+        variants: dict[str, object] = {}
+        for start in range(0, len(names), DETAIL_BATCH_SIZE):
+            batch = names[start:start + DETAIL_BATCH_SIZE]
+            results = await asyncio.gather(*(self._variants_cached(n) for n in batch), return_exceptions=True)
+            variants.update(zip(batch, results))
+        for candidate in named:
+            rows = variants.get(str(candidate["name"]))
+            if isinstance(rows, WikiUnavailableError):
+                # Counted in the browser's "wiki didn't respond" note: this part may be
+                # missing only because its fitting variant couldn't be looked up.
+                candidate["_detail_unanswered"] = True
+                continue
             variant = pick_fitting_variant(rows, port) if isinstance(rows, list) else None
             if variant is None:
                 continue
