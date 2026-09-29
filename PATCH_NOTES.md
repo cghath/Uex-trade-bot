@@ -1,7 +1,17 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.16.
+the oldest entry below); the next new entry is 2.17.
+
+---
+
+## 2.16 - 2026-09-29 - Ship Parts Finder: pick up where you left off
+
+**New**
+- `/ship-parts-finder` - The browser now has a **↻ Refresh** button. If you step away and the dropdowns stop
+  responding, tap it to bring the browser back on the same ship and category, without running the command again.
+  After 10 minutes idle the browser now greys out and says so, instead of looking usable. Your locked-in parts were
+  never affected.
 
 ---
 

@@ -155,6 +155,12 @@ date - no open item, nothing to record here.
       `bot/autocomplete.py: fetch_within`. aiv2's AI tools that draw charts, or any aiv2
       autocomplete still doing `try: await uex... except UexApiError`, need the same.
       Test: `tests/test_responsiveness.py`. See PROJECT_CONTEXT.md entry 93
+- [ ] `/ship-parts-finder`'s restart-proof ↻ Refresh button (`RefreshBrowserButton`,
+      `_RefreshStub`, `refresh_browser`, `PartsBrowserView.on_timeout`) - only matters if
+      aiv2 ever ports `/ship-parts-finder`. The general lesson applies to any aiv2 view:
+      never put a `DynamicItem` inside a view that can time out, since closing it
+      unregisters the pattern bot-wide. Test: `tests/test_ship_parts_refresh.py`.
+      See PROJECT_CONTEXT.md entry 94
 
 ## To port: aiv2 -> production
 

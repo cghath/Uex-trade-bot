@@ -87,6 +87,16 @@ DETAIL_CACHE_MAX = 1000
 # being retried - long enough that browsing during an outage doesn't wait on every part
 # again, short enough that the finder recovers minutes after the wiki does.
 WIKI_OUTAGE_RETRY_SECONDS = 5 * 60
+# The browsing view stops listening after this long without a click. Its ↻ Refresh button
+# keeps working after that, and after a restart, and rebuilds the browser in place.
+BROWSER_IDLE_SECONDS = 600
+REFRESH_LABEL = "↻ Refresh"
+REFRESH_HINT = "Buttons not responding? Tap **↻ Refresh**."
+EXPIRED_NOTE = ("⏸️ Closed after 10 minutes idle. Tap **↻ Refresh** to pick up where you left off - "
+                "your locked-in parts are saved.")
+_REFRESH_PREFIX = "ship-parts-browse:refresh"
+REFRESH_TEMPLATE = _REFRESH_PREFIX + r":(?P<vehicle>\d+):(?P<terminal>\d+):(?P<category>.*)"
+MAX_CUSTOM_ID_CHARS = 100  # Discord's limit
 # Wiki detail fields no display or fit check reads - dropped before caching, so a full
 # cache stays small on the Pi.
 _UNUSED_DETAIL_KEYS = frozenset({
@@ -430,12 +440,14 @@ class PartsBrowserView(discord.ui.View):
     Category -> [slot, when a category has more than one physical port] -> part, since a
     ship can have several independent slots in one category (e.g. two differently-sized
     turrets) that each need their own choice - collapsing to the category's first port
-    silently made those unreachable, a real defect an outside audit caught before merge."""
+    silently made those unreachable, a real defect an outside audit caught before merge.
+
+    Its ↻ Refresh button outlives it: see RefreshBrowserButton."""
     def __init__(
         self, cog: "ShipPartsFinder", vehicle: dict, origin_terminal: tuple[int, str],
         grouped_ports: dict[str, list[ShipPort]],
     ) -> None:
-        super().__init__(timeout=600)
+        super().__init__(timeout=BROWSER_IDLE_SECONDS)
         self.cog = cog
         self.vehicle = vehicle
         self.origin_terminal = origin_terminal
@@ -456,8 +468,14 @@ class PartsBrowserView(discord.ui.View):
         self.parts_unanswered = 0
         # Turrets whose gun slots are missing because the wiki didn't answer; set by the command.
         self.turret_guns_unanswered = 0
+        # The message this view is on (set once it's sent) and whether it has gone idle.
+        self.message: discord.Message | None = None
+        self.expired = False
+        # One-off explanation shown in the header, e.g. a refresh that couldn't reload its category.
+        self.notice: str | None = None
         self.category_select = _CategorySelect(self)
         self.add_item(self.category_select)
+        self._add_refresh()
 
     def _selection_summary(self) -> str:
         # Plain-text mirror of the dropdowns' own state, independent of whether Discord's
@@ -478,7 +496,7 @@ class PartsBrowserView(discord.ui.View):
     def _wiki_notes(self) -> list[str]:
         """Say when the Star Citizen Wiki didn't answer, since a list built without its data
         can be short or wrong-sized - otherwise that looks like a real "none for sale"."""
-        notes = []
+        notes = [self.notice] if self.notice else []
         if self.turret_guns_unanswered:
             notes.append("⚠️ The Star Citizen Wiki didn't respond, so turret guns aren't listed. "
                          "Try again in a few minutes.")
@@ -489,6 +507,10 @@ class PartsBrowserView(discord.ui.View):
         return notes
 
     def text(self) -> str:
+        # Always ends with how to recover, since a dead control looks exactly like a live one.
+        return f"{self._body()}\n\n{EXPIRED_NOTE if self.expired else REFRESH_HINT}"
+
+    def _body(self) -> str:
         header = "\n".join([f"**{self.vehicle.get('name')}** parts - pick a category to compare real options.",
                             *self._wiki_notes()])
         if self.category is None:
@@ -524,7 +546,7 @@ class PartsBrowserView(discord.ui.View):
         fixed = port.size_min if port is not None and port.size_min == port.size_max else None
         self._header_shared, self._shared = list_shared(candidates, fixed)
         # Any outage note shares the message's 2,000-char limit, so it comes out of the list's budget.
-        notes = sum(len(note) + 1 for note in self._wiki_notes())
+        notes = sum(len(note) + 1 for note in self._wiki_notes()) + len(EXPIRED_NOTE) + 2
         self.pages = paginate_parts(candidates, shared=self._shared, budget=LIST_BUDGET_CHARS - notes)
         self.page = 0
         self._show_page()
@@ -533,12 +555,64 @@ class PartsBrowserView(discord.ui.View):
         """Rebuild the page's own dropdown (only this page's parts, so it can never hit
         Discord's 25-option limit however big the slot) and the page buttons."""
         self._remove_items(_PartSelect, _PageButton)
-        if not self.pages:
+        if self.pages:
+            self.add_item(_PartSelect(self, self.pages[self.page]))
+            if len(self.pages) > 1:
+                self.add_item(_PageButton(self, -1))
+                self.add_item(_PageButton(self, +1))
+        self._add_refresh()
+
+    def _add_refresh(self) -> None:
+        """(Re)add ↻ Refresh as the last button, carrying the current category so a refresh
+        comes back to it."""
+        self._remove_items(_RefreshStub)
+        self.add_item(_RefreshStub(refresh_custom_id(self.vehicle.get("id"), self.origin_terminal[0], self.category)))
+
+    async def on_timeout(self) -> None:
+        """Grey out everything but ↻ Refresh and say so, instead of leaving controls that
+        look usable but answer "didn't respond in time". A restart never gets here, which is
+        why the hint line is always on the message."""
+        browsers = getattr(self.cog, "_browsers", {})
+        if self.message is None or browsers.get(self.message.id) is not self:
+            return  # replaced by a refresh; the newer view owns the message now
+        browsers.pop(self.message.id, None)
+        self.expired = True
+        for child in self.children:
+            if not isinstance(child, _RefreshStub):
+                child.disabled = True
+        try:
+            await self.message.edit(content=self.text(), view=self)
+        except discord.HTTPException as exc:
+            logger.info("Couldn't mark an idle ship parts browser as closed: %s", exc)
+
+    async def restore_category(self, category: str) -> None:
+        """Refresh's way back to where the player was: the same category, reloaded without an
+        interaction of its own (the Refresh click has already deferred)."""
+        self.category = category
+        _mark_default(self.category_select.options, category)
+        ports = self.grouped_ports.get(category, [])
+        if len(ports) > 1:
+            self._set_candidates([])
+            self.add_item(_SlotSelect(self, ports))
             return
-        self.add_item(_PartSelect(self, self.pages[self.page]))
-        if len(self.pages) > 1:
-            self.add_item(_PageButton(self, -1))
-            self.add_item(_PageButton(self, +1))
+        self.selected_port = ports[0] if ports else None
+        candidates: list[dict] = []
+        if self.selected_port is not None:
+            try:
+                candidates = await self.cog.candidates_for_port(
+                    self.selected_port, category=category, origin_id=self.origin_terminal[0],
+                )
+            except (UexApiError, WikiApiError) as exc:
+                logger.info("Refresh couldn't reload %s options: %s", category, exc)
+                self.category = None
+                self.selected_port = None
+                for option in self.category_select.options:
+                    option.default = False
+                self.notice = f"⚠️ Couldn't reload {category_label(category)} options right now. Pick it again to retry."
+                self._set_candidates([])
+                return
+        self.parts_unanswered = getattr(candidates, "wiki_unavailable", 0)
+        self._set_candidates(candidates)
 
     async def turn_page(self, interaction: discord.Interaction, delta: int) -> None:
         self.page = max(0, min(len(self.pages) - 1, self.page + delta))
@@ -552,6 +626,7 @@ class PartsBrowserView(discord.ui.View):
     async def show_category(self, interaction: discord.Interaction, category: str) -> None:
         self._load_seq += 1  # supersedes any load still running for the previous pick
         self.category = category
+        self.notice = None
         self.selected_port = None
         self.selected_candidate = None
         self.parts_unanswered = 0
@@ -686,6 +761,52 @@ class _PartSelect(discord.ui.Select):
         await interaction.response.edit_message(content=self.parent_view.text(), view=self.parent_view)
 
 
+def refresh_custom_id(id_vehicle, id_terminal, category: str | None) -> str:
+    custom_id = f"{_REFRESH_PREFIX}:{int(id_vehicle)}:{int(id_terminal)}:{category or ''}"
+    if len(custom_id) > MAX_CUSTOM_ID_CHARS:  # an unexpectedly long category name: reopen without it
+        custom_id = f"{_REFRESH_PREFIX}:{int(id_vehicle)}:{int(id_terminal)}:"
+    return custom_id
+
+
+class _RefreshStub(discord.ui.Button):
+    """↻ Refresh as it sits in a live PartsBrowserView. Deliberately NOT dispatchable: every
+    click goes to RefreshBrowserButton, registered once at startup, so the same code runs
+    whether or not this view is still alive. It can't be a DynamicItem inside the view,
+    because discord.py unregisters a view's DynamicItem patterns bot-wide when that view
+    closes - the first browser to time out would have killed Refresh on every message."""
+    def __init__(self, custom_id: str) -> None:
+        super().__init__(label=REFRESH_LABEL, style=discord.ButtonStyle.secondary, row=4, custom_id=custom_id)
+
+    def is_dispatchable(self) -> bool:
+        return False
+
+
+class RefreshBrowserButton(discord.ui.DynamicItem[discord.ui.Button], template=REFRESH_TEMPLATE):
+    """Handles ↻ Refresh on any browsing message, even one whose view timed out or was lost
+    in a restart: the ship, location and category ride in the button's own custom_id."""
+    def __init__(self, id_vehicle: int, id_terminal: int, category: str | None) -> None:
+        super().__init__(discord.ui.Button(
+            label=REFRESH_LABEL, style=discord.ButtonStyle.secondary, row=4,
+            custom_id=refresh_custom_id(id_vehicle, id_terminal, category),
+        ))
+        self.id_vehicle = id_vehicle
+        self.id_terminal = id_terminal
+        self.category = category
+
+    @classmethod
+    async def from_custom_id(cls, interaction: discord.Interaction, item: discord.ui.Button, match, /):
+        return cls(int(match["vehicle"]), int(match["terminal"]), match["category"] or None)
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        cog = interaction.client.get_cog("ShipPartsFinder")
+        if cog is None:
+            await interaction.response.send_message(
+                "Ship Parts Finder isn't available right now. Try again in a minute.", ephemeral=True,
+            )
+            return
+        await cog.refresh_browser(interaction, self.id_vehicle, self.id_terminal, self.category)
+
+
 class ShipPartsFinder(commands.Cog):
     def __init__(self, bot: commands.Bot, *, wiki_client: WikiApiClient | None = None, start_refresh: bool = True) -> None:
         self.bot = bot
@@ -694,13 +815,17 @@ class ShipPartsFinder(commands.Cog):
         # Detail lookups the wiki didn't answer: key -> monotonic time to retry after.
         self._wiki_outages: dict[str, float] = {}
         self.shopping = ShipPartsShoppingService(bot)
+        # Live browsing views by message id, so a refresh can retire the one it replaces.
+        self._browsers: dict[int, PartsBrowserView] = {}
         if start_refresh:
             self.refresh_reference.start()
 
     async def cog_load(self) -> None:
         self.bot.add_view(ShipPartsShoppingView(self.shopping))
+        self.bot.add_dynamic_items(RefreshBrowserButton)
 
     def cog_unload(self) -> None:
+        self.bot.remove_dynamic_items(RefreshBrowserButton)
         self.refresh_reference.cancel()
         try:
             asyncio.get_running_loop().create_task(self._wiki.aclose())
@@ -1009,16 +1134,9 @@ class ShipPartsFinder(commands.Cog):
             )
             return
 
-        try:
-            ports = await self._ports_for_vehicle(vehicle)
-        except WikiApiError as exc:
-            await interaction.followup.send(f"Couldn't load {vehicle.get('name')}'s components: {exc}", ephemeral=True)
-            return
-        grouped = group_ports_by_category(ports)
-        if not grouped:
-            await interaction.followup.send(
-                f"No supported component categories found for **{vehicle.get('name')}** yet.", ephemeral=True,
-            )
+        view = await self._build_browser(vehicle, resolved_location)
+        if isinstance(view, str):
+            await interaction.followup.send(view, ephemeral=True)
             return
 
         # Browsing lives inside the same private thread as the locked-in list, not as an
@@ -1031,12 +1149,76 @@ class ShipPartsFinder(commands.Cog):
                 "I couldn't open your private ship parts thread. Check thread permissions.", ephemeral=True,
             )
             return
-        view = PartsBrowserView(self, vehicle, resolved_location, grouped)
-        view.turret_guns_unanswered = self.turret_gun_lookups_unanswered(ports)
-        await thread.send(content=view.text(), view=view, allowed_mentions=NO_MENTIONS)
+        view.message = await thread.send(content=view.text(), view=view, allowed_mentions=NO_MENTIONS)
+        self._browsers[view.message.id] = view
         await interaction.followup.send(
             f"Opened {thread.mention} - browse **{vehicle.get('name')}**'s parts there.", ephemeral=True,
         )
+
+
+    async def _build_browser(self, vehicle: dict, origin_terminal: tuple[int, str]) -> PartsBrowserView | str:
+        """A fresh browsing view for one ship, or the message to show instead. Shared by the
+        command and ↻ Refresh."""
+        try:
+            ports = await self._ports_for_vehicle(vehicle)
+        except WikiApiError as exc:
+            return f"Couldn't load {vehicle.get('name')}'s components: {exc}"
+        grouped = group_ports_by_category(ports)
+        if not grouped:
+            return f"No supported component categories found for **{vehicle.get('name')}** yet."
+        view = PartsBrowserView(self, vehicle, origin_terminal, grouped)
+        view.turret_guns_unanswered = self.turret_gun_lookups_unanswered(ports)
+        return view
+
+    async def refresh_browser(
+        self, interaction: discord.Interaction, id_vehicle: int, id_terminal: int, category: str | None,
+    ) -> None:
+        """Rebuild the browser on the clicked message: same ship, location and category."""
+        await interaction.response.defer()
+        try:
+            await self._rebuild_browser(interaction, id_vehicle, id_terminal, category)
+        except Exception:
+            # discord.py only logs a dynamic item's exception, which would leave the player
+            # on "thinking..." with no way forward.
+            logger.exception("Ship parts browser refresh failed")
+            try:
+                await interaction.followup.send(
+                    "Couldn't refresh this browser. Run `/ship-parts-finder` again - your locked-in parts are saved.",
+                    ephemeral=True,
+                )
+            except discord.HTTPException:
+                pass
+
+    async def _rebuild_browser(
+        self, interaction: discord.Interaction, id_vehicle: int, id_terminal: int, category: str | None,
+    ) -> None:
+        try:
+            vehicles = await self.bot.uex.get_vehicles()
+        except UexApiError as exc:
+            await interaction.followup.send(describe_uex_api_error(exc), ephemeral=True)
+            return
+        vehicle = next((v for v in vehicles if str(v.get("id")) == str(id_vehicle)), None)
+        if vehicle is None:
+            await interaction.followup.send(
+                "That ship isn't in UEX's list any more. Run `/ship-parts-finder` again.", ephemeral=True,
+            )
+            return
+        # Only the id is used downstream; the location's name isn't shown by the browser.
+        view = await self._build_browser(vehicle, (id_terminal, ""))
+        if isinstance(view, str):
+            await interaction.followup.send(view, ephemeral=True)
+            return
+        if category and category in view.grouped_ports:
+            await view.restore_category(category)
+        message = interaction.message
+        # Retire the view being replaced BEFORE the edit registers the new one: stopping it
+        # afterwards would drop the new view's own message registration in discord.py.
+        old = self._browsers.pop(message.id, None)
+        if old is not None:
+            old.stop()
+        view.message = message
+        self._browsers[message.id] = view
+        await interaction.edit_original_response(content=view.text(), view=view)
 
 
 async def setup(bot: commands.Bot) -> None:

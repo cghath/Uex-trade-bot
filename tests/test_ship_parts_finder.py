@@ -1099,7 +1099,9 @@ def test_outage_notes_never_push_a_full_page_past_discords_2000_chars():
     lengths = []
     for page in range(len(view.pages)):
         view.page = page
-        lengths.append(len(view.text()))
+        for expired in (False, True):  # the idle-closed note is the longer footer
+            view.expired = expired
+            lengths.append(len(view.text()))
     assert max(lengths) <= 2000, lengths
 
 
