@@ -1,7 +1,23 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.20.
+the oldest entry below); the next new entry is 2.21.
+
+---
+
+## 2.20 - 2026-09-29 - Listing ids and tidier lists
+
+**Changed**
+- `/marketplace-search`, `/my-favorites`, `/my-negotiations` - Each listing now shows its listing id, the number
+  `/marketplace-listing` and `/marketplace-delete-listing` ask for. (`/my-favorites` used to show a different number
+  that no command accepted.)
+- `/uex-trades` - Trade dates now show as real dates in your own time zone, not raw numbers.
+- `/trade-log` - `limit` now goes from 1 to 50.
+
+**Fixed**
+- `/my-favorites`, `/my-negotiations`, `/trade-log`, `/uex-trades` - A long list no longer makes the command fail;
+  it shows as many entries as fit and says how many more there are.
+- `/uex-trades` - No longer tells you your linked key may be invalid when UEX is just having a temporary problem.
 
 ---
 

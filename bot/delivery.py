@@ -65,6 +65,23 @@ def fit_message(prefix: str, body: str, *, limit: int = MAX_MESSAGE_CHARS,
     return prefix + body[:room].rstrip() + cut_note
 
 
+def fit_lines(lines: list[str], *, limit: int = MAX_MESSAGE_CHARS, footer: str | None = None,
+              more: str = "…and {n} more.") -> str:
+    """As many whole lines as fit under Discord's limit, the rest counted in a "…and N more"
+    line rather than cut mid-line, with `footer` always kept last. A plain-text list over
+    the limit is refused outright, so the whole command failed (audit UX-13)."""
+    tail = [footer] if footer else []
+    kept: list[str] = []
+    for line in lines:
+        remaining = len(lines) - len(kept) - 1
+        trial = "\n".join([*kept, line, *([more.format(n=remaining)] if remaining else []), *tail])
+        if len(trial) > limit:
+            break
+        kept.append(line)
+    omitted = len(lines) - len(kept)
+    return "\n".join([*kept, *([more.format(n=omitted)] if omitted else []), *tail])[:limit]
+
+
 async def send_dm(bot: Any, user_id: int, content: str | None = None, *, label: str, **send_kwargs: Any) -> Delivery:
     """DM one user. `label` names the notification in the logs (e.g. "price alert #12")."""
     try:
