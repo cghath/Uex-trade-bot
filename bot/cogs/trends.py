@@ -45,6 +45,8 @@ from bot.uex.route_presentation import (
     cargo_item_line,
     format_evidence_note,
     hedge_room,
+    missing_ship_cargo_line,
+    missing_ship_note,
     stock_headroom_warning,
     travel_warning,
 )
@@ -57,7 +59,7 @@ from bot.uex.supply_demand import (
     classify_supply_evidence,
     has_sell_side_demand,
 )
-from bot.uex.trading_preferences import describe_active_preferences
+from bot.uex.trading_preferences import describe_active_preferences, saved_filter_labels, saved_filters_hint
 from bot.uex.trends import (
     ScoredRouteEntry,
     TrendingEntry,
@@ -97,6 +99,7 @@ def _build_route_field(
     destination_evidence: EvidenceLevel,
     budget: float | None = None,
     hedge_items: list | None = None,
+    missing_ship_line: str | None = None,
 ) -> tuple[str, str]:
     """Build one route field for /top-routes. hedge_items are find_hedge_cargo's suggestions for a
     stock-limited route, already looked up by the caller - this function does no I/O."""
@@ -140,7 +143,7 @@ def _build_route_field(
             for hedge_item in hedge_items or ():
                 value_lines.append(f"Hedge: {cargo_item_line(hedge_item)}")
     elif not ship_vehicle:
-        value_lines.append("Cargo: unknown (set a ship with /set-default-ship to see haulable SCU)")
+        value_lines.append(missing_ship_line or "Cargo: unknown (set a ship with /set-default-ship to see haulable SCU)")
 
     pct_bits = []
     if r.price_margin is not None:
@@ -364,7 +367,11 @@ class Trends(commands.Cog):
         risk_tolerance: str | None = None,
         budget: float | None = None,
         already_deferred: bool = False,
+        auto_load_saved: bool = False,
+        system_saved: bool = False,
     ) -> None:
+        # auto_load_saved/system_saved: that filter came from the player's saved
+        # preferences, not this command - an empty result then says so (audit UX-2).
         # already_deferred is set by a caller (routes_from, route_on_the_way) that had to do its
         # own DB work (terminal-name resolution) before this point and so deferred itself, right
         # at the top of its own function, before that work - deferring again here would raise
@@ -375,11 +382,13 @@ class Trends(commands.Cog):
 
         ship_query = ship or await self.bot.db.get_default_ship(interaction.user.id)
         ship_vehicle = None
+        ship_lookup_failed = False
         if ship_query:
             try:
                 vehicles = await self.bot.uex.get_vehicles()
                 ship_vehicle = resolve_ship(vehicles, ship_query)
             except UexApiError as exc:
+                ship_lookup_failed = True
                 logger.info("Vehicle lookup failed for '%s' in %s: %s", ship_query, log_label, exc)
         ship_cargo_scu = ship_vehicle.get("scu") if ship_vehicle else None
         status_lookup = await self._get_status_lookup()
@@ -425,7 +434,8 @@ class Trends(commands.Cog):
             ]
             if not entries:
                 await interaction.followup.send(
-                    "No auto-load-capable routes found right now - try again once more route data has been collected."
+                    "No routes with auto-load at both ends found right now."
+                    + saved_filters_hint(saved_filter_labels(auto_load_only=auto_load_saved))
                 )
                 return
         if system is not None:
@@ -440,6 +450,7 @@ class Trends(commands.Cog):
             if not entries:
                 await interaction.followup.send(
                     f"No routes confirmed entirely within {system} found right now."
+                    + saved_filters_hint(saved_filter_labels(system=system if system_saved else None))
                 )
                 return
         # Re-rank by what THIS player can actually haul/afford before dedup/truncation,
@@ -544,7 +555,7 @@ class Trends(commands.Cog):
         elif ship_vehicle:
             footer += f" · using {ship_vehicle.get('name', ship_query)} (no cargo capacity on record)"
         else:
-            footer += " · set a default ship with /set-default-ship for cargo/run-profit numbers"
+            footer += " · " + missing_ship_note(ship_query, lookup_failed=ship_lookup_failed)
         if budget is not None:
             footer += f" · budget {budget:,.0f} aUEC"
         preferences_note = describe_active_preferences(
@@ -622,6 +633,7 @@ class Trends(commands.Cog):
             name, value = _build_route_field(
                 i, r, ship_vehicle, ship_cargo_scu, status_lookup, origin_evidence, destination_evidence,
                 budget=budget, hedge_items=hedge_items_by_route.get(i),
+                missing_ship_line=missing_ship_cargo_line(ship_query, lookup_failed=ship_lookup_failed),
             )
             warnings = []
             for side, terminal_id in (
@@ -738,6 +750,8 @@ class Trends(commands.Cog):
         budget: app_commands.Range[float, 1, 1_000_000_000] | None = None,
     ) -> None:
         prefs = await self.bot.db.get_trading_preferences(interaction.user.id)
+        auto_load_saved = auto_load_only is None and bool(prefs["auto_load_only"])
+        system_saved = system is None and bool(prefs["preferred_system"])
         if auto_load_only is None:
             auto_load_only = prefs["auto_load_only"]
         system_value = system.value if system else prefs["preferred_system"]
@@ -785,6 +799,8 @@ class Trends(commands.Cog):
             auto_load_only=auto_load_only,
             system=system_value,
             risk_tolerance=prefs["risk_tolerance"],
+            auto_load_saved=auto_load_saved,
+            system_saved=system_saved,
             budget=float(budget) if budget is not None else None,
         )
 
@@ -827,6 +843,8 @@ class Trends(commands.Cog):
         origin_id, origin_name = resolved
 
         prefs = await self.bot.db.get_trading_preferences(interaction.user.id)
+        auto_load_saved = auto_load_only is None and bool(prefs["auto_load_only"])
+        system_saved = system is None and bool(prefs["preferred_system"])
         if auto_load_only is None:
             auto_load_only = prefs["auto_load_only"]
         system_value = system.value if system else prefs["preferred_system"]
@@ -874,6 +892,8 @@ class Trends(commands.Cog):
             auto_load_only=auto_load_only,
             system=system_value,
             risk_tolerance=prefs["risk_tolerance"],
+            auto_load_saved=auto_load_saved,
+            system_saved=system_saved,
             budget=float(budget) if budget is not None else None,
             already_deferred=True,
         )
@@ -931,6 +951,7 @@ class Trends(commands.Cog):
             return
 
         prefs = await self.bot.db.get_trading_preferences(interaction.user.id)
+        auto_load_saved = auto_load_only is None and bool(prefs["auto_load_only"])
         if auto_load_only is None:
             auto_load_only = prefs["auto_load_only"]
         if budget is None:
@@ -981,6 +1002,7 @@ class Trends(commands.Cog):
             auto_load_only=auto_load_only,
             system=None,
             risk_tolerance=prefs["risk_tolerance"],
+            auto_load_saved=auto_load_saved,
             budget=float(budget) if budget is not None else None,
             already_deferred=True,
         )

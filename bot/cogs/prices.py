@@ -39,7 +39,7 @@ from bot.uex.multi_stop_routes import (
     sweep_budget_curve,
 )
 from bot.uex.charts import render_budget_curve_chart
-from bot.uex.trading_preferences import describe_active_preferences
+from bot.uex.trading_preferences import describe_active_preferences, saved_filter_labels, saved_filters_hint
 from bot.cogs.route_progression import RouteLegInput, RouteTrackingView, TrackableRoute
 from bot.uex.route_presentation import (
     add_chunked_fields,
@@ -52,6 +52,8 @@ from bot.uex.route_presentation import (
     format_evidence_note,
     side_health_warnings,
     hedge_room,
+    missing_ship_cargo_line,
+    missing_ship_note,
     stock_headroom_warning,
     travel_warning,
     worst_confidence,
@@ -415,6 +417,12 @@ class Prices(commands.Cog):
     ) -> None:
         await interaction.response.defer()
         prefs = await self.bot.db.get_trading_preferences(interaction.user.id)
+        # Which filters came from saved preferences rather than this command, so an empty
+        # result can say the player's own setting is the cause (audit UX-2).
+        auto_load_hint = saved_filters_hint(saved_filter_labels(
+            auto_load_only=auto_load_only is None and bool(prefs["auto_load_only"])))
+        system_hint = saved_filters_hint(saved_filter_labels(
+            system=prefs["preferred_system"] if system is None else None))
         if auto_load_only is None:
             auto_load_only = prefs["auto_load_only"]
         system_value = system.value if system else prefs["preferred_system"]
@@ -440,11 +448,13 @@ class Prices(commands.Cog):
         # UEX reports it, just without a ship-capacity comparison.
         ship_query = ship or await self.bot.db.get_default_ship(interaction.user.id)
         ship_vehicle = None
+        ship_lookup_failed = False
         if ship_query:
             try:
                 vehicles = await self.bot.uex.get_vehicles()
                 ship_vehicle = resolve_ship(vehicles, ship_query)
             except UexApiError as exc:
+                ship_lookup_failed = True
                 logger.info("Vehicle lookup failed for '%s': %s", ship_query, exc)
         ship_cargo_scu = ship_vehicle.get("scu") if ship_vehicle else None
         status_lookup = await self._get_status_lookup()
@@ -519,7 +529,7 @@ class Prices(commands.Cog):
                 ]
                 if not candidates:
                     await interaction.followup.send(
-                        f"No auto-load-capable routes found for '{commodity_display}' right now."
+                        f"No auto-load-capable routes found for '{commodity_display}' right now.{auto_load_hint}"
                     )
                     return
             if system_value is not None:
@@ -533,7 +543,7 @@ class Prices(commands.Cog):
                 ]
                 if not candidates:
                     await interaction.followup.send(
-                        f"No routes confirmed entirely within {system_value} found for '{commodity_display}' right now."
+                        f"No routes confirmed entirely within {system_value} found for '{commodity_display}' right now.{system_hint}"
                     )
                     return
             ranked = sorted(candidates, key=lambda r: r.get("profit") or 0, reverse=True)[:MAX_FIELD_ROWS]
@@ -582,7 +592,7 @@ class Prices(commands.Cog):
             elif ship_vehicle:
                 footer += f" · using {ship_vehicle.get('name', ship_query)} (no cargo capacity on record)"
             else:
-                footer += " · set a default ship with /set-default-ship for cargo/run-profit numbers"
+                footer += " · " + missing_ship_note(ship_query, lookup_failed=ship_lookup_failed)
             if preferences_note:
                 footer += " · " + preferences_note
             intro_embed.set_footer(text=footer)
@@ -686,7 +696,7 @@ class Prices(commands.Cog):
                             except Exception:
                                 logger.warning("Hedge suggestion unavailable for /best-route", exc_info=True)
                 elif not ship_vehicle:
-                    value_lines.append("Cargo: unknown (set a ship with /set-default-ship to see haulable SCU)")
+                    value_lines.append(missing_ship_cargo_line(ship_query, lookup_failed=ship_lookup_failed))
 
                 pct_bits = []
                 if margin_pct is not None:
@@ -825,7 +835,7 @@ class Prices(commands.Cog):
             ]
             if not routes:
                 await interaction.followup.send(
-                    f"No auto-load-capable routes found for '{commodity}' right now."
+                    f"No auto-load-capable routes found for '{commodity}' right now.{auto_load_hint}"
                 )
                 return
         if system_value is not None:
@@ -839,7 +849,7 @@ class Prices(commands.Cog):
             ]
             if not routes:
                 await interaction.followup.send(
-                    f"No routes confirmed entirely within {system_value} found for '{commodity}' right now."
+                    f"No routes confirmed entirely within {system_value} found for '{commodity}' right now.{system_hint}"
                 )
                 return
         routes = routes[:MAX_FIELD_ROWS]
@@ -876,7 +886,7 @@ class Prices(commands.Cog):
         elif ship_vehicle:
             footer += f" · using {ship_vehicle.get('name', ship_query)} (no cargo capacity on record)"
         else:
-            footer += " · set a default ship with /set-default-ship for cargo/run-profit numbers"
+            footer += " · " + missing_ship_note(ship_query, lookup_failed=ship_lookup_failed)
         if preferences_note:
             footer += " · " + preferences_note
         embed.set_footer(text=footer)
@@ -961,7 +971,7 @@ class Prices(commands.Cog):
                         except Exception:
                             logger.warning("Hedge suggestion unavailable for /best-route", exc_info=True)
             elif not ship_vehicle:
-                value_lines.append("Cargo: unknown (set a ship with /set-default-ship to see haulable SCU)")
+                value_lines.append(missing_ship_cargo_line(ship_query, lookup_failed=ship_lookup_failed))
 
             origin_signal = live_signals.get(route.buy_terminal_id, {})
             destination_signal = live_signals.get(route.sell_terminal_id, {})
@@ -1063,6 +1073,13 @@ class Prices(commands.Cog):
                 return
             destination_id, destination_name = resolved
         prefs = await self.bot.db.get_trading_preferences(interaction.user.id)
+        # The filters that came from saved preferences, not this command - an empty result
+        # names them, so the player's own setting doesn't read as "nothing exists" (UX-2).
+        saved_filters = dict(
+            space_only=space_only is None and bool(prefs["space_only"]),
+            auto_load_only=auto_load_only is None and bool(prefs["auto_load_only"]),
+            system=prefs["preferred_system"] if system is None else None,
+        )
         if space_only is None:
             space_only = prefs["space_only"]
         if auto_load_only is None:
@@ -1138,8 +1155,10 @@ class Prices(commands.Cog):
             budget_note = " within that budget" if budget is not None else ""
             safety_note = " using confirmed space stations only" if space_only else ""
             access_note = " with confirmed capital-ship cargo access" if capital_access_only else ""
-            auto_load_note = " with auto-load at the origin" if auto_load_only else ""
+            auto_load_note = " with auto-load at both ends" if auto_load_only else ""
             system_note = f" entirely within {system_value}" if system_value else ""
+            saved_hint = saved_filters_hint(saved_filter_labels(**saved_filters, capital_ship_access=(
+                bool(prefs["capital_ship_access"]) and not requires_capital_cargo_access(ship_vehicle))))
             if origin_name and destination_name:
                 pin_note = f" from **{origin_name}** to **{destination_name}**"
             elif origin_name:
@@ -1150,7 +1169,7 @@ class Prices(commands.Cog):
                 pin_note = ""
             await interaction.followup.send(
                 f"No two- or three-commodity loads{pin_note} fit **{ship_vehicle.get('name', ship_query)}**"
-                f"{budget_note}{safety_note}{access_note}{auto_load_note}{system_note} right now."
+                f"{budget_note}{safety_note}{access_note}{auto_load_note}{system_note} right now.{saved_hint}"
             )
             return
 
@@ -1324,6 +1343,13 @@ class Prices(commands.Cog):
     ) -> None:
         await interaction.response.defer()
         prefs = await self.bot.db.get_trading_preferences(interaction.user.id)
+        # The filters that came from saved preferences, not this command - an empty result
+        # names them, so the player's own setting doesn't read as "nothing exists" (UX-2).
+        saved_filters = dict(
+            space_only=space_only is None and bool(prefs["space_only"]),
+            auto_load_only=auto_load_only is None and bool(prefs["auto_load_only"]),
+            system=prefs["preferred_system"] if system is None else None,
+        )
         if space_only is None:
             space_only = prefs["space_only"]
         if auto_load_only is None:
@@ -1399,9 +1425,11 @@ class Prices(commands.Cog):
             access_note = " with confirmed capital-ship cargo access" if capital_access_only else ""
             auto_load_note = " with auto-load at every stop" if auto_load_only else ""
             system_note = f" entirely within {system_value}" if system_value else ""
+            saved_hint = saved_filters_hint(saved_filter_labels(**saved_filters, capital_ship_access=(
+                bool(prefs["capital_ship_access"]) and not requires_capital_cargo_access(ship_vehicle))))
             await interaction.followup.send(
                 f"No multi-stop chains fit **{ship_vehicle.get('name', ship_query)}**"
-                f"{budget_note}{safety_note}{access_note}{auto_load_note}{system_note} right now."
+                f"{budget_note}{safety_note}{access_note}{auto_load_note}{system_note} right now.{saved_hint}"
             )
             return
 
@@ -1671,6 +1699,13 @@ class Prices(commands.Cog):
         origin_id, origin_name = resolved
 
         prefs = await self.bot.db.get_trading_preferences(interaction.user.id)
+        # The filters that came from saved preferences, not this command - an empty result
+        # names them, so the player's own setting doesn't read as "nothing exists" (UX-2).
+        saved_filters = dict(
+            space_only=space_only is None and bool(prefs["space_only"]),
+            auto_load_only=auto_load_only is None and bool(prefs["auto_load_only"]),
+            system=prefs["preferred_system"] if system is None else None,
+        )
         if space_only is None:
             space_only = prefs["space_only"]
         if auto_load_only is None:
@@ -1743,9 +1778,11 @@ class Prices(commands.Cog):
             access_note = " with confirmed capital-ship cargo access" if capital_access_only else ""
             auto_load_note = " with auto-load at every stop" if auto_load_only else ""
             system_note = f" entirely within {system_value}" if system_value else ""
+            saved_hint = saved_filters_hint(saved_filter_labels(**saved_filters, capital_ship_access=(
+                bool(prefs["capital_ship_access"]) and not requires_capital_cargo_access(ship_vehicle))))
             await interaction.followup.send(
                 f"No multi-stop chains from **{origin_name}** fit **{ship_vehicle.get('name', ship_query)}**"
-                f"{budget_note}{safety_note}{access_note}{auto_load_note}{system_note} right now."
+                f"{budget_note}{safety_note}{access_note}{auto_load_note}{system_note} right now.{saved_hint}"
             )
             return
 
@@ -1778,6 +1815,13 @@ class Prices(commands.Cog):
     ) -> None:
         await interaction.response.defer()
         prefs = await self.bot.db.get_trading_preferences(interaction.user.id)
+        # The filters that came from saved preferences, not this command - an empty result
+        # names them, so the player's own setting doesn't read as "nothing exists" (UX-2).
+        saved_filters = dict(
+            space_only=space_only is None and bool(prefs["space_only"]),
+            auto_load_only=auto_load_only is None and bool(prefs["auto_load_only"]),
+            system=prefs["preferred_system"] if system is None else None,
+        )
         if space_only is None:
             space_only = prefs["space_only"]
         if auto_load_only is None:
@@ -1843,9 +1887,11 @@ class Prices(commands.Cog):
         )
         plottable = [p for p in points if p.investment > 0]
         if len(plottable) < 2:
+            saved_hint = saved_filters_hint(saved_filter_labels(**saved_filters, capital_ship_access=(
+                bool(prefs["capital_ship_access"]) and not requires_capital_cargo_access(ship_vehicle))))
             await interaction.followup.send(
                 f"Couldn't find enough profitable multi-stop chains for "
-                f"**{ship_vehicle.get('name', ship_query)}** to chart a budget curve right now."
+                f"**{ship_vehicle.get('name', ship_query)}** to chart a budget curve right now.{saved_hint}"
             )
             return
 
