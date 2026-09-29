@@ -8,6 +8,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from bot.autocomplete import fetch_within
 from bot.uex.exceptions import UexApiError, describe_uex_api_error
 from bot.uex.mining_locations import names_for_ids
 from bot.uex.refinery import (
@@ -34,9 +35,8 @@ async def raw_commodity_autocomplete(interaction: discord.Interaction, current: 
     """Same pattern as commodity_name_autocomplete (bot/cogs/prices.py), scoped to
     commodities flagged both is_raw and is_refinable - the set /refinery-advisor actually
     knows how to look up."""
-    try:
-        commodities = await interaction.client.uex.get_commodities()
-    except UexApiError:
+    commodities = await fetch_within(interaction.client.uex.get_commodities())
+    if commodities is None:
         return []
     refinable = [c for c in commodities if c.get("is_raw") and c.get("is_refinable")]
     current_lower = current.lower()

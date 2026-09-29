@@ -143,6 +143,12 @@ date - no open item, nothing to record here.
       commands were cloned from these, so they likely say "set a default ship" the same way.
       Test: `tests/test_route_messages.py`. See PROJECT_CONTEXT.md entry 91
       (ported to aiv2 in commit `dacd22b`, rewritten for aiv2's restructured route code; the same hints also reach its chat route tools)
+- [ ] Charts drawn off the event loop (`asyncio.to_thread` around every `render_*` call,
+      `bot/uex/charts.py` on `matplotlib.figure.Figure` instead of pyplot), and the five
+      remaining UEX-backed autocompletes time-limited with the new
+      `bot/autocomplete.py: fetch_within`. aiv2's AI tools that draw charts, or any aiv2
+      autocomplete still doing `try: await uex... except UexApiError`, need the same.
+      Test: `tests/test_responsiveness.py`. See PROJECT_CONTEXT.md entry 93
 
 ## To port: aiv2 -> production
 

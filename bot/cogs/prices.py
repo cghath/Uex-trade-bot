@@ -10,6 +10,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from bot.cogs.ships import ship_name_autocomplete
+from bot.autocomplete import fetch_within
 from bot.uex.exceptions import UexApiError, describe_uex_api_error
 from bot.uex.data_health import (
     FRESHNESS_LEGEND,
@@ -126,9 +127,8 @@ async def commodity_name_autocomplete(interaction: discord.Interaction, current:
     (bot/cogs/marketplace.py) - scoped to /commodities (cached 12h client-side), restricted to
     commodities actually flagged tradeable (is_buyable or is_sellable), matching the same
     "tradeable" definition Trends.refresh_trending already uses."""
-    try:
-        commodities = await interaction.client.uex.get_commodities()
-    except UexApiError:
+    commodities = await fetch_within(interaction.client.uex.get_commodities())
+    if commodities is None:
         return []
     tradeable = [c for c in commodities if c.get("is_buyable") or c.get("is_sellable")]
     current_lower = current.lower()
@@ -1896,7 +1896,9 @@ class Prices(commands.Cog):
             return
 
         diminishing_returns_budget = find_diminishing_returns_budget(plottable)
-        chart_buffer = render_budget_curve_chart(
+        # Off the event loop: drawing a chart is CPU-bound (audit REL-14).
+        chart_buffer = await asyncio.to_thread(
+            render_budget_curve_chart,
             ship_name=ship_vehicle.get("name", ship_query),
             points=plottable,
             diminishing_returns_budget=diminishing_returns_budget,

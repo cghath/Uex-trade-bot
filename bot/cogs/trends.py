@@ -1101,7 +1101,9 @@ class Trends(commands.Cog):
             await interaction.followup.send(f"No historical price data for {commodity_display} at {terminal_display} yet.")
             return
 
-        chart_buffer = render_price_history_chart(
+        # Off the event loop: drawing a chart is CPU-bound (audit REL-14).
+        chart_buffer = await asyncio.to_thread(
+            render_price_history_chart,
             commodity_name=commodity_display, terminal_name=terminal_display, history_rows=history_rows
         )
         if chart_buffer is None:

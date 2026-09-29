@@ -10,6 +10,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from bot.autocomplete import fetch_within
 from bot.uex.exceptions import UexApiError, describe_uex_api_error
 from bot.uex.mining_locations import describe_mining_locations, resolve_mineable_commodity
 from bot.uex.route_presentation import add_chunked_fields
@@ -21,9 +22,8 @@ async def mineable_commodity_autocomplete(
     """Same pattern as commodity_name_autocomplete (bot/cogs/prices.py), scoped to is_raw
     only - not is_refinable, so hand-mined materials with no refinery pathway (e.g.
     Jaclium) are still suggested."""
-    try:
-        commodities = await interaction.client.uex.get_commodities()
-    except UexApiError:
+    commodities = await fetch_within(interaction.client.uex.get_commodities())
+    if commodities is None:
         return []
     mineable = [c for c in commodities if c.get("is_raw")]
     current_lower = current.lower()
