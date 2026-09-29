@@ -89,10 +89,10 @@ DETAIL_CACHE_MAX = 1000
 WIKI_OUTAGE_RETRY_SECONDS = 5 * 60
 # The browsing view stops listening after this long without a click. Its ↻ Refresh button
 # keeps working after that, and after a restart, and rebuilds the browser in place.
-BROWSER_IDLE_SECONDS = 600
+BROWSER_IDLE_SECONDS = 30 * 60
 REFRESH_LABEL = "↻ Refresh"
 REFRESH_HINT = "Buttons not responding? Tap **↻ Refresh**."
-EXPIRED_NOTE = ("⏸️ Closed after 10 minutes idle. Tap **↻ Refresh** to pick up where you left off - "
+EXPIRED_NOTE = (f"⏸️ Closed after {BROWSER_IDLE_SECONDS // 60} minutes idle. Tap **↻ Refresh** to pick up where you left off - "
                 "your locked-in parts are saved.")
 _REFRESH_PREFIX = "ship-parts-browse:refresh"
 REFRESH_TEMPLATE = _REFRESH_PREFIX + r":(?P<vehicle>\d+):(?P<terminal>\d+):(?P<category>.*)"

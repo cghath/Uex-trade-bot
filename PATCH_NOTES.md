@@ -10,7 +10,7 @@ the oldest entry below); the next new entry is 2.17.
 **New**
 - `/ship-parts-finder` - The browser now has a **↻ Refresh** button. If you step away and the dropdowns stop
   responding, tap it to bring the browser back on the same ship and category, without running the command again.
-  After 10 minutes idle the browser now greys out and says so, instead of looking usable. Your locked-in parts were
+  After 30 minutes idle the browser now greys out and says so, instead of looking usable. Your locked-in parts were
   never affected.
 
 ---

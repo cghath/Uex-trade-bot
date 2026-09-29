@@ -3326,7 +3326,9 @@ they're in sync).
       - Any unexpected error still answers the player: discord.py only logs a dynamic
         item's exceptions, which would leave "thinking..." forever.
     - **Idle expiry is visible.** `on_timeout` greys out everything except Refresh and
-      swaps the message's last line to "Closed after 10 minutes idle. Tap ↻ Refresh...".
+      swaps the message's last line to "Closed after 30 minutes idle. Tap ↻ Refresh...".
+      The idle timeout went from 10 to 30 minutes (`BROWSER_IDLE_SECONDS`) at the user's
+      request; the note's wording is built from that constant.
       A restart never runs `on_timeout`, so every browser message ends with "Buttons not
       responding? Tap ↻ Refresh." Both lines count against `LIST_BUDGET_CHARS`.
     - **A discord.py trap that shaped the design.** In 2.7, `ViewStore.remove_view` pops
