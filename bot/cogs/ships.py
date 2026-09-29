@@ -61,9 +61,13 @@ class Ships(commands.Cog):
 
     @app_commands.command(name="clear-default-ship", description="Clear your default ship.")
     async def clear_default_ship(self, interaction: discord.Interaction) -> None:
+        # Deferred before any DB write: a write can wait on a lock past Discord's
+        # 3-second window, and a player who sees "did not respond" retries into a
+        # duplicate (audit REL-8).
+        await interaction.response.defer(ephemeral=True)
         removed = await self.bot.db.clear_default_ship(interaction.user.id)
         msg = "Default ship cleared." if removed else "You don't have a default ship set."
-        await interaction.response.send_message(msg, ephemeral=True)
+        await interaction.followup.send(msg, ephemeral=True)
 
 
 async def setup(bot: commands.Bot) -> None:

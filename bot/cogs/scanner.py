@@ -48,8 +48,12 @@ class Scanner(commands.Cog):
     )
     @app_commands.describe(channel="The channel to post steal alerts in")
     async def set_scanner_channel(self, interaction: discord.Interaction, channel: discord.TextChannel) -> None:
+        # Deferred before any DB write: a write can wait on a lock past Discord's
+        # 3-second window, and a player who sees "did not respond" retries into a
+        # duplicate (audit REL-8).
+        await interaction.response.defer(ephemeral=True)
         await self.bot.db.set_scanner_channel(interaction.user.id, channel.id)
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"Raw-material deal alerts will now be posted in {channel.mention} (checked every "
             f"{POLL_INTERVAL_MINUTES} min, threshold {self.bot.config.scanner_steal_threshold:.0%} off "
             "the quality-matched 30-day average). Run /set-scanner-channel again anytime to change it, "

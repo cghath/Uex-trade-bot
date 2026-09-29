@@ -42,19 +42,22 @@ class NegotiationAlerts(commands.Cog):
     )
     @app_commands.describe(enabled="Turn negotiation-message DMs on or off")
     async def negotiation_alerts(self, interaction: discord.Interaction, enabled: bool) -> None:
+        # Deferred before any DB write: a write can wait on a lock past Discord's
+        # 3-second window, and a player who sees "did not respond" retries into a
+        # duplicate (audit REL-8).
+        await interaction.response.defer(ephemeral=True)
         if not enabled:
             await self.bot.db.set_negotiation_alerts_enabled(interaction.user.id, False)
-            await interaction.response.send_message("Negotiation-message DMs are now **off**.", ephemeral=True)
+            await interaction.followup.send("Negotiation-message DMs are now **off**.", ephemeral=True)
             return
 
         secret_key = await self.bot.db.get_user_secret_key(interaction.user.id)
         if not secret_key:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "Link your UEX account first with `/link-uex-account`, then enable this.", ephemeral=True
             )
             return
 
-        await interaction.response.defer(ephemeral=True)
         # Enabling and successfully baselining are not the same thing - if the seed can't
         # even fetch a negotiation list (e.g. an invalid secret key), the feature must not
         # turn on with an empty baseline, or the first successful poll later floods every

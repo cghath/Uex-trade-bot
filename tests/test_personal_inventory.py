@@ -204,7 +204,8 @@ def test_uncertain_post_message_tells_the_user_to_check_uex_manually(tmp_path):
 
         await cog.inventory_confirm_sale.callback(cog, inter, job_id=job_id, quantity_sold=0)
 
-        (message,), kwargs = inter.response.send_message.call_args
+        inter.response.defer.assert_awaited_once_with(ephemeral=True)  # before the DB write (REL-8)
+        (message,), kwargs = inter.followup.send.call_args
         assert "never confirmed" in message.lower()
         assert kwargs.get("ephemeral") is True
 
@@ -293,7 +294,7 @@ def test_custom_price_survives_relist_after_ambiguous_sale_resolution(tmp_path):
         assert len(due) == 1, due
         assert due[0]["pricing_strategy"] == "custom"
         assert due[0]["custom_price"] == 200
-        (message,), _ = inter.response.send_message.call_args
+        (message,), _ = inter.followup.send.call_args
         assert "rescheduled" in message.lower()
 
     asyncio.run(run())

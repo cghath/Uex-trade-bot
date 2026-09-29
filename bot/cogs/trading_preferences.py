@@ -125,6 +125,10 @@ class TradingPreferences(commands.Cog):
         description="Reset ALL saved trading preferences, including your default ship, back to their defaults.",
     )
     async def clear_trading_preferences(self, interaction: discord.Interaction) -> None:
+        # Deferred before any DB write: a write can wait on a lock past Discord's
+        # 3-second window, and a player who sees "did not respond" retries into a
+        # duplicate (audit REL-8).
+        await interaction.response.defer(ephemeral=True)
         removed = await self.bot.db.clear_trading_preferences(interaction.user.id)
         msg = (
             "Trading preferences cleared, including your default ship. Use /set-default-ship "
@@ -132,7 +136,7 @@ class TradingPreferences(commands.Cog):
             if removed
             else "You don't have any saved trading preferences."
         )
-        await interaction.response.send_message(msg, ephemeral=True)
+        await interaction.followup.send(msg, ephemeral=True)
 
     @app_commands.command(
         name="my-trading-preferences",

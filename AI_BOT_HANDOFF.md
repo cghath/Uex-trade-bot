@@ -192,6 +192,11 @@ date - no open item, nothing to record here.
       message per alert per check (`format_restock_message` in `bot/uex/stock_alerts.py`).
       Any aiv2 AI tool that creates alerts should validate the commodity the same way.
       Test: `tests/test_alert_add_and_restock.py`. See PROJECT_CONTEXT.md entry 99
+- [ ] Defer before any DB write in 13 handlers (`/trade-log-add`, `/marketplace-alert-add`,
+      the inventory commands, the link-account modal, scanner/digest settings, unlink,
+      clear-default-ship, clear-trading-preferences, `/negotiation-alerts` off). aiv2 shares
+      these cogs; re-run the same first-await sweep there (the entry describes it).
+      Test: `tests/test_defer_before_db_writes.py`. See PROJECT_CONTEXT.md entry 100
 
 ## To port: aiv2 -> production
 

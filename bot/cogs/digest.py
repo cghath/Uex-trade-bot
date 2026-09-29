@@ -47,10 +47,14 @@ class Digest(commands.Cog):
         channel: discord.TextChannel,
         hour_utc: app_commands.Range[int, 0, 23],
     ) -> None:
+        # Deferred before any DB write: a write can wait on a lock past Discord's
+        # 3-second window, and a player who sees "did not respond" retries into a
+        # duplicate (audit REL-8).
+        await interaction.response.defer(ephemeral=True)
         await self.bot.db.set_guild_digest_config(
             guild_id=interaction.guild_id, channel_id=channel.id, hour_utc=hour_utc
         )
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"Daily digest will post in {channel.mention} at **{hour_utc:02d}:00 UTC** every day "
             f"(checked every {CHECK_INTERVAL_MINUTES} min, so it may land up to that long after the exact hour). "
             "Use /digest-now to post one immediately, or /digest-disable to turn it off.",
@@ -60,9 +64,13 @@ class Digest(commands.Cog):
     @app_commands.command(name="digest-disable", description="(Admin) Turn off the daily digest for this server.")
     @app_commands.checks.has_permissions(manage_guild=True)
     async def digest_disable(self, interaction: discord.Interaction) -> None:
+        # Deferred before any DB write: a write can wait on a lock past Discord's
+        # 3-second window, and a player who sees "did not respond" retries into a
+        # duplicate (audit REL-8).
+        await interaction.response.defer(ephemeral=True)
         disabled = await self.bot.db.disable_guild_digest(interaction.guild_id)
         msg = "Daily digest disabled." if disabled else "No digest was configured for this server."
-        await interaction.response.send_message(msg, ephemeral=True)
+        await interaction.followup.send(msg, ephemeral=True)
 
     @app_commands.command(
         name="digest-now",
