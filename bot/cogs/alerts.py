@@ -14,8 +14,9 @@ from discord.ext import commands, tasks
 from bot.cogs.prices import commodity_name_autocomplete
 from bot.delivery import Delivery, send_to_channel_or_dm
 from bot.discord_ui import send_alert_remove_picker
-from bot.uex.exceptions import UexApiError
+from bot.uex.exceptions import UexApiError, describe_uex_api_error
 from bot.uex.marketplace import format_quality_range
+from bot.uex.trading import resolve_tradeable_commodity, unknown_commodity_message
 
 logger = logging.getLogger("uexbot.alerts")
 
@@ -54,17 +55,34 @@ class Alerts(commands.Cog):
         direction: app_commands.Choice[str],
         target_price: float,
     ) -> None:
+        # Deferred before the UEX lookup and the DB write: either can outlast Discord's
+        # 3-second window, and a player who sees "did not respond" retries and makes a
+        # duplicate alert (audit REL-8).
+        await interaction.response.defer()
+        try:
+            commodities = await self.bot.uex.get_commodities()
+        except UexApiError as exc:
+            await interaction.followup.send(
+                f"Couldn't check the commodity name against UEX right now, so no alert was set. "
+                f"Try again in a minute. ({describe_uex_api_error(exc)})"
+            )
+            return
+        resolved = resolve_tradeable_commodity(commodities, commodity)
+        if resolved is None:
+            await interaction.followup.send(unknown_commodity_message(commodities, commodity))
+            return
+        name = resolved["name"]
         alert_id = await self.bot.db.add_price_alert(
             guild_id=interaction.guild_id,
             channel_id=interaction.channel_id,
             user_id=interaction.user.id,
-            commodity_name=commodity,
+            commodity_name=name,
             direction=direction.value,
             target_price=target_price,
         )
         readable = "sells for at least" if direction.value == "sell_at_least" else "can be bought for at most"
-        await interaction.response.send_message(
-            f"Alert #{alert_id} set: I'll ping you here when **{commodity}** {readable} "
+        await interaction.followup.send(
+            f"Alert #{alert_id} set: I'll ping you here when **{name}** {readable} "
             f"**{target_price:.2f} aUEC/unit**. (checked every {POLL_INTERVAL_MINUTES} min)"
         )
 

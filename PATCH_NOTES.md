@@ -1,7 +1,17 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.19.
+the oldest entry below); the next new entry is 2.20.
+
+---
+
+## 2.19 - 2026-09-29 - Alerts that can actually fire
+
+**Changed**
+- `/alert-add`, `/stock-alert-add` - The commodity has to be a real tradeable one now. A typo used to create an alert
+  that could never go off; now it's refused with suggestions ("Did you mean **Laranite**?").
+- `/stock-alert-add` - When several terminals restock at once, including when a new alert finds stock straight away,
+  you get one message listing them cheapest first, instead of a separate ping for every terminal.
 
 ---
 

@@ -3509,6 +3509,52 @@ they're in sync).
 
       Making `_gather_until` ignore the deadline fails the four time-bound tests.
 
+99. **Price and stock alerts only accept real commodities, respond before saving, and a
+    restock check sends one message.** Audit findings UX-5 and UX-1, and REL-8 for these two
+    commands.
+    - **UX-5.** `/alert-add` and `/stock-alert-add` saved whatever commodity text was typed.
+      The pollers ask UEX for that exact name, so a typo got no rows back, and the alert
+      silently never fired.
+      - New `resolve_tradeable_commodity` (`bot/uex/trading.py`) uses the same rule as
+        `resolve_ship`: an exact case-insensitive match first, else a unique substring
+        match, scoped to tradeable commodities (the ones `commodity_name_autocomplete`
+        offers). The canonical name is saved, which also normalizes case for the pollers'
+        grouping.
+      - An unresolved name is refused by `unknown_commodity_message`, with up to three
+        `suggest_commodity_names`: the ambiguous substring matches, else `difflib`'s
+        nearest spellings.
+      - If UEX's commodity list can't load, the alert isn't saved and the player is told to
+        try again.
+      - Checked read-only on the Pi first: no live alert had an unmatchable name (0 active
+        price alerts, 2 stock alerts, both valid), so no cleanup was needed.
+    - **REL-8 (these two commands).** Both wrote to the DB before responding. A slow DB or
+      UEX lookup could pass Discord's 3-second window, and a retrying player got a
+      duplicate. Both now defer first. `/stock-alert-add` defers at the reply's own
+      visibility, so a personal alert's error replies stay private too. The rest of REL-8's
+      list is still open.
+    - **UX-1.** `detect_restocks` treats every terminal an alert has never seen as a
+      restock, deliberately, so a new watch reports stock right away. But each one was its
+      own ping, and on a first check that meant every stocked terminal: a flood for a
+      common commodity.
+      - New `format_restock_message` (`bot/uex/stock_alerts.py`) makes one message per
+        alert per check: cheapest first, up to `RESTOCK_MESSAGE_MAX_TERMINALS` (10) lines,
+        then "…and N more".
+      - Per-line cargo fit shows only when a ship is known; otherwise the "set
+        /set-default-ship" hint appears once.
+      - A single restock keeps the old wording.
+      - Delivery tracking is per message now: if it isn't settled, none of that check's
+        terminals are recorded, so all are retried together.
+    - Tests: `tests/test_alert_add_and_restock.py` (15):
+      - the resolver and its suggestions;
+      - both commands' defer-then-look-up-then-save order, the canonical name, typo
+        refusal, the UEX-down refusal, and private replies for personal alerts;
+      - the combined message: order, "and N more", fit per line vs. hint once, and under
+        1,900 chars with 40 long names;
+      - the poller sending one message for five terminals, with none recorded when it
+        fails.
+
+      All 7 command/poller tests fail against the old cogs.
+
 ## Where to look for what
 
 Six docs, deliberately scoped so they don't duplicate each other:
