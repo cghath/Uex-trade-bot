@@ -23,6 +23,13 @@ from bot.uex.marketplace import compute_liquidity_score
 from bot.uex.route_confidence import coalesce_report_count
 from bot.uex.blueprints import BlueprintMission, BlueprintRef, SnapshotState
 
+# How long hourly liquidity snapshots are kept on the bot's own disk: twice the longest
+# window any command reads (/liquidity-trends' 7 days). See update_liquidity_scores.
+LIQUIDITY_SNAPSHOT_RETENTION_DAYS = 14
+# Pruning batch size and per-call cap - see Database.prune_liquidity_snapshots.
+LIQUIDITY_PRUNE_BATCH_ROWS = 5000
+LIQUIDITY_PRUNE_MAX_BATCHES = 20
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS price_alerts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -192,8 +199,15 @@ CREATE TABLE IF NOT EXISTS liquidity_score_snapshots (
     recorded_hour TEXT NOT NULL,
     PRIMARY KEY (id_item, recorded_hour)
 );
-CREATE INDEX IF NOT EXISTS idx_liquidity_snapshots_item_time
-    ON liquidity_score_snapshots (id_item, recorded_hour);
+-- This duplicated the primary key's own index exactly, doubling its size for nothing.
+DROP INDEX IF EXISTS idx_liquidity_snapshots_item_time;
+-- The two readers: get_liquidity_movers filters by time window alone, and
+-- get_liquidity_history by name (case-insensitively, hence the COLLATE) plus window.
+-- Without these both scanned the whole table (~445k rows on the Pi by 2026-09-29).
+CREATE INDEX IF NOT EXISTS idx_liquidity_snapshots_hour
+    ON liquidity_score_snapshots (recorded_hour);
+CREATE INDEX IF NOT EXISTS idx_liquidity_snapshots_name_hour
+    ON liquidity_score_snapshots (item_name COLLATE NOCASE, recorded_hour);
 
 -- Accumulating index of Marketplace items the bot has actually observed being traded, built
 -- by periodically snapshotting /marketplace_trends (which only ever exposes ~100 items live
@@ -3202,7 +3216,34 @@ class Database:
                 )
                 count += 1
             await db.commit()
+        await self.prune_liquidity_snapshots()
         return count
+
+    async def prune_liquidity_snapshots(self) -> int:
+        """Drop liquidity snapshots older than LIQUIDITY_SNAPSHOT_RETENTION_DAYS. Hourly
+        snapshots of ~500 items grew this table by ~12k rows a day with no end (445k rows
+        after 37 days on the Pi), and nothing reads further back than 7 days. The full
+        history still lives in the PC's archived deploy backups (scripts/sync_pi_backups.sh).
+
+        Deleted in small batches, each its own transaction: the first run on the Pi's
+        backlog removes ~278k rows, which as one DELETE held the write lock for 8s on a PC -
+        several times that on the Pi, long enough for other writers to hit the 30s busy
+        timeout. At most LIQUIDITY_PRUNE_MAX_BATCHES per call, so a backlog drains over a
+        few hourly runs instead of one long stall. Returns the number of rows deleted."""
+        deleted = 0
+        async with self.connect() as db:
+            for _ in range(LIQUIDITY_PRUNE_MAX_BATCHES):
+                cursor = await db.execute(
+                    """DELETE FROM liquidity_score_snapshots WHERE rowid IN (
+                           SELECT rowid FROM liquidity_score_snapshots
+                           WHERE recorded_hour < datetime('now', ?) LIMIT ?)""",
+                    (f"-{LIQUIDITY_SNAPSHOT_RETENTION_DAYS} days", LIQUIDITY_PRUNE_BATCH_ROWS),
+                )
+                await db.commit()
+                deleted += cursor.rowcount
+                if cursor.rowcount < LIQUIDITY_PRUNE_BATCH_ROWS:
+                    break
+        return deleted
 
     async def get_top_liquidity_items(self, limit: int = 10) -> list[dict[str, Any]]:
         """Returns the top N items with the highest liquidity scores."""

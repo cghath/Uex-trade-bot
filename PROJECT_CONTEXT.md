@@ -3225,6 +3225,49 @@ they're in sync).
       auto-load cases, the unmatched-ship and UEX-down footers, `/best-route`'s saved system,
       and `/mixed-routes` naming two saved filters.
 
+92. **Two things that grew on the Pi without limit are now bounded.** Audit findings REL-9
+    and REL-10, in line with the standing "keep the Pi lean" preference.
+    - **REL-9, UEX response cache.** `UexClient._cache` only replaced an entry when the
+      same key was requested again, and never removed one. High-variety keys, such as
+      terminal-distance pairs from the item finder, ship parts and multi-stop, plus
+      `marketplace_listings?id=` lookups and per-item prices, accumulated until the next
+      restart. Frequent deploys were masking it. New `_store_cached`:
+      - sweeps expired entries every `_CACHE_SWEEP_EVERY` (200) writes;
+      - caps the cache at `_CACHE_MAX_ENTRIES` (5,000), dropping the least recently
+        written first (a rewrite moves its key to the end).
+    - **REL-10, `liquidity_score_snapshots`.** Measured read-only on the Pi on 2026-09-29:
+      445,518 rows over 37 days (~12k/day), in an 80 MB database.
+      - Both readers did a full `SCAN`: `get_liquidity_movers` filters by time only, and
+        `get_liquidity_history` by name `COLLATE NOCASE` plus time.
+      - `idx_liquidity_snapshots_item_time` exactly duplicated the primary key.
+      - Fix: the schema now drops that index and adds `idx_liquidity_snapshots_hour`
+        `(recorded_hour)` and `idx_liquidity_snapshots_name_hour`
+        `(item_name COLLATE NOCASE, recorded_hour)`. The COLLATE has to match the query's
+        for SQLite to use the index. Both `EXPLAIN QUERY PLAN`s now show them.
+      - New `prune_liquidity_snapshots`, run after each hourly write, keeps
+        `LIQUIDITY_SNAPSHOT_RETENTION_DAYS` = 14. That's twice the longest window anything
+        reads (`/liquidity-trends`' 7 days), and the full history survives in the PC's
+        archived deploy backups.
+    - **A rehearsal on a copy of the Pi's real database changed the design.**
+      - The first version pruned with one `DELETE`. On the copy, that removed 278k rows in
+        8.2s on this PC, and the Pi is several times slower: close to the 30s
+        `busy_timeout`, so other writers, players' commands included, could fail with
+        "database is locked".
+      - It now deletes in `LIQUIDITY_PRUNE_BATCH_ROWS` (5,000) batches, each its own
+        transaction (~0.22s each on the PC), with at most `LIQUIDITY_PRUNE_MAX_BATCHES`
+        (20) per call.
+      - The same copy drained its backlog over three hourly runs (100k, 100k, 73k) to
+        167k rows.
+      - Index creation took 1.1s. Movers went 0.053s to 0.024s and history 0.054s to
+        0.010s, measured on the PC.
+      - SQLite reuses freed pages, so the file stops growing but doesn't shrink without a
+        `VACUUM`. That's deliberately not run: it rewrites the whole file and locks the
+        database while it does.
+    - **Not changed**: the other observation tables. They record changes only, so their
+      growth is bounded by how often the market changes, not by time.
+    - Tests: `tests/test_pi_growth.py` (5): the cache sweep, the cap and its ordering,
+      14-day retention, the batch cap, and both indexes being used with the duplicate gone.
+
 93. **Charts draw off the event loop, and every UEX-backed autocomplete is time-limited.**
     Audit findings REL-14 and REL-12.
     - **REL-14.** `/liquidity-trends`, `/marketplace-history`, `/commodity-history` and

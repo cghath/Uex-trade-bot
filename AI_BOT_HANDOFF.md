@@ -143,6 +143,12 @@ date - no open item, nothing to record here.
       commands were cloned from these, so they likely say "set a default ship" the same way.
       Test: `tests/test_route_messages.py`. See PROJECT_CONTEXT.md entry 91
       (ported to aiv2 in commit `dacd22b`, rewritten for aiv2's restructured route code; the same hints also reach its chat route tools)
+- [ ] Pi growth bounded: `UexClient._store_cached` (expired-entry sweep every 200 writes,
+      5,000-entry cap), and `liquidity_score_snapshots` kept 14 days via batched
+      `Database.prune_liquidity_snapshots`, with the duplicate index dropped and two query
+      indexes added in `SCHEMA`. aiv2 shares the client and schema, so it has the same
+      growth; rehearse the first prune against a copy of its DB, as here. Test:
+      `tests/test_pi_growth.py`. See PROJECT_CONTEXT.md entry 92
 - [ ] Charts drawn off the event loop (`asyncio.to_thread` around every `render_*` call,
       `bot/uex/charts.py` on `matplotlib.figure.Figure` instead of pyplot), and the five
       remaining UEX-backed autocompletes time-limited with the new
