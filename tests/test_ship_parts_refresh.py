@@ -1,4 +1,4 @@
-"""/ship-parts-finder's ↻ Refresh button: the browsing view stops listening after 10 idle
+"""/ship-parts-finder's ↻ Refresh button: the browsing view stops listening after 30 idle
 minutes or a restart, and Refresh brings it back on the same message, ship, location and
 category - without the player having to rerun the command."""
 import asyncio
@@ -277,3 +277,8 @@ def test_an_unexpected_refresh_failure_still_answers_the_player():
     interaction = asyncio.run(run())
     message = interaction.followup.send.await_args.args[0]
     assert "/ship-parts-finder" in message and "saved" in message
+
+
+def test_the_browser_waits_30_idle_minutes_and_says_so():
+    assert _view().timeout == 30 * 60
+    assert "30 minutes idle" in EXPIRED_NOTE
