@@ -3423,6 +3423,52 @@ they're in sync).
       like a real request: with an instant fake, the old code's cache absorbed the
       duplicates by accident.
 
+97. **A partial trending/top-routes refresh no longer replaces a good snapshot silently.**
+    Audit finding REL-5.
+    - **What happened.** `Trends.refresh_trending` (every 45 minutes) fetches prices, then
+      routes, for each tradeable commodity. It skipped any commodity whose fetch failed,
+      but still replaced all three caches (`_trending`, `_top_scored_routes`,
+      `_top_in_stock_routes`) and stamped them "refreshed" now. A UEX blip mid-refresh
+      made `/trending`, `/top-routes`, `/routes-from` and `/route-on-the-way` silently
+      incomplete for the next 45 minutes. An empty `/commodities` answer would have wiped
+      all three.
+    - **Scope correction.** The audit also named `/movers`, but it fetches
+      `/commodities_prices_all` live and never reads these caches. The daily digest's
+      "Most Actively Traded" does read `_trending` (via `get_trending_snapshot`), so it
+      benefits from the keep-previous rule, but it shows no partial note.
+    - **Fix.**
+      - The loop now records a `RefreshGap(missing, attempted)` per cache
+        (`bot/uex/trends.py`). A failed price fetch, or unexpected data, counts against
+        all three caches; a failed route fetch only against the two route lists.
+      - `should_replace_snapshot` decides whether to use the result. A refresh missing
+        more than `REFRESH_MAX_FAILED_SHARE` (10%; a full refresh covers 159 commodities,
+        measured on the Pi, so about 16) keeps the previous snapshot while that
+        one is more complete and younger than `REFRESH_KEEP_PREVIOUS_MAX_AGE` (2 hours).
+      - Past 2 hours, the fresher partial one is used: fresh prices for most commodities
+        beat hours-old stock figures for all of them.
+      - The first refresh after a start is always used. An empty commodity list
+        (`attempted == 0`) counts as a fully failed refresh.
+      - A kept snapshot keeps its own older timestamp, so "refreshed" stays true. It's
+        logged as a warning.
+    - **What players see.** Any partial snapshot in use adds "partial refresh: N of M
+      commodities couldn't be fetched" to the `/trending` and route-command footers. The
+      route commands' empty results add "Some routes may be missing: the last refresh
+      couldn't fetch N of M commodities.", so "nothing found" isn't read as "nothing
+      exists". The route footer is set before the field loop, so
+      `add_chunked_fields`' size check already includes the note.
+    - **`Trends` class attributes.** The gap attributes also exist at class level (a
+      `RefreshGap` is immutable). Many tests build `Trends.__new__(Trends)` by hand, and a
+      snapshot set without a refresh then counts as complete.
+    - Tests: `tests/test_partial_refresh.py` (17):
+      - the replace/keep policy, including the 2-hour give-way and the empty list;
+      - the note texts;
+      - the real `_refresh_trending_once` against a fake UEX, covering a clean refresh,
+        a 30% blip keeping the snapshot, a 5% gap recorded, route-only failures, the
+        first refresh, an empty list, and the 2-hour give-way;
+      - the `/trending` and `/top-routes` footers, and the auto-load empty-result hint.
+
+      Forcing the decision back to always-replace fails the keep-previous tests.
+
 ## Where to look for what
 
 Six docs, deliberately scoped so they don't duplicate each other:

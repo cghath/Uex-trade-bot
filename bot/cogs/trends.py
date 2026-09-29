@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import discord
 from discord import app_commands
@@ -34,13 +34,16 @@ from bot.cogs.prices import (
 from bot.cogs.route_progression import RouteLegInput, RouteTrackingView, TrackableRoute
 from bot.cogs.ships import ship_name_autocomplete
 from bot.uex.charts import render_price_history_chart
-from bot.uex.exceptions import UexApiError, describe_uex_api_error
-from bot.uex.data_health import classify_terminal_health, format_health_note
-from bot.uex.route_confidence import compute_route_confidence, track_record_modifier
-from bot.uex.route_progression import SUPPRESSION_HOURS
-from bot.uex.practical_routes import route_in_system, route_practical_notes, route_supports_auto_load
 from bot.uex.commodity_risk import format_commodity_risk
+from bot.uex.data_health import classify_terminal_health, format_health_note
+from bot.uex.exceptions import UexApiError, describe_uex_api_error
 from bot.uex.mixed_routes import find_hedge_cargo
+from bot.uex.practical_routes import (
+    route_in_system,
+    route_practical_notes,
+    route_supports_auto_load,
+)
+from bot.uex.route_confidence import compute_route_confidence, track_record_modifier
 from bot.uex.route_presentation import (
     cargo_item_line,
     format_evidence_note,
@@ -50,6 +53,7 @@ from bot.uex.route_presentation import (
     stock_headroom_warning,
     travel_warning,
 )
+from bot.uex.route_progression import SUPPRESSION_HOURS
 from bot.uex.ships import estimate_route_cargo, resolve_ship
 from bot.uex.status import build_status_lookup, resolve_status_label
 from bot.uex.supply_demand import (
@@ -59,17 +63,25 @@ from bot.uex.supply_demand import (
     classify_supply_evidence,
     has_sell_side_demand,
 )
-from bot.uex.trading_preferences import describe_active_preferences, saved_filter_labels, saved_filters_hint
+from bot.uex.trading_preferences import (
+    describe_active_preferences,
+    saved_filter_labels,
+    saved_filters_hint,
+)
 from bot.uex.trends import (
+    RefreshGap,
     ScoredRouteEntry,
     TrendingEntry,
     aggregate_commodity_trips,
     compute_movers,
+    partial_refresh_hint,
+    partial_refresh_note,
     rank_by_achievable_profit,
     rank_top_scored_routes,
     rank_trending,
     select_available_routes,
     select_in_stock_routes,
+    should_replace_snapshot,
 )
 
 logger = logging.getLogger("uexbot.trends")
@@ -177,18 +189,38 @@ TOP_IN_STOCK_ROUTES_KEEP = 10
 # whatever real user commands are running concurrently.
 _TRENDING_CALL_DELAY = 0.6
 
+# A refresh that couldn't fetch more than this share of commodities keeps the previous
+# snapshot, while that one is more complete and younger than REFRESH_KEEP_PREVIOUS_MAX_AGE
+# (audit REL-5). Past that age, the fresher partial one is shown, labelled as partial.
+REFRESH_MAX_FAILED_SHARE = 0.10
+REFRESH_KEEP_PREVIOUS_MAX_AGE = timedelta(hours=2)
+
+
+def _gap_log(gap: RefreshGap) -> str:
+    return f" (couldn't fetch {gap.missing} of {gap.attempted} commodities)" if gap.missing else ""
+
 
 class Trends(commands.Cog):
+    # What each cached snapshot's refresh couldn't fetch. Class-level defaults as well as
+    # instance ones (RefreshGap is immutable), so a snapshot set without a refresh counts
+    # as complete.
+    _trending_gap = RefreshGap()
+    _top_scored_routes_gap = RefreshGap()
+    _top_in_stock_routes_gap = RefreshGap()
+
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
         self._trending: list[TrendingEntry] = []
         self._trending_updated_at: datetime | None = None
+        self._trending_gap = RefreshGap()
         self._trending_lock = asyncio.Lock()
         self._top_scored_routes: list[ScoredRouteEntry] = []
         self._top_scored_routes_updated_at: datetime | None = None
+        self._top_scored_routes_gap = RefreshGap()
         self._top_scored_routes_lock = asyncio.Lock()
         self._top_in_stock_routes: list[ScoredRouteEntry] = []
         self._top_in_stock_routes_updated_at: datetime | None = None
+        self._top_in_stock_routes_gap = RefreshGap()
         self._top_in_stock_routes_lock = asyncio.Lock()
         self.refresh_trending.start()
 
@@ -216,6 +248,7 @@ class Trends(commands.Cog):
         async with self._trending_lock:
             entries = list(self._trending)
             updated_at = self._trending_updated_at
+            gap = self._trending_gap
 
         if not entries:
             await interaction.response.send_message(
@@ -235,6 +268,8 @@ class Trends(commands.Cog):
         footer = "Trade volume = real player-submitted trips, last 15 days (UEX data)"
         if updated_at:
             footer += f" · refreshed {updated_at.strftime('%Y-%m-%d %H:%M UTC')}"
+        if partial_refresh_note(gap):
+            footer += f" · {partial_refresh_note(gap)}"
         embed.set_footer(text=footer)
         await interaction.response.send_message(embed=embed)
 
@@ -259,15 +294,23 @@ class Trends(commands.Cog):
         entries: list[TrendingEntry] = []
         route_candidates: list[ScoredRouteEntry] = []
         in_stock_route_candidates: list[ScoredRouteEntry] = []
+        # Commodities this refresh couldn't fetch, per cache: a failed price fetch loses a
+        # commodity from both, a failed route fetch only from the route lists.
+        attempted = 0
+        trending_missing: set[str] = set()
+        routes_missing: set[str] = set()
 
         for commodity in tradeable:
             name = commodity.get("name")
             if not name:
                 continue
+            attempted += 1
             try:
                 rows = await self.bot.uex.get_commodities_prices(commodity_name=name)
             except UexApiError as exc:
                 logger.info("Skipping %s in trending refresh: %s", name, exc)
+                trending_missing.add(name)
+                routes_missing.add(name)
                 await asyncio.sleep(_TRENDING_CALL_DELAY)
                 continue
 
@@ -302,6 +345,7 @@ class Trends(commands.Cog):
                         route_rows = await self.bot.uex.get_commodities_routes(id_commodity=id_commodity)
                     except UexApiError as exc:
                         logger.info("Skipping %s in top-routes refresh: %s", name, exc)
+                        routes_missing.add(name)
                         route_rows = []
                     else:
                         # Every qualifying route for this commodity, not just the top-scored
@@ -314,12 +358,24 @@ class Trends(commands.Cog):
                     await asyncio.sleep(_TRENDING_CALL_DELAY)
             except Exception:
                 logger.exception("Skipping %s in trending refresh: unexpected data", name)
+                trending_missing.add(name)
+                routes_missing.add(name)
+
+        now = datetime.now(timezone.utc)
+        trending_gap = RefreshGap(len(trending_missing), attempted)
+        routes_gap = RefreshGap(len(routes_missing), attempted)
 
         ranked = rank_trending(entries, limit=TRENDING_KEEP_TOP)
         async with self._trending_lock:
-            self._trending = ranked
-            self._trending_updated_at = datetime.now(timezone.utc)
-        logger.info("Trending refresh complete: %d commodities ranked", len(ranked))
+            if self._replaces(trending_gap, self._trending_gap, self._trending_updated_at, now):
+                self._trending = ranked
+                self._trending_updated_at = now
+                self._trending_gap = trending_gap
+                logger.info("Trending refresh complete: %d commodities ranked%s",
+                            len(ranked), _gap_log(trending_gap))
+            else:
+                logger.warning("Trending refresh kept the previous snapshot: couldn't fetch %d of %d commodities",
+                               trending_gap.missing, trending_gap.attempted)
 
         # Keep every candidate the loop already computed, not just the top
         # TOP_SCORED_ROUTES_KEEP by score - a user's auto-load-only/system filter runs
@@ -330,19 +386,34 @@ class Trends(commands.Cog):
         # after filtering, in _send_ranked_routes.
         ranked_routes = rank_top_scored_routes(route_candidates, limit=len(route_candidates))
         async with self._top_scored_routes_lock:
-            self._top_scored_routes = ranked_routes
-            self._top_scored_routes_updated_at = datetime.now(timezone.utc)
-        logger.info(
-            "Top-routes refresh complete: %d candidates, %d kept", len(route_candidates), len(ranked_routes)
-        )
+            if self._replaces(routes_gap, self._top_scored_routes_gap, self._top_scored_routes_updated_at, now):
+                self._top_scored_routes = ranked_routes
+                self._top_scored_routes_updated_at = now
+                self._top_scored_routes_gap = routes_gap
+                logger.info("Top-routes refresh complete: %d candidates, %d kept%s",
+                            len(route_candidates), len(ranked_routes), _gap_log(routes_gap))
+            else:
+                logger.warning("Top-routes refresh kept the previous snapshot: couldn't fetch %d of %d commodities",
+                               routes_gap.missing, routes_gap.attempted)
 
         ranked_in_stock_routes = rank_top_scored_routes(in_stock_route_candidates, limit=len(in_stock_route_candidates))
         async with self._top_in_stock_routes_lock:
-            self._top_in_stock_routes = ranked_in_stock_routes
-            self._top_in_stock_routes_updated_at = datetime.now(timezone.utc)
-        logger.info(
-            "Strict top-routes refresh complete: %d candidates, %d kept",
-            len(in_stock_route_candidates), len(ranked_in_stock_routes),
+            if self._replaces(routes_gap, self._top_in_stock_routes_gap, self._top_in_stock_routes_updated_at, now):
+                self._top_in_stock_routes = ranked_in_stock_routes
+                self._top_in_stock_routes_updated_at = now
+                self._top_in_stock_routes_gap = routes_gap
+                logger.info("Strict top-routes refresh complete: %d candidates, %d kept%s",
+                            len(in_stock_route_candidates), len(ranked_in_stock_routes), _gap_log(routes_gap))
+            else:
+                logger.warning("Strict top-routes refresh kept the previous snapshot: couldn't fetch %d of %d "
+                               "commodities", routes_gap.missing, routes_gap.attempted)
+
+    @staticmethod
+    def _replaces(new: RefreshGap, previous: RefreshGap, previous_at: datetime | None, now: datetime) -> bool:
+        return should_replace_snapshot(
+            new, previous if previous_at is not None else None,
+            now - previous_at if previous_at is not None else None,
+            max_failed_share=REFRESH_MAX_FAILED_SHARE, max_keep_age=REFRESH_KEEP_PREVIOUS_MAX_AGE,
         )
 
     @refresh_trending.before_loop
@@ -358,6 +429,7 @@ class Trends(commands.Cog):
         entries: list[ScoredRouteEntry],
         updated_at: datetime | None,
         ship: str | None,
+        gap: RefreshGap = RefreshGap(),
         title: str,
         footer_note: str,
         log_label: str,
@@ -422,6 +494,7 @@ class Trends(commands.Cog):
             await interaction.followup.send(
                 "No routes found right now - the ones that would otherwise qualify were recently "
                 f"reported empty and are given up to {SUPPRESSION_HOURS}h to refresh before showing again."
+                + partial_refresh_hint(gap)
             )
             return
         if auto_load_only:
@@ -436,6 +509,7 @@ class Trends(commands.Cog):
                 await interaction.followup.send(
                     "No routes with auto-load at both ends found right now."
                     + saved_filters_hint(saved_filter_labels(auto_load_only=auto_load_saved))
+                    + partial_refresh_hint(gap)
                 )
                 return
         if system is not None:
@@ -451,6 +525,7 @@ class Trends(commands.Cog):
                 await interaction.followup.send(
                     f"No routes confirmed entirely within {system} found right now."
                     + saved_filters_hint(saved_filter_labels(system=system if system_saved else None))
+                    + partial_refresh_hint(gap)
                 )
                 return
         # Re-rank by what THIS player can actually haul/afford before dedup/truncation,
@@ -544,6 +619,8 @@ class Trends(commands.Cog):
         footer = footer_note + " · " + SELL_SIDE_STATUS_CLARIFIER
         if updated_at:
             footer += f" · refreshed {updated_at.strftime('%Y-%m-%d %H:%M UTC')}"
+        if partial_refresh_note(gap):
+            footer += f" · {partial_refresh_note(gap)}"
         if ship_vehicle and ship_cargo_scu is not None:
             # Consistency fix: a resolved ship used to only get named inside a per-route
             # cargo line, and only for a route that happened to be ship-limited
@@ -766,6 +843,7 @@ class Trends(commands.Cog):
             async with self._top_in_stock_routes_lock:
                 entries = list(self._top_in_stock_routes)
                 updated_at = self._top_in_stock_routes_updated_at
+                gap = self._top_in_stock_routes_gap
             title = "Top Trade Routes — Strict Live Availability"
             footer_note = (
                 "Ranked by profit (ROI% as a tie-breaker) · one route per commodity · requires "
@@ -775,6 +853,7 @@ class Trends(commands.Cog):
             async with self._top_scored_routes_lock:
                 entries = list(self._top_scored_routes)
                 updated_at = self._top_scored_routes_updated_at
+                gap = self._top_scored_routes_gap
             title = "Top Trade Routes"
             footer_note = (
                 "Ranked by profit (ROI% as a tie-breaker) · one route per commodity · filtered "
@@ -791,6 +870,7 @@ class Trends(commands.Cog):
             interaction,
             entries=entries,
             updated_at=updated_at,
+            gap=gap,
             ship=ship,
             title=title,
             footer_note=footer_note,
@@ -860,16 +940,19 @@ class Trends(commands.Cog):
             async with self._top_in_stock_routes_lock:
                 pool = list(self._top_in_stock_routes)
                 updated_at = self._top_in_stock_routes_updated_at
+                gap = self._top_in_stock_routes_gap
         else:
             async with self._top_scored_routes_lock:
                 pool = list(self._top_scored_routes)
                 updated_at = self._top_scored_routes_updated_at
+                gap = self._top_scored_routes_gap
 
         entries = [r for r in pool if r.origin_terminal_id == origin_id]
         if not entries:
             still_gathering = " (still gathering route data - try again in a few minutes)" if not pool else ""
             await interaction.followup.send(
                 f"No profitable routes found starting from **{origin_name}** right now{still_gathering}."
+                + partial_refresh_hint(gap)
             )
             return
 
@@ -884,6 +967,7 @@ class Trends(commands.Cog):
             interaction,
             entries=entries,
             updated_at=updated_at,
+            gap=gap,
             ship=ship,
             title=title,
             footer_note=footer_note,
@@ -967,10 +1051,12 @@ class Trends(commands.Cog):
             async with self._top_in_stock_routes_lock:
                 pool = list(self._top_in_stock_routes)
                 updated_at = self._top_in_stock_routes_updated_at
+                gap = self._top_in_stock_routes_gap
         else:
             async with self._top_scored_routes_lock:
                 pool = list(self._top_scored_routes)
                 updated_at = self._top_scored_routes_updated_at
+                gap = self._top_scored_routes_gap
 
         entries = [
             r for r in pool if r.origin_terminal_id == origin_id and r.destination_terminal_id == destination_id
@@ -980,6 +1066,7 @@ class Trends(commands.Cog):
             await interaction.followup.send(
                 f"No profitable routes found from **{origin_name}** to **{destination_name}** "
                 f"right now{still_gathering}."
+                + partial_refresh_hint(gap)
             )
             return
 
@@ -994,6 +1081,7 @@ class Trends(commands.Cog):
             interaction,
             entries=entries,
             updated_at=updated_at,
+            gap=gap,
             ship=ship,
             title=title,
             footer_note=footer_note,
