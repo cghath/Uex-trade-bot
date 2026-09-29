@@ -66,6 +66,10 @@ class MarketplaceAlerts(commands.Cog):
         min_quality: app_commands.Range[float, 0, QUALITY_MAX] | None = None,
         max_quality: app_commands.Range[float, 0, QUALITY_MAX] | None = None,
     ) -> None:
+        # Deferred before any DB write: a write can wait on a lock past Discord's
+        # 3-second window, and a player who sees "did not respond" retries into a
+        # duplicate (audit REL-8).
+        await interaction.response.defer(ephemeral=True)
         alert_id = await self.bot.db.add_marketplace_alert(
             user_id=interaction.user.id,
             keyword=keyword,
@@ -84,7 +88,7 @@ class MarketplaceAlerts(commands.Cog):
             if quality_note
             else ""
         )
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"Marketplace alert #{alert_id} set: I'll DM you when a new {side_note} matching "
             f"'{keyword}'{price_note}{quality_note} appears (checked every {POLL_INTERVAL_MINUTES} min)."
             f"{quality_caveat} This keeps watching - it won't turn off after the first match.",

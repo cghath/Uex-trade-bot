@@ -3555,6 +3555,35 @@ they're in sync).
 
       All 7 command/poller tests fail against the old cogs.
 
+100. **Every command that writes to the DB now responds first.** Audit finding REL-8, the
+     rest of it (entry 99 covered `/alert-add` and `/stock-alert-add`).
+     - **The risk.** A write can wait on a lock for up to the 30s `busy_timeout`, far past
+       Discord's 3-second window to respond. The player sees "did not respond" and runs
+       the command again. That creates a duplicate row (trade log, Marketplace alert), and
+       for `/inventory-remove` it removes the quantity twice.
+     - **Found by sweeping, not just the audit's list.** An AST scan of every slash command
+       and UI callback in `bot/cogs/`, checking whether its first `await` is a response,
+       found the audit's eight plus five more writes:
+       - the audit's eight: `/trade-log-add`, `/marketplace-alert-add`,
+         `/inventory-set-minimum`, `/inventory-remove`, `/inventory-confirm-sale`, the
+         link-account modal, `/set-scanner-channel` and `/set-digest-channel`;
+       - the five more: `/unlink-uex-account`, `/digest-disable`, the "off" path of
+         `/negotiation-alerts`, `/clear-default-ship` and `/clear-trading-preferences`.
+
+       Reads before a reply were left alone: with WAL on, a read never waits on a writer.
+       The UI callbacks' first awaits are in-memory claims or owner checks.
+     - **Fix.** Each of the 13 now defers ephemerally as its first statement and replies
+       through `interaction.followup.send`.
+       - The modal uses `defer(ephemeral=True, thinking=True)`: for a modal submit,
+         discord.py only makes a private "thinking" reply with `thinking=True`.
+       - `/negotiation-alerts` already deferred on its "on" path; that later defer was
+         removed, since a second one raises `InteractionResponded`.
+     - Tests: `tests/test_defer_before_db_writes.py` (13) runs each handler against a DB
+       fake that records whether the defer had already happened when it was first
+       touched. A direct `response.send_message` fails the test. All 13 fail against the
+       old cogs. Three existing tests that read the reply from `response.send_message`
+       now read the followup.
+
 ## Where to look for what
 
 Six docs, deliberately scoped so they don't duplicate each other:

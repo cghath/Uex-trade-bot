@@ -27,9 +27,13 @@ class LinkUexModal(discord.ui.Modal, title="Link your UEX account"):
         self.bot = bot
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
+        # Deferred before any DB write: a write can wait on a lock past Discord's
+        # 3-second window, and a player who sees "did not respond" retries into a
+        # duplicate (audit REL-8).
+        await interaction.response.defer(ephemeral=True, thinking=True)
         secret_key = str(self.secret_key_input.value).strip()
         await self.bot.db.set_user_secret_key(interaction.user.id, secret_key)
-        await interaction.response.send_message(
+        await interaction.followup.send(
             "Your UEX account is linked. It's stored encrypted and only used for your "
             "own requests (e.g. /uex-trades). Use /unlink-uex-account any time to remove it.\n"
             "Run /intro to see what else this unlocks - negotiation alerts, daily digests, "
@@ -51,11 +55,15 @@ class Account(commands.Cog):
 
     @app_commands.command(name="unlink-uex-account", description="Remove your linked UEX account from this bot.")
     async def unlink_uex_account(self, interaction: discord.Interaction) -> None:
+        # Deferred before any DB write: a write can wait on a lock past Discord's
+        # 3-second window, and a player who sees "did not respond" retries into a
+        # duplicate (audit REL-8).
+        await interaction.response.defer(ephemeral=True)
         removed = await self.bot.db.remove_user_secret_key(interaction.user.id)
         if removed:
-            await interaction.response.send_message("Your UEX account has been unlinked.", ephemeral=True)
+            await interaction.followup.send("Your UEX account has been unlinked.", ephemeral=True)
         else:
-            await interaction.response.send_message("You don't have a linked UEX account.", ephemeral=True)
+            await interaction.followup.send("You don't have a linked UEX account.", ephemeral=True)
 
     @app_commands.command(name="uex-account-status", description="Check whether you've linked a UEX account.")
     async def uex_account_status(self, interaction: discord.Interaction) -> None:

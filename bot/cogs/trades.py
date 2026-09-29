@@ -59,6 +59,10 @@ class Trades(commands.Cog):
         unit_price: float,
         terminal: str | None = None,
     ) -> None:
+        # Deferred before any DB write: a write can wait on a lock past Discord's
+        # 3-second window, and a player who sees "did not respond" retries into a
+        # duplicate (audit REL-8).
+        await interaction.response.defer(ephemeral=True)
         entry_id = await self.bot.db.log_trade(
             user_id=interaction.user.id,
             commodity_name=commodity,
@@ -68,7 +72,7 @@ class Trades(commands.Cog):
             unit_price=unit_price,
         )
         total = quantity_scu * unit_price
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"Logged #{entry_id}: {operation.value} {quantity_scu} SCU of {commodity} "
             f"@ {unit_price:.2f} aUEC (total {total:,.0f} aUEC)",
             ephemeral=True,

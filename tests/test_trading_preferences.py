@@ -590,7 +590,8 @@ def test_clear_trading_preferences_command(tmp_path):
         await db.set_trading_preferences(1, space_only=True)
         interaction = _FakeInteraction(1)
         await cog.clear_trading_preferences.callback(cog, interaction)
-        assert "cleared" in interaction.response.send_message.call_args.args[0].lower()
+        interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+        assert "cleared" in interaction.followup.send.call_args.args[0].lower()
         assert await db.get_trading_preferences(1) == DEFAULT_TRADING_PREFERENCES
 
     asyncio.run(run())

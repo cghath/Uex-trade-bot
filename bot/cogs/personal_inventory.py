@@ -816,6 +816,10 @@ class PersonalInventory(commands.Cog):
         inventory_id: int,
         minimum_price: app_commands.Range[int, 1, 2_000_000_000],
     ) -> None:
+        # Deferred before any DB write: a write can wait on a lock past Discord's
+        # 3-second window, and a player who sees "did not respond" retries into a
+        # duplicate (audit REL-8).
+        await interaction.response.defer(ephemeral=True)
         changed = await self.bot.db.set_inventory_minimum_price(
             interaction.user.id, inventory_id, int(minimum_price)
         )
@@ -827,7 +831,7 @@ class PersonalInventory(commands.Cog):
             if changed
             else f"Inventory #{inventory_id} was not found in your inventory."
         )
-        await interaction.response.send_message(message, ephemeral=True)
+        await interaction.followup.send(message, ephemeral=True)
 
     @app_commands.command(name="inventory-remove", description="Remove an unreserved quantity from your personal inventory.")
     @app_commands.describe(inventory_id="Number shown by /inventory", quantity="How many to remove")
@@ -837,18 +841,22 @@ class PersonalInventory(commands.Cog):
         inventory_id: int,
         quantity: app_commands.Range[int, 1, 1_000_000],
     ) -> None:
+        # Deferred before any DB write: a write can wait on a lock past Discord's
+        # 3-second window, and a player who sees "did not respond" retries into a
+        # duplicate (audit REL-8).
+        await interaction.response.defer(ephemeral=True)
         try:
             remaining = await self.bot.db.remove_inventory_quantity(
                 interaction.user.id, inventory_id, int(quantity)
             )
         except ValueError as exc:
-            await interaction.response.send_message(str(exc), ephemeral=True)
+            await interaction.followup.send(str(exc), ephemeral=True)
             return
         if remaining is None:
             message = f"Inventory #{inventory_id} was not found in your inventory."
         else:
             message = f"Removed **{quantity}** from inventory #{inventory_id}; **{remaining}** remain."
-        await interaction.response.send_message(message, ephemeral=True)
+        await interaction.followup.send(message, ephemeral=True)
 
     @app_commands.command(name="inventory-sell", description="Check off inventory stacks to schedule guarded automatic UEX posting.")
     async def inventory_sell(self, interaction: discord.Interaction) -> None:
@@ -938,15 +946,19 @@ class PersonalInventory(commands.Cog):
         job_id: int,
         quantity_sold: app_commands.Range[int, 0, 1_000_000],
     ) -> None:
+        # Deferred before any DB write: a write can wait on a lock past Discord's
+        # 3-second window, and a player who sees "did not respond" retries into a
+        # duplicate (audit REL-8).
+        await interaction.response.defer(ephemeral=True)
         try:
             result = await self.bot.db.confirm_ambiguous_inventory_sale(
                 interaction.user.id, job_id, int(quantity_sold)
             )
         except ValueError as exc:
-            await interaction.response.send_message(str(exc), ephemeral=True)
+            await interaction.followup.send(str(exc), ephemeral=True)
             return
         if not result:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"Job #{job_id} is not one of your listings awaiting confirmation.", ephemeral=True
             )
             return
@@ -969,7 +981,7 @@ class PersonalInventory(commands.Cog):
                     ],
                 )
             except ValueError as exc:
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     f"Recorded **{result['sold']}** sold for job #{job_id}, but the **{result['unsold']}** "
                     f"unsold remainder could not be rescheduled: {exc}. Use `/inventory-sell` to reschedule it manually.",
                     ephemeral=True,
@@ -983,7 +995,7 @@ class PersonalInventory(commands.Cog):
                 "were NOT automatically relisted - check your UEX marketplace listings for a stray duplicate, then "
                 "use `/inventory-sell` yourself once you've confirmed there isn't one."
             )
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"Recorded **{result['sold']}** sold for job #{job_id}.{relist_note}", ephemeral=True
         )
 
