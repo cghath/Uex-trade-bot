@@ -801,6 +801,15 @@ CREATE TABLE IF NOT EXISTS ship_parts_reference (
 );
 CREATE INDEX IF NOT EXISTS idx_ship_parts_reference_vehicle_name ON ship_parts_reference (vehicle_name);
 
+-- When the wiki was last asked about each ship, including ships it returned no slots for
+-- (which have no ship_parts_reference rows to date them), so the hourly refresh only asks
+-- about ships not checked in the last day - a restart no longer re-crawls every ship.
+CREATE TABLE IF NOT EXISTS ship_parts_reference_status (
+    id_vehicle INTEGER PRIMARY KEY,
+    refreshed_at TEXT NOT NULL,
+    port_count INTEGER NOT NULL
+);
+
 -- One locked-in part per (user, guild, ship, slot category, physical port) - re-locking the
 -- same port replaces its row rather than accumulating duplicates, unlike
 -- blueprint_shopping_entries (which combines many distinct plans, not one slot per category).
@@ -4459,6 +4468,26 @@ class Database:
                 ],
             )
             await db.commit()
+
+    async def mark_ship_parts_refreshed(self, id_vehicle: int, port_count: int) -> None:
+        async with self.connect() as db:
+            await db.execute(
+                """INSERT INTO ship_parts_reference_status (id_vehicle, refreshed_at, port_count)
+                   VALUES (?, datetime('now'), ?)
+                   ON CONFLICT(id_vehicle) DO UPDATE SET refreshed_at=excluded.refreshed_at,
+                                                         port_count=excluded.port_count""",
+                (id_vehicle, port_count),
+            )
+            await db.commit()
+
+    async def get_fresh_ship_parts_vehicles(self, max_age_hours: float) -> set[int]:
+        """Ships whose slots the wiki was asked about within the last max_age_hours."""
+        async with self.connect() as db:
+            rows = await (await db.execute(
+                "SELECT id_vehicle FROM ship_parts_reference_status WHERE refreshed_at > datetime('now', ?)",
+                (f"-{max_age_hours} hours",),
+            )).fetchall()
+            return {row[0] for row in rows}
 
     async def get_ship_parts_reference(self, id_vehicle: int) -> list[dict]:
         async with self.connect() as db:

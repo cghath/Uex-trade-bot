@@ -3351,6 +3351,46 @@ they're in sync).
       `tests/test_ship_parts_finder.py` now also measures the idle-closed footer. The store
       test fails if the stub is swapped for a real `DynamicItem`, checked directly.
 
+95. **The ship-slot reference refresh asks the wiki only about ships that are due, and no
+    longer wipes saved slots on an empty answer.** Audit finding REL-11.
+    - **Measured on the Pi on 2026-09-29, read-only.**
+      - Every start re-read every ship: about 383 `GET /api/vehicles` wiki requests in
+        15 seconds (04:45:20 to 04:45:35), roughly 25 a second.
+      - That morning's three deploy restarts made 1,149 of them in 6 hours.
+      - 201 ships had saved slots (2,273 rows).
+      - Cause: `refresh_reference` was a `tasks.loop(hours=24)`, which runs immediately
+        on every start, and nothing recorded when a ship was last read.
+    - **A second defect.** `_wiki_ports` returns `[]` for a ship the wiki has no exact
+      match for. That's normal for concept ships, but it also happens on a brief name
+      mismatch. `replace_ship_parts_reference(id, name, [])` then deleted that ship's
+      saved slots.
+    - **Fix.**
+      - New table `ship_parts_reference_status` (`id_vehicle` primary key,
+        `refreshed_at`, `port_count`) records every ship the wiki was asked about. That
+        includes ships with no slots, which have no reference rows to date them.
+      - The loop now runs hourly (`REFERENCE_CHECK_HOURS`) and asks only about ships not
+        refreshed in `REFERENCE_REFRESH_HOURS` (24). A restart costs nothing, and a crawl
+        a restart interrupted resumes where it stopped.
+      - `WIKI_CRAWL_SPACING_SECONDS` (1.0) between ships.
+      - An empty answer keeps the saved slots, with a logged warning. So does a definite
+        error: a 404, an identity mismatch, or data that can't be parsed. Both still mark
+        the ship refreshed, so a ship the wiki doesn't have is asked about daily, not
+        hourly.
+      - `WikiUnavailableError` (the wiki didn't answer at all) leaves the ship due. After
+        `WIKI_CRAWL_MAX_OUTAGES` (5) in a row, the crawl stops until the next hourly check,
+        instead of trying every ship during an outage. One answered ship resets the count.
+      - An unexpected failure, such as a locked database, also leaves the ship due.
+    - **After deploy.** The status table starts empty, so the first run reads every ship
+      once, about 5-8 minutes at one ship a second. That is deliberately not seeded from
+      the existing rows, since those carry no timestamp. All ships then come due together
+      roughly a day later, and are read at the same spaced pace.
+    - **Not changed:** `_ports_for_vehicle` still falls back to a live wiki lookup for a
+      ship with no saved rows, and turret gun slots are still read when a ship is opened
+      (entry 86).
+    - Tests: `tests/test_ship_parts_reference_refresh.py` (12). The "restart asks only
+      about due ships", "empty answer keeps saved slots" and spacing tests each fail
+      against the old behaviour, checked by reintroducing it.
+
 ## Where to look for what
 
 Six docs, deliberately scoped so they don't duplicate each other:
