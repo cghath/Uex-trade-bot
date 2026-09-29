@@ -12,14 +12,14 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from bot.autocomplete import fetch_within
 from bot.uex.exceptions import UexApiError, describe_uex_api_error
 from bot.uex.ships import resolve_ship
 
 
 async def ship_name_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
-    try:
-        vehicles = await interaction.client.uex.get_vehicles()
-    except UexApiError:
+    vehicles = await fetch_within(interaction.client.uex.get_vehicles())
+    if vehicles is None:
         return []
     current_lower = current.lower()
     matches = [v for v in vehicles if current_lower in (v.get("name") or "").lower()][:25]

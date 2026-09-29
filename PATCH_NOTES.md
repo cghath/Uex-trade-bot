@@ -1,7 +1,18 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.15.
+the oldest entry below); the next new entry is 2.16.
+
+---
+
+## 2.15 - 2026-09-29 - Charts and suggestions stay quick
+
+**Fixed**
+- `/liquidity-trends`, `/marketplace-history`, `/commodity-history`, `/diminishing-returns` - Drawing a chart
+  no longer pauses every other command while it renders.
+- Ship, commodity, ore and Marketplace category suggestions (`/set-default-ship`, `/price`, `/where-to-mine`,
+  `/refinery-advisor`, `/marketplace-post` and others) no longer go blank for a while when UEX is slow.
+  If UEX doesn't answer in time you get no suggestions right away, and they're ready a moment later.
 
 ---
 

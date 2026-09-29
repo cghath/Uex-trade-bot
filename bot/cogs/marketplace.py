@@ -17,6 +17,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
+from bot.autocomplete import fetch_within
 from bot.uex.charts import render_price_history_chart
 from bot.uex.exceptions import UexApiError, describe_uex_api_error
 from bot.uex.inventory import extract_listing_id
@@ -127,9 +128,8 @@ async def category_autocomplete(interaction: discord.Interaction, current: str) 
     # The category list depends on which `type` the user already picked in this same
     # command invocation - fall back to "item" if they haven't gotten to that field yet.
     chosen_type = getattr(interaction.namespace, "type", None) or "item"
-    try:
-        categories = await interaction.client.uex.get_categories(type=chosen_type)
-    except UexApiError:
+    categories = await fetch_within(interaction.client.uex.get_categories(type=chosen_type))
+    if categories is None:
         return []
     current_lower = current.lower()
     matches = [c for c in categories if current_lower in (c.get("name") or "").lower()][:25]
@@ -760,7 +760,9 @@ class Marketplace(commands.Cog):
 
         history_rows = reshape_marketplace_history_rows(rows)
         tier_label = quality_tier.name if quality_tier else "all qualities"
-        chart = render_price_history_chart(
+        # Off the event loop: drawing a chart is CPU-bound (audit REL-14).
+        chart = await asyncio.to_thread(
+            render_price_history_chart,
             commodity_name=item, terminal_name=f"UEX Marketplace ({tier_label})", history_rows=history_rows
         )
         if chart is None:

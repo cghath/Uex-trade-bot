@@ -15,9 +15,12 @@ from datetime import datetime, timezone
 import matplotlib
 
 matplotlib.use("Agg")  # headless rendering, no display needed
-import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import matplotlib.ticker as mticker
+# A standalone Figure, not pyplot: pyplot keeps a global figure registry that isn't safe to
+# touch from worker threads, and these renders run in asyncio.to_thread so drawing a chart
+# never stalls every other command and poller on the bot's one event loop (audit REL-14).
+from matplotlib.figure import Figure
 
 # Dark-mode tokens straight from the dataviz skill's reference palette.
 _SURFACE = "#1a1a19"
@@ -73,7 +76,8 @@ def render_price_history_chart(
     plot_sell = _to_plot_series(sell_prices)
     plot_buy = _to_plot_series(buy_prices)
 
-    fig, ax = plt.subplots(figsize=(9, 5), dpi=100)
+    fig = Figure(figsize=(9, 5), dpi=100)
+    ax = fig.subplots()
     fig.patch.set_facecolor(_SURFACE)
     ax.set_facecolor(_SURFACE)
 
@@ -113,7 +117,6 @@ def render_price_history_chart(
                         fontsize=9, xytext=(8, 0), textcoords="offset points", va="center")
 
     if not has_buy and not has_sell:
-        plt.close(fig)
         return None
 
     # Text stays in ink tokens, never the series color (per house style).
@@ -142,7 +145,6 @@ def render_price_history_chart(
 
     buffer = io.BytesIO()
     fig.savefig(buffer, format="png", facecolor=_SURFACE)
-    plt.close(fig)
     buffer.seek(0)
     return buffer
 
@@ -165,7 +167,8 @@ def render_budget_curve_chart(
     budgets = [p.budget for p in plottable]
     rois = [p.roi_pct for p in plottable]
 
-    fig, ax = plt.subplots(figsize=(9, 5), dpi=100)
+    fig = Figure(figsize=(9, 5), dpi=100)
+    ax = fig.subplots()
     fig.patch.set_facecolor(_SURFACE)
     ax.set_facecolor(_SURFACE)
     ax.grid(True, color=_GRIDLINE, linewidth=1, linestyle="-", zorder=0)
@@ -203,7 +206,6 @@ def render_budget_curve_chart(
 
     buffer = io.BytesIO()
     fig.savefig(buffer, format="png", facecolor=_SURFACE)
-    plt.close(fig)
     buffer.seek(0)
     return buffer
 
@@ -223,7 +225,8 @@ def render_liquidity_history_chart(*, item_name: str, history_rows: list[dict]) 
 
     points.sort(key=lambda point: point[0])
     times, scores = zip(*points)
-    fig, ax = plt.subplots(figsize=(9, 5), dpi=100)
+    fig = Figure(figsize=(9, 5), dpi=100)
+    ax = fig.subplots()
     fig.patch.set_facecolor(_SURFACE)
     ax.set_facecolor(_SURFACE)
     ax.grid(True, color=_GRIDLINE, linewidth=1, linestyle="-", zorder=0)
@@ -246,6 +249,5 @@ def render_liquidity_history_chart(*, item_name: str, history_rows: list[dict]) 
     fig.tight_layout()
     buffer = io.BytesIO()
     fig.savefig(buffer, format="png", facecolor=_SURFACE)
-    plt.close(fig)
     buffer.seek(0)
     return buffer

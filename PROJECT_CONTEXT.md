@@ -3225,6 +3225,38 @@ they're in sync).
       auto-load cases, the unmatched-ship and UEX-down footers, `/best-route`'s saved system,
       and `/mixed-routes` naming two saved filters.
 
+93. **Charts draw off the event loop, and every UEX-backed autocomplete is time-limited.**
+    Audit findings REL-14 and REL-12.
+    - **REL-14.** `/liquidity-trends`, `/marketplace-history`, `/commodity-history` and
+      `/diminishing-returns` drew their chart with pyplot directly in the command
+      coroutine. The bot has one asyncio event loop, so every other command and poller
+      waited while matplotlib rendered.
+      - The four `render_*` calls now go through `await asyncio.to_thread(...)`.
+      - `bot/uex/charts.py` builds each chart on `matplotlib.figure.Figure` instead of
+        pyplot. pyplot keeps a global registry of open figures that isn't thread-safe, so
+        two charts drawn in worker threads at once could corrupt each other. A plain
+        `Figure` isn't registered anywhere, so there's nothing to close and nothing shared.
+    - **REL-12.** PR #59's time limit (`bot/autocomplete.py`) only reached
+      `/ingame-item-finder` and `/where-to-buy-ship`. Five autocompletes still awaited UEX
+      with the client's full 15s timeout plus retries, well past Discord's ~3s deadline, so
+      a cold cache meant no suggestions and nothing logged.
+      - Affected: `ship_name_autocomplete` (`ships.py`, shared by several commands),
+        `commodity_name_autocomplete` (`prices.py`), `mineable_commodity_autocomplete`
+        (`mining_locations.py`), `raw_commodity_autocomplete` (`refinery.py`) and
+        `category_autocomplete` (`marketplace.py`).
+      - New `fetch_within(aw)` wraps `gather_within` for the common one-fetch case. It
+        returns the result, or `None` on a `UexApiError` or past the budget; anything
+        else is a real bug and is raised. The slow fetch keeps running and warms the
+        cache, as before.
+      - Checked every other autocomplete in `bot/cogs/`: the rest read the DB or an
+        already-warm in-memory catalog, not UEX.
+    - Tests: `tests/test_responsiveness.py` (20). Charts module has no pyplot; eight
+      charts drawn from four threads at once are all valid PNGs; `/liquidity-trends` and
+      `/diminishing-returns` render in a non-main thread (the first fails if the
+      `to_thread` is removed). Each of the five autocompletes is checked for a normal
+      answer, a slow UEX (empty, under budget) and UEX down (empty), plus `fetch_within`
+      re-raising a non-UEX exception.
+
 ## Where to look for what
 
 Six docs, deliberately scoped so they don't duplicate each other:

@@ -12,6 +12,8 @@ import asyncio
 import logging
 from typing import Any, Awaitable
 
+from bot.uex.exceptions import UexApiError
+
 logger = logging.getLogger(__name__)
 
 AUTOCOMPLETE_BUDGET_SECONDS = 2.5
@@ -49,3 +51,15 @@ async def gather_within(*aws: Awaitable[Any], timeout: float | None = None) -> l
         else:
             outcomes.append(task.result())
     return outcomes
+
+
+async def fetch_within(aw: Awaitable[Any], timeout: float | None = None) -> Any | None:
+    """One time-boxed fetch for an autocomplete handler: the result, or None when UEX
+    failed or the fetch ran past the budget (show no suggestions). Any other exception is
+    a real bug and is raised."""
+    (result,) = await gather_within(aw, timeout=timeout)
+    if isinstance(result, (UexApiError, TimeoutError)):
+        return None
+    if isinstance(result, BaseException):
+        raise result
+    return result
