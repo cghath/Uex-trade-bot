@@ -173,6 +173,13 @@ date - no open item, nothing to record here.
       note, skipped for 5 minutes) instead of "no variants". Only matters if aiv2 ever
       ports `/ship-parts-finder`. Test: `tests/test_ship_parts_variant_lookups.py`.
       See PROJECT_CONTEXT.md entry 96
+- [ ] Trending/top-routes refresh keeps the previous snapshot when too much of a refresh
+      failed (`RefreshGap`, `should_replace_snapshot`, `partial_refresh_note`/`_hint` in
+      `bot/uex/trends.py`; `REFRESH_MAX_FAILED_SHARE`, `REFRESH_KEEP_PREVIOUS_MAX_AGE` in
+      `bot/cogs/trends.py`), and footers/empty results say when a snapshot is partial.
+      aiv2's `/ai-*` route tools read the same caches, so their answers should mention a
+      partial snapshot too. Test: `tests/test_partial_refresh.py`. See PROJECT_CONTEXT.md
+      entry 97
 
 ## To port: aiv2 -> production
 

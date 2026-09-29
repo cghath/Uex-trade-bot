@@ -6,6 +6,7 @@ synthetic data - the actual API calls live in the cogs that use these.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import timedelta
 
 from bot.uex.ships import estimate_route_cargo
 from bot.uex.supply_demand import SELL_SIDE_NO_DEMAND_CODE as SELL_SIDE_NO_DEMAND_CODE
@@ -299,3 +300,47 @@ def select_in_stock_routes(
     entries = [_build_scored_route_entry(commodity_name, id_commodity, r) for r in candidates]
     entries.sort(key=_profit_rank_key, reverse=True)
     return entries
+
+
+@dataclass(frozen=True)
+class RefreshGap:
+    """How many tradeable commodities one background refresh tried, and how many of them it
+    couldn't fetch - the refresh used to skip those silently and stamp the result as fully
+    up to date (audit REL-5)."""
+    missing: int = 0
+    attempted: int = 0
+
+    @property
+    def share(self) -> float:
+        # An empty commodity list is treated as a completely failed refresh, not a clean one.
+        return self.missing / self.attempted if self.attempted else 1.0
+
+
+def should_replace_snapshot(
+    new: RefreshGap, previous: RefreshGap | None, previous_age: timedelta | None,
+    *, max_failed_share: float, max_keep_age: timedelta,
+) -> bool:
+    """Whether a refresh's result should replace the cached snapshot. A refresh missing more
+    than max_failed_share of its commodities keeps the previous snapshot instead - but only
+    while that one is more complete, and younger than max_keep_age: past that, fresh
+    prices for most commodities (labelled partial) beat stale ones for all of them."""
+    if previous is None or previous_age is None:
+        return True
+    if new.share <= max_failed_share or new.share <= previous.share:
+        return True
+    return previous_age >= max_keep_age
+
+
+def partial_refresh_note(gap: RefreshGap) -> str:
+    """Footer text for a snapshot some commodities are missing from, or ""."""
+    if not gap.missing or not gap.attempted:
+        return ""
+    return f"partial refresh: {gap.missing} of {gap.attempted} commodities couldn't be fetched"
+
+
+def partial_refresh_hint(gap: RefreshGap) -> str:
+    """Appended to an empty result, so "nothing found" isn't read as "nothing exists"."""
+    if not partial_refresh_note(gap):
+        return ""
+    return f" Some routes may be missing: the last refresh couldn't fetch {gap.missing} of {gap.attempted} commodities."
+

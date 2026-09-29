@@ -1,7 +1,18 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.17.
+the oldest entry below); the next new entry is 2.18.
+
+---
+
+## 2.17 - 2026-09-29 - Route lists survive a UEX hiccup
+
+**Fixed**
+- `/trending`, `/top-routes`, `/routes-from`, `/route-on-the-way` - These are refreshed every 45 minutes. If UEX
+  failed partway through a refresh, the lists used to be quietly replaced with an incomplete version. Now a refresh
+  that misses more than a tenth of commodities keeps the previous, complete lists instead. When a partial list is
+  shown, the footer says so ("partial refresh: 3 of 159 commodities couldn't be fetched"), and a "nothing found"
+  reply says some routes may be missing.
 
 ---
 
