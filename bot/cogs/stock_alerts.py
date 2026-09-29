@@ -24,9 +24,10 @@ from discord.ext import commands, tasks
 from bot.cogs.prices import commodity_name_autocomplete
 from bot.cogs.ships import ship_name_autocomplete
 from bot.delivery import Delivery, send_dm, send_to_channel_or_dm
-from bot.uex.exceptions import UexApiError
+from bot.uex.exceptions import UexApiError, describe_uex_api_error
 from bot.uex.ships import resolve_ship
-from bot.uex.stock_alerts import compute_terminal_availability, detect_restocks, format_cargo_fit_note
+from bot.uex.stock_alerts import compute_terminal_availability, detect_restocks, format_restock_message
+from bot.uex.trading import resolve_tradeable_commodity, unknown_commodity_message
 
 logger = logging.getLogger("uexbot.stock_alerts")
 
@@ -67,6 +68,22 @@ class StockAlerts(commands.Cog):
         scope: app_commands.Choice[str] | None = None,
     ) -> None:
         scope_value = scope.value if scope else "global"
+        # Deferred before the UEX lookup and the DB write (audit REL-8), at the reply's own
+        # visibility: a personal alert's replies stay private.
+        await interaction.response.defer(ephemeral=(scope_value == "personal"))
+        try:
+            commodities = await self.bot.uex.get_commodities()
+        except UexApiError as exc:
+            await interaction.followup.send(
+                f"Couldn't check the commodity name against UEX right now, so no alert was set. "
+                f"Try again in a minute. ({describe_uex_api_error(exc)})"
+            )
+            return
+        resolved = resolve_tradeable_commodity(commodities, commodity)
+        if resolved is None:
+            await interaction.followup.send(unknown_commodity_message(commodities, commodity))
+            return
+        commodity = resolved["name"]
         alert_id = await self.bot.db.add_stock_alert(
             guild_id=interaction.guild_id,
             channel_id=interaction.channel_id,
@@ -79,11 +96,10 @@ class StockAlerts(commands.Cog):
         delivery_note = (
             "I'll post here and ping you" if scope_value == "global" else "I'll DM you (nothing posted in this channel)"
         )
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"Stock alert #{alert_id} set: {delivery_note} when **{commodity}** has real stock "
             f"at any terminal{ship_note} (checked every {POLL_INTERVAL_MINUTES} min). This keeps "
             "watching - it fires again on every future restock, not just the first one.",
-            ephemeral=(scope_value == "personal"),
         )
 
     @tasks.loop(minutes=POLL_INTERVAL_MINUTES)
@@ -146,10 +162,11 @@ class StockAlerts(commands.Cog):
                             except UexApiError as exc:
                                 logger.info("Vehicle lookup failed for stock alert #%s: %s", alert["id"], exc)
 
-                        for terminal in to_notify:
-                            outcome = await self._notify_stock_alert(alert, commodity_name, terminal, ship_cargo_scu)
-                            if not outcome.settled:
-                                unsent.add(terminal["id_terminal"])
+                        # One message for every terminal this check found (audit UX-1). If it
+                        # isn't settled, none of them are recorded, so all are retried.
+                        outcome = await self._notify_stock_alert(alert, commodity_name, to_notify, ship_cargo_scu)
+                        if not outcome.settled:
+                            unsent.update(terminal["id_terminal"] for terminal in to_notify)
 
                     for id_terminal, state in new_state.items():
                         if id_terminal in unsent:
@@ -161,14 +178,9 @@ class StockAlerts(commands.Cog):
                     logger.exception("Stock alert #%s failed this cycle", alert["id"])
 
     async def _notify_stock_alert(
-        self, alert: dict, commodity_name: str, terminal: dict, ship_cargo_scu: float | None
+        self, alert: dict, commodity_name: str, terminals: list[dict], ship_cargo_scu: float | None
     ) -> Delivery:
-        fit_note = format_cargo_fit_note(terminal["scu_buy"], ship_cargo_scu)
-        body = (
-            f"stock alert #{alert['id']}: **{commodity_name}** is back in stock at "
-            f"**{terminal['terminal_name']}** — {terminal['price_buy']:.2f} aUEC/unit, "
-            f"{terminal['scu_buy']:,.0f} SCU available ({fit_note})"
-        )
+        body = format_restock_message(alert["id"], commodity_name, terminals, ship_cargo_scu)
         label = f"stock alert #{alert['id']}"
         if alert.get("scope") == "personal":
             # DM only - nothing posted to the channel, so no @-mention needed (it's

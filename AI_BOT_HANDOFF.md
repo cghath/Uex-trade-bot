@@ -186,6 +186,12 @@ date - no open item, nothing to record here.
       ever ports `/ship-parts-finder`, but any aiv2 AI tool that waits on the wiki has the
       same ~96s-per-request worst case. Test: `tests/test_ship_parts_load_deadline.py`.
       See PROJECT_CONTEXT.md entry 98
+- [ ] Price/stock alert commodity names resolved against UEX before saving
+      (`resolve_tradeable_commodity`, `suggest_commodity_names`, `unknown_commodity_message`
+      in `bot/uex/trading.py`), both add commands deferring first, and one combined restock
+      message per alert per check (`format_restock_message` in `bot/uex/stock_alerts.py`).
+      Any aiv2 AI tool that creates alerts should validate the commodity the same way.
+      Test: `tests/test_alert_add_and_restock.py`. See PROJECT_CONTEXT.md entry 99
 
 ## To port: aiv2 -> production
 

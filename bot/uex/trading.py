@@ -1,6 +1,7 @@
 """Trade-route math built on top of raw /commodities_prices rows."""
 from __future__ import annotations
 
+import difflib
 from dataclasses import dataclass
 from typing import Any
 
@@ -107,3 +108,43 @@ def best_routes(price_rows: list[dict[str, Any]], limit: int = 5) -> list[TradeR
 
     routes.sort(key=lambda r: r.profit_per_unit, reverse=True)
     return routes[:limit]
+
+
+def _is_tradeable(commodity: dict[str, Any]) -> bool:
+    return bool(commodity.get("is_buyable") or commodity.get("is_sellable"))
+
+
+def resolve_tradeable_commodity(commodities: list[dict[str, Any]], query: str) -> dict[str, Any] | None:
+    """A typed commodity name resolved to UEX's own record: an exact (case-insensitive)
+    match first, else a substring match only if it's unique - the same rule as
+    resolve_ship. Scoped to tradeable commodities, the ones commodity_name_autocomplete
+    offers. Price and stock alerts used to save whatever was typed, so a typo made an
+    alert that could never fire (audit UX-5)."""
+    query_lower = query.strip().lower()
+    if not query_lower:
+        return None
+    tradeable = [c for c in commodities if _is_tradeable(c) and c.get("name")]
+    for commodity in tradeable:
+        if commodity["name"].strip().lower() == query_lower:
+            return commodity
+    matches = [c for c in tradeable if query_lower in c["name"].lower()]
+    return matches[0] if len(matches) == 1 else None
+
+
+def suggest_commodity_names(commodities: list[dict[str, Any]], query: str, limit: int = 3) -> list[str]:
+    """Up to `limit` tradeable names close to a query that didn't resolve: the ambiguous
+    substring matches first, else the nearest spellings."""
+    query_lower = query.strip().lower()
+    names = sorted({c["name"] for c in commodities if _is_tradeable(c) and c.get("name")})
+    contains = [n for n in names if query_lower and query_lower in n.lower()]
+    if contains:
+        return contains[:limit]
+    by_lower = {n.lower(): n for n in names}
+    return [by_lower[n] for n in difflib.get_close_matches(query_lower, list(by_lower), n=limit, cutoff=0.6)]
+
+
+def unknown_commodity_message(commodities: list[dict[str, Any]], query: str) -> str:
+    suggestions = suggest_commodity_names(commodities, query)
+    hint = f" Did you mean {', '.join(f'**{s}**' for s in suggestions)}?" if suggestions else ""
+    return (f"Couldn't find a tradeable commodity called **{query.strip()}**.{hint} "
+            "Pick one from the autocomplete list.")
