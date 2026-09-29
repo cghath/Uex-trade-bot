@@ -67,6 +67,13 @@ _ENDPOINT_CACHE_TTL = {
     "terminals_distances": 12 * 3600,
 }
 
+# Entries were only ever replaced by a later call with the same key, never removed, so
+# high-variety keys (terminal-distance pairs, per-listing lookups, per-item prices) grew
+# the cache for as long as the bot ran (audit REL-9). Expired entries are swept every
+# _CACHE_SWEEP_EVERY writes, and the oldest writes are dropped past _CACHE_MAX_ENTRIES.
+_CACHE_SWEEP_EVERY = 200
+_CACHE_MAX_ENTRIES = 5000
+
 # UEX status strings that specifically mean "the secret_key is missing/wrong/not allowed",
 # as opposed to statuses like "no_trades_found" which just mean an empty (but valid) result.
 _AUTH_ERROR_STATUSES = {
@@ -95,6 +102,7 @@ class UexClient:
         self._client = httpx.AsyncClient(timeout=timeout)
         self._cache: dict[tuple, tuple[float, Any]] = {}
         self._cache_lock = asyncio.Lock()
+        self._cache_writes_since_sweep = 0
         self._item_catalog: tuple[float, list[dict[str, Any]]] | None = None
         self._item_catalog_lock = asyncio.Lock()
 
@@ -276,7 +284,7 @@ class UexClient:
             if use_cache:
                 ttl = _ENDPOINT_CACHE_TTL.get(path.strip("/").split("/")[0], _DEFAULT_CACHE_TTL)
                 async with self._cache_lock:
-                    self._cache[cache_key] = (time.monotonic() + ttl, data)
+                    self._store_cached(cache_key, ttl, data)
 
             return data
 
@@ -378,6 +386,20 @@ class UexClient:
         paint, and similar items with no real shop listing (see item_finder.py's
         sold_item_name_autocomplete)."""
         return await self._get("items_prices_all", params={}) or []
+
+    def _store_cached(self, cache_key: tuple, ttl: float, data: Any) -> None:
+        """Cache `data` for `ttl` seconds. Call with _cache_lock held. Re-inserting moves the
+        key to the end, so "oldest" below means least recently written."""
+        now = time.monotonic()
+        self._cache.pop(cache_key, None)
+        self._cache[cache_key] = (now + ttl, data)
+        self._cache_writes_since_sweep += 1
+        if self._cache_writes_since_sweep < _CACHE_SWEEP_EVERY and len(self._cache) <= _CACHE_MAX_ENTRIES:
+            return
+        self._cache_writes_since_sweep = 0
+        self._cache = {key: entry for key, entry in self._cache.items() if entry[0] > now}
+        while len(self._cache) > _CACHE_MAX_ENTRIES:
+            self._cache.pop(next(iter(self._cache)))
 
     async def get_item_catalog(self) -> list[dict[str, Any]]:
         """Load every item category once and cache the combined catalog for 12 hours.
