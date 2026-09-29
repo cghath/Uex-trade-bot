@@ -161,6 +161,13 @@ date - no open item, nothing to record here.
       never put a `DynamicItem` inside a view that can time out, since closing it
       unregisters the pattern bot-wide. Test: `tests/test_ship_parts_refresh.py`.
       See PROJECT_CONTEXT.md entry 94
+- [ ] Ship-slot reference refresh asks the wiki only about ships not refreshed in 24h
+      (new `ship_parts_reference_status` table, hourly check, 1s between ships, stops
+      after 5 wiki outages in a row), and keeps saved slots when the wiki answers empty.
+      Only matters if aiv2 ever ports `/ship-parts-finder`. The general lesson for any
+      aiv2 `tasks.loop`: a long interval still runs on every start, so a heavy crawl
+      needs its own last-run record. Test: `tests/test_ship_parts_reference_refresh.py`.
+      See PROJECT_CONTEXT.md entry 95
 
 ## To port: aiv2 -> production
 

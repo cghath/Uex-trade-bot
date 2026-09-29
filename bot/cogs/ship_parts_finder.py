@@ -75,7 +75,14 @@ from bot.wiki_api import WikiApiClient, WikiApiError, WikiUnavailableError
 logger = logging.getLogger("uexbot.ship_parts_finder")
 NO_MENTIONS = discord.AllowedMentions.none()
 
+# Each ship's slots are re-read from the wiki once they're this old. The refresh itself
+# checks hourly, so a restart only picks up ships that are due (audit REL-11).
 REFERENCE_REFRESH_HOURS = 24
+REFERENCE_CHECK_HOURS = 1
+# Pause between ships in that crawl. It used to fire ~380 wiki requests in 15 seconds.
+WIKI_CRAWL_SPACING_SECONDS = 1.0
+# Ships in a row the wiki doesn't answer for before the crawl stops until the next check.
+WIKI_CRAWL_MAX_OUTAGES = 5
 # Component hardware prices move far less often than commodity market prices (deliberate
 # design decision, not a placeholder) - see module docstring.
 DETAIL_CACHE_SECONDS = 24 * 3600
@@ -761,6 +768,13 @@ class _PartSelect(discord.ui.Select):
         await interaction.response.edit_message(content=self.parent_view.text(), view=self.parent_view)
 
 
+def _vehicle_id(vehicle: dict) -> int | None:
+    try:
+        return int(vehicle.get("id"))
+    except (TypeError, ValueError):
+        return None
+
+
 def refresh_custom_id(id_vehicle, id_terminal, category: str | None) -> str:
     custom_id = f"{_REFRESH_PREFIX}:{int(id_vehicle)}:{int(id_terminal)}:{category or ''}"
     if len(custom_id) > MAX_CUSTOM_ID_CHARS:  # an unexpectedly long category name: reopen without it
@@ -832,30 +846,71 @@ class ShipPartsFinder(commands.Cog):
         except RuntimeError:
             pass
 
-    @tasks.loop(hours=REFERENCE_REFRESH_HOURS)
+    @tasks.loop(hours=REFERENCE_CHECK_HOURS)
     async def refresh_reference(self) -> None:
+        """Keep each ship's slots at most REFERENCE_REFRESH_HOURS old. It used to re-read
+        every ship from the wiki on every start, ~380 requests in 15 seconds, three times
+        on one morning of deploys (audit REL-11). Now only ships that are due are asked
+        about, one at a time, so a restart costs nothing and an interrupted crawl resumes
+        where it stopped."""
         try:
             vehicles = await self.bot.uex.get_vehicles()
         except UexApiError as exc:
             logger.warning("Ship parts reference refresh could not load the vehicle list: %s", exc)
             return
-        for vehicle in vehicles:
+        try:
+            fresh = await self.bot.db.get_fresh_ship_parts_vehicles(REFERENCE_REFRESH_HOURS)
+        except Exception:
+            logger.exception("Ship parts reference refresh could not read when ships were last refreshed")
+            return
+        due = [v for v in vehicles if v.get("name") and _vehicle_id(v) is not None and _vehicle_id(v) not in fresh]
+        outages = 0
+        for index, vehicle in enumerate(due):
+            if index:
+                await asyncio.sleep(WIKI_CRAWL_SPACING_SECONDS)
             try:
-                id_vehicle = int(vehicle.get("id"))
-                name = vehicle.get("name")
-                if not name:
-                    continue
-                ports = await self._wiki_ports(vehicle)
-                await self.bot.db.replace_ship_parts_reference(
-                    id_vehicle, name,
-                    [{"name": p.name, "port_type": p.port_type, "size_min": p.size_min, "size_max": p.size_max,
-                      "accepts_guns": p.accepts_guns, "port_tags": sorted(p.tags), "editable": p.editable,
-                      "required_tags": sorted(p.required_tags), "equipped_uuid": p.equipped_uuid} for p in ports],
-                )
-            except (TypeError, ValueError, WikiApiError):
-                logger.warning("Ship parts reference refresh failed for vehicle %r", vehicle.get("name"))
+                await self._refresh_vehicle_reference(vehicle)
+                outages = 0
+            except WikiUnavailableError as exc:
+                outages += 1
+                logger.warning("Ship parts reference refresh: the wiki didn't answer for %r: %s", vehicle.get("name"), exc)
+                if outages >= WIKI_CRAWL_MAX_OUTAGES:
+                    logger.warning("Ship parts reference refresh stopped after %d ships the wiki didn't answer for; "
+                                   "%d ships left for the next check", outages, len(due) - index - 1)
+                    return
             except Exception:
                 logger.exception("Ship parts reference refresh failed unexpectedly for vehicle %r", vehicle.get("name"))
+
+    async def _refresh_vehicle_reference(self, vehicle: dict) -> None:
+        """Re-read one ship's slots. Raises WikiUnavailableError when the wiki didn't answer
+        (the ship stays due); any definite answer, including an error, marks it refreshed."""
+        id_vehicle = int(vehicle["id"])
+        name = vehicle["name"]
+        try:
+            ports = await self._wiki_ports(vehicle)
+        except WikiUnavailableError:
+            raise
+        except (TypeError, ValueError, WikiApiError) as exc:
+            # A definite failure (a 404, an identity mismatch, data it can't parse) won't
+            # change within the hour, so it waits a day like an empty answer does.
+            logger.warning("Ship parts reference refresh failed for %r: %s; keeping its saved slots", name, exc)
+            ports = []
+        if ports:
+            await self.bot.db.replace_ship_parts_reference(
+                id_vehicle, name,
+                [{"name": p.name, "port_type": p.port_type, "size_min": p.size_min, "size_max": p.size_max,
+                  "accepts_guns": p.accepts_guns, "port_tags": sorted(p.tags), "editable": p.editable,
+                  "required_tags": sorted(p.required_tags), "equipped_uuid": p.equipped_uuid} for p in ports],
+            )
+        else:
+            # No slots is how the wiki answers a ship it doesn't have (concept ships) but also
+            # a name it briefly fails to match. Replacing with nothing used to wipe a ship's
+            # saved slots on such a blip (audit REL-11), so keep whatever is saved.
+            saved = await self.bot.db.get_ship_parts_reference(id_vehicle)
+            if saved:
+                logger.warning("The wiki returned no slots for %r; keeping its %d saved slots", name, len(saved))
+        # Marked either way, so a ship the wiki doesn't have is asked about daily, not hourly.
+        await self.bot.db.mark_ship_parts_refreshed(id_vehicle, len(ports))
 
     @refresh_reference.before_loop
     async def before_refresh_reference(self) -> None:
