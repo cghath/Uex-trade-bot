@@ -21,6 +21,7 @@ from bot.uex.charts import render_price_history_chart
 from bot.uex.exceptions import UexApiError, describe_uex_api_error
 from bot.uex.inventory import extract_listing_id
 from bot.uex.marketplace import (
+    QUALITY_MAX,
     MarketplaceAverageEntry,
     compute_marketplace_movers,
     exclude_sold_out,
@@ -479,8 +480,8 @@ class Marketplace(commands.Cog):
     @app_commands.describe(
         query="Item name or keyword",
         operation="Filter to buy or sell listings",
-        min_quality="Optional: only listings with quality at least this (seller-set, UEX's 0-100 scale)",
-        max_quality="Optional: only listings with quality at most this (seller-set, UEX's 0-100 scale)",
+        min_quality="Optional: only listings with quality at least this, 0-1000 (seller-set)",
+        max_quality="Optional: only listings with quality at most this, 0-1000 (seller-set)",
     )
     @app_commands.choices(operation=OPERATION_CHOICES)
     @app_commands.autocomplete(query=traded_item_autocomplete)
@@ -489,8 +490,8 @@ class Marketplace(commands.Cog):
         interaction: discord.Interaction,
         query: str,
         operation: app_commands.Choice[str] | None = None,
-        min_quality: float | None = None,
-        max_quality: float | None = None,
+        min_quality: app_commands.Range[float, 0, QUALITY_MAX] | None = None,
+        max_quality: app_commands.Range[float, 0, QUALITY_MAX] | None = None,
     ) -> None:
         await interaction.response.defer()
 
@@ -539,7 +540,7 @@ class Marketplace(commands.Cog):
             )
         footer = "UEX Marketplace · player-to-player listings"
         if min_quality is not None or max_quality is not None:
-            footer += " · quality filter applied (0-100 scale, only listings the seller set a quality on)"
+            footer += " · quality filter applied (0-1000 scale, only listings the seller set a quality on)"
         embed.set_footer(text=footer)
         await interaction.followup.send(embed=embed)
 
@@ -596,7 +597,7 @@ class Marketplace(commands.Cog):
                 name="Trending up",
                 value="\n".join(
                     f"**{marketplace_item_link(m.item_name, m.id_item)}** +{m.pct_change:.1f}% "
-                    f"({m.current_avg_sell:,.0f} UEC)" for m in gainers
+                    f"({m.current_avg_sell:,.0f} {m.currency})" for m in gainers
                 ),
                 inline=False,
             )
@@ -605,7 +606,7 @@ class Marketplace(commands.Cog):
                 name="Trending down",
                 value="\n".join(
                     f"**{marketplace_item_link(m.item_name, m.id_item)}** {m.pct_change:.1f}% "
-                    f"({m.current_avg_sell:,.0f} UEC)" for m in losers
+                    f"({m.current_avg_sell:,.0f} {m.currency})" for m in losers
                 ),
                 inline=False,
             )

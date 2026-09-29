@@ -1,7 +1,25 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.13.
+the oldest entry below); the next new entry is 2.14.
+
+---
+
+## 2.13 - 2026-09-28 - Scanner off switch, quality and currency fixes
+
+**New**
+- `/scanner-status` - Now has a **Turn off** button, the first way to stop Raw Materials Deal Scanner alerts.
+  `/set-scanner-channel` turns it back on.
+
+**Fixed**
+- `/marketplace-search`, `/marketplace-alert-add` - Quality filters now use the same 0-1000 scale as in-game
+  quality, and reject numbers outside it. They used to say 0-100, which made a filter like "at least 80" match
+  almost everything.
+- `/alert-list` - A Marketplace alert with no maximum quality now shows "0-1000", not "0-100".
+- `/marketplace-movers` - Prices show each item's own currency (UEC, WIF or MGS) instead of always "UEC".
+- Price, restock and Marketplace alerts, deal scanner posts and negotiation DMs are no longer lost when Discord
+  has a brief hiccup. They're retried on the next check. A negotiation message too long for a Discord DM now
+  arrives trimmed, with a pointer to read the rest on UEX.
 
 ---
 

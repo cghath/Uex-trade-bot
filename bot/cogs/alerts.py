@@ -15,6 +15,7 @@ from bot.cogs.prices import commodity_name_autocomplete
 from bot.delivery import Delivery, send_to_channel_or_dm
 from bot.discord_ui import send_alert_remove_picker
 from bot.uex.exceptions import UexApiError
+from bot.uex.marketplace import format_quality_range
 
 logger = logging.getLogger("uexbot.alerts")
 
@@ -98,9 +99,7 @@ class Alerts(commands.Cog):
                 min_q, max_q = a.get("min_quality"), a.get("max_quality")
                 quality_note = ""
                 if min_q is not None or max_q is not None:
-                    lo = f"{min_q:.0f}" if min_q is not None else "0"
-                    hi = f"{max_q:.0f}" if max_q is not None else "100"
-                    quality_note = f" · quality {lo}-{hi}"
+                    quality_note = f" · quality {format_quality_range(min_q, max_q)}"
                 lines.append(f"#{a['id']} — {a['operation']} listings matching '{a['keyword']}'{price_note}{quality_note}")
             sections.append("**Marketplace alerts**\n" + "\n".join(lines))
 
@@ -147,9 +146,7 @@ class Alerts(commands.Cog):
             min_q, max_q = a.get("min_quality"), a.get("max_quality")
             quality_note = ""
             if min_q is not None or max_q is not None:
-                lo = f"{min_q:.0f}" if min_q is not None else "0"
-                hi = f"{max_q:.0f}" if max_q is not None else "100"
-                quality_note = f" · quality {lo}-{hi}"
+                quality_note = f" · quality {format_quality_range(min_q, max_q)}"
             picker_items.append({
                 "id": f"marketplace:{a['id']}",
                 "label": f"#{a['id']} {a['keyword']} (marketplace)",

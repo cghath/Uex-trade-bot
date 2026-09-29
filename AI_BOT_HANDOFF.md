@@ -126,6 +126,12 @@ date - no open item, nothing to record here.
       closed DMs no longer retried every 5 minutes). aiv2 was cloned from here, so it
       almost certainly has the same five delivery paths. Test: `tests/test_alert_delivery.py`.
       See PROJECT_CONTEXT.md entry 89
+- [ ] Marketplace quality on the real 0-1000 scale (`format_quality_range`, `QUALITY_MAX`,
+      `Range[float, 0, 1000]` on the four quality options), `/marketplace-movers` showing
+      each row's own currency (`MarketplaceMoverEntry.currency`), and a Turn off button on
+      `/scanner-status` (`ScannerOffView`, `Database.clear_scanner_channel`). Check any aiv2
+      AI tools that describe or filter listing quality, too. Test:
+      `tests/test_marketplace_labels_and_scanner_off.py`. See PROJECT_CONTEXT.md entry 90
 
 ## To port: aiv2 -> production
 

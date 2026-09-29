@@ -4194,6 +4194,14 @@ class Database:
             row = await cursor.fetchone()
             return row["channel_id"] if row else None
 
+    async def clear_scanner_channel(self, user_id: int) -> bool:
+        """Turn a user's deal scanner off. True if it was on. Their seen-deal rows are kept,
+        so turning it back on doesn't re-send deals they were already shown."""
+        async with self.connect() as db:
+            cursor = await db.execute("DELETE FROM user_scanner_channel WHERE user_id = ?", (user_id,))
+            await db.commit()
+            return cursor.rowcount > 0
+
     async def list_scanner_watchers(self) -> list[dict[str, Any]]:
         """Every user with a scanner channel configured - polled by the background loop."""
         async with self.connect() as db:

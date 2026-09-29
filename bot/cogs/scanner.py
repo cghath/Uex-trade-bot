@@ -52,7 +52,8 @@ class Scanner(commands.Cog):
         await interaction.response.send_message(
             f"Raw-material deal alerts will now be posted in {channel.mention} (checked every "
             f"{POLL_INTERVAL_MINUTES} min, threshold {self.bot.config.scanner_steal_threshold:.0%} off "
-            "the quality-matched 30-day average). Run /set-scanner-channel again anytime to change it.",
+            "the quality-matched 30-day average). Run /set-scanner-channel again anytime to change it, "
+            "or turn it off from /scanner-status.",
             ephemeral=True,
         )
 
@@ -69,12 +70,15 @@ class Scanner(commands.Cog):
                 ephemeral=True,
             )
             return
+        view = ScannerOffView(self.bot.db, interaction.user.id)
         await interaction.response.send_message(
             f"Raw Materials Deal Scanner active: alerts post to <#{channel_id}>, checked every "
             f"{POLL_INTERVAL_MINUTES} min for Commodities and Harvestables with reported quality, at least "
             f"{self.bot.config.scanner_steal_threshold:.0%} below their quality-matched 30-day average.",
+            view=view,
             ephemeral=True,
         )
+        view.origin = interaction
 
     @app_commands.command(
         name="scan-now",
@@ -188,6 +192,44 @@ class Scanner(commands.Cog):
     @poll_scanner.before_loop
     async def before_poll_scanner(self) -> None:
         await self.bot.wait_until_ready()
+
+
+class ScannerOffView(discord.ui.View):
+    """A "Turn off" button on /scanner-status: before it there was no way to stop the
+    scanner at all (audit UX-3), short of pointing it at a channel nobody reads. Lives on
+    the status reply rather than as its own command, to keep the command list short."""
+
+    def __init__(self, db, user_id: int) -> None:
+        super().__init__(timeout=300)
+        self.db = db
+        self.user_id = user_id
+        self.origin: discord.Interaction | None = None  # the /scanner-status call, set once sent
+
+    @discord.ui.button(label="Turn off", style=discord.ButtonStyle.danger)
+    async def turn_off(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("This button isn't for you.", ephemeral=True)
+            return
+        was_on = await self.db.clear_scanner_channel(self.user_id)
+        button.disabled = True
+        await interaction.response.edit_message(
+            content=("Raw Materials Deal Scanner turned off. Run /set-scanner-channel to turn it back on."
+                     if was_on else "The Raw Materials Deal Scanner was already off."),
+            view=self,
+        )
+        self.stop()
+
+    async def on_timeout(self) -> None:
+        # Grey the button out so it doesn't look usable after it stops working. An
+        # ephemeral reply can still be edited through its interaction for 15 minutes.
+        if self.origin is None:
+            return
+        for child in self.children:
+            child.disabled = True
+        try:
+            await self.origin.edit_original_response(view=self)
+        except discord.HTTPException:
+            pass
 
 
 async def setup(bot: commands.Bot) -> None:
