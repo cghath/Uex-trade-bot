@@ -3187,6 +3187,44 @@ they're in sync).
     - PATCH_NOTES 2.13 covers these, plus PR #66's delivery fixes, which had no player-facing
       note yet. Tests: `tests/test_marketplace_labels_and_scanner_off.py` (8).
 
+91. **Route commands say the real reason nothing, or no cargo math, came back.** Audit
+    findings UX-2 and MSG-4, plus MSG-7 in passing.
+    - **UX-2.** A saved `/set-trading-preferences` filter (auto-load-only, system,
+      space-only, capital-ship access) that ruled out every route read as "No ... found right
+      now". `/top-routes`' auto-load branch even said "try again once more route data has
+      been collected", with no hint that the player's own saved setting was the cause.
+      - Each command now records which filters came from saved preferences, not its own
+        options, before filling them in. That's a plain boolean or label per filter, captured
+        before the `if x is None: x = prefs[...]` fallback.
+      - The empty-result message then appends `saved_filters_hint(saved_filter_labels(...))`
+        (`bot/uex/trading_preferences.py`), which names those settings and how to override
+        or change them.
+      - Where it applies: `/best-route` (both branches) and `_send_ranked_routes`
+        (`/top-routes`, `/routes-from`, `/route-on-the-way`) name only the filter that
+        emptied that stage. `/mixed-routes`, `/multi-stop-route`, `/route-from-multi` and
+        `/diminishing-returns` name every saved filter that's active, since any of them can
+        be the cause.
+      - Capital-ship access counts as "saved" only when the preference is on and the ship
+        wouldn't already require it.
+      - A filter passed on the command itself gets no hint, since the player knows they set
+        it.
+    - **MSG-4.** Three different cases all fell through to `ship_vehicle = None`, then to
+      "set a default ship with /set-default-ship", in both the footer and the per-route
+      "Cargo: unknown" line:
+      - no ship at all;
+      - a saved or typed ship that no longer resolves;
+      - UEX's vehicle list failing to load.
+      - New `missing_ship_note` / `missing_ship_cargo_line` (`bot/uex/route_presentation.py`)
+        tell them apart, using a new `ship_lookup_failed` flag set in each command's
+        `get_vehicles()` except branch.
+      - The "resolved, but no cargo capacity on record" case already had its own wording.
+      - `/intelligence-brief`'s vague "ship cargo capacity unavailable" now uses the same note.
+    - **MSG-7.** `/mixed-routes`' empty message said "with auto-load at the origin", but it
+      checks both ends (see CLAUDE.md's autoload convention). It now says "at both ends".
+    - Tests: `tests/test_route_messages.py` (8): the helpers, `/top-routes`' saved-vs-explicit
+      auto-load cases, the unmatched-ship and UEX-down footers, `/best-route`'s saved system,
+      and `/mixed-routes` naming two saved filters.
+
 ## Where to look for what
 
 Six docs, deliberately scoped so they don't duplicate each other:

@@ -82,3 +82,36 @@ def format_trading_preferences(prefs: dict[str, object], *, ship_detail: str | N
         f"Preferred system: **{system}**",
         f"Risk tolerance: **{risk}** (stored, not yet enforced by any route command)",
     ])
+
+
+def saved_filters_hint(labels: list[str]) -> str:
+    """Appended to a "nothing found" message when filters the player didn't pass on this
+    command - their saved /set-trading-preferences defaults - are active (audit UX-2).
+    Without it a saved auto-load-only or system filter that rules out everything reads as
+    "nothing exists right now", with no hint the player's own setting is the cause.
+    `labels` are the saved filters actually active, e.g. ["auto-load-only", "system Pyro"];
+    empty means no hint."""
+    if not labels:
+        return ""
+    if len(labels) == 1:
+        return (f" Your saved {labels[0]} setting is on - set that option on this command to override it, "
+                "or change it with /set-trading-preferences.")
+    joined = ", ".join(labels[:-1]) + " and " + labels[-1]
+    return (f" Your saved {joined} settings are on - set those options on this command to override them, "
+            "or change them with /set-trading-preferences.")
+
+
+def saved_filter_labels(*, space_only: bool = False, capital_ship_access: bool = False,
+                        auto_load_only: bool = False, system: str | None = None) -> list[str]:
+    """Labels for saved_filters_hint. Pass only filters that came from saved preferences,
+    not ones the player set on this command."""
+    labels = []
+    if space_only:
+        labels.append("space-only")
+    if capital_ship_access:
+        labels.append("capital-ship access")
+    if auto_load_only:
+        labels.append("auto-load-only")
+    if system:
+        labels.append(f"system {system}")
+    return labels

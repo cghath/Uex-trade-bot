@@ -302,3 +302,24 @@ def approximation_note(is_exact: bool, *, per_leg: bool = False) -> str | None:
         return None
     kind = "per-leg cargo allocation" if per_leg else "cargo allocation"
     return f"{kind} for this route is approximate, not proven-optimal"
+
+
+def missing_ship_note(ship_query: str | None, *, lookup_failed: bool) -> str:
+    """Footer fragment for a route command with no ship to do cargo math with. Three
+    different causes all used to read "set a default ship" (audit MSG-4) - telling a player
+    who already has one to set one, when really UEX was down or the saved name no longer
+    matches a ship."""
+    if not ship_query:
+        return "set a default ship with /set-default-ship for cargo/run-profit numbers"
+    if lookup_failed:
+        return "UEX's ship list didn't load, so no cargo/run-profit numbers this time"
+    return f"'{ship_query}' didn't match a single ship - pick one from autocomplete or update /set-default-ship"
+
+
+def missing_ship_cargo_line(ship_query: str | None, *, lookup_failed: bool) -> str:
+    """The per-route "Cargo: unknown" line, with the same three causes as missing_ship_note."""
+    if not ship_query:
+        return "Cargo: unknown (set a ship with /set-default-ship to see haulable SCU)"
+    if lookup_failed:
+        return "Cargo: unknown (UEX's ship list didn't load)"
+    return f"Cargo: unknown ('{ship_query}' didn't match a single ship)"

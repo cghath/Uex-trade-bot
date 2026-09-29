@@ -132,6 +132,13 @@ date - no open item, nothing to record here.
       `/scanner-status` (`ScannerOffView`, `Database.clear_scanner_channel`). Check any aiv2
       AI tools that describe or filter listing quality, too. Test:
       `tests/test_marketplace_labels_and_scanner_off.py`. See PROJECT_CONTEXT.md entry 90
+- [ ] Route commands name the real cause of an empty result or missing cargo math:
+      `saved_filters_hint`/`saved_filter_labels` (`bot/uex/trading_preferences.py`) on every
+      route command's "nothing found" message, and `missing_ship_note`/
+      `missing_ship_cargo_line` (`bot/uex/route_presentation.py`) plus a `ship_lookup_failed`
+      flag in `prices.py`, `trends.py` and `intelligence_brief.py`. aiv2's `/ai-*` route
+      commands were cloned from these, so they likely say "set a default ship" the same way.
+      Test: `tests/test_route_messages.py`. See PROJECT_CONTEXT.md entry 91
 
 ## To port: aiv2 -> production
 

@@ -1,7 +1,21 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.14.
+the oldest entry below); the next new entry is 2.15.
+
+---
+
+## 2.14 - 2026-09-29 - Route commands say why nothing came back
+
+**Changed**
+- `/best-route`, `/top-routes`, `/routes-from`, `/route-on-the-way`, `/mixed-routes`, `/multi-stop-route`,
+  `/route-from-multi`, `/diminishing-returns` - When nothing is found because of a filter from your saved
+  `/set-trading-preferences` (auto-load-only, a star system, space-only or capital-ship access), the message now
+  names that setting and how to override it, instead of just "nothing found right now".
+- The same route commands no longer tell you to "set a default ship" when you already have one. They now say
+  when your saved ship no longer matches one of UEX's ships, or when UEX's ship list didn't load.
+- `/mixed-routes` - Its "nothing fits" message now says auto-load is checked at both ends of the route, not
+  just the origin, matching what it actually checks.
 
 ---
 

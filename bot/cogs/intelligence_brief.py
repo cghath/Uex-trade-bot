@@ -20,6 +20,7 @@ from bot.uex.route_presentation import (
     cargo_confidences,
     cargo_item_warnings,
     chunk_lines,
+    missing_ship_note,
     side_health_warnings,
     travel_warning,
     worst_confidence,
@@ -110,8 +111,10 @@ class IntelligenceBrief(commands.Cog):
         try:
             vehicles = await self.bot.uex.get_vehicles()
             vehicle = resolve_ship(vehicles, ship_query)
-            if not vehicle or not vehicle.get("scu"):
-                raise ValueError("ship cargo capacity unavailable")
+            if not vehicle:
+                raise ValueError(missing_ship_note(ship_query, lookup_failed=False))
+            if not vehicle.get("scu"):
+                raise ValueError(f"UEX lists no cargo capacity for {vehicle.get('name', ship_query)}")
             rows = await self.bot.db.get_mixed_route_market_rows()
             capital_gate = requires_capital_cargo_access(vehicle)
             if capital_gate:
