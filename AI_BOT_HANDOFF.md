@@ -105,7 +105,7 @@ date - no open item, nothing to record here.
       part's tags (`bot/uex/ship_parts.py`, `bot/cogs/ship_parts_finder.py`, three new
       `ship_parts_reference` columns). Only relevant if aiv2 ever ports `/ship-parts-finder`.
       See PROJECT_CONTEXT.md entry 86
-- [ ] Background loops guarded against any single failure: an outer try/except per loop
+- [x] Background loops guarded against any single failure: an outer try/except per loop
       body plus a per-item guard, in `alerts.py`, `stock_alerts.py`, `digest.py`,
       `intelligence.py` (`snapshot_fuel_prices`), `marketplace_alerts.py`,
       `negotiation_alerts.py`, `scanner.py`, `route_progression.py`
@@ -113,32 +113,36 @@ date - no open item, nothing to record here.
       here, so it very likely has the same unguarded loops. Grep its own `@tasks.loop`s
       too, including any AI-only ones. Test: `tests/test_background_loop_guards.py`.
       See PROJECT_CONTEXT.md entry 87
+      (ported to aiv2 in commit `dacd22b`; aiv2's other loops, including `blueprints.py`, were already guarded)
 - [ ] `/ship-parts-finder` reliability: a wiki outage is no longer cached as "no detail"
       for 24h, and a slow category load can't overwrite a newer pick or lock a part under
       the wrong slot (`bot/cogs/ship_parts_finder.py`). Also a new `WikiUnavailableError`
       subclass in `bot/wiki_api.py`, raised only when retries run out. It's a subclass, so
       every existing `except WikiApiError` still catches it. Only the finder part matters,
       and only if aiv2 ever ports `/ship-parts-finder`. See PROJECT_CONTEXT.md entry 88
-- [ ] Notifications marked done only once settled: new `bot/delivery.py` (DELIVERED /
+- [x] Notifications marked done only once settled: new `bot/delivery.py` (DELIVERED /
       RETRY / UNDELIVERABLE, `send_dm`, `send_to_channel_or_dm`, `fit_message`), used by
       `alerts.py`, `stock_alerts.py`, `marketplace_alerts.py`, `scanner.py` (which also
       gains a DM fallback) and `negotiation_alerts.py` (long messages trimmed to fit, and
       closed DMs no longer retried every 5 minutes). aiv2 was cloned from here, so it
       almost certainly has the same five delivery paths. Test: `tests/test_alert_delivery.py`.
       See PROJECT_CONTEXT.md entry 89
-- [ ] Marketplace quality on the real 0-1000 scale (`format_quality_range`, `QUALITY_MAX`,
+      (ported to aiv2 in commit `dacd22b`)
+- [x] Marketplace quality on the real 0-1000 scale (`format_quality_range`, `QUALITY_MAX`,
       `Range[float, 0, 1000]` on the four quality options), `/marketplace-movers` showing
       each row's own currency (`MarketplaceMoverEntry.currency`), and a Turn off button on
       `/scanner-status` (`ScannerOffView`, `Database.clear_scanner_channel`). Check any aiv2
       AI tools that describe or filter listing quality, too. Test:
       `tests/test_marketplace_labels_and_scanner_off.py`. See PROJECT_CONTEXT.md entry 90
-- [ ] Route commands name the real cause of an empty result or missing cargo math:
+      (ported to aiv2 in commit `dacd22b`; aiv2's chat tools never describe listing quality, so nothing more was needed there)
+- [x] Route commands name the real cause of an empty result or missing cargo math:
       `saved_filters_hint`/`saved_filter_labels` (`bot/uex/trading_preferences.py`) on every
       route command's "nothing found" message, and `missing_ship_note`/
       `missing_ship_cargo_line` (`bot/uex/route_presentation.py`) plus a `ship_lookup_failed`
       flag in `prices.py`, `trends.py` and `intelligence_brief.py`. aiv2's `/ai-*` route
       commands were cloned from these, so they likely say "set a default ship" the same way.
       Test: `tests/test_route_messages.py`. See PROJECT_CONTEXT.md entry 91
+      (ported to aiv2 in commit `dacd22b`, rewritten for aiv2's restructured route code; the same hints also reach its chat route tools)
 
 ## To port: aiv2 -> production
 
