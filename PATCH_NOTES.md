@@ -1,7 +1,16 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.18.
+the oldest entry below); the next new entry is 2.19.
+
+---
+
+## 2.18 - 2026-09-29 - Ship Parts Finder doesn't hang on a slow wiki
+
+**Fixed**
+- `/ship-parts-finder` - When the Star Citizen Wiki is slow or down, picking a category could leave the browser
+  loading forever. The list now appears within about 45 seconds either way; any parts the wiki didn't answer for are
+  listed without their stats, with a note saying so, and fill in if you try again a few minutes later.
 
 ---
 

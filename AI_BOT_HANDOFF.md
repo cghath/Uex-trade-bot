@@ -180,6 +180,12 @@ date - no open item, nothing to record here.
       aiv2's `/ai-*` route tools read the same caches, so their answers should mention a
       partial snapshot too. Test: `tests/test_partial_refresh.py`. See PROJECT_CONTEXT.md
       entry 97
+- [ ] `/ship-parts-finder` loads capped at `LOAD_TIME_BUDGET_SECONDS` (45) via
+      `_gather_until` + `gather_within`, so a hanging wiki can't outlast the 15-minute
+      interaction window; cut-off lookups finish in the background. Only matters if aiv2
+      ever ports `/ship-parts-finder`, but any aiv2 AI tool that waits on the wiki has the
+      same ~96s-per-request worst case. Test: `tests/test_ship_parts_load_deadline.py`.
+      See PROJECT_CONTEXT.md entry 98
 
 ## To port: aiv2 -> production
 

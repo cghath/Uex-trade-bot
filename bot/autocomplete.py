@@ -5,6 +5,9 @@ allows a 15s timeout with retries, so a cold cache or a slow UEX response used t
 user with no suggestions and nothing logged. gather_within() stops waiting at a budget
 but does NOT cancel the slow fetches: they keep running in the background and fill
 UexClient's cache, so the very next keystroke gets an instant answer.
+
+/ship-parts-finder uses gather_within the same way, to cap how long one browse waits on
+the Star Citizen Wiki (bot/cogs/ship_parts_finder.py: LOAD_TIME_BUDGET_SECONDS).
 """
 from __future__ import annotations
 
@@ -26,7 +29,7 @@ _background: set[asyncio.Task] = set()
 def _finish_in_background(task: asyncio.Task) -> None:
     _background.discard(task)
     if not task.cancelled() and task.exception() is not None:
-        logger.info("Background autocomplete fetch failed after its deadline: %r", task.exception())
+        logger.info("Background fetch failed after its deadline: %r", task.exception())
 
 
 async def gather_within(*aws: Awaitable[Any], timeout: float | None = None) -> list[Any]:
