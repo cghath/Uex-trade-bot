@@ -42,6 +42,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
+from bot.autocomplete import gather_within
 from bot.cogs.prices import terminal_name_autocomplete
 from bot.cogs.ships import ship_name_autocomplete
 from bot.uex.exceptions import UexApiError, describe_uex_api_error
@@ -94,6 +95,13 @@ DETAIL_CACHE_MAX = 1000
 # being retried - long enough that browsing during an outage doesn't wait on every part
 # again, short enough that the finder recovers minutes after the wiki does.
 WIKI_OUTAGE_RETRY_SECONDS = 5 * 60
+# How long one browse may spend loading a slot's parts. A hanging wiki makes each request
+# take ~96s (3 attempts x 30s), a detail miss makes two, and batches run one after
+# another, so a cold category could outlast Discord's 15-minute interaction window and
+# never show at all (audit REL-6). Past this, no new batch starts: lookups still running
+# finish in the background and fill the cache, and the parts left unanswered are counted
+# in the browser's "wiki didn't respond" note. A healthy cold load measured 0.2-4.7s.
+LOAD_TIME_BUDGET_SECONDS = 45.0
 # The browsing view stops listening after this long without a click. Its ↻ Refresh button
 # keeps working after that, and after a restart, and rebuilds the browser in place.
 BROWSER_IDLE_SECONDS = 30 * 60
@@ -155,6 +163,20 @@ def _rank_key(candidate: dict) -> tuple:
     distance = candidate.get("_distance_gm")
     return (stat is None, -(stat[1] if stat else 0.0), distance is None, distance or 0.0,
             candidate.get("_price_buy") or 0.0)
+
+
+async def _gather_until(deadline: float | None, calls: list) -> list:
+    """Run one batch of lookups (zero-argument callables, so nothing is started once time
+    is up) and return each result or exception, like gather(return_exceptions=True). With
+    a deadline, a lookup still running when it passes comes back as TimeoutError but isn't
+    cancelled - it finishes in the background and fills its cache (see gather_within) -
+    and a batch reached after the deadline isn't started at all."""
+    if deadline is None:
+        return await asyncio.gather(*(call() for call in calls), return_exceptions=True)
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return [TimeoutError("out of time for this browse") for _ in calls]
+    return await gather_within(*(call() for call in calls), timeout=remaining)
 
 
 def _fits(candidate: dict, port: ShipPort, category: str) -> bool:
@@ -509,8 +531,8 @@ class PartsBrowserView(discord.ui.View):
                          "Try again in a few minutes.")
         if self.category is not None and self.parts_unanswered:
             count = f"{self.parts_unanswered} part{'s' if self.parts_unanswered != 1 else ''}"
-            notes.append(f"⚠️ The Star Citizen Wiki didn't respond for {count} here, so they may be missing. "
-                         "Try again in a few minutes.")
+            notes.append(f"⚠️ The Star Citizen Wiki didn't respond for {count} here, so they may be missing "
+                         "or listed without their stats. Try again in a few minutes.")
         return notes
 
     def text(self) -> str:
@@ -1026,7 +1048,7 @@ class ShipPartsFinder(commands.Cog):
 
     async def candidates_for_port(
         self, port: ShipPort, *, category: str | None = None, limit: int | None = None,
-        origin_id: int | None = None,
+        origin_id: int | None = None, time_budget: float | None = LOAD_TIME_BUDGET_SECONDS,
     ) -> list[dict]:
         """Every sold part that fits this slot under `category`, priced from UEX's own shop
         rows and ranked by the category's key stat, highest first (quantum speed, power
@@ -1037,7 +1059,8 @@ class ShipPartsFinder(commands.Cog):
         Ranking needs every part's wiki detail, and so does the fit check (UEX's size is
         unreliable - see bot/uex/ship_parts.py), so all of them are loaded, batched and
         cached for 24h: a category's first browse is the slow one. `limit` is only an
-        optional cap after ranking; the browser passes none, since it pages."""
+        optional cap after ranking; the browser passes none, since it pages. `time_budget`
+        bounds the batched lookups (see LOAD_TIME_BUDGET_SECONDS); None means no limit."""
         category = category or port.uex_category
         catalog = await self.bot.uex.get_item_catalog()
         cheapest = cheapest_listing_by_item(await self.bot.uex.get_items_prices_all())
@@ -1054,11 +1077,13 @@ class ShipPartsFinder(commands.Cog):
                 "_uex_row": row, "_uex_id": id_item, "_price_buy": float(listing["price_buy"]),
                 "_id_terminal": listing.get("id_terminal"), "_terminal_name": listing.get("terminal_name"),
             })
+        deadline = time.monotonic() + time_budget if time_budget is not None else None
         await self._attach_full_terminal_names(candidates)
         if origin_id is not None:
-            await self._attach_distances(candidates, origin_id)
-        await self._attach_details(candidates)
-        await self._swap_in_fitting_variants([c for c in candidates if not tags_allow(c, port)], port)
+            await self._attach_distances(candidates, origin_id, deadline=deadline)
+        await self._attach_details(candidates, deadline=deadline)
+        await self._swap_in_fitting_variants([c for c in candidates if not tags_allow(c, port)], port,
+                                             deadline=deadline)
         kept = sorted((c for c in candidates if _fits(c, port, category)), key=_rank_key)
         return PartCandidates(kept if limit is None else kept[:limit],
                               wiki_unavailable=sum(1 for c in candidates if c.get("_detail_unanswered")))
@@ -1089,7 +1114,9 @@ class ShipPartsFinder(commands.Cog):
         self._detail_cache[key] = (now + DETAIL_CACHE_SECONDS, rows)
         return rows
 
-    async def _swap_in_fitting_variants(self, candidates: list[dict], port: ShipPort) -> None:
+    async def _swap_in_fitting_variants(
+        self, candidates: list[dict], port: ShipPort, *, deadline: float | None = None,
+    ) -> None:
         """A part that fails the tag check on the detail its UEX uuid led to may still be
         a generic part with ship-specific namesakes (see pick_fitting_variant) - replace
         its wiki fields with the variant that fits this ship, stats included. Only runs
@@ -1101,11 +1128,11 @@ class ShipPartsFinder(commands.Cog):
         variants: dict[str, object] = {}
         for start in range(0, len(names), DETAIL_BATCH_SIZE):
             batch = names[start:start + DETAIL_BATCH_SIZE]
-            results = await asyncio.gather(*(self._variants_cached(n) for n in batch), return_exceptions=True)
+            results = await _gather_until(deadline, [lambda n=n: self._variants_cached(n) for n in batch])
             variants.update(zip(batch, results))
         for candidate in named:
             rows = variants.get(str(candidate["name"]))
-            if isinstance(rows, WikiUnavailableError):
+            if isinstance(rows, (WikiUnavailableError, TimeoutError)):
                 # Counted in the browser's "wiki didn't respond" note: this part may be
                 # missing only because its fitting variant couldn't be looked up.
                 candidate["_detail_unanswered"] = True
@@ -1134,16 +1161,14 @@ class ShipPartsFinder(commands.Cog):
             if reference and reference.get("terminal_name"):
                 candidate["_terminal_name"] = reference["terminal_name"]
 
-    async def _attach_details(self, candidates: list[dict]) -> None:
+    async def _attach_details(self, candidates: list[dict], *, deadline: float | None = None) -> None:
         """Merge each candidate's wiki detail (stats, grade, maker) into it. A part the wiki
         has no detail for (its UEX uuid missing or not matching the wiki's) keeps a minimal
         name/size from UEX's own row and is still shown, instead of silently vanishing."""
         pending = [c for c in candidates if "_detail_loaded" not in c]
         for start in range(0, len(pending), DETAIL_BATCH_SIZE):
             batch = pending[start:start + DETAIL_BATCH_SIZE]
-            results = await asyncio.gather(
-                *(self._item_detail_cached(c["_uex_row"]) for c in batch), return_exceptions=True,
-            )
+            results = await _gather_until(deadline, [lambda c=c: self._item_detail_cached(c["_uex_row"]) for c in batch])
             for candidate, detail in zip(batch, results):
                 row = candidate["_uex_row"]
                 if isinstance(detail, dict):
@@ -1153,9 +1178,10 @@ class ShipPartsFinder(commands.Cog):
                     candidate.setdefault("name", row.get("name"))
                     candidate.setdefault("size", row.get("size"))
                 candidate["_detail_loaded"] = isinstance(detail, dict)
-                candidate["_detail_unanswered"] = isinstance(detail, WikiUnavailableError)
+                # Out of time counts like no answer: it may still arrive, into the cache.
+                candidate["_detail_unanswered"] = isinstance(detail, (WikiUnavailableError, TimeoutError))
 
-    async def _attach_distances(self, candidates: list[dict], origin_id: int) -> None:
+    async def _attach_distances(self, candidates: list[dict], origin_id: int, *, deadline: float | None = None) -> None:
         """Real distance (gigameters) from the player's given location to each candidate's
         cheapest shop, batched via asyncio.gather - mirrors /ingame-item-finder's own
         _fetch_distances. None when UEX can't price the pair; never fabricated."""
@@ -1166,8 +1192,8 @@ class ShipPartsFinder(commands.Cog):
         distances: dict[int, float | None] = {origin_id: 0.0}
         for start in range(0, len(to_fetch), DETAIL_BATCH_SIZE):
             batch = to_fetch[start:start + DETAIL_BATCH_SIZE]
-            results = await asyncio.gather(
-                *(self.bot.uex.get_terminal_distance(origin_id, tid) for tid in batch), return_exceptions=True,
+            results = await _gather_until(
+                deadline, [lambda tid=tid: self.bot.uex.get_terminal_distance(origin_id, tid) for tid in batch],
             )
             for tid, result in zip(batch, results):
                 if isinstance(result, Exception) or not result:

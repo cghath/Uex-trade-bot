@@ -3469,6 +3469,46 @@ they're in sync).
 
       Forcing the decision back to always-replace fails the keep-previous tests.
 
+98. **A `/ship-parts-finder` browse can no longer outlast Discord's 15-minute interaction
+    window on a hanging wiki.** Audit finding REL-6.
+    - **How long it could take.** `WikiApiClient` gives each request a 30s timeout and 3
+      attempts with 2s/4s backoff, so about 96s per lookup when the wiki hangs. A detail
+      miss makes two lookups in a row (uuid, then name). `_attach_details` runs batches of
+      8 one after another. A cold category of 40-86 parts could therefore take 16-35
+      minutes. The deferred component interaction's token lasts 15, so the final edit
+      failed and the list never appeared.
+    - **Fix.**
+      - `candidates_for_port` takes `time_budget`, defaulting to `LOAD_TIME_BUDGET_SECONDS`
+        (45). Both callers are interactive: the category/slot load and the ↻ Refresh
+        rebuild. `None` means no limit.
+      - The three batched steps (`_attach_distances`, `_attach_details`,
+        `_swap_in_fitting_variants`) run each batch through a new `_gather_until`, which
+        takes zero-argument callables, so a batch reached after the deadline is never
+        started at all.
+      - Within the deadline, `_gather_until` uses `bot/autocomplete.py`'s `gather_within`:
+        a lookup still running when time is up returns `TimeoutError` but is not
+        cancelled. It finishes in the background and fills `_detail_cache`, so the next
+        browse is fast.
+      - `gather_within`'s docs and log line are now generic.
+    - **What the player gets.** A timed-out detail or variant lookup counts as
+      `_detail_unanswered`, like an outage, so the existing ⚠️ note counts it. It is not
+      recorded in `_wiki_outages`, since it may still succeed.
+      - The part is still listed from UEX's own data, as before for any unanswered part.
+        The note now says "...so they may be missing or listed without their stats", which
+        describes both outcomes.
+      - A distance lookup cut off by the deadline shows as unknown.
+    - **Why 45 seconds.** A healthy cold load measured 0.2-4.7s (entry 85). 45s bounds the
+      hanging-wiki case far inside the 15-minute token, and short enough that a player isn't
+      left waiting minutes.
+    - Tests: `tests/test_ship_parts_load_deadline.py` (7):
+      - partial results within the budget, and the cache filled by the cut-off lookups;
+      - no batch starting after the deadline;
+      - slow distances coming back unknown;
+      - no budget waiting for everything, and a normal load being unaffected;
+      - the interactive default, and that the browser doesn't opt out.
+
+      Making `_gather_until` ignore the deadline fails the four time-bound tests.
+
 ## Where to look for what
 
 Six docs, deliberately scoped so they don't duplicate each other:
