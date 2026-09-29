@@ -184,3 +184,20 @@ date - no open item, nothing to record here.
       shows no sell price for them today. Found through aiv2 chat testing. Production's
       `bot/uex/refinery.py` and `tests/test_refinery.py` matched aiv2's before this change, so
       it ports cleanly.
+- [ ] aiv2 commit `c4f1aa6` - Price only the commodity asked for. UEX's
+      `/commodities_prices?commodity_name=` matches by SUBSTRING, and every lookup by name used
+      the mixed rows as-is. Checked live 2026-09-29: "Gold" returns Gold + Golden Medmon, so
+      `/price Gold` shows Golden Medmon's 71,000 (real Gold sells for about 31,000) and
+      `/refinery-advisor` quotes it as Gold's sell price; "Tin" returns Astatine first, so
+      `/best-route Tin` builds an Astatine route. About 8 commodities affected (Gold, Tin,
+      Iron, Diamond, Carbon, Borase, Hydrogen, ship ammunition). Same seven lookups in
+      production (`TestBranch` @ `040323d`): `bot/cogs/prices.py` (`/price` ~219 and best-route
+      ~433), `refinery.py` ~213, the `alerts.py` ~199 and `stock_alerts.py` ~114 pollers (a Gold
+      alert fires on Golden Medmon's price), and `trends.py` ~268 (trending/top-routes refresh)
+      and ~1060 (`/commodity-history`). Port only the core fix - new `rows_for_commodity`/
+      `rows_for_known_commodity` in `bot/uex/trading.py`, `/price` asking "which one?" when a
+      typed name matches several and replying in text when nothing trades; tests in
+      `tests/test_exact_commodity_lookups.py` (a fake UEX that matches by substring like the real
+      one), `test_trading.py`, `test_price_command.py`, `test_refinery.py`. Skip aiv2's chat
+      price tool, its `price_summary.py` facts and the evals - production has no AI. Port the
+      refinery entry above (`f2785ae`) first: both touch the refinery sell-price lookup.
