@@ -153,3 +153,12 @@ date - no open item, nothing to record here.
       the unmerged `feature/price-outlier-detection` branch - porting this entry likely
       means merging that branch rather than re-implementing from scratch, but check it's
       still current (and still unmerged) before assuming a fresh port is needed.
+- [ ] aiv2 commit `f2785ae` - Refinery Advisor finds sell prices for ores UEX
+      links only from the refined side, and signs negative yield bonuses ("-3%", not "+-3%"):
+      new `refined_form`/`format_yield_bonus` (`bot/uex/refinery.py`), used in
+      `bot/cogs/refinery.py`; 5 new tests in `tests/test_refinery.py`. Checked live: 5 of 32
+      refinable ores (Taranite, Lindinium, Savrilium, Torite, Aslarite) have `id_parent` 0 on
+      the raw row while the refined row still links back, so production's `/refinery-advisor`
+      shows no sell price for them today. Found through aiv2 chat testing. Production's
+      `bot/uex/refinery.py` and `tests/test_refinery.py` matched aiv2's before this change, so
+      it ports cleanly.
