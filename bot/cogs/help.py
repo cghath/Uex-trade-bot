@@ -18,8 +18,8 @@ HIDDEN_COMMANDS = {"marketplace-index-status", "command-usage"}
 
 CATEGORIES: list[tuple[str, str, list[str]]] = [
     ("💰 Prices & Routes", "Terminal prices, profitable hauls, and ranked live routes.", [
-        "price", "best-route", "mixed-routes", "multi-stop-route", "top-routes", "routes-from",
-        "route-from-multi", "route-on-the-way", "terminal-history", "diminishing-returns",
+        "price", "best-route", "top-routes", "mixed-routes", "multi-stop-route",
+        "terminal-history", "diminishing-returns",
         "refinery-advisor", "where-to-mine", "ingame-item-finder",
     ]),
     ("📊 Commodity Trends", "Trade volume, price movement, and commodity price charts.", [

@@ -93,7 +93,7 @@ def _search_multi_stop_routes(
     /mixed-routes already reads, with no extra API calls and no scan of every terminal.
 
     start_terminal_id restricts every returned chain to start at that one terminal
-    (/route-from-multi's "from wherever I am" anchor) instead of searching from every
+    (/multi-stop-route's `origin` option, "from wherever I am") instead of searching from every
     profit-ranked candidate origin. The requested terminal, and every terminal reachable
     from it within `max_legs` real hops, is force-added to the candidate set regardless of
     global profit ranking - the profit-ranked candidate window is built assuming the

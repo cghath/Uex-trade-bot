@@ -154,8 +154,8 @@ def test_route_from_multi_reports_when_the_location_cannot_be_resolved(tmp_path)
     async def run():
         interaction = await _run_command(
             tmp_path, "route_from_multi_unresolved.sqlite3", _MULTI_STOP_ROWS,
-            lambda cog, interaction: cog.route_from_multi.callback(
-                cog, interaction, location="Nowhere Station", ship="TestShip",
+            lambda cog, interaction: cog.multi_stop_route.callback(
+                cog, interaction, origin="Nowhere Station", ship="TestShip",
             ),
             terminal_reference_rows=_MULTI_STOP_TERMINAL_REFERENCE,
         )
@@ -174,8 +174,8 @@ def test_route_from_multi_reports_when_no_chains_start_there(tmp_path):
     async def run():
         interaction = await _run_command(
             tmp_path, "route_from_multi_empty.sqlite3", _MULTI_STOP_ROWS,
-            lambda cog, interaction: cog.route_from_multi.callback(
-                cog, interaction, location="Final", ship="TestShip",
+            lambda cog, interaction: cog.multi_stop_route.callback(
+                cog, interaction, origin="Final", ship="TestShip",
             ),
             terminal_reference_rows=_MULTI_STOP_TERMINAL_REFERENCE,
         )
@@ -196,8 +196,8 @@ def test_route_from_multi_only_returns_chains_starting_at_the_resolved_location(
         interaction = await _run_command(
             tmp_path, "route_from_multi_anchored.sqlite3",
             _MULTI_STOP_ROWS + _SECOND_MULTI_STOP_ROWS,
-            lambda cog, interaction: cog.route_from_multi.callback(
-                cog, interaction, location="AltOrigin", ship="TestShip",
+            lambda cog, interaction: cog.multi_stop_route.callback(
+                cog, interaction, origin="AltOrigin", ship="TestShip",
             ),
             terminal_reference_rows=_MULTI_STOP_TERMINAL_REFERENCE,
         )
@@ -246,7 +246,7 @@ def test_route_from_multi_attaches_a_tracking_view(monkeypatch, tmp_path):
         interaction = _FakeInteraction(111)
 
         try:
-            await cog.route_from_multi.callback(cog, interaction, location="Origin", ship="TestShip")
+            await cog.multi_stop_route.callback(cog, interaction, origin="Origin", ship="TestShip")
         finally:
             await client.aclose()
 
@@ -2147,7 +2147,7 @@ def test_multi_stop_commands_pass_max_legs_to_the_search(monkeypatch, tmp_path):
     """Default 3 unless the player picks 4 - through both commands, not just the search function."""
     async def run():
         four = discord.app_commands.Choice(name="4 (slower)", value=4)
-        for command, extra in (("multi_stop_route", {}), ("route_from_multi", {"location": "Origin"})):
+        for command, extra in (("multi_stop_route", {}), ("multi_stop_route", {"origin": "Origin"})):
             for choice, expected in ((None, 3), (four, 4)):
                 seen = {}
 

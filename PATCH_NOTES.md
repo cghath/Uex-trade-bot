@@ -1,7 +1,21 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.29.
+the oldest entry below); the next new entry is 2.30.
+
+---
+
+## 2.29 - 2026-09-30 - Fewer route commands
+
+**Changed**
+- `/top-routes` - Now has `origin` and `destination` options. Set `origin` for routes starting where you are (what
+  `/routes-from` did), both for routes between two terminals (what `/route-on-the-way` did), or just `destination`
+  for routes ending somewhere.
+- `/multi-stop-route` - Now has an `origin` option to start the chain where you are (what `/route-from-multi` did).
+
+**Removed**
+- `/routes-from`, `/route-on-the-way` and `/route-from-multi` - Folded into the two commands above, with the same
+  results.
 
 ---
 

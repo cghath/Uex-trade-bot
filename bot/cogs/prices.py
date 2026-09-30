@@ -166,8 +166,8 @@ async def terminal_history_autocomplete(
 
 
 async def terminal_name_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
-    """Suggest terminals for a "current location" option (/routes-from, /route-from-multi,
-    /route-on-the-way) - reads the local, 24h-cached terminal_reference table (same pattern as
+    """Suggest terminals for an origin/destination option (/top-routes, /mixed-routes,
+    /multi-stop-route) - reads the local, 24h-cached terminal_reference table (same pattern as
     ship_name_autocomplete/commodity_name_autocomplete above), no live UEX call. Lives here
     rather than in trends.py (which imports several things FROM this module already) so
     prices.py can use it too without a circular import."""
@@ -1332,6 +1332,7 @@ class Prices(commands.Cog):
         description="Chain 2-3 (or up to 4) profitable hops across multiple stops for your ship and budget.",
     )
     @app_commands.describe(
+        origin="Optional: start the chain at this terminal, e.g. where you are now",
         ship="Optional: use a specific ship instead of your saved default",
         budget="Optional starting aUEC to invest - profit compounds into later legs",
         space_only="Exclude surface terminals; require every stop to be a confirmed space station",
@@ -1341,10 +1342,11 @@ class Prices(commands.Cog):
     )
     @app_commands.rename(space_only="space-only", auto_load_only="auto-load-only", max_legs="max-legs")
     @app_commands.choices(system=SYSTEM_CHOICES, max_legs=MAX_LEGS_CHOICES)
-    @app_commands.autocomplete(ship=ship_name_autocomplete)
+    @app_commands.autocomplete(ship=ship_name_autocomplete, origin=terminal_name_autocomplete)
     async def multi_stop_route(
         self,
         interaction: discord.Interaction,
+        origin: str | None = None,
         ship: str | None = None,
         budget: app_commands.Range[float, 1, 1_000_000_000] | None = None,
         space_only: bool | None = None,
@@ -1352,7 +1354,20 @@ class Prices(commands.Cog):
         system: app_commands.Choice[str] | None = None,
         max_legs: app_commands.Choice[int] | None = None,
     ) -> None:
+        """`origin` is what /route-from-multi did before it was folded in here (audit
+        UX-8): the same search, anchored to start at one terminal."""
+        # Deferred before any slow await, the terminal lookup included.
         await interaction.response.defer()
+        origin_id = origin_name = None
+        if origin:
+            resolved = await self.bot.db.resolve_terminal_id_by_name(origin)
+            if resolved is None:
+                await interaction.followup.send(
+                    f"Couldn't find a single terminal matching '{origin}' - pick one from the "
+                    "autocomplete list to make sure it's unambiguous."
+                )
+                return
+            origin_id, origin_name = resolved
         prefs = await self.bot.db.get_trading_preferences(interaction.user.id)
         # The filters that came from saved preferences, not this command - an empty result
         # names them, so the player's own setting doesn't read as "nothing exists" (UX-2).
@@ -1430,6 +1445,7 @@ class Prices(commands.Cog):
             capital_access_only=capital_access_only,
             auto_load_only=auto_load_only,
             system=system_value,
+            start_terminal_id=origin_id,
             max_legs=max_legs.value if max_legs else MAX_LEGS,
         )
         if not routes:
@@ -1441,7 +1457,8 @@ class Prices(commands.Cog):
             saved_hint = saved_filters_hint(saved_filter_labels(**saved_filters, capital_ship_access=(
                 bool(prefs["capital_ship_access"]) and not requires_capital_cargo_access(ship_vehicle)))) + risk_hint
             await interaction.followup.send(
-                f"No multi-stop chains fit **{ship_vehicle.get('name', ship_query)}**"
+                f"No multi-stop chains{f' from **{origin_name}**' if origin_name else ''} "
+                f"fit **{ship_vehicle.get('name', ship_query)}**"
                 f"{budget_note}{safety_note}{access_note}{auto_load_note}{system_note} right now.{saved_hint}"
             )
             return
@@ -1467,12 +1484,9 @@ class Prices(commands.Cog):
         system: str | None = None,
         filters_note: str | None = None,
     ) -> None:
-        """Shared per-route embed/tracking/fallback sending for /multi-stop-route and
-        /route-from-multi - both build a `routes: list[MultiStopRoute]` differently
-        (unconstrained search vs. anchored to one starting terminal) but display them
-        identically. Keeping this in one place is what makes CONTRIBUTING.md's "grep for
-        every caller before considering a fix complete" cheap to actually do for this
-        command family."""
+        """Per-route embed/tracking/fallback sending for /multi-stop-route, whether its search
+        was unconstrained or anchored to one starting terminal (`origin`, which was
+        /route-from-multi before audit UX-8 folded it in)."""
         terminal_ids = [terminal_id for route in routes for terminal_id in route.stops]
         health_rows = await self.bot.db.get_terminal_data_health_by_ids(terminal_ids)
         status_lookup = await self._get_status_lookup()
@@ -1666,143 +1680,6 @@ class Prices(commands.Cog):
                 pages.append(RoutePage(route_embed, "\n".join(fallback_lines), trackable_route))
         # One results message, one route per page (audit UX-6).
         await send_route_pages(interaction, pages, tracking_cog=tracking_cog)
-
-    @app_commands.command(
-        name="route-from-multi",
-        description="Chain 2-3 (or up to 4) profitable hops starting from your current location.",
-    )
-    @app_commands.describe(
-        location="Terminal you're currently at, e.g. 'Area18' or 'Port Tressler'",
-        ship="Optional: use a specific ship instead of your saved default",
-        budget="Optional starting aUEC to invest - profit compounds into later legs",
-        space_only="Exclude surface terminals; require every stop to be a confirmed space station",
-        auto_load_only="Only show chains where every stop offers UEX's auto-load",
-        system="Optional: require every stop in the chain to be in this star system",
-        max_legs=MAX_LEGS_DESCRIPTION,
-    )
-    @app_commands.rename(space_only="space-only", auto_load_only="auto-load-only", max_legs="max-legs")
-    @app_commands.choices(system=SYSTEM_CHOICES, max_legs=MAX_LEGS_CHOICES)
-    @app_commands.autocomplete(ship=ship_name_autocomplete, location=terminal_name_autocomplete)
-    async def route_from_multi(
-        self,
-        interaction: discord.Interaction,
-        location: str,
-        ship: str | None = None,
-        budget: app_commands.Range[float, 1, 1_000_000_000] | None = None,
-        space_only: bool | None = None,
-        auto_load_only: bool | None = None,
-        system: app_commands.Choice[str] | None = None,
-        max_legs: app_commands.Choice[int] | None = None,
-    ) -> None:
-        # Deferred before ANY slow await, including the location lookup itself - the real
-        # search (get_vehicles, market rows, build_multi_stop_routes) is always slow
-        # enough on its own to need this, so there's no fast path worth special-casing.
-        await interaction.response.defer()
-        resolved = await self.bot.db.resolve_terminal_id_by_name(location)
-        if resolved is None:
-            await interaction.followup.send(
-                f"Couldn't find a single terminal matching '{location}' - pick one from the "
-                "autocomplete list to make sure it's unambiguous."
-            )
-            return
-        origin_id, origin_name = resolved
-
-        prefs = await self.bot.db.get_trading_preferences(interaction.user.id)
-        # The filters that came from saved preferences, not this command - an empty result
-        # names them, so the player's own setting doesn't read as "nothing exists" (UX-2).
-        saved_filters = dict(
-            space_only=space_only is None and bool(prefs["space_only"]),
-            auto_load_only=auto_load_only is None and bool(prefs["auto_load_only"]),
-            system=prefs["preferred_system"] if system is None else None,
-        )
-        if space_only is None:
-            space_only = prefs["space_only"]
-        if auto_load_only is None:
-            auto_load_only = prefs["auto_load_only"]
-        system_value = system.value if system else prefs["preferred_system"]
-        if budget is None:
-            budget = prefs["budget"]
-
-        ship_query = ship or await self.bot.db.get_default_ship(interaction.user.id)
-        if not ship_query:
-            await interaction.followup.send(
-                "Set a default ship with `/set-default-ship`, or provide the `ship` option, "
-                "so a multi-stop chain can be ranked against a real cargo limit."
-            )
-            return
-        try:
-            vehicles = await self.bot.uex.get_vehicles()
-        except UexApiError as exc:
-            await interaction.followup.send(describe_uex_api_error(exc))
-            return
-        ship_vehicle = resolve_ship(vehicles, ship_query)
-        if not ship_vehicle or not ship_vehicle.get("scu"):
-            await interaction.followup.send(
-                f"I couldn't resolve a cargo capacity for **{ship_query}**. "
-                "Choose a ship from autocomplete or update `/set-default-ship`."
-            )
-            return
-
-        all_market_rows = await self.bot.db.get_mixed_route_market_rows()
-        market_rows = within_risk_tolerance(all_market_rows, prefs["risk_tolerance"])
-        risk_hint = risk_tolerance_hint(prefs["risk_tolerance"]) if len(market_rows) < len(all_market_rows) else ""
-        # OR'd with the saved preference, not replaced by it - see the matching comment
-        # in /multi-stop-route above.
-        capital_access_only = requires_capital_cargo_access(ship_vehicle) or prefs["capital_ship_access"]
-        if capital_access_only:
-            try:
-                stations = await self.bot.uex.get_space_stations()
-            except UexApiError as exc:
-                await interaction.followup.send(
-                    "I couldn't verify XL-hangar/loading-dock access for this capital ship, "
-                    f"so I won't recommend potentially unusable routes: {exc}"
-                )
-                return
-            stations_by_id = {
-                int(station["id"]): station
-                for station in stations
-                if station.get("id") is not None and int(station["id"]) > 0
-            }
-            for row in market_rows:
-                station_id = int(row.get("id_space_station") or 0)
-                station = stations_by_id.get(station_id, {})
-                row["station_pad_types"] = station.get("pad_types")
-                row["station_has_loading_dock"] = station.get("has_loading_dock")
-
-        routes = await asyncio.to_thread(
-            build_multi_stop_routes,
-            market_rows,
-            ship_capacity_scu=float(ship_vehicle["scu"]),
-            budget=float(budget) if budget is not None else None,
-            limit=5,
-            max_commodities=3,
-            space_only=space_only,
-            capital_access_only=capital_access_only,
-            auto_load_only=auto_load_only,
-            system=system_value,
-            start_terminal_id=origin_id,
-            max_legs=max_legs.value if max_legs else MAX_LEGS,
-        )
-        if not routes:
-            budget_note = " within that budget" if budget is not None else ""
-            safety_note = " using confirmed space stations only" if space_only else ""
-            access_note = " with confirmed capital-ship cargo access" if capital_access_only else ""
-            auto_load_note = " with auto-load at every stop" if auto_load_only else ""
-            system_note = f" entirely within {system_value}" if system_value else ""
-            saved_hint = saved_filters_hint(saved_filter_labels(**saved_filters, capital_ship_access=(
-                bool(prefs["capital_ship_access"]) and not requires_capital_cargo_access(ship_vehicle)))) + risk_hint
-            await interaction.followup.send(
-                f"No multi-stop chains from **{origin_name}** fit **{ship_vehicle.get('name', ship_query)}**"
-                f"{budget_note}{safety_note}{access_note}{auto_load_note}{system_note} right now.{saved_hint}"
-            )
-            return
-
-        await self._send_multi_stop_routes(
-            interaction, routes, ship_vehicle=ship_vehicle, ship_query=ship_query, budget=budget,
-            space_only=space_only, capital_access_only=capital_access_only, auto_load_only=auto_load_only,
-            system=system_value, filters_note=_filters_note(
-                prefs, saved_filters, space_only=space_only, auto_load_only=auto_load_only, system=system_value),
-        )
 
     @app_commands.command(
         name="diminishing-returns",

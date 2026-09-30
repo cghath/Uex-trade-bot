@@ -254,6 +254,10 @@ date - no open item, nothing to record here.
       redraw (`list_price_text`); no Message Content intent in `bot/main.py` - check aiv2's
       AI chat doesn't read message text before porting that one. See PROJECT_CONTEXT.md
       entry 109
+- [ ] `/routes-from`, `/route-on-the-way` and `/route-from-multi` folded into `/top-routes
+      origin:/destination:` and `/multi-stop-route origin:`; `help.py` CATEGORIES and
+      `ROUTE_COMMANDS`/`PREFERENCE_READERS` updated. If aiv2's AI tools or prompts name the
+      three old commands, point them at the new options. See PROJECT_CONTEXT.md entry 110
 
 ## To port: aiv2 -> production
 

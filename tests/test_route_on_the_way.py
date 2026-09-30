@@ -1,6 +1,6 @@
-"""Tests for /route-on-the-way: like /routes-from, filters the SAME background-refreshed
-candidate pool /top-routes reads from - but down to routes matching BOTH a resolved origin
-AND a resolved destination, not just the origin."""
+"""Tests for /top-routes with both origin and destination set (the old /route-on-the-way,
+folded in by audit UX-8): filters the SAME background-refreshed candidate pool down to
+routes matching BOTH a resolved origin AND a resolved destination, not just the origin."""
 from __future__ import annotations
 
 import asyncio
@@ -115,7 +115,7 @@ def test_route_on_the_way_defers_before_the_terminal_lookup(tmp_path):
         db.resolve_terminal_id_by_name = spying_resolve
 
         try:
-            await cog.route_on_the_way.callback(cog, interaction, origin="Area18", destination="Port Tressler")
+            await cog.top_routes.callback(cog, interaction, origin="Area18", destination="Port Tressler")
         finally:
             await client.aclose()
 
@@ -142,7 +142,7 @@ def test_route_on_the_way_reports_when_the_origin_cannot_be_resolved(tmp_path):
         interaction = _FakeInteraction(1)
 
         try:
-            await cog.route_on_the_way.callback(
+            await cog.top_routes.callback(
                 cog, interaction, origin="Nowhere Station", destination="Area18"
             )
         finally:
@@ -174,7 +174,7 @@ def test_route_on_the_way_reports_when_the_destination_cannot_be_resolved(tmp_pa
         interaction = _FakeInteraction(1)
 
         try:
-            await cog.route_on_the_way.callback(
+            await cog.top_routes.callback(
                 cog, interaction, origin="Area18", destination="Nowhere Station"
             )
         finally:
@@ -206,7 +206,7 @@ def test_route_on_the_way_rejects_the_same_terminal_for_both(tmp_path):
         interaction = _FakeInteraction(1)
 
         try:
-            await cog.route_on_the_way.callback(cog, interaction, origin="Area18", destination="Area18")
+            await cog.top_routes.callback(cog, interaction, origin="Area18", destination="Area18")
         finally:
             await client.aclose()
 
@@ -241,7 +241,7 @@ def test_route_on_the_way_reports_when_no_route_matches_both_ends(tmp_path):
         interaction = _FakeInteraction(1)
 
         try:
-            await cog.route_on_the_way.callback(
+            await cog.top_routes.callback(
                 cog, interaction, origin="Area18", destination="Port Tressler"
             )
         finally:
@@ -288,7 +288,7 @@ def test_route_on_the_way_filters_the_shared_pool_to_both_resolved_ends(tmp_path
         interaction = _FakeInteraction(1)
 
         try:
-            await cog.route_on_the_way.callback(
+            await cog.top_routes.callback(
                 cog, interaction, origin="Area18", destination="Port Tressler"
             )
         finally:
@@ -333,7 +333,7 @@ def test_route_on_the_way_shows_the_budget_in_the_footer_and_caps_the_cargo_esti
         interaction = _FakeInteraction(1)
 
         try:
-            await cog.route_on_the_way.callback(
+            await cog.top_routes.callback(
                 cog, interaction, origin="Area18", destination="Port Tressler", budget=1000.0
             )
         finally:
@@ -377,7 +377,7 @@ def test_route_on_the_way_falls_back_to_a_saved_budget_preference(tmp_path):
         interaction = _FakeInteraction(1)
 
         try:
-            await cog.route_on_the_way.callback(cog, interaction, origin="Area18", destination="Port Tressler")
+            await cog.top_routes.callback(cog, interaction, origin="Area18", destination="Port Tressler")
         finally:
             await client.aclose()
 
@@ -415,7 +415,7 @@ def test_route_on_the_way_direction_matters(tmp_path):
         interaction = _FakeInteraction(1)
 
         try:
-            await cog.route_on_the_way.callback(
+            await cog.top_routes.callback(
                 cog, interaction, origin="Area18", destination="Port Tressler"
             )
         finally:

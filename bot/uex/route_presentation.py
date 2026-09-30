@@ -276,8 +276,8 @@ def hedge_room(cargo: Any, *, ship_cargo_scu: float | None, budget: float | None
     record to measure spare room against, or no spare capacity/budget left - so callers can
     use `is None` to skip the market lookup entirely.
 
-    Shared by /best-route and the ranked route lists (/top-routes, /routes-from,
-    /route-on-the-way) so the rule lives in one place rather than being re-derived per
+    Shared by /best-route and /top-routes (with or without its origin/destination pins)
+    so the rule lives in one place rather than being re-derived per
     command. budget is None for a command with no budget concept (/best-route), and
     also when the route's own investment couldn't be computed - both mean "don't cap the
     hedge by money", never "the budget is zero"."""
