@@ -405,7 +405,7 @@ class UexClient:
         return await self._get("commodities_prices_all", params=filters) or []
 
     async def get_commodities_routes(self, **filters: Any) -> list[dict[str, Any]]:
-        """UEX's own precomputed buy->sell trade routes, with real distance (GM), ROI,
+        """UEX's own precomputed buy->sell trade routes, with real distance (Gm), ROI,
         profit, and a UEX quality score. Needs at least one of: id_commodity,
         id_terminal_origin, id_planet_origin, id_orbit_origin.
         """

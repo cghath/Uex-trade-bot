@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
 
-from bot.uex.item_finder import split_place_and_vendor
+from bot.uex.item_finder import place_and_vendor_text, split_place_and_vendor
 
 UNKNOWN_SYSTEM_LABEL = "Unknown system"
 
@@ -182,8 +182,8 @@ def ship_autocomplete_names(
     return names
 
 
-def _vendor_part(listing: ShipShopListing) -> str:
-    return f" ({listing.vendor_label})" if listing.vendor_label else ""
+def _shop(listing: ShipShopListing) -> str:
+    return place_and_vendor_text(listing.place_label, listing.vendor_label, bold=True)
 
 
 def _updated_part(listing: ShipShopListing) -> str:
@@ -198,7 +198,7 @@ def format_purchase_line(listing: ShipShopListing) -> str:
     Buys aren't grouped by system, so the system goes on each line instead."""
     system = listing.star_system_name or UNKNOWN_SYSTEM_LABEL
     return (
-        f"**{listing.place_label}**{_vendor_part(listing)} — {listing.price:,.0f} aUEC · "
+        f"{_shop(listing)} — {listing.price:,.0f} aUEC · "
         f"{system}{_updated_part(listing)}"
     )
 
@@ -207,7 +207,7 @@ def format_rental_line(listing: ShipShopListing) -> str:
     """'**Place** (Vendor) — Price aUEC / day · updated <t:..:R>'. No system on the line -
     rentals are shown grouped under a per-system heading. The '1-day rate' caveat
     (RENTAL_RATE_NOTE) is shown once for the whole message, not repeated per line."""
-    return f"**{listing.place_label}**{_vendor_part(listing)} — {listing.price:,.0f} aUEC / day{_updated_part(listing)}"
+    return f"{_shop(listing)} — {listing.price:,.0f} aUEC / day{_updated_part(listing)}"
 
 
 def build_ship_shop_sections(

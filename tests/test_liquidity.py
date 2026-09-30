@@ -63,7 +63,7 @@ def test_digest_data_freshness_is_compact_and_flags_overdue_collectors():
         },
         now=datetime(2026, 8, 25, 15, 0, tzinfo=timezone.utc),
     )
-    assert "✅ **Liquidity ratings:** 30m ago" in value
+    assert "✅ **Sellability Ratings:** 30m ago" in value
     assert "⚠️ **Terminal markets:** 3h 30m ago · overdue" in value
     assert "⚠️ **Marketplace index:** not collected yet" in value
     assert len(value) <= 1024

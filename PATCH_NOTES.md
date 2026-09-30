@@ -1,7 +1,24 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.30.
+the oldest entry below); the next new entry is 2.31.
+
+---
+
+## 2.30 - 2026-09-30 - Clearer wording
+
+**Changed**
+- `/price` - The footer only explains the markers actually shown on that reply, and says prices update every 30 min.
+- `/liquidity-rank`, `/liquidity-trends`, the daily digest - Call the score the Sellability Rating, as everywhere else.
+- `/set-digest-channel`, `/digest-disable` - Hidden from members without the Manage Server permission, who couldn't
+  use them anyway.
+
+**Fixed**
+- `/best-route` - When UEX has no route data for a commodity, the profit percentage is now labelled ROI (profit per
+  aUEC spent), which is what it always was.
+- Route lists - Distances are written "Gm" everywhere.
+- Daily digest - No more "just now ago".
+- `/ship-parts-finder` - A failed ship lookup explains what happened instead of showing an error code.
 
 ---
 

@@ -176,7 +176,7 @@ def _build_route_field(
     # line above, matching /best-route's own established pattern of never displaying a
     # second, differently-scaled lump-sum profit figure.
     if r.distance is not None:
-        value_lines.append(f"{r.distance:.1f} GM")
+        value_lines.append(f"{r.distance:.1f} Gm")
 
     name = f"{i}. {r.commodity_name}: {r.origin_terminal_name} → {r.destination_terminal_name}"
     return name, "\n".join(value_lines)

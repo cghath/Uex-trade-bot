@@ -40,6 +40,7 @@ class Digest(commands.Cog):
         channel="Channel to post the daily digest in",
         hour_utc="Hour of day (UTC, 0-23) to post it",
     )
+    @app_commands.default_permissions(manage_guild=True)  # hidden from others (audit UX-17)
     @app_commands.checks.has_permissions(manage_guild=True)
     async def set_digest_channel(
         self,
@@ -62,6 +63,7 @@ class Digest(commands.Cog):
         )
 
     @app_commands.command(name="digest-disable", description="(Admin) Turn off the daily digest for this server.")
+    @app_commands.default_permissions(manage_guild=True)  # hidden from others (audit UX-17)
     @app_commands.checks.has_permissions(manage_guild=True)
     async def digest_disable(self, interaction: discord.Interaction) -> None:
         # Deferred before any DB write: a write can wait on a lock past Discord's
@@ -253,7 +255,7 @@ def _format_data_freshness(
     current = now or datetime.now(timezone.utc)
     sources = (
         ("Terminal markets", "terminal_market", 3),
-        ("Liquidity ratings", "liquidity", 2),
+        ("Sellability Ratings", "liquidity", 2),
         ("Marketplace index", "marketplace", 2),
     )
     lines: list[str] = []
@@ -273,7 +275,8 @@ def _format_data_freshness(
         age_text = _format_age(age_seconds)
         overdue = age_seconds > stale_after_hours * 3600
         marker = "⚠️" if overdue else "✅"
-        lines.append(f"{marker} **{label}:** {age_text} ago{' · overdue' if overdue else ''}")
+        when = age_text if age_text == "just now" else f"{age_text} ago"
+        lines.append(f"{marker} **{label}:** {when}{' · overdue' if overdue else ''}")
     return "\n".join(lines)
 
 

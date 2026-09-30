@@ -1184,6 +1184,7 @@ def test_best_route_fallback_branch_shows_investment(tmp_path):
         embed = kwargs["embed"]
         combined = "\n".join(field.value or "" for field in embed.fields)
         assert "Investment:" in combined, combined
+        assert "(ROI 100.0%)" in combined, "profit per aUEC spent is ROI, not margin (audit MSG-16)"
 
     asyncio.run(run())
 

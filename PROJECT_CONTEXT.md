@@ -3935,6 +3935,45 @@ they're in sync).
        test from entry 109 caught the stale layout lines. Each change was undone one at a time
        (8 in all), and its test failed every time.
 
+111. **P3 wording: units, ROI, "just now", the Sellability Rating, shop names, errors, the
+     /price footer, admin visibility.** Audit findings MSG-15 to MSG-20, UX-17, UX-18.
+     - **MSG-15.** Two route lines printed distances as "GM"; everything else says "Gm"
+       (gigametres). Now all say Gm.
+     - **MSG-16.** Checked live against `/commodities_routes` on 2026-09-30: UEX's
+       `price_margin` is profit ÷ sell price, and `price_roi` is profit ÷ buy price.
+       - `/best-route`'s main branch shows both, correctly labelled.
+       - Its fallback branch printed an unlabelled "(Z%)" from a property called
+         `margin_pct` that computed profit ÷ buy price, i.e. ROI. Renamed `roi_pct`
+         (`bot/uex/trading.py`), and the line now says "(ROI Z%)".
+     - **MSG-17.** The digest's data-freshness line said "just now ago".
+     - **MSG-18.** Players see the "Sellability Rating" everywhere: `/intro`, the digest,
+       the rating lines themselves. But `/liquidity-rank`'s and `/liquidity-trends`'
+       titles and messages said "Liquidity", and so did the digest's freshness label.
+       Those now say Sellability Rating. The command names stay, to avoid renaming
+       commands people know.
+     - **MSG-19.** The three shop commands (`/ingame-item-finder`, `/where-to-buy-ship`,
+       `/ship-parts-finder`) each formatted "Place (Vendor)" themselves. Only the parts
+       finder wrote "Ship Weapons at Pyro Gateway (Stanton)" instead of stacking two
+       brackets. One helper now does it for all three: `place_and_vendor_text` in
+       `bot/uex/item_finder.py`.
+     - **MSG-20.** Ship Parts Finder's slot lookup failure showed the raw exception text.
+       It now says the wiki didn't answer (`WikiUnavailableError`), or that the wiki
+       doesn't list usable slots for that ship. PR #83 had already fixed the category-load
+       message.
+     - **UX-17.** `/set-digest-channel`, `/digest-disable` and `/command-usage` now carry
+       `default_permissions(manage_guild=True)`, so Discord hides them from members
+       without Manage Server. The existing permission and owner checks still run.
+       `/digest-now` stays open to everyone, at the user's choice.
+     - **UX-18.** `/price`'s footer explained every marker on every reply. It now builds
+       the lines first and explains only what's shown ("est. buying", "holds ~N SCU
+       already", sell-side status labels). It's still set before the fields, so the
+       6,000-character budget counts it, and it says "updated every 30 min" (entry 109).
+     - **UX-19.** Its README half (`/help`) was fixed in entry 109. `/intro` stays public,
+       at the user's choice.
+     - Tests: `tests/test_p3_wording.py` (6), a ROI assertion on the `/best-route` fallback
+       test, and updated `/price` footer tests. Each change was undone one at a time (13 in
+       all), and its test failed every time.
+
 ## Where to look for what
 
 Six docs, deliberately scoped so they don't duplicate each other:
