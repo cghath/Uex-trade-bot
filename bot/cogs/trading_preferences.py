@@ -21,16 +21,31 @@ RISK_TOLERANCE_CHOICES = [
 ]
 
 
+# The ship option's "clear it" choice, like the system option's "Any" (audit UX-15:
+# /clear-default-ship was folded in here).
+CLEAR_SHIP = "none"
+
+
+async def ship_preference_autocomplete(interaction: discord.Interaction,
+                                       current: str) -> list[app_commands.Choice[str]]:
+    """The ship names, plus a first choice that clears the saved ship."""
+    ships = await ship_name_autocomplete(interaction, current)
+    clear = app_commands.Choice(name="No default ship (clear it)", value=CLEAR_SHIP)
+    if not current or current.strip().lower() in "no default ship none":
+        return [clear, *ships][:25]
+    return ships
+
+
 class TradingPreferences(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
 
     @app_commands.command(
         name="set-trading-preferences",
-        description="Save route-filter defaults so you don't have to repeat them every call.",
+        description="Save your default ship, budget and route filters so you don't repeat them every call.",
     )
     @app_commands.describe(
-        ship="Your default ship - also settable via /set-default-ship, same underlying setting",
+        ship="Your default ship, used by every route command and stock alerts ('No default ship' clears it)",
         budget=f"Default starting aUEC for {preference_scope('budget')}",
         space_only="Mixed-cargo commands (e.g. /mixed-routes): only confirmed space stations, no surface",
         capital_ship_access="Mixed-cargo commands (e.g. /mixed-routes): only XL-hangar/freight-elevator stops, any ship",
@@ -45,7 +60,7 @@ class TradingPreferences(commands.Cog):
         risk_tolerance="risk-tolerance",
     )
     @app_commands.choices(system=SYSTEM_PREFERENCE_CHOICES, risk_tolerance=RISK_TOLERANCE_CHOICES)
-    @app_commands.autocomplete(ship=ship_name_autocomplete)
+    @app_commands.autocomplete(ship=ship_preference_autocomplete)
     async def set_trading_preferences(
         self,
         interaction: discord.Interaction,
@@ -87,7 +102,10 @@ class TradingPreferences(commands.Cog):
         await interaction.response.defer(ephemeral=True)
 
         resolved_ship_name: str | None | object = UNSET
-        if ship is not None:
+        ship_detail = None
+        if ship is not None and ship.strip().lower() == CLEAR_SHIP:
+            resolved_ship_name = None
+        elif ship is not None:
             try:
                 vehicles = await self.bot.uex.get_vehicles()
             except UexApiError as exc:
@@ -102,6 +120,8 @@ class TradingPreferences(commands.Cog):
                 )
                 return
             resolved_ship_name = vehicle.get("name")
+            scu = vehicle.get("scu")
+            ship_detail = f"({scu:,.0f} SCU)" if scu else "(unknown cargo capacity)"
 
         prefs = await self.bot.db.set_trading_preferences(
             interaction.user.id,
@@ -116,7 +136,7 @@ class TradingPreferences(commands.Cog):
             risk_tolerance=UNSET if risk_tolerance is None else risk_tolerance.value,
         )
         await interaction.followup.send(
-            f"Trading preferences updated.\n{format_trading_preferences(prefs)}",
+            f"Trading preferences updated.\n{format_trading_preferences(prefs, ship_detail=ship_detail)}",
             ephemeral=True,
         )
 
@@ -131,8 +151,8 @@ class TradingPreferences(commands.Cog):
         await interaction.response.defer(ephemeral=True)
         removed = await self.bot.db.clear_trading_preferences(interaction.user.id)
         msg = (
-            "Trading preferences cleared, including your default ship. Use /set-default-ship "
-            "to set a ship again without touching the other preferences."
+            "Trading preferences cleared, including your default ship. Set a ship again with "
+            "/set-trading-preferences ship:."
             if removed
             else "You don't have any saved trading preferences."
         )
@@ -140,7 +160,7 @@ class TradingPreferences(commands.Cog):
 
     @app_commands.command(
         name="my-trading-preferences",
-        description="Show your saved trading-preference defaults.",
+        description="Show your saved default ship, budget and route filters.",
     )
     async def my_trading_preferences(self, interaction: discord.Interaction) -> None:
         prefs = await self.bot.db.get_trading_preferences(interaction.user.id)
@@ -165,7 +185,7 @@ class TradingPreferences(commands.Cog):
             elif vehicle is None:
                 ship_detail = (
                     "(couldn't be matched against UEX's current ship list - maybe renamed; "
-                    "try /set-default-ship again)"
+                    "set it again with /set-trading-preferences ship:)"
                 )
             else:
                 scu = vehicle.get("scu")

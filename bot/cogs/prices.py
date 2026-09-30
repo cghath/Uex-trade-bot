@@ -414,7 +414,7 @@ class Prices(commands.Cog):
     @app_commands.command(name="best-route", description="Find the most profitable buy->sell terminal pair for a commodity.")
     @app_commands.describe(
         commodity="Commodity name, e.g. 'Gold' or 'Laranite'",
-        ship="Optional: check cargo for a specific ship instead of your default (/set-default-ship)",
+        ship="Optional: check cargo for a specific ship instead of your saved default",
         auto_load_only="Only show routes where both the origin and destination terminal offer UEX's auto-load",
         system="Optional: require both ends of the route to be in this star system",
     )
@@ -461,7 +461,7 @@ class Prices(commands.Cog):
         commodity_display = rows[0].get("commodity_name", commodity)
 
         # Resolve the ship to use for cargo math: an explicit /best-route option wins,
-        # otherwise fall back to the user's saved default (/set-default-ship). Either way
+        # otherwise fall back to the user's saved default (/set-trading-preferences). Either way
         # this is optional - with no ship known we still show stock-limited cargo when
         # UEX reports it, just without a ship-capacity comparison.
         ship_query = ship or await self.bot.db.get_default_ship(interaction.user.id)
@@ -1103,7 +1103,7 @@ class Prices(commands.Cog):
         ship_query = ship or await self.bot.db.get_default_ship(interaction.user.id)
         if not ship_query:
             await interaction.followup.send(
-                "Set a default ship with `/set-default-ship`, or provide the `ship` option, "
+                "Set a default ship with `/set-trading-preferences ship:`, or provide the `ship` option, "
                 "so mixed routes can be ranked against a real cargo limit."
             )
             return
@@ -1116,7 +1116,7 @@ class Prices(commands.Cog):
         if not ship_vehicle or not ship_vehicle.get("scu"):
             await interaction.followup.send(
                 f"I couldn't resolve a cargo capacity for **{ship_query}**. "
-                "Choose a ship from autocomplete or update `/set-default-ship`."
+                "Choose a ship from autocomplete, or update it with `/set-trading-preferences ship:`."
             )
             return
 
@@ -1383,7 +1383,7 @@ class Prices(commands.Cog):
         ship_query = ship or await self.bot.db.get_default_ship(interaction.user.id)
         if not ship_query:
             await interaction.followup.send(
-                "Set a default ship with `/set-default-ship`, or provide the `ship` option, "
+                "Set a default ship with `/set-trading-preferences ship:`, or provide the `ship` option, "
                 "so a multi-stop chain can be ranked against a real cargo limit."
             )
             return
@@ -1396,7 +1396,7 @@ class Prices(commands.Cog):
         if not ship_vehicle or not ship_vehicle.get("scu"):
             await interaction.followup.send(
                 f"I couldn't resolve a cargo capacity for **{ship_query}**. "
-                "Choose a ship from autocomplete or update `/set-default-ship`."
+                "Choose a ship from autocomplete, or update it with `/set-trading-preferences ship:`."
             )
             return
 
@@ -1716,7 +1716,7 @@ class Prices(commands.Cog):
         ship_query = ship or await self.bot.db.get_default_ship(interaction.user.id)
         if not ship_query:
             await interaction.followup.send(
-                "Set a default ship with `/set-default-ship`, or provide the `ship` option, "
+                "Set a default ship with `/set-trading-preferences ship:`, or provide the `ship` option, "
                 "so this can be measured against a real cargo limit."
             )
             return
@@ -1729,7 +1729,7 @@ class Prices(commands.Cog):
         if not ship_vehicle or not ship_vehicle.get("scu"):
             await interaction.followup.send(
                 f"I couldn't resolve a cargo capacity for **{ship_query}**. "
-                "Choose a ship from autocomplete or update `/set-default-ship`."
+                "Choose a ship from autocomplete, or update it with `/set-trading-preferences ship:`."
             )
             return
 

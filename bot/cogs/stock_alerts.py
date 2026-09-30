@@ -49,7 +49,7 @@ class StockAlerts(commands.Cog):
     )
     @app_commands.describe(
         commodity="Commodity name, e.g. 'Gold' or 'Laranite'",
-        ship="Optional: which ship to report the cargo fit against (defaults to your /set-default-ship)",
+        ship="Optional: which ship to report the cargo fit against (defaults to your saved ship)",
         delivery=DELIVERY_DESCRIPTION,
     )
     @app_commands.autocomplete(ship=ship_name_autocomplete, commodity=commodity_name_autocomplete)
@@ -88,7 +88,7 @@ class StockAlerts(commands.Cog):
             ship_query=ship,
             scope=scope_value,
         )
-        ship_note = f" (cargo fit checked against **{ship}**)" if ship else " (set /set-default-ship for a cargo-fit estimate)"
+        ship_note = f" (cargo fit checked against **{ship}**)" if ship else " (set a ship with /set-trading-preferences for a cargo-fit estimate)"
         await interaction.followup.send(
             f"Stock alert #{alert_id} set: {delivery_note(scope_value)} when **{commodity}** has real stock "
             f"at any terminal{ship_note} (checked every {POLL_INTERVAL_MINUTES} min). This keeps "

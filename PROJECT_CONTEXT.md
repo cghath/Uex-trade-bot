@@ -3974,6 +3974,42 @@ they're in sync).
        test, and updated `/price` footer tests. Each change was undone one at a time (13 in
        all), and its test failed every time.
 
+112. **The default ship is set in one place, and no message names a missing command.**
+     Audit findings UX-15 and MSG-21.
+     - **UX-15.** The default ship could be set two ways: `/set-default-ship` and
+       `/set-trading-preferences ship:`, both writing `user_trading_preferences.ship_name`.
+       `/set-default-ship`'s description named only `/best-route`, though every route
+       command and stock alerts read the ship. The user chose to fold the two ship commands
+       into preferences (67 -> 65 commands, 26 -> 25 cogs):
+       - `bot/cogs/ships.py` is no longer a cog. It keeps `ship_name_autocomplete`, which
+         every command with a `ship` option imports.
+       - The `ship` autocomplete on `/set-trading-preferences` now offers "No default ship
+         (clear it)" first (value `none`, like the system option's "Any"). That clears only
+         the ship and never asks UEX. Setting a ship confirms its cargo capacity, as
+         `/set-default-ship` did.
+       - Every hint that said "set a default ship with /set-default-ship" now names
+         `/set-trading-preferences` (route commands, `/intelligence-brief`, stock alerts,
+         the shared helpers in `bot/uex/route_presentation.py` and `bot/uex/stock_alerts.py`).
+       - The `set_default_ship`/`clear_default_ship` DB methods stay; tests and the
+         migration docstring use them.
+     - **MSG-21.** Descriptions and dev docs had drifted. `tests/test_ship_setting_fold.py`
+       now parses every module under `bot/` and fails if any string the bot can send (not
+       docstrings, not the two API clients' endpoint paths) names a `/command` that
+       doesn't exist. Its first run found a stale `/set-default-ship` in the SQL comments
+       inside `SCHEMA`.
+       - `/set-trading-preferences` and `/my-trading-preferences` now say they cover the
+         default ship and budget, not just route filters. `/intro`'s "Ship & Cargo"
+         category, which said "Save a ship once" but held only the two ship-shopping
+         commands, is now "Ships".
+       - CLAUDE.local.md said 18 cogs and 31 tables; there are 25 and 47. Its cog list
+         now covers route tracking, blueprints, the refinery and mining lookups and the
+         three shop finders, and its table list is regrouped to cover every table in
+         `SCHEMA`. It also listed `bot/uex/price_outliers.py` as if it were here; that
+         module exists only in aiv2 so far (it's on the aiv2 -> production list in
+         AI_BOT_HANDOFF.md).
+     - Tests: `tests/test_ship_setting_fold.py` (5), plus updated hint assertions. Each
+       change was undone one at a time (6 in all), and its test failed every time.
+
 ## Where to look for what
 
 Six docs, deliberately scoped so they don't duplicate each other:

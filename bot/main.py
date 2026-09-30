@@ -33,7 +33,6 @@ INITIAL_COGS = (
     "bot.cogs.intelligence_brief",
     "bot.cogs.marketplace_alerts",
     "bot.cogs.stock_alerts",
-    "bot.cogs.ships",
     "bot.cogs.digest",
     "bot.cogs.diagnostics",
     "bot.cogs.help",

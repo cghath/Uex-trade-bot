@@ -77,7 +77,8 @@ def format_cargo_fit_note(scu_available: float, ship_cargo_scu: float | None) ->
     just omitting the detail silently.
     """
     if ship_cargo_scu is None or ship_cargo_scu <= 0:
-        return "set /set-default-ship (or pass one to /stock-alert-add) to see how much of this would fill your hold"
+        return ("set a ship with /set-trading-preferences (or pass one to /stock-alert-add) to see how much "
+                "of this would fill your hold")
     if scu_available >= ship_cargo_scu:
         return f"fills your full {ship_cargo_scu:,.0f} SCU hold"
     return f"fills {scu_available:,.0f} of your {ship_cargo_scu:,.0f} SCU hold"

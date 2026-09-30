@@ -239,7 +239,7 @@ bot/
     trends.py             /trending, /top-routes, /movers, /commodity-history + loop
     route_progression.py  route tracking threads (the Track this route button) + loops
     trading_preferences.py /set-trading-preferences, /clear-trading-preferences, /my-trading-preferences
-    ships.py              /set-default-ship, /clear-default-ship
+    ships.py              the shared ship-name autocomplete (no commands)
     alerts.py             /alert-add, /alert-list, /alert-remove (list/remove cover all 3 alert types) + loop
     stock_alerts.py       /stock-alert-add + loop
     marketplace_alerts.py /marketplace-alert-add + loop

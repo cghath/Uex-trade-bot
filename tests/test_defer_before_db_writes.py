@@ -15,7 +15,6 @@ from bot.cogs.marketplace_alerts import MarketplaceAlerts
 from bot.cogs.negotiation_alerts import NegotiationAlerts
 from bot.cogs.personal_inventory import PersonalInventory
 from bot.cogs.scanner import Scanner
-from bot.cogs.ships import Ships
 from bot.cogs.trades import Trades
 from bot.cogs.trading_preferences import TradingPreferences
 
@@ -68,7 +67,6 @@ CASES = {
         cog, i, 1, 0), "confirm_ambiguous_inventory_sale"),
     "/negotiation-alerts off": (NegotiationAlerts, lambda cog, i: NegotiationAlerts.negotiation_alerts.callback(
         cog, i, False), "set_negotiation_alerts_enabled"),
-    "/clear-default-ship": (Ships, lambda cog, i: Ships.clear_default_ship.callback(cog, i), "clear_default_ship"),
     "/clear-trading-preferences": (TradingPreferences, lambda cog, i: TradingPreferences.clear_trading_preferences
                                    .callback(cog, i), "clear_trading_preferences"),
 }

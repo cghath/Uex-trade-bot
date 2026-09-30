@@ -75,7 +75,7 @@ class IntelligenceBrief(commands.Cog):
         else:
             embeds[0].add_field(
                 name="Personalized routes",
-                value="Set a ship with `/set-default-ship` or pass `ship` to include mixed-route opportunities.",
+                value="Set a ship with `/set-trading-preferences ship:` or pass `ship` to include mixed-route opportunities.",
                 inline=False,
             )
         # Discord enforces its 6,000-char embed-text limit as a SUM across every embed in
