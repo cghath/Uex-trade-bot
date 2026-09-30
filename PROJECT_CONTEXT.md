@@ -3752,6 +3752,33 @@ they're in sync).
        (9 in all), and its test failed every time. Three existing tests were updated for the
        new default and wording.
 
+106. **Inventory commands offer a list instead of a raw number; linking checks the key.** Audit
+     findings UX-10 and UX-11.
+     - **UX-10.** Six inventory commands took a number the player had to copy out of
+       /inventory or an old DM first. Each now autocompletes (`bot/cogs/personal_inventory.py`):
+       - `/inventory-set-minimum`, `/inventory-remove`, `/inventory-post-now`: the player's
+         own stacks (`inventory_stack_autocomplete`), e.g. "#12 Laranite · q650 · ×32 (8
+         listed) · Area18" - enough to tell two stacks of one item apart.
+       - `/inventory-confirm-sale`: only jobs waiting on a sale confirmation;
+         `/inventory-cancel-post`: scheduled, listed or unconfirmed jobs;
+         `/inventory-resolve-floor`: only listed jobs paused at their floor (`auto_relist`
+         off) - `_job_autocomplete` with one filter per command.
+       - Typing a number still works, and matches the stack or job number itself, not a
+         quantity like the 32 in "×32".
+     - **UX-11.**
+       - `/link-uex-account` saved any key unchecked, so a wrong one "linked" and only failed
+         later, in whichever command used it first. The form now asks UEX first
+         (`UexClient.get_user_profile`, GET `/user` with the player's key): a key UEX rejects
+         (`UexAuthError`) isn't saved; an accepted one is confirmed with the UEX username it
+         belongs to. If UEX is down, the key is saved with a note that it wasn't checked -
+         an outage isn't the key's fault, and MSG-10 (entry 101) already says so plainly if
+         it's later rejected.
+       - Linking also puts a player on `/leaderboard`, which shows their verified sell
+         revenue to anyone in the server, and nothing said so. The link confirmation and
+         `/uex-account-status` now do (`LEADERBOARD_NOTE`), with how to come off it.
+     - Tests: `tests/test_inventory_pickers_and_key_check.py` (15). Each change was undone
+       one at a time (11 in all), and its test failed every time.
+
 ## Where to look for what
 
 Six docs, deliberately scoped so they don't duplicate each other:

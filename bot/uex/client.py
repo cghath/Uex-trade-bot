@@ -656,6 +656,15 @@ class UexClient:
 
     # -- user-scoped (requires the calling player's own secret_key) -----------
 
+    async def get_user_profile(self, secret_key: str) -> dict[str, Any] | None:
+        """The UEX profile a secret key belongs to (GET /user), used to check a key when a
+        player links it. A key UEX doesn't accept raises UexAuthError (invalid_secret_key,
+        user_not_found, user_not_allowed)."""
+        data = await self._get("user", require_secret=True, secret_key=secret_key, use_cache=False)
+        if isinstance(data, list):
+            data = data[0] if data else None
+        return data if isinstance(data, dict) else None
+
     async def get_user_trades(self, secret_key: str | None = None, **filters: Any) -> list[dict[str, Any]]:
         return await self._get(
             "user_trades", params=filters, require_secret=True, secret_key=secret_key, use_cache=False

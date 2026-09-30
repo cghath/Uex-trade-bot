@@ -6,7 +6,7 @@ import dataclasses
 import logging
 import time
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 import discord
@@ -121,6 +121,67 @@ async def inventory_item_autocomplete(
         for item in matches
         if item.get("name")
     ]
+
+
+def _stack_label(row: dict[str, Any]) -> str:
+    """One inventory stack in an autocomplete list: enough to tell two stacks of the same
+    item apart (quality, place) and to see how much is already listed."""
+    parts = [f"#{row['id']} {row['item_name']}"]
+    if row.get("quality"):
+        parts.append(f"q{row['quality']}")
+    listed = int(row.get("reserved_quantity") or 0)
+    parts.append(f"×{row['quantity']}" + (f" ({listed} listed)" if listed else ""))
+    if row.get("location"):
+        parts.append(str(row["location"]))
+    return " · ".join(parts)[:100]
+
+
+def _autocomplete_matches(query: str, label: str) -> bool:
+    """A typed number means the stack or job number itself (not a quantity like ×32);
+    anything else matches anywhere in the label."""
+    number = query.lstrip("#")
+    if number.isdigit():
+        return label.startswith(f"#{number}")
+    return not query or query in label.lower()
+
+
+async def inventory_stack_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[int]]:
+    """The player's own stacks, so the inventory commands don't need the number copied out
+    of /inventory first (audit UX-10). Typing the number still works."""
+    rows = await interaction.client.db.list_inventory(interaction.user.id)
+    query = current.strip().lower()
+    labels = [(_stack_label(row), int(row["id"])) for row in rows]
+    return [app_commands.Choice(name=label, value=stack_id)
+            for label, stack_id in labels if _autocomplete_matches(query, label)][:25]
+
+
+_JOB_STATUS_TEXT = {"pending": "scheduled", "listed": "listed", "needs_confirmation": "needs confirming"}
+
+
+def _job_autocomplete(applies: Callable[[dict[str, Any]], bool]):
+    """Posting jobs a command can act on, e.g. only the ones waiting on a sale confirmation
+    for /inventory-confirm-sale (audit UX-10)."""
+    async def autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[int]]:
+        db = interaction.client.db
+        jobs = [job for job in await db.list_active_inventory_jobs(interaction.user.id) if applies(job)]
+        names = {int(row["id"]): row["item_name"] for row in await db.list_inventory(interaction.user.id)}
+        query = current.strip().lower()
+        choices = []
+        for job in jobs:
+            label = (f"#{job['id']} {names.get(int(job['inventory_id']), 'item')} ×{job['quantity']}"
+                     f" · {_JOB_STATUS_TEXT.get(job['status'], job['status'])}")[:100]
+            if _autocomplete_matches(query, label):
+                choices.append(app_commands.Choice(name=label, value=int(job["id"])))
+        return choices[:25]
+    return autocomplete
+
+
+confirm_sale_job_autocomplete = _job_autocomplete(lambda job: job["status"] == "needs_confirmation")
+cancel_post_job_autocomplete = _job_autocomplete(
+    lambda job: job["status"] in {"pending", "listed", "needs_confirmation"})
+floor_job_autocomplete = _job_autocomplete(lambda job: job["status"] == "listed" and not job.get("auto_relist"))
 
 
 class InventoryEntrySelect(discord.ui.Select):
@@ -818,7 +879,8 @@ class PersonalInventory(commands.Cog):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="inventory-set-minimum", description="Set the hard UEC price floor for an inventory stack.")
-    @app_commands.describe(inventory_id="Number shown by /inventory", minimum_price="Never post below this UEC price per unit")
+    @app_commands.describe(inventory_id="Which stack - pick from the list", minimum_price="Never post below this UEC price per unit")
+    @app_commands.autocomplete(inventory_id=inventory_stack_autocomplete)
     async def inventory_set_minimum(
         self,
         interaction: discord.Interaction,
@@ -843,7 +905,8 @@ class PersonalInventory(commands.Cog):
         await interaction.followup.send(message, ephemeral=True)
 
     @app_commands.command(name="inventory-remove", description="Remove an unreserved quantity from your personal inventory.")
-    @app_commands.describe(inventory_id="Number shown by /inventory", quantity="How many to remove")
+    @app_commands.describe(inventory_id="Which stack - pick from the list", quantity="How many to remove")
+    @app_commands.autocomplete(inventory_id=inventory_stack_autocomplete)
     async def inventory_remove(
         self,
         interaction: discord.Interaction,
@@ -893,7 +956,8 @@ class PersonalInventory(commands.Cog):
         name="inventory-post-now",
         description="Skip the scheduled window and post one inventory stack for sale on UEX right now.",
     )
-    @app_commands.describe(inventory_id="The inventory stack number, shown by /inventory")
+    @app_commands.describe(inventory_id="Which stack - pick from the list")
+    @app_commands.autocomplete(inventory_id=inventory_stack_autocomplete)
     async def inventory_post_now(self, interaction: discord.Interaction, inventory_id: int) -> None:
         if not await self.bot.db.has_linked_uex_account(interaction.user.id):
             await interaction.response.send_message(
@@ -950,7 +1014,8 @@ class PersonalInventory(commands.Cog):
         view.message = await interaction.followup.send(embed=embed, view=view, ephemeral=True, wait=True)
 
     @app_commands.command(name="inventory-confirm-sale", description="Resolve a tracked listing when UEX cannot prove how many sold.")
-    @app_commands.describe(job_id="Posting job number from the bot's warning", quantity_sold="How many actually sold; use 0 if none sold")
+    @app_commands.describe(job_id="Which listing - pick from the list", quantity_sold="How many actually sold; use 0 if none sold")
+    @app_commands.autocomplete(job_id=confirm_sale_job_autocomplete)
     async def inventory_confirm_sale(
         self,
         interaction: discord.Interaction,
@@ -1011,7 +1076,8 @@ class PersonalInventory(commands.Cog):
         )
 
     @app_commands.command(name="inventory-cancel-post", description="Cancel a pending or active automatic inventory post.")
-    @app_commands.describe(job_id="Posting job number shown when the stack was scheduled")
+    @app_commands.describe(job_id="Which post - pick from the list")
+    @app_commands.autocomplete(job_id=cancel_post_job_autocomplete)
     async def inventory_cancel_post(self, interaction: discord.Interaction, job_id: int) -> None:
         job = await self.bot.db.get_inventory_post_job(interaction.user.id, job_id)
         if not job:
@@ -1046,7 +1112,8 @@ class PersonalInventory(commands.Cog):
         name="inventory-resolve-floor",
         description="Resend a working prompt for a listing paused at its floor price with no interest.",
     )
-    @app_commands.describe(job_id="Posting job number shown in the original floor-reached DM")
+    @app_commands.describe(job_id="Which listing - pick from the list")
+    @app_commands.autocomplete(job_id=floor_job_autocomplete)
     async def inventory_resolve_floor(self, interaction: discord.Interaction, job_id: int) -> None:
         job = await self.bot.db.get_inventory_post_job(interaction.user.id, job_id)
         if not job:
