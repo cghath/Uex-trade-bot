@@ -208,7 +208,6 @@ class ScannerOffView(BotView):
         super().__init__(timeout=300)
         self.db = db
         self.user_id = user_id
-        self.origin: discord.Interaction | None = None  # the /scanner-status call, set once sent
 
     @discord.ui.button(label="Turn off", style=discord.ButtonStyle.danger)
     async def turn_off(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
@@ -223,18 +222,6 @@ class ScannerOffView(BotView):
             view=self,
         )
         self.stop()
-
-    async def on_timeout(self) -> None:
-        # Grey the button out so it doesn't look usable after it stops working. An
-        # ephemeral reply can still be edited through its interaction for 15 minutes.
-        if self.origin is None:
-            return
-        for child in self.children:
-            child.disabled = True
-        try:
-            await self.origin.edit_original_response(view=self)
-        except discord.HTTPException:
-            pass
 
 
 async def setup(bot: commands.Bot) -> None:

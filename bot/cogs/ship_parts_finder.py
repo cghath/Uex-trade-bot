@@ -444,8 +444,10 @@ class ShipPartsShoppingView(BotView):
             await interaction.response.send_message("Your list is empty - nothing to remove.", ephemeral=True)
             return
         note = "" if len(entries) <= 25 else f" (showing the first 25 of {len(entries)})"
+        view = _RemoveEntryView(self.service, entries)
         await interaction.response.send_message(
-            f"Pick a part to remove{note}:", view=_RemoveEntryView(self.service, entries), ephemeral=True)
+            f"Pick a part to remove{note}:", view=view, ephemeral=True)
+        view.origin = interaction
 
     @discord.ui.button(label="Clear list", style=discord.ButtonStyle.danger,
                        custom_id="ship-parts-shopping:clear")

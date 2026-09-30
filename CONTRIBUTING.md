@@ -97,6 +97,12 @@ on "thinking..." forever. `bot/discord_ui.py` fixes both:
 
 - `BotView` and `BotModal` (use them instead of `discord.ui.View` / `discord.ui.Modal`)
   answer the player when a callback raises.
+- A `BotView` with a timeout greys out its controls when it expires, but only if it can
+  reach its message. When you send one, set `view.origin = interaction` (sent with
+  `interaction.response.send_message` or `edit_message`) or `view.message = await
+  interaction.followup.send(..., wait=True)`. If you override `interaction_check` or
+  `on_timeout`, call `super()` first. If a view hands its message to another view, `stop()`
+  it first.
 - `on_app_command_error`, registered on the command tree in `bot/main.py`, does the same for
   every slash command. It always answers, so don't add a `cog_app_command_error` that
   replies too - the player would get two messages.
@@ -302,7 +308,8 @@ Run through this before considering a feature finished:
       manual `bot.tree.command(callback=...)` or `func=...` anywhere
 - [ ] Any new DB table has a real `CREATE TABLE IF NOT EXISTS` in `bot/db/database.py`'s
       `SCHEMA` string
-- [ ] Any new view or modal subclasses `BotView` / `BotModal` from `bot/discord_ui.py`
+- [ ] Any new view or modal subclasses `BotView` / `BotModal` from `bot/discord_ui.py`, and a
+      view with a timeout gets `view.origin` or `view.message` set where it's sent
 - [ ] Any new config value is read in `bot/config.py` and documented in `.env.example`
 - [ ] `python -m pytest -q` passes
 - [ ] With authorization, started the bot locally and saw `Loaded extension bot.cogs.<yours>` and a plausible

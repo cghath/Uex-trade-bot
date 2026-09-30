@@ -208,15 +208,16 @@ class ActualAmountModal(BotModal):
         else:
             # "more" still doesn't commit here - MoreOutcomeFollowupView's own buttons are
             # the real commit point for this flow, same reasoning as this modal itself.
+            view = MoreOutcomeFollowupView(
+                cog=self.cog, thread_id=self.thread_id, leg_index=self.leg_index, leg=self.leg,
+                actual_price=actual_price, actual_scu=actual_scu, parent_view=self.parent_view,
+            )
             await interaction.response.send_message(
                 "One more thing - did you take everything there was, or did something else "
                 "stop you first (your cargo hold, or the terminal itself)?",
-                view=MoreOutcomeFollowupView(
-                    cog=self.cog, thread_id=self.thread_id, leg_index=self.leg_index, leg=self.leg,
-                    actual_price=actual_price, actual_scu=actual_scu, parent_view=self.parent_view,
-                ),
-                ephemeral=True,
+                view=view, ephemeral=True,
             )
+            view.origin = interaction
 
 
 class MoreOutcomeFollowupView(BotView):
@@ -457,11 +458,11 @@ class LegOutcomeView(BotView):
         if self.resolved:
             await interaction.response.send_message("This leg was already reported.", ephemeral=True)
             return
+        view = AbandonConfirmView(cog=self.cog, thread_id=self.thread_id, parent_view=self)
         await interaction.response.send_message(
-            "Abandon tracking this route? This closes the thread and can't be undone.",
-            view=AbandonConfirmView(cog=self.cog, thread_id=self.thread_id, parent_view=self),
-            ephemeral=True,
+            "Abandon tracking this route? This closes the thread and can't be undone.", view=view, ephemeral=True,
         )
+        view.origin = interaction
 
 
 class AbandonConfirmView(BotView):

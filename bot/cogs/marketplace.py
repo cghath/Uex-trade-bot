@@ -160,6 +160,7 @@ class ConfirmListingView(BotView):
         self.resolved = False
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        await super().interaction_check(interaction)
         if interaction.user.id != self.author_id:
             await interaction.response.send_message("Only the person who started this listing can confirm it.", ephemeral=True)
             return False
@@ -167,8 +168,7 @@ class ConfirmListingView(BotView):
 
     async def on_timeout(self) -> None:
         self.resolved = True
-        for item in self.children:
-            item.disabled = True
+        await super().on_timeout()
 
     @discord.ui.button(label="Post listing", style=discord.ButtonStyle.green)
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
@@ -227,6 +227,7 @@ class ConfirmDeleteListingView(BotView):
         self.resolved = False
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        await super().interaction_check(interaction)
         if interaction.user.id != self.author_id:
             await interaction.response.send_message("Only the person who started this deletion can confirm it.", ephemeral=True)
             return False
@@ -234,8 +235,7 @@ class ConfirmDeleteListingView(BotView):
 
     async def on_timeout(self) -> None:
         self.resolved = True
-        for item in self.children:
-            item.disabled = True
+        await super().on_timeout()
 
     @discord.ui.button(label="Delete listing", style=discord.ButtonStyle.red)
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
@@ -370,6 +370,7 @@ class ListingDetailsModal(BotModal, title="Marketplace listing details"):
 
         view = ConfirmListingView(self.bot, secret_key=secret_key, payload=payload, author_id=interaction.user.id)
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        view.origin = interaction
 
 
 class Marketplace(commands.Cog):
@@ -1025,7 +1026,7 @@ class Marketplace(commands.Cog):
         )
         embed.set_footer(text=f"Listing #{listing_id}")
         view = ConfirmDeleteListingView(self.bot, listing_id, secret_key, interaction.user.id)
-        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+        view.message = await interaction.followup.send(embed=embed, view=view, ephemeral=True, wait=True)
 
 
 async def setup(bot: commands.Bot) -> None:

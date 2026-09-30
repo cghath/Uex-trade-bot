@@ -1,7 +1,16 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.22.
+the oldest entry below); the next new entry is 2.23.
+
+---
+
+## 2.22 - 2026-09-29 - Expired buttons look expired
+
+**Changed**
+- Buttons and menus - Once they stop working, they now grey out instead of looking usable. Before, clicking one
+  just showed "This interaction failed". Run the command again for fresh ones.
+- `/blueprint-search` - The Configure crafting menu now closes after 10 idle minutes instead of 15.
 
 ---
 

@@ -210,6 +210,13 @@ date - no open item, nothing to record here.
       services, and `retry_after_seconds` in the UEX client. aiv2's own views and modals
       (AI chat) need the base class too; the subclass walk in
       `tests/test_failed_interactions.py` lists any it misses. See PROJECT_CONTEXT.md entry 102
+- [ ] Expired buttons and menus grey out: `BotView.on_timeout`/`grey_out` in
+      `bot/discord_ui.py`, every timed view's send site setting `view.origin` or
+      `view.message` (`followup.send(..., wait=True)`), `super()` calls in overridden
+      `interaction_check`/`on_timeout`, `SetMinimumPricesView.stop()` before handing its
+      message on, and the Configure crafting menu's 10-minute timeout. aiv2's own views
+      need the same wiring. Tests: `tests/test_expired_views.py`, `tests/bot_views.py`.
+      See PROJECT_CONTEXT.md entry 103
 
 ## To port: aiv2 -> production
 
