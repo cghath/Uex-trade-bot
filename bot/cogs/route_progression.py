@@ -23,7 +23,8 @@ import discord
 from discord.ext import commands, tasks
 
 from bot.discord_ui import BotModal, BotView
-from bot.uex.backup_routes import find_backup_routes
+from bot.uex.backup_routes import find_backup_routes, reroute_buyer_ids
+from bot.uex.client import fetch_terminal_distances
 from bot.uex.commodity_risk import within_risk_tolerance
 from bot.uex.mixed_routes import find_hedge_cargo
 from bot.uex.route_presentation import cargo_item_line
@@ -43,6 +44,15 @@ logger = logging.getLogger("uexbot.route_progression")
 # threshold" pollers (e.g. intelligence.py's data-health snapshot cadence).
 ABANDONMENT_POLL_HOURS = 6
 ABANDONMENT_HOURS = 48
+
+# How far a sell-shortfall reroute may send a player holding unsold cargo (audit MSG-11:
+# PATCH_NOTES 2.8 promised a buyer "nearby" with no limit at all). Measured from UEX's
+# /terminals_distances on 2026-09-30: terminals around one planet sit 3-6 Gm apart, the
+# neighbouring planet's stations 14-24 Gm, the far side of Stanton 28-78 Gm. So 25 Gm
+# reaches the next planet over and no further. Only the best-paying buyers get a live
+# distance lookup (one call each), which caps the lookups for a widely traded commodity.
+MAX_REROUTE_DISTANCE_GM = 25
+MAX_REROUTE_DISTANCE_LOOKUPS = 24
 
 # A leg-outcome button/modal's real commit point (claim() + the Discord acknowledgement)
 # happens BEFORE handle_leg_outcome/abandon_thread ever runs - by the time either of those
@@ -1057,6 +1067,33 @@ class RouteProgression(commands.Cog):
                 return
             market_rows = await self.bot.db.get_mixed_route_market_rows()
             filters = await self._get_route_filters(thread_id)
+            route_filters = dict(
+                space_only=filters.get("space_only", False),
+                capital_access_only=filters.get("capital_access_only", False),
+                auto_load_only=filters.get("auto_load_only", False),
+                system=filters.get("system"),
+            )
+            # Only buyers in reach (audit MSG-11): same star system, and within
+            # MAX_REROUTE_DISTANCE_GM by UEX's own distance. A buyer UEX can't give a
+            # distance for isn't claimed as nearby.
+            buyer_ids = reroute_buyer_ids(
+                market_rows, terminal_id=leg.id_terminal, anchor_commodity_id=leg.id_commodity,
+                anchor_buy_price=float(buy_price), **route_filters,
+            )
+            nothing_nearby = (
+                f"That left ~{shortfall_scu:,.0f} SCU of **{leg.commodity_name}** unsold - no other buyer "
+                f"within {MAX_REROUTE_DISTANCE_GM} Gm of **{leg.terminal_name}** was found right now."
+            )
+            if not buyer_ids:
+                await channel.send(nothing_nearby)
+                return
+            distances = await fetch_terminal_distances(
+                self.bot.uex, leg.id_terminal, buyer_ids[:MAX_REROUTE_DISTANCE_LOOKUPS],
+            )
+            nearby = {tid: gm for tid, gm in distances.items() if gm is not None and gm <= MAX_REROUTE_DISTANCE_GM}
+            if not nearby:
+                await channel.send(nothing_nearby)
+                return
             # find_backup_routes always computes without_anchor internally (build_mixed_routes
             # over the full market snapshot, even though this caller never reads that field) -
             # dense market data can make that expensive enough to matter, and this call would
@@ -1068,17 +1105,10 @@ class RouteProgression(commands.Cog):
                 market_rows,
                 origin_terminal_id=leg.id_terminal, destination_terminal_id=leg.id_terminal,
                 anchor_commodity_id=leg.id_commodity, anchor_scu=shortfall_scu, anchor_buy_price=float(buy_price),
-                ship_capacity_scu=shortfall_scu,
-                space_only=filters.get("space_only", False),
-                capital_access_only=filters.get("capital_access_only", False),
-                auto_load_only=filters.get("auto_load_only", False),
-                system=filters.get("system"),
+                ship_capacity_scu=shortfall_scu, destination_ids=set(nearby), **route_filters,
             )
             if result.other_destination is None:
-                await channel.send(
-                    f"That left ~{shortfall_scu:,.0f} SCU of **{leg.commodity_name}** unsold - no better "
-                    f"buyer was found from **{leg.terminal_name}** right now."
-                )
+                await channel.send(nothing_nearby)
                 return
             load = result.other_destination
             item = load.cargo[0]
@@ -1086,9 +1116,11 @@ class RouteProgression(commands.Cog):
                 f" (only {item.quantity_scu:,.0f} of the {shortfall_scu:,.0f} SCU you're holding - the rest "
                 f"still won't sell there)" if load.anchor_unsold_scu > 0 else ""
             )
+            distance = nearby.get(load.destination_id)
+            distance_note = f" ({distance:,.0f} Gm away)" if distance is not None else ""
             await channel.send(
                 f"That left ~{shortfall_scu:,.0f} SCU of **{leg.commodity_name}** unsold - "
-                f"**{load.destination_name}** buys it{unsold_note}:\n{cargo_item_line(item)}"
+                f"**{load.destination_name}**{distance_note} buys it{unsold_note}:\n{cargo_item_line(item)}"
             )
         except Exception:
             logger.info(

@@ -2171,6 +2171,20 @@ def _leg_dict(leg: RouteLegInput) -> dict:
     }
 
 
+def _reroute_bot(db: Database, distance: float | None = 10):
+    """A fake bot for the sell-shortfall reroute: the DB, plus a UEX client answering every
+    /terminals_distances lookup with `distance` Gm (the reroute only suggests a buyer within
+    MAX_REROUTE_DISTANCE_GM - audit MSG-11)."""
+    uex = NS(get_terminal_distance=AsyncMock(return_value={"distance": distance}))
+    return type("FakeBot", (), {"db": db, "uex": uex})()
+
+
+async def _seed_systems(db: Database, *terminals: tuple[int, str], system: str = "Stanton") -> None:
+    """The reroute only looks in the current terminal's own star system."""
+    await db.upsert_terminal_reference([{"id": tid, "name": name, "star_system_name": system}
+                                        for tid, name in terminals])
+
+
 async def _create_thread_for_legs(db: Database, thread_id: int, legs: list[RouteLegInput], **filters) -> None:
     await db.create_route_progression_thread(
         thread_id=thread_id, user_id=1, guild_id=1, route_kind="best_route",
@@ -2649,6 +2663,7 @@ def test_handle_leg_outcome_a_sell_side_shortfall_suggests_a_different_destinati
             {"id_commodity": 1, "id_terminal": 30, "commodity_name": "Gold", "terminal_name": "Port Olisar",
              "price_buy": 0, "price_sell": 150, "scu_buy": 0, "scu_sell": 60, "status_buy": None, "status_sell": 1},
         ])
+        await _seed_systems(db, (20, "Elsewhere"), (30, "Port Olisar"))
         leg0 = _leg_input(id_terminal=10, id_commodity=1, quoted_price=100.0, quoted_scu=50.0, quoted_status=3)
         leg1 = _leg_input(
             side="sell", id_terminal=20, id_commodity=1, terminal_name="Elsewhere",
@@ -2661,7 +2676,7 @@ def test_handle_leg_outcome_a_sell_side_shortfall_suggests_a_different_destinati
         )
         await _create_thread_for_legs(db, 1, [leg0, leg1, leg2])
         cog = RouteProgression.__new__(RouteProgression)
-        cog.bot = type("FakeBot", (), {"db": db})()
+        cog.bot = _reroute_bot(db)
         cog._active_legs = {1: [leg0, leg1, leg2]}
         channel = _fake_thread_channel()
 
@@ -2670,6 +2685,7 @@ def test_handle_leg_outcome_a_sell_side_shortfall_suggests_a_different_destinati
         assert channel.send.await_count == 2, "expected the reroute suggestion plus leg 3's prompt"
         reroute_message = channel.send.call_args_list[0].args[0]
         assert "Port Olisar" in reroute_message, reroute_message
+        assert "(10 Gm away)" in reroute_message, reroute_message
 
     asyncio.run(run())
 
@@ -2697,9 +2713,9 @@ def test_handle_leg_outcome_a_sell_side_shortfall_with_no_other_buyer_says_so(tm
 
         await cog.handle_leg_outcome(channel, 1, 1, leg1, outcome="missing")
 
-        assert channel.send.await_count == 2, "expected the 'no better buyer' message plus leg 3's prompt"
+        assert channel.send.await_count == 2, "expected the 'no other buyer' message plus leg 3's prompt"
         no_reroute_message = channel.send.call_args_list[0].args[0]
-        assert "no better" in no_reroute_message, no_reroute_message
+        assert "no other buyer within 25 Gm of **Elsewhere**" in no_reroute_message, no_reroute_message
 
     asyncio.run(run())
 
@@ -2721,6 +2737,7 @@ def test_handle_leg_outcome_sell_side_reroute_offloads_the_search_to_a_worker_th
             {"id_commodity": 1, "id_terminal": 30, "commodity_name": "Gold", "terminal_name": "Port Olisar",
              "price_buy": 0, "price_sell": 150, "scu_buy": 0, "scu_sell": 60, "status_buy": None, "status_sell": 1},
         ])
+        await _seed_systems(db, (20, "Elsewhere"), (30, "Port Olisar"))
         leg0 = _leg_input(id_terminal=10, id_commodity=1, quoted_price=100.0, quoted_scu=50.0, quoted_status=3)
         leg1 = _leg_input(
             side="sell", id_terminal=20, id_commodity=1, terminal_name="Elsewhere",
@@ -2733,7 +2750,7 @@ def test_handle_leg_outcome_sell_side_reroute_offloads_the_search_to_a_worker_th
         )
         await _create_thread_for_legs(db, 1, [leg0, leg1, leg2])
         cog = RouteProgression.__new__(RouteProgression)
-        cog.bot = type("FakeBot", (), {"db": db})()
+        cog.bot = _reroute_bot(db)
         cog._active_legs = {1: [leg0, leg1, leg2]}
         channel = _fake_thread_channel()
 
@@ -2783,9 +2800,16 @@ def test_handle_leg_outcome_sell_side_reroute_honors_the_originating_routes_filt
             space_only=True, capital_access_only=True, auto_load_only=True, system="Stanton",
         )
         cog = RouteProgression.__new__(RouteProgression)
-        cog.bot = type("FakeBot", (), {"db": db})()
+        cog.bot = _reroute_bot(db)
         cog._active_legs = {1: [leg0, leg1, leg2]}
         channel = _fake_thread_channel()
+        buyer_kwargs = {}
+
+        def buyers(*args, **kwargs):
+            buyer_kwargs.update(kwargs)
+            return [30]  # one nearby buyer, so the search itself runs
+
+        monkeypatch.setattr(route_progression_module, "reroute_buyer_ids", buyers)
 
         captured_kwargs = {}
         real_find = route_progression_module.find_backup_routes
@@ -2799,10 +2823,11 @@ def test_handle_leg_outcome_sell_side_reroute_honors_the_originating_routes_filt
         await cog.handle_leg_outcome(channel, 1, 1, leg1, outcome="missing")
 
         assert captured_kwargs, "find_backup_routes was never called"
-        assert captured_kwargs["space_only"] is True
-        assert captured_kwargs["capital_access_only"] is True
-        assert captured_kwargs["auto_load_only"] is True
-        assert captured_kwargs["system"] == "Stanton"
+        for kwargs in (captured_kwargs, buyer_kwargs):
+            assert kwargs["space_only"] is True
+            assert kwargs["capital_access_only"] is True
+            assert kwargs["auto_load_only"] is True
+            assert kwargs["system"] == "Stanton"
 
     asyncio.run(run())
 
@@ -2838,9 +2863,10 @@ def test_handle_leg_outcome_sell_side_reroute_prices_against_the_nearest_precedi
         )
         await _create_thread_for_legs(db, 1, [leg0, leg1, leg2, leg3, leg4])
         cog = RouteProgression.__new__(RouteProgression)
-        cog.bot = type("FakeBot", (), {"db": db})()
+        cog.bot = _reroute_bot(db)
         cog._active_legs = {1: [leg0, leg1, leg2, leg3, leg4]}
         channel = _fake_thread_channel()
+        monkeypatch.setattr(route_progression_module, "reroute_buyer_ids", lambda *a, **k: [30])
 
         captured_kwargs = {}
         real_find = route_progression_module.find_backup_routes

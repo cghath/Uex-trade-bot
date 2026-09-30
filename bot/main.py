@@ -54,8 +54,10 @@ INITIAL_COGS = (
 
 class UexBot(commands.Bot):
     def __init__(self, config: Config) -> None:
+        # No privileged intents (audit MSG-14): nothing reads other people's messages, and a
+        # bot always sees its own. Asking for Message Content made startup fail on any bot
+        # that didn't also switch it on in the Developer Portal, which README says it needn't.
         intents = discord.Intents.default()
-        intents.message_content = True
         super().__init__(command_prefix="!uex-unused-", intents=intents)
         self.config = config
         # Every slash command answers when it fails, instead of leaving "thinking..." up.

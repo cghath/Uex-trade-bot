@@ -24,6 +24,7 @@ a player holding the anchor is asking.
 from __future__ import annotations
 
 import math
+from collections.abc import Collection
 from dataclasses import dataclass
 from typing import Any
 
@@ -165,6 +166,55 @@ def _held_anchor_load(
     )
 
 
+def _anchor_buyers(eligible: list[dict[str, Any]], *, exclude_terminal_id: int, anchor_commodity_id: int,
+                   buy_price: float) -> dict[int, dict[str, Any]]:
+    """Where a held anchor can be sold at a profit: destination-side rows only, no origin
+    stock involved, one row per terminal."""
+    buyers: dict[int, dict[str, Any]] = {}
+    for row in eligible:
+        terminal_id = _int(row.get("id_terminal"))
+        if (
+            terminal_id is None or terminal_id == exclude_terminal_id
+            or _int(row.get("id_commodity")) != anchor_commodity_id
+            or _num(row.get("price_sell")) <= buy_price
+            or not has_sell_side_demand(row.get("scu_sell"), row.get("status_sell"))
+        ):
+            continue
+        buyers.setdefault(terminal_id, row)
+    return buyers
+
+
+def reroute_buyer_ids(
+    market_rows: list[dict[str, Any]],
+    *,
+    terminal_id: int,
+    anchor_commodity_id: int,
+    anchor_buy_price: float,
+    space_only: bool = False,
+    capital_access_only: bool = False,
+    auto_load_only: bool = False,
+    system: str | None = None,
+) -> list[int]:
+    """Terminals in terminal_id's own star system that would buy a held anchor at a profit,
+    best sell price first: the candidates a sell-shortfall reroute then checks distances
+    for (audit MSG-11). Same system only, because UEX's /terminals_distances is a straight
+    line that ignores jump points: Levski (Nyx) reads as 56 Gm from ARC-L3 (Stanton), a
+    jump away. Empty when terminal_id's own system isn't known."""
+    home = next((row.get("star_system_name") for row in market_rows
+                 if _int(row.get("id_terminal")) == terminal_id and row.get("star_system_name")), None)
+    if not home:
+        return []
+    eligible = eligible_market_rows(
+        market_rows, space_only=space_only, capital_access_only=capital_access_only,
+        auto_load_only=auto_load_only, system=system,
+    )
+    buyers = _anchor_buyers(eligible, exclude_terminal_id=terminal_id, anchor_commodity_id=anchor_commodity_id,
+                            buy_price=_num(anchor_buy_price))
+    same_system = [(tid, row) for tid, row in buyers.items() if row.get("star_system_name") == home]
+    same_system.sort(key=lambda item: _num(item[1].get("price_sell")), reverse=True)
+    return [tid for tid, _row in same_system]
+
+
 def find_backup_routes(
     market_rows: list[dict[str, Any]],
     *,
@@ -179,6 +229,7 @@ def find_backup_routes(
     capital_access_only: bool = False,
     auto_load_only: bool = False,
     system: str | None = None,
+    destination_ids: Collection[int] | None = None,
 ) -> BackupResult:
     """Plan B for a stock-limited route from origin_terminal_id to destination_terminal_id
     carrying anchor_scu of anchor_commodity_id, bought at anchor_buy_price. The filters are the
@@ -189,7 +240,10 @@ def find_backup_routes(
     fuller_hold beats simply continuing; other_destination must beat fuller_hold (or
     continuing, if there is no fuller hold) by MIN_DETOUR_GAIN_PCT; without_anchor must beat
     every option that keeps the anchor by the same margin, and is the one that only makes
-    sense for a player who has not bought yet."""
+    sense for a player who has not bought yet.
+
+    `destination_ids`, when given, limits other_destination to those terminals (e.g. the
+    ones a sell-shortfall reroute found within reach)."""
     capacity = math.floor(float(ship_capacity_scu or 0))
     held = min(math.floor(float(anchor_scu or 0)), capacity)
     buy_price = _num(anchor_buy_price)
@@ -206,18 +260,11 @@ def find_backup_routes(
         (r.get("commodity_name") for r in market_rows if _int(r.get("id_commodity")) == anchor_commodity_id
          and r.get("commodity_name")), "Unknown",
     ))
-    # Where the held anchor can be sold: destination-side rows only, no origin stock involved.
-    anchor_destinations: dict[int, dict[str, Any]] = {}
-    for row in eligible:
-        terminal_id = _int(row.get("id_terminal"))
-        if (
-            terminal_id is None or terminal_id == origin_terminal_id
-            or _int(row.get("id_commodity")) != anchor_commodity_id
-            or _num(row.get("price_sell")) <= buy_price
-            or not has_sell_side_demand(row.get("scu_sell"), row.get("status_sell"))
-        ):
-            continue
-        anchor_destinations.setdefault(terminal_id, row)
+    anchor_destinations = _anchor_buyers(eligible, exclude_terminal_id=origin_terminal_id,
+                                         anchor_commodity_id=anchor_commodity_id, buy_price=buy_price)
+    if destination_ids is not None:
+        anchor_destinations = {tid: row for tid, row in anchor_destinations.items()
+                               if tid in destination_ids or tid == destination_terminal_id}
 
     original_rows = [r for r in market_rows if _int(r.get("id_commodity")) == anchor_commodity_id
                      and _int(r.get("id_terminal")) == destination_terminal_id]

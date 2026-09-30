@@ -46,11 +46,13 @@ from bot.autocomplete import gather_within
 from bot.cogs.prices import terminal_name_autocomplete
 from bot.cogs.ships import ship_name_autocomplete
 from bot.discord_ui import BotView
+from bot.uex.client import cache_interval_text
 from bot.uex.exceptions import UexApiError, describe_uex_api_error
 from bot.uex.ship_part_display import (
     LIST_BUDGET_CHARS,
     format_part_page,
     format_port_label,
+    list_price_text,
     list_shared,
     paginate_parts,
     ranked_by_label,
@@ -280,21 +282,53 @@ class ShipPartsShoppingService:
                     logger.warning("Could not delete partial ship parts thread %s", thread.id)
             return None
 
+    async def _current_prices(self, entries: list[dict]) -> dict[int, tuple[float, str | None]] | None:
+        """id_item -> (price, full shop name) at each listed part's cheapest shop right now,
+        the same /items_prices_all rows the browser prices from - None if UEX didn't answer,
+        so the list falls back to lock-in prices and says so (audit MSG-13)."""
+        try:
+            cheapest = cheapest_listing_by_item(await self.bot.uex.get_items_prices_all())
+        except Exception:
+            logger.warning("Couldn't re-price the ship parts list; showing lock-in prices", exc_info=True)
+            return None
+        listings = {entry["id_item"]: cheapest[entry["id_item"]] for entry in entries
+                    if entry.get("id_item") in cheapest}
+        references: dict = {}
+        terminal_ids = [listing["id_terminal"] for listing in listings.values() if listing.get("id_terminal")]
+        if terminal_ids:
+            try:
+                references = await self.bot.db.get_terminal_references_by_ids(terminal_ids)
+            except Exception:
+                logger.warning("Couldn't load full shop names for the ship parts list", exc_info=True)
+        return {
+            id_item: (float(listing["price_buy"]),
+                      (references.get(listing.get("id_terminal")) or {}).get("terminal_name")
+                      or listing.get("terminal_name"))
+            for id_item, listing in listings.items()
+        }
+
     async def render(self, user_id: int, guild_id: int) -> list[str]:
         entries = await self.bot.db.get_ship_parts_entries(user_id, guild_id)
         if not entries:
             return ["**Ship parts list**\nNo parts locked in yet."]
-        lines = ["**Ship parts list**"]
+        current = await self._current_prices(entries)
+        if current is None:
+            note = ("-# UEX's prices didn't load, so these are the prices when each part was locked in. "
+                    "Press Refresh list to try again.")
+        else:
+            note = (f"-# Each part's cheapest shop right now, from UEX's prices "
+                    f"(updated every {cache_interval_text('items_prices_all')}).")
+        lines = ["**Ship parts list**", note]
         current_ship = None
         for entry in entries:
             if entry["vehicle_name"] != current_ship:
                 current_ship = entry["vehicle_name"]
                 lines.extend(["", f"**{current_ship}**"])
-            parts = [f"{entry['price_buy']:,.0f} aUEC" if entry.get("price_buy") is not None else "no shop price on record"]
-            shop = shop_text(entry.get("terminal_name"))
-            if shop:
-                parts.append(shop)
-            lines.append(f"• {_entry_slot_label(entry)}: **{entry['item_name']}** — {' · '.join(parts)}")
+            price = list_price_text(
+                entry.get("price_buy"), entry.get("terminal_name"),
+                (current or {}).get(entry.get("id_item")), prices_loaded=current is not None,
+            )
+            lines.append(f"• {_entry_slot_label(entry)}: **{entry['item_name']}** — {price}")
         return _pages(lines)
 
     async def refresh(self, thread: discord.Thread, user_id: int, guild_id: int) -> None:
@@ -431,7 +465,7 @@ class ShipPartsShoppingView(BotView):
                     "I couldn't refresh the list. Check that I can edit messages in this thread, then try again.",
                     ephemeral=True)
                 return
-            await interaction.followup.send("List refreshed.", ephemeral=True)
+            await interaction.followup.send("List refreshed with current prices.", ephemeral=True)
 
     @discord.ui.button(label="Remove a part", style=discord.ButtonStyle.secondary,
                        custom_id="ship-parts-shopping:remove-one")
