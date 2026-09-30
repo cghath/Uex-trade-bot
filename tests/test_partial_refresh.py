@@ -19,6 +19,7 @@ from bot.uex.exceptions import UexApiError
 from bot.uex.trends import (
     RefreshGap, ScoredRouteEntry, partial_refresh_hint, partial_refresh_note, should_replace_snapshot,
 )
+from tests.route_results import route_results
 
 HOUR = timedelta(hours=1)
 
@@ -244,8 +245,8 @@ def test_top_routes_footer_says_when_the_snapshot_is_partial(tmp_path):
         return interaction
 
     interaction = asyncio.run(run())
-    footers = [kw["embed"].footer.text for _, kw in interaction.followup.sent if kw.get("embed")]
-    assert footers and "partial refresh: 3 of 20 commodities couldn't be fetched" in footers[0]
+    header = route_results(interaction.followup.sent).header
+    assert "partial refresh: 3 of 20 commodities couldn't be fetched" in header
 
 
 def test_trending_footer_says_when_the_snapshot_is_partial():

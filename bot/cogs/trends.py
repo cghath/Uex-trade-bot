@@ -31,8 +31,9 @@ from bot.cogs.prices import (
     commodity_name_autocomplete,
     terminal_name_autocomplete,
 )
-from bot.cogs.route_progression import RouteLegInput, RouteTrackingView, TrackableRoute
+from bot.cogs.route_progression import RouteLegInput, TrackableRoute
 from bot.cogs.ships import ship_name_autocomplete
+from bot.route_pages import RoutePage, send_route_pages
 from bot.uex.charts import render_price_history_chart
 from bot.uex.commodity_risk import format_commodity_risk, outside_risk_tolerance, within_risk_tolerance
 from bot.uex.data_health import classify_terminal_health, format_health_note
@@ -659,9 +660,8 @@ class Trends(commands.Cog):
                 f"(this list shows up to {display_limit}) - more may appear as route data keeps refreshing"
             )
 
-        intro_embed = discord.Embed(title=title, color=discord.Color.green())
-        intro_embed.set_footer(text=footer)
-        await interaction.followup.send(embed=intro_embed)
+        # The intro is the text above every page of the one results message (audit UX-6).
+        header = f"**{title}**\n-# {footer}"
 
         track_record_pairs = [
             pair
@@ -704,7 +704,7 @@ class Trends(commands.Cog):
             logger.warning("Hedge suggestions unavailable for %s", log_label, exc_info=True)
             hedge_items_by_route = {}
 
-        routes_shown = 0
+        pages: list[RoutePage] = []
         for i, r in enumerate(entries, start=1):
             origin_health = classify_terminal_health(health_rows[r.origin_terminal_id]) if r.origin_terminal_id in health_rows else None
             destination_health = (
@@ -776,16 +776,14 @@ class Trends(commands.Cog):
             if risk_note:
                 value += f"\n{risk_note}"
             route_embed = discord.Embed(title=name, color=discord.Color.green())
-            route_embed.set_footer(text=f"Route {i} of {len(entries)}")
             # Per-route embed, budget-checked on its own - a route's own detail lines
             # overflowing a single Discord embed is unlikely but not impossible, and this
             # stops and discloses instead of silently dropping it (see /best-route's
             # identical pattern in prices.py).
             if not _add_chunked_fields(route_embed, name="Details", lines=value.splitlines()):
                 continue
-            routes_shown += 1
 
-            view = None
+            trackable_route = None
             if tracking_cog and r.origin_terminal_id is not None and r.destination_terminal_id is not None:
                 trackable_route = TrackableRoute(
                     route_kind="top_routes",
@@ -808,16 +806,10 @@ class Trends(commands.Cog):
                         ),
                     ],
                 )
-                view = RouteTrackingView(tracking_cog, [trackable_route])
+            pages.append(RoutePage(route_embed, f"**{name}**\n{value}", trackable_route))
 
-            if view is not None:
-                view.message = await interaction.followup.send(embed=route_embed, view=view, wait=True)
-            else:
-                await interaction.followup.send(embed=route_embed)
-
-        omitted = len(entries) - routes_shown
-        if omitted > 0:
-            await interaction.followup.send(f"{omitted} more route(s) omitted - too large to display.")
+        await send_route_pages(interaction, pages, tracking_cog=tracking_cog, header=header,
+                               omitted=len(entries) - len(pages))
 
     @app_commands.command(name="top-routes", description="Top trade routes by profit, with live-stock filtering.")
     @app_commands.describe(

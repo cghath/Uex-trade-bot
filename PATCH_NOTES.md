@@ -1,7 +1,17 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.26.
+the oldest entry below); the next new entry is 2.27.
+
+---
+
+## 2.26 - 2026-09-30 - Route results in one message
+
+**Changed**
+- `/top-routes`, `/routes-from`, `/route-on-the-way`, `/best-route`, `/mixed-routes`, `/multi-stop-route`,
+  `/route-from-multi` - Results now arrive as one message showing a route at a time, instead of a message per
+  route. Use ◀ ▶ to page through them (only whoever ran the command can), and **Track this route** to track the
+  one showing (anyone can). Every route can now be tracked, not just the first five.
 
 ---
 

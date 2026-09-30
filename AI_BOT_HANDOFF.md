@@ -234,6 +234,12 @@ date - no open item, nothing to record here.
       leaderboard disclosure (`LEADERBOARD_NOTE`). If aiv2 links keys any other way, check
       them the same way.
       Tests: `tests/test_inventory_pickers_and_key_check.py`. See PROJECT_CONTEXT.md entry 106
+- [ ] Route results as one paged message: `bot/route_pages.py` (`send_route_pages`,
+      `RoutePagesView`, `text_pages`), used by `_send_ranked_routes`, `/best-route`,
+      `/mixed-routes` and `_send_multi_stop_routes`; `RouteTrackingView` removed;
+      `BotView.grey_out(**edit_kwargs)`. If aiv2's AI chat posts route results, it can send
+      them the same way. Tests: `tests/test_route_pages.py`, `tests/route_results.py`.
+      See PROJECT_CONTEXT.md entry 107
 
 ## To port: aiv2 -> production
 

@@ -20,10 +20,11 @@ from bot.cogs.blueprints import Blueprints, SearchResult
 from bot.cogs.marketplace import ConfirmListingView, Marketplace
 from bot.cogs.personal_inventory import SetMinimumPricesView
 from bot.cogs.prices import Prices
-from bot.cogs.route_progression import RouteProgression, RouteTrackingView
+from bot.cogs.route_progression import RouteProgression
 from bot.cogs.ship_parts_finder import PartsBrowserView
 from bot.db.database import Database
 from bot.discord_ui import AlertRemovePickerView, BotView, send_alert_remove_picker
+from bot.route_pages import RoutePagesView
 from bot.uex.blueprint_crafting import Recipe
 from bot.uex.client import UexClient
 from tests.bot_views import all_bot_views
@@ -128,10 +129,12 @@ def test_views_that_check_clicks_still_record_them():
 
 
 def test_views_with_their_own_timeout_still_grey_out():
-    """Only the Ship Parts Finder browser greys out its own way (it adds a note)."""
+    """Only the Ship Parts Finder browser greys out its own way (it adds a note); the route
+    pages grey out through grey_out(), adding their own note."""
     own = [cls for cls in all_bot_views() if cls.on_timeout is not BotView.on_timeout]
     missing = [cls.__name__ for cls in own
-               if cls is not PartsBrowserView and "super().on_timeout(" not in inspect.getsource(cls.on_timeout)]
+               if cls is not PartsBrowserView
+               and not any(call in inspect.getsource(cls.on_timeout) for call in ("super().on_timeout(", "self.grey_out("))]
     assert missing == []
 
     async def run():
@@ -213,7 +216,7 @@ def test_every_route_tracking_view_knows_its_message(tmp_path):
     sent = [kwargs for _, kwargs in asyncio.run(run()).followup.sent if kwargs.get("view")]
     assert sent
     for kwargs in sent:
-        assert isinstance(kwargs["view"], RouteTrackingView)
+        assert isinstance(kwargs["view"], RoutePagesView)
         assert kwargs["view"].message.sent_with is kwargs
 
 
