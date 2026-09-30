@@ -36,7 +36,7 @@ class TradingPreferences(commands.Cog):
         capital_ship_access="mixed-routes/multi-stop-route default: force XL-hangar/freight-elevator filtering, any ship",
         auto_load_only="Default auto-load-only for all 4 route commands",
         system="Default star-system restriction for all 4 route commands ('Any' clears it)",
-        risk_tolerance="Illegal/volatile/explosive/buggy tolerance - stored now, not yet enforced by routes",
+        risk_tolerance="Which risky goods route suggestions skip (illegal, explosive, volatile, buggy)",
     )
     @app_commands.rename(
         space_only="space-only",

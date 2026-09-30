@@ -1382,7 +1382,8 @@ they're in sync).
       `describe_active_preferences`, but no route command excludes any commodity based on
       it - every occurrence is labeled "(not yet enforced)" so this isn't mistaken for a
       real guarantee. Building the actual filter (against `is_illegal`/`is_explosive`/
-      `is_volatile_qt`/`is_volatile_time`/`is_buggy`) is future work.
+      `is_volatile_qt`/`is_volatile_time`/`is_buggy`) is future work. (Built later: see
+      entry 104.)
 
     A real scoping gap, surfaced deliberately rather than silently: **space-only and
     capital-ship-access preferences only affect `/mixed-routes` and `/multi-stop-route`**,
@@ -3686,6 +3687,41 @@ they're in sync).
      - Tests: `tests/test_expired_views.py` (11), with `tests/bot_views.py` listing every
        BotView subclass. Each change was undone one at a time (12 in all), and its test
        failed every time.
+
+104. **The saved risk tolerance now filters routes.** Audit finding UX-9. It was stored and
+     shown but did nothing, labelled "(not yet enforced)" everywhere (entry 52's deliberate
+     "store now, filter later"). On the Pi, 5 players had it set to High and 1 to Medium -
+     that one expected illegal goods to be left out, and they weren't.
+     - What each level leaves out is what its choice has always said:
+       - Low: illegal, explosive, volatile (quantum or over time) and buggy goods, i.e.
+         every flag in `RISK_FLAG_KEYS`.
+       - Medium: illegal and buggy goods.
+       - High, or none set: nothing.
+     - On the Pi's data, all 205 commodities have their flags collected; of the 125 traded,
+       Low leaves out 12 and Medium 11 (18 illegal, 2 explosive, 3 volatile, 0 buggy).
+     - New in `bot/uex/commodity_risk.py`: `RISK_TOLERANCE_EXCLUDES`, `RISK_TOLERANCE_SKIPS`,
+       `outside_risk_tolerance` and `within_risk_tolerance` (market rows carry their own
+       commodity's flags from `get_mixed_route_market_rows`' join). A commodity with no
+       collected flags is kept: routes already warn its risk is unknown.
+     - Where it applies, always from the saved preference (there's no per-command option):
+       - `/top-routes`, `/routes-from`, `/route-on-the-way` (`_send_ranked_routes`): after
+         the system filter, on the full pool, before ranking and truncation.
+       - `/mixed-routes`, `/multi-stop-route`, `/route-from-multi`,
+         `/diminishing-returns`: the whole market pool, before any search.
+       - Every "Hedge:" suggestion, since a hedge is a different commodity: `/best-route`
+         (both branches), the ranked lists, and a tracking thread's buy-side shortfall
+         hedge (which reads the thread owner's current preference). A sell-side reroute
+         keeps the same commodity, so it isn't filtered.
+     - `/best-route` names its commodity, so it's never filtered out. When that commodity is
+       outside the tolerance, the embed says so under its risk warning.
+     - An empty result says the tolerance is why (`risk_tolerance_hint`), with its own
+       wording: `saved_filters_hint` says "set that option on this command", and risk
+       tolerance has no such option.
+     - Not changed: `/intelligence-brief` reads no saved preferences at all (only the
+       default ship), so it doesn't apply this one either.
+     - Tests: `tests/test_risk_tolerance.py` (26). Each change was undone one at a time (13 in
+       all, including each of the four mixed-cargo pools separately), and its test failed
+       every time.
 
 ## Where to look for what
 

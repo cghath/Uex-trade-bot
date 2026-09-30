@@ -1,7 +1,21 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.23.
+the oldest entry below); the next new entry is 2.24.
+
+---
+
+## 2.23 - 2026-09-30 - Risk tolerance now works
+
+**Fixed**
+- `/set-trading-preferences` `risk-tolerance` - It now does what it says. It used to be saved but ignored.
+  - **Low** leaves illegal, explosive, volatile and buggy goods out of route suggestions.
+  - **Medium** leaves out illegal and buggy goods.
+  - **High** (the default) leaves out nothing.
+
+  It applies to `/top-routes`, `/routes-from`, `/route-on-the-way`, `/mixed-routes`, `/multi-stop-route`,
+  `/route-from-multi`, `/diminishing-returns`, and every "Hedge:" suggestion. If it leaves nothing, the reply says so.
+- `/best-route` - Still shows the commodity you ask for, but says when it's outside your risk tolerance.
 
 ---
 

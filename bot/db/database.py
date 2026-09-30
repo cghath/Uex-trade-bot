@@ -74,8 +74,8 @@ CREATE TABLE IF NOT EXISTS user_ship_preference (
 
 -- Saved route-filtering defaults, applied whenever a route command's matching option is
 -- left unset so a user doesn't have to repeat the same options every call. risk_tolerance
--- is stored and shown but not yet enforced by any route command - filtering on it is a
--- separate follow-up. preferred_system/risk_tolerance/ship_name NULL means "no preference
+-- has no per-command option: route commands always apply it (bot/uex/commodity_risk.py's
+-- RISK_TOLERANCE_EXCLUDES). preferred_system/risk_tolerance/ship_name NULL means "no preference
 -- set", not "explicitly disabled". ship_name supersedes the older user_ship_preference
 -- table (kept, but no longer written to, purely as the one-time migration source run in
 -- Database.init() - see _migrate_ship_preference_into_trading_preferences) - the user's

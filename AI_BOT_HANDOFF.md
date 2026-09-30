@@ -217,6 +217,12 @@ date - no open item, nothing to record here.
       message on, and the Configure crafting menu's 10-minute timeout. aiv2's own views
       need the same wiring. Tests: `tests/test_expired_views.py`, `tests/bot_views.py`.
       See PROJECT_CONTEXT.md entry 103
+- [ ] The saved risk tolerance filters routes: `bot/uex/commodity_risk.py`'s
+      `outside_risk_tolerance`/`within_risk_tolerance`, applied in `_send_ranked_routes`, the
+      four mixed-cargo commands' market pools, every hedge suggestion (including the
+      tracking thread's), and a `/best-route` note; `risk_tolerance_hint` for empty results.
+      If aiv2's AI tools suggest routes, they should honour it too.
+      Tests: `tests/test_risk_tolerance.py`. See PROJECT_CONTEXT.md entry 104
 
 ## To port: aiv2 -> production
 
