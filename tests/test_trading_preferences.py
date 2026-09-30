@@ -53,7 +53,7 @@ def test_describe_active_preferences_covers_all_five_fields():
     )
     assert note == (
         "Active preferences: space-only, capital-ship access, auto-load-only, "
-        "system: Stanton, risk tolerance: low (not yet enforced)"
+        "system: Stanton, risk tolerance: low"
     )
 
 

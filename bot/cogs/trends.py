@@ -34,7 +34,7 @@ from bot.cogs.prices import (
 from bot.cogs.route_progression import RouteLegInput, RouteTrackingView, TrackableRoute
 from bot.cogs.ships import ship_name_autocomplete
 from bot.uex.charts import render_price_history_chart
-from bot.uex.commodity_risk import format_commodity_risk
+from bot.uex.commodity_risk import format_commodity_risk, outside_risk_tolerance, within_risk_tolerance
 from bot.uex.data_health import classify_terminal_health, format_health_note
 from bot.uex.exceptions import UexApiError, describe_uex_api_error
 from bot.uex.mixed_routes import find_hedge_cargo
@@ -65,6 +65,7 @@ from bot.uex.supply_demand import (
 )
 from bot.uex.trading_preferences import (
     describe_active_preferences,
+    risk_tolerance_hint,
     saved_filter_labels,
     saved_filters_hint,
 )
@@ -528,6 +529,17 @@ class Trends(commands.Cog):
                     + partial_refresh_hint(gap)
                 )
                 return
+        # The saved risk tolerance has no per-command option, so it always applies here.
+        if risk_tolerance:
+            flags = await self.bot.db.get_commodity_references(list({route.id_commodity for route in entries}))
+            entries = [route for route in entries
+                       if not outside_risk_tolerance(flags.get(route.id_commodity), risk_tolerance)]
+            if not entries:
+                await interaction.followup.send(
+                    "No routes within your risk tolerance found right now."
+                    + risk_tolerance_hint(risk_tolerance) + partial_refresh_hint(gap)
+                )
+                return
         # Re-rank by what THIS player can actually haul/afford before dedup/truncation,
         # not UEX's own unlimited-cargo/budget 'profit' figure the candidates arrived
         # sorted by - see rank_by_achievable_profit's docstring for the real Waste-vs-
@@ -681,7 +693,8 @@ class Trends(commands.Cog):
                 if room is None:
                     continue
                 if market_rows is None:
-                    market_rows = await self.bot.db.get_mixed_route_market_rows()
+                    market_rows = within_risk_tolerance(
+                        await self.bot.db.get_mixed_route_market_rows(), risk_tolerance)
                 hedge_items_by_route[i] = find_hedge_cargo(
                     market_rows, origin_terminal_id=r.origin_terminal_id,
                     destination_terminal_id=r.destination_terminal_id, exclude_commodity_id=r.id_commodity,

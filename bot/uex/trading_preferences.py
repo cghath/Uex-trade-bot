@@ -5,6 +5,8 @@ only knows how to describe a resolved set of preferences back to the user.
 """
 from __future__ import annotations
 
+from bot.uex.commodity_risk import RISK_TOLERANCE_SKIPS
+
 # Sentinel for Database.set_trading_preferences: distinguishes "caller didn't pass this
 # field, leave it unchanged" from a real value (including False/None, both meaningful).
 # Public (no leading underscore) because callers outside bot/db/database.py - the
@@ -48,7 +50,7 @@ def describe_active_preferences(
     if system:
         parts.append(f"system: {system}")
     if risk_tolerance and risk_tolerance != "high":
-        parts.append(f"risk tolerance: {risk_tolerance} (not yet enforced)")
+        parts.append(f"risk tolerance: {risk_tolerance}")
     if not parts:
         return None
     return "Active preferences: " + ", ".join(parts)
@@ -80,8 +82,18 @@ def format_trading_preferences(prefs: dict[str, object], *, ship_detail: str | N
         f"Capital-ship access required: **{_yes_no(prefs.get('capital_ship_access'))}** (mixed-routes/multi-stop-route only)",
         f"Auto-load only: **{_yes_no(prefs.get('auto_load_only'))}**",
         f"Preferred system: **{system}**",
-        f"Risk tolerance: **{risk}** (stored, not yet enforced by any route command)",
+        f"Risk tolerance: **{risk}**" + (f" (route suggestions skip {RISK_TOLERANCE_SKIPS[risk]})"
+                                          if risk in RISK_TOLERANCE_SKIPS else ""),
     ])
+
+
+def risk_tolerance_hint(tolerance: str | None) -> str:
+    """Appended to a "nothing found" message when the saved risk tolerance left routes out.
+    It has no per-command option to override, unlike saved_filters_hint's filters."""
+    if tolerance not in RISK_TOLERANCE_SKIPS:
+        return ""
+    return (f" Your saved risk tolerance ({tolerance}) skips {RISK_TOLERANCE_SKIPS[tolerance]} - "
+            "change it with /set-trading-preferences.")
 
 
 def saved_filters_hint(labels: list[str]) -> str:
