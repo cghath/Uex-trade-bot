@@ -65,7 +65,18 @@ def test_price_shows_buying_capacity_next_to_each_sell_location(tmp_path):
         assert line.startswith("⚪ **Terminal A**"), f"expected the dot to lead the line: {line!r}"
         assert "buying 250 SCU" in line
         assert FRESHNESS_LEGEND in embed.footer.text
-        assert SELL_SIDE_STATUS_CLARIFIER in embed.footer.text
+        # Audit UX-18: the footer only explains what's shown - no status label here, so no
+        # status explanation, and no est. buying / holds lines to explain either.
+        assert SELL_SIDE_STATUS_CLARIFIER not in embed.footer.text
+        assert "est. buying" not in embed.footer.text and "holds ~" not in embed.footer.text
+        assert "updated every 30 min" in embed.footer.text
+
+        labelled = _cog(db, price_rows=rows)
+        labelled.bot.uex.get_commodities_status = AsyncMock(return_value={
+            "buy": [], "sell": [{"code": 1, "name": "Out of Stock", "name_abbr": "OOS"}]})
+        interaction = _FakeInteraction()
+        await labelled.price.callback(labelled, interaction, commodity="Gold")
+        assert SELL_SIDE_STATUS_CLARIFIER in interaction.followup.send.call_args.kwargs["embed"].footer.text
 
     asyncio.run(run())
 

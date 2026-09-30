@@ -140,7 +140,7 @@ def test_trade_route_profit_and_margin():
         sell_price=175.567,
     )
     assert route.profit_per_unit == 75.57
-    assert route.margin_pct == 75.6
+    assert route.roi_pct == 75.6
 
 
 def test_trade_route_margin_is_zero_when_buy_price_is_zero():
@@ -151,4 +151,4 @@ def test_trade_route_margin_is_zero_when_buy_price_is_zero():
         sell_terminal="B",
         sell_price=100,
     )
-    assert route.margin_pct == 0.0
+    assert route.roi_pct == 0.0

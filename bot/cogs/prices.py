@@ -11,6 +11,7 @@ from discord.ext import commands
 
 from bot.cogs.ships import ship_name_autocomplete
 from bot.autocomplete import fetch_within
+from bot.uex.client import cache_interval_text
 from bot.uex.exceptions import UexApiError, describe_uex_api_error
 from bot.uex.data_health import (
     FRESHNESS_LEGEND,
@@ -283,81 +284,76 @@ class Prices(commands.Cog):
                 _positive_int(r["id_terminal"]): rows for r, rows in zip(history_candidates, history_results)
             }
 
-        # Footer set BEFORE the fields below are added (not after), matching this
-        # codebase's established _add_chunked_fields convention - its len(embed) budget
-        # check needs to already include the footer's own real length, or the check can
-        # pass while the fully-assembled embed (footer included) still lands over
-        # Discord's 6000-char combined limit. See route_presentation.py's docstring and
-        # trends.py's identical footer-before-loop ordering.
-        embed.set_footer(
-            text="Data from UEX Corp · cached up to 30 min · status = current stock/demand level · "
-            "buying SCU is the last reported figure, not a fixed capacity · "
-            "'est. buying' is a lower-bound guess from that terminal's own historical peak "
-            "stock, not a confirmed figure · 'holds ~N SCU already' is the terminal's own "
-            "on-hand stock (a different figure, shown only when nothing else is available)\n"
-            f"{SELL_SIDE_STATUS_CLARIFIER}\n"
-            f"Data freshness:\n{FRESHNESS_LEGEND}"
-        )
-        omitted_sides = []
+        # Every line is built first, so the footer only explains what's shown (audit UX-18:
+        # it used to explain every marker on every reply). It's still set before the fields
+        # are added: add_chunked_fields' len(embed) budget must already count it, or the
+        # assembled embed can land over Discord's 6000-char limit.
+        shown: set[str] = set()
+        sell_lines = []
+        for r in top_sell:
+            label = resolve_status_label(status_lookup, "sell", r.get("status_sell"))
+            if label:
+                shown.add("sell status")
+            label_text = f" · {label}" if label else ""
+            terminal_id = _positive_int(r.get("id_terminal"))
+            freshness = freshness_label(health_by_terminal.get(terminal_id))
+            capacity = effective_sell_scu(r.get("scu_sell"), r.get("status_sell"))
+            # A genuine zero stock is real information (the terminal is empty right now),
+            # so _nonnegative_float, not _positive_float: it still gets an estimate below.
+            stock = _nonnegative_float(r.get("scu_sell_stock"))
+            estimate = (
+                estimate_sell_capacity_from_history(history_by_terminal[terminal_id], stock)
+                if not capacity and terminal_id in history_by_terminal
+                else None
+            )
+            if capacity:
+                capacity_text = f" · buying {capacity:,.0f} SCU"
+                shown.add("buying")
+            elif estimate:
+                # UEX's own historical peak - still only an estimate, so it's worded as one
+                # and the peak's age is shown.
+                age_note = (
+                    f", peak {estimate.source_age_days:.0f}d ago"
+                    if estimate.source_age_days is not None and estimate.source_age_days >= 1
+                    else ""
+                )
+                capacity_text = f" · est. buying ~{estimate.scu:,.0f} SCU{age_note}"
+                shown.add("estimate")
+            elif stock is not None:
+                # The terminal's own on-hand stock: a different figure from how much it
+                # buys, worded so it's never mistaken for one. 0 is shown too.
+                capacity_text = f" · holds ~{stock:,.0f} SCU already"
+                shown.add("holds")
+            else:
+                capacity_text = ""
+            sell_lines.append(
+                f"{freshness} **{r['terminal_name']}** — {r['price_sell']:.2f} aUEC/unit"
+                f"{capacity_text}{label_text}"
+            )
+        buy_lines = []
+        for r in top_buy:
+            label = resolve_status_label(status_lookup, "buy", r.get("status_buy"))
+            label_text = f" · {label}" if label else ""
+            freshness = freshness_label(health_by_terminal.get(_positive_int(r.get("id_terminal"))))
+            buy_lines.append(f"{freshness} **{r['terminal_name']}** — {r['price_buy']:.2f} aUEC/unit{label_text}")
 
-        if top_sell:
-            lines = []
-            for r in top_sell:
-                label = resolve_status_label(status_lookup, "sell", r.get("status_sell"))
-                label_text = f" · {label}" if label else ""
-                terminal_id = _positive_int(r.get("id_terminal"))
-                freshness = freshness_label(health_by_terminal.get(terminal_id))
-                capacity = effective_sell_scu(r.get("scu_sell"), r.get("status_sell"))
-                # Audit-confirmed carry-forward defect: _positive_float discarded a
-                # genuine zero, so a currently-empty terminal (real, useful information -
-                # not "no data") silently lost its historical-peak estimate below, even
-                # though estimate_sell_capacity_from_history already accepts and uses a
-                # real 0.0 current_stock to compute one.
-                stock = _nonnegative_float(r.get("scu_sell_stock"))
-                estimate = (
-                    estimate_sell_capacity_from_history(history_by_terminal[terminal_id], stock)
-                    if not capacity and terminal_id in history_by_terminal
-                    else None
-                )
-                if capacity:
-                    capacity_text = f" · buying {capacity:,.0f} SCU"
-                elif estimate:
-                    # A real UEX-provided historical peak, not something this bot collected
-                    # itself - still only an estimate (the terminal's true capacity could
-                    # exceed anything UEX's own history happens to cover), so the wording
-                    # and the age of that peak are both shown rather than stating it as fact.
-                    age_note = (
-                        f", peak {estimate.source_age_days:.0f}d ago"
-                        if estimate.source_age_days is not None and estimate.source_age_days >= 1
-                        else ""
-                    )
-                    capacity_text = f" · est. buying ~{estimate.scu:,.0f} SCU{age_note}"
-                elif stock is not None:
-                    # UEX has no recorded "amount actually bought" for this terminal, but
-                    # does report its own on-hand stock of the commodity - a DIFFERENT
-                    # figure (the terminal's inventory level, not a buying figure) shown
-                    # distinctly so it's never mistaken for the real thing. `is not None`,
-                    # not a truthy check - stock=0.0 (genuinely empty right now) is real,
-                    # useful information and must not silently fall through to no display
-                    # at all, same reasoning as switching to _nonnegative_float above.
-                    capacity_text = f" · holds ~{stock:,.0f} SCU already"
-                else:
-                    capacity_text = ""
-                lines.append(
-                    f"{freshness} **{r['terminal_name']}** — {r['price_sell']:.2f} aUEC/unit"
-                    f"{capacity_text}{label_text}"
-                )
-            if not add_chunked_fields(embed, name="Best places to SELL", lines=lines):
-                omitted_sides.append("SELL")
-        if top_buy:
-            lines = []
-            for r in top_buy:
-                label = resolve_status_label(status_lookup, "buy", r.get("status_buy"))
-                label_text = f" · {label}" if label else ""
-                freshness = freshness_label(health_by_terminal.get(_positive_int(r.get("id_terminal"))))
-                lines.append(f"{freshness} **{r['terminal_name']}** — {r['price_buy']:.2f} aUEC/unit{label_text}")
-            if not add_chunked_fields(embed, name="Best places to BUY", lines=lines):
-                omitted_sides.append("BUY")
+        notes = [f"Data from UEX Corp · updated every {cache_interval_text('commodities_prices')}"]
+        if "buying" in shown:
+            notes.append("'buying' is the last reported figure, not a fixed capacity")
+        if "estimate" in shown:
+            notes.append("'est. buying' is a lower-bound guess from the terminal's own past peak")
+        if "holds" in shown:
+            notes.append("'holds ~N SCU already' is the terminal's own on-hand stock, not how much it buys")
+        footer_lines = [" · ".join(notes)]
+        if "sell status" in shown:
+            footer_lines.append(SELL_SIDE_STATUS_CLARIFIER)
+        footer_lines.append(f"Data freshness: {FRESHNESS_LEGEND}")
+        embed.set_footer(text="\n".join(footer_lines))
+        omitted_sides = []
+        if sell_lines and not add_chunked_fields(embed, name="Best places to SELL", lines=sell_lines):
+            omitted_sides.append("SELL")
+        if buy_lines and not add_chunked_fields(embed, name="Best places to BUY", lines=buy_lines):
+            omitted_sides.append("BUY")
 
         if omitted_sides:
             # Bounded, short addition - the exact case TRUNCATION_NOTICE_RESERVE exists
@@ -729,7 +725,7 @@ class Prices(commands.Cog):
                     value_lines.append(" · ".join(pct_bits))
                 loc_bits = []
                 if distance is not None:
-                    loc_bits.append(f"{distance:.1f} GM")
+                    loc_bits.append(f"{distance:.1f} Gm")
                 if score is not None:
                     loc_bits.append(f"UEX score {score:,.0f}")
                 if loc_bits:
@@ -909,7 +905,7 @@ class Prices(commands.Cog):
         for route in routes:
             value_lines = [
                 f"Buy {route.buy_price:.2f} / Sell {route.sell_price:.2f}\n"
-                f"Profit: **{route.profit_per_unit:.2f} aUEC/unit** ({route.margin_pct}%)"
+                f"Profit: **{route.profit_per_unit:.2f} aUEC/unit** (ROI {route.roi_pct}%)"
             ]
             for side, terminal_id in (("origin", route.buy_terminal_id), ("destination", route.sell_terminal_id)):
                 health_note = health_notes.get(terminal_id)

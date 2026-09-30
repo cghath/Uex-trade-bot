@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from bot.uex.item_finder import split_place_and_vendor
+from bot.uex.item_finder import place_and_vendor_text, split_place_and_vendor
 
 # Discord rejects message content over 2000 characters; the browsing view's text also
 # carries a header and selection summary around this list.
@@ -285,11 +285,7 @@ def shop_text(terminal_name: str | None) -> str | None:
     if not terminal_name:
         return None
     place, vendor = split_place_and_vendor({"terminal_name": terminal_name})
-    if not vendor:
-        return place
-    if place.rstrip().endswith(")"):
-        return f"{vendor} at {place}"
-    return f"{place} ({vendor})"
+    return place_and_vendor_text(place, vendor)
 
 
 def list_price_text(locked_price: float | None, locked_shop: str | None,

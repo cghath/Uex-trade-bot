@@ -37,7 +37,9 @@ class TradeRoute:
         return round(self.sell_price - self.buy_price, 2)
 
     @property
-    def margin_pct(self) -> float:
+    def roi_pct(self) -> float:
+        """Profit per aUEC spent, as UEX's own price_roi (audit MSG-16: this was named
+        margin_pct, but margin is profit per aUEC of the sale - UEX's price_margin)."""
         if self.buy_price <= 0:
             return 0.0
         return round((self.profit_per_unit / self.buy_price) * 100, 1)

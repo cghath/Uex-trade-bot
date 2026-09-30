@@ -1335,8 +1335,12 @@ class ShipPartsFinder(commands.Cog):
         command and ↻ Refresh."""
         try:
             ports = await self._ports_for_vehicle(vehicle)
-        except WikiApiError as exc:
-            return f"Couldn't load {vehicle.get('name')}'s components: {exc}"
+        except WikiUnavailableError:
+            return (f"Couldn't reach the Star Citizen Wiki for **{vehicle.get('name')}**'s component slots "
+                    "right now - try again in a few minutes.")
+        except WikiApiError:
+            logger.warning("No usable wiki slot data for %s", vehicle.get("name"), exc_info=True)
+            return f"The Star Citizen Wiki doesn't list usable component slots for **{vehicle.get('name')}** yet."
         grouped = group_ports_by_category(ports)
         if not grouped:
             return f"No supported component categories found for **{vehicle.get('name')}** yet."

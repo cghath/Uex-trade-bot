@@ -258,6 +258,11 @@ date - no open item, nothing to record here.
       origin:/destination:` and `/multi-stop-route origin:`; `help.py` CATEGORIES and
       `ROUTE_COMMANDS`/`PREFERENCE_READERS` updated. If aiv2's AI tools or prompts name the
       three old commands, point them at the new options. See PROJECT_CONTEXT.md entry 110
+- [ ] P3 wording: "Gm" everywhere, `TradeRoute.roi_pct` (was `margin_pct`), digest "just now",
+      Sellability Rating wording in `bot/cogs/liquidity.py`, `place_and_vendor_text` for
+      shop names, Ship Parts Finder's wiki-failure messages, `/price`'s shown-only footer,
+      and `default_permissions(manage_guild=True)` on the digest setup commands and
+      `/command-usage`. See PROJECT_CONTEXT.md entry 111
 
 ## To port: aiv2 -> production
 

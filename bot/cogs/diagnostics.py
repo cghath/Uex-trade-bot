@@ -93,6 +93,7 @@ class Diagnostics(commands.Cog):
     )
     @app_commands.describe(command="Optional: see WHICH real users ran this specific command, for feedback outreach.")
     @app_commands.autocomplete(command=tracked_command_autocomplete)
+    @app_commands.default_permissions(manage_guild=True)  # hidden from members (audit UX-17)
     async def command_usage(self, interaction: discord.Interaction, command: str | None = None) -> None:
         if not await self.bot.is_owner(interaction.user):
             await interaction.response.send_message("Owner-only command.", ephemeral=True)

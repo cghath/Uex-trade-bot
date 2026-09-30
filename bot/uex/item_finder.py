@@ -52,6 +52,18 @@ def split_place_and_vendor(row: dict[str, Any]) -> tuple[str, str | None]:
     return str(fallback or terminal_name or "Unknown"), None
 
 
+def place_and_vendor_text(place: str, vendor: str | None, *, bold: bool = False) -> str:
+    """How every shop command names a shop (audit MSG-19): 'Place (Vendor)', or 'Vendor at
+    Place' when the place already ends in its own parentheses ('Ship Weapons at Pyro
+    Gateway (Stanton)') rather than stacking two. `bold` bolds the place."""
+    shown = f"**{place}**" if bold else place
+    if not vendor:
+        return shown
+    if place.rstrip().endswith(")"):
+        return f"{vendor} at {shown}"
+    return f"{shown} ({vendor})"
+
+
 def rank_item_listings(
     listings: list[dict[str, Any]], distances: dict[int, float | None], *,
     origin_star_system: str | None = None,
@@ -122,6 +134,6 @@ def format_item_listing_line(listing: ItemListing, *, origin_star_system: str | 
     Plain proportional text sidesteps both: it never collapses two different names to the
     same string, and a long name just wraps gracefully like any other sentence instead of
     misaligning a column."""
-    vendor_part = f" ({listing.vendor_label})" if listing.vendor_label else ""
     distance = _distance_label(listing, origin_star_system=origin_star_system)
-    return f"**{listing.place_label}**{vendor_part} — {listing.price_buy:,.0f} aUEC · {distance}"
+    shop = place_and_vendor_text(listing.place_label, listing.vendor_label, bold=True)
+    return f"{shop} — {listing.price_buy:,.0f} aUEC · {distance}"
