@@ -12,6 +12,7 @@ from discord.ext import commands
 from bot.config import Config
 from bot.db.crypto import load_or_create_key
 from bot.db.database import Database
+from bot.discord_ui import on_app_command_error
 from bot.uex.client import UexClient
 from bot.uex.exceptions import UexApiError
 
@@ -57,6 +58,8 @@ class UexBot(commands.Bot):
         intents.message_content = True
         super().__init__(command_prefix="!uex-unused-", intents=intents)
         self.config = config
+        # Every slash command answers when it fails, instead of leaving "thinking..." up.
+        self.tree.error(on_app_command_error)
 
         # Fernet key for encrypting per-user UEX secret keys at rest, stored next to the DB.
         credentials_key_path = config.database_path.parent / "credentials.key"

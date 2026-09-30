@@ -14,14 +14,15 @@ not a silent one, and one Phase 1.5 (persistent views with custom_ids) would clo
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
 import json
 import logging
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 
 import discord
 from discord.ext import commands, tasks
 
+from bot.discord_ui import BotModal, BotView
 from bot.uex.backup_routes import find_backup_routes
 from bot.uex.mixed_routes import find_hedge_cargo
 from bot.uex.route_presentation import cargo_item_line
@@ -121,7 +122,7 @@ class TrackableRoute:
     system: str | None = None
 
 
-class ActualAmountModal(discord.ui.Modal):
+class ActualAmountModal(BotModal):
     scu_input = discord.ui.TextInput(label="Actual SCU", placeholder="e.g. 40", required=True, max_length=10)
     price_input = discord.ui.TextInput(
         label="Actual price per unit (optional)", required=False, max_length=12
@@ -218,7 +219,7 @@ class ActualAmountModal(discord.ui.Modal):
             )
 
 
-class MoreOutcomeFollowupView(discord.ui.View):
+class MoreOutcomeFollowupView(BotView):
     """Only shown after 'More than quoted' - resolves whether the confirmed SCU is an exact
     post-leg figure (terminal drained) or just a lower bound (the player's own cargo hold,
     or the terminal's demand, capped them first). See terminal_state_update_for_outcome for
@@ -304,7 +305,7 @@ class MoreOutcomeFollowupView(discord.ui.View):
             await self.parent_view.reenable_in_background()
 
 
-class LegOutcomeView(discord.ui.View):
+class LegOutcomeView(BotView):
     """Posted for the CURRENT leg only. 'Less'/'More' open a modal for the actual figure -
     'missing' is derived from a 'Less' report of exactly 0, not a separate button, since the
     two are otherwise identical (see ActualAmountModal.on_submit)."""
@@ -463,7 +464,7 @@ class LegOutcomeView(discord.ui.View):
         )
 
 
-class AbandonConfirmView(discord.ui.View):
+class AbandonConfirmView(BotView):
     """Confirm/cancel gate in front of a real, irreversible action - same pattern as
     ConfirmDeleteListingView in bot/cogs/marketplace.py."""
 
@@ -512,7 +513,7 @@ class AbandonConfirmView(discord.ui.View):
         await interaction.response.edit_message(content="Continuing to track this route.", view=self)
 
 
-class HedgeReportModal(discord.ui.Modal):
+class HedgeReportModal(BotModal):
     """A single number, not the three-button matched/less/more flow LegOutcomeView uses -
     a hedge is a best-effort side note, not the route the player explicitly asked to
     track, so it doesn't need that flow's precision (e.g. an over-quote here is always
@@ -566,7 +567,7 @@ class HedgeReportModal(discord.ui.Modal):
         await self.parent_view.disable_in_background()
 
 
-class HedgeReportView(discord.ui.View):
+class HedgeReportView(BotView):
     """Deliberately has no claim()/release_claim() dance like LegOutcomeView - a hedge
     report is a best-effort side note, never part of the tracked route's own
     idempotency-critical sequence, and Database.record_hedge_side_outcome's own
@@ -604,7 +605,7 @@ class HedgeReportView(discord.ui.View):
                 logger.info("Could not disable a hedge report button (non-critical)", exc_info=True)
 
 
-class RouteTrackingView(discord.ui.View):
+class RouteTrackingView(BotView):
     """Attach to a route-recommendation embed - one 'Track' button per route (up to
     MAX_TRACKABLE_ROUTES), each opening its own private thread. Built with plain
     discord.ui.Button instances (not the @discord.ui.button decorator) since the number of

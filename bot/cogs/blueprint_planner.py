@@ -1,13 +1,15 @@
 """Interactive recipe configuration and owner-private shopping-list delivery."""
 from __future__ import annotations
 
-import logging
+import asyncio
 import io
+import logging
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
 import discord
 
+from bot.discord_ui import BotView
 from bot.uex.blueprint_crafting import Recipe, aggregate
 
 if TYPE_CHECKING:
@@ -38,11 +40,18 @@ def _pages(lines: list[str], limit: int = 1900) -> list[str]:
 class ShoppingService:
     def __init__(self, bot) -> None:
         self.bot = bot
+        # One get-or-create at a time per player and server (audit REL-16): without it, two
+        # quick clicks each found no thread, each created one, and one was left orphaned.
+        self._thread_locks: dict[tuple[int, int], asyncio.Lock] = {}
 
     async def _thread(self, interaction: discord.Interaction) -> discord.Thread | None:
         if interaction.guild_id is None:
             return None
+        lock = self._thread_locks.setdefault((interaction.user.id, interaction.guild_id), asyncio.Lock())
+        async with lock:
+            return await self._get_or_create_thread(interaction)
 
+    async def _get_or_create_thread(self, interaction: discord.Interaction) -> discord.Thread | None:
         saved = await self.bot.db.get_blueprint_thread(interaction.user.id, interaction.guild_id)
         if saved:
             thread = self.bot.get_channel(saved["thread_id"])
@@ -173,7 +182,7 @@ class ShoppingService:
         await interaction.followup.send(f"Your blueprint list is in {thread.mention}.", ephemeral=True)
 
 
-class ShoppingView(discord.ui.View):
+class ShoppingView(BotView):
     """Persistent controls whose callbacks always re-check the stored owner."""
     def __init__(self, service: ShoppingService) -> None:
         super().__init__(timeout=None)
@@ -266,7 +275,7 @@ class ChoiceSelect(discord.ui.Select):
 SELECTORS_PER_PAGE = 4
 
 
-class CraftConfigView(discord.ui.View):
+class CraftConfigView(BotView):
     def __init__(self, cog: "Blueprints", recipe: Recipe, count: int,
                  quality_options: dict[str, tuple[int, ...]]) -> None:
         super().__init__(timeout=900)
@@ -332,7 +341,7 @@ class CraftConfigView(discord.ui.View):
         await self.update(interaction)
 
 
-class CraftLaunchView(discord.ui.View):
+class CraftLaunchView(BotView):
     def __init__(self, cog: "Blueprints", recipe: Recipe, count: int) -> None:
         super().__init__(timeout=900)
         self.cog, self.recipe, self.count = cog, recipe, count

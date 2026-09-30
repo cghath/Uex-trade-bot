@@ -12,8 +12,10 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from bot.discord_ui import BotModal
 
-class LinkUexModal(discord.ui.Modal, title="Link your UEX account"):
+
+class LinkUexModal(BotModal, title="Link your UEX account"):
     secret_key_input = discord.ui.TextInput(
         label="UEX secret key",
         placeholder="Paste your UEX secret_key (from your UEX account page)",

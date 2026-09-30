@@ -3612,6 +3612,44 @@ they're in sync).
        command tests fail against the old cogs; only the 3 pure `fit_lines` tests pass
        there.
 
+102. **Every failed command, button and form now answers; one private thread per player; a
+     safe `Retry-After`.** Audit findings REL-13 (the rest of it), REL-16 and REL-17.
+     - **REL-13.** There was no command-tree or view error handler anywhere, and discord.py's
+       defaults only log. A command that raised after deferring stayed on "thinking..."
+       forever, and a failing button or form showed Discord's "interaction failed" with
+       nothing saying what to do next.
+       - New in `bot/discord_ui.py`: `tell_player_it_failed`, `on_app_command_error`
+         (registered in `UexBot.__init__` with `tree.error`), and `BotView`/`BotModal` base
+         classes whose `on_error` answers. All 25 views and 7 modals now use them, and a test
+         walks every subclass so a new one can't be left on the plain base.
+       - A missing permission now names the permission and the command ("You need the Manage
+         Server permission to use `/set-digest-channel`."). Digest's own
+         `cog_app_command_error` is gone: discord.py calls the tree handler after any cog
+         handler, so both would have replied. A test checks no cog adds one back.
+       - Not covered, on purpose: autocomplete errors never reach the tree handler
+         (discord.py swallows them; the autocompletes already time-limit themselves), and
+         dynamic items aren't views - Ship Parts Finder's ↻ Refresh, the only one, already
+         catches its own failures.
+       - Ship Parts Finder: a failed part load, whatever the exception, now keeps the browser,
+         clears the old parts from the message and says "Pick it again to retry". Before, a
+         non-UEX, non-wiki failure left the old parts on screen after the view had dropped
+         them, and a UEX or wiki failure replaced the whole browser with a bare error line.
+         Failing to post the browser in the player's thread now says so too.
+     - **REL-16.** Ship Parts Finder's and the blueprint planner's thread services take a
+       per-(player, server) `asyncio.Lock` around get-or-create, so two quick calls can't each
+       create a private thread and orphan one.
+     - **REL-17.**
+       - `retry_after_seconds` (`bot/uex/client.py`) reads `Retry-After` as seconds or an HTTP
+         date (a past date means now), falls back to `2**attempt` for anything else, and caps
+         at 60 s, UEX's per-minute window. `float()` raised `ValueError` on a date, which none
+         of the UEX-only excepts catch.
+       - The 25-option slot menu: measured on the Pi's saved slots for all 201 ships, the most
+         in one category is 12 (the Fury MX's missile racks), and turret gun slots add only a
+         few (the Corsair has 8 gun slots). It can't be hit today, so rather than paging the
+         menu, the browser now says so if a category ever passes 25.
+     - Tests: `tests/test_failed_interactions.py` (26). Each fix was undone one at a time, and
+       its test failed every time.
+
 ## Where to look for what
 
 Six docs, deliberately scoped so they don't duplicate each other:

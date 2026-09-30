@@ -1,7 +1,19 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.21.
+the oldest entry below); the next new entry is 2.22.
+
+---
+
+## 2.21 - 2026-09-29 - No more endless "thinking…"
+
+**Fixed**
+- Every command, button and form - If something goes wrong on the bot's side, you now get a message saying so,
+  instead of the bot "thinking…" forever or a button that seems to do nothing.
+- `/ship-parts-finder` - If a category's parts fail to load, the browser stays up and asks you to pick it again,
+  instead of showing the previous parts or replacing the browser with an error.
+- `/ship-parts-finder`, `/blueprint-list` - Using them twice in quick succession no longer creates two private
+  threads.
 
 ---
 

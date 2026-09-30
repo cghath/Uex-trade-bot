@@ -17,7 +17,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 import httpx
@@ -82,6 +85,35 @@ _AUTH_ERROR_STATUSES = {
     "user_not_found",
     "user_not_allowed",
 }
+
+# UEX's rate limit is per minute, so no 429 needs a longer wait than that.
+RETRY_AFTER_MAX_SECONDS = 60.0
+
+
+def retry_after_seconds(header: str | None, attempt: int, now: datetime | None = None) -> float:
+    """How long to wait after a 429. `Retry-After` may be seconds or an HTTP date (a past date
+    means now); anything else (missing, garbled, negative, not finite) falls back to
+    2**attempt, and every answer is capped at RETRY_AFTER_MAX_SECONDS. A plain float() used
+    to raise ValueError on a date, which none of the UEX-only excepts catch (audit REL-17)."""
+    fallback = float(2**attempt)
+    seconds = fallback
+    if header:
+        try:
+            seconds = float(header)
+            if seconds < 0:
+                seconds = fallback
+        except ValueError:
+            try:
+                when = parsedate_to_datetime(header)
+            except (TypeError, ValueError, IndexError):
+                when = None
+            if when is not None:
+                if when.tzinfo is None:
+                    when = when.replace(tzinfo=timezone.utc)
+                seconds = (when - (now or datetime.now(timezone.utc))).total_seconds()
+    if not math.isfinite(seconds):
+        seconds = fallback
+    return min(max(seconds, 0.0), RETRY_AFTER_MAX_SECONDS)
 
 
 class UexClient:
@@ -215,7 +247,7 @@ class UexClient:
                 continue
 
             if response.status_code == 429:
-                retry_after = float(response.headers.get("Retry-After", 2**attempt))
+                retry_after = retry_after_seconds(response.headers.get("Retry-After"), attempt)
                 logger.warning("UEX rate limit hit on %s, retrying in %.1fs", path, retry_after)
                 await asyncio.sleep(retry_after)
                 continue

@@ -203,6 +203,13 @@ date - no open item, nothing to record here.
       its error via `describe_uex_api_error`. aiv2's AI tools that list listings should show
       the listing id too. Tests: `tests/test_listing_ids.py`, `tests/test_long_lists.py`.
       See PROJECT_CONTEXT.md entry 101
+- [ ] Failed interactions always answer: `bot/discord_ui.py`'s `on_app_command_error`
+      (registered on the tree in `bot/main.py`) and `BotView`/`BotModal` as the base of every
+      view and modal; digest's `cog_app_command_error` removed. Also Ship Parts Finder's
+      load and thread-post failures, per-player thread locks in the ship parts and blueprint
+      services, and `retry_after_seconds` in the UEX client. aiv2's own views and modals
+      (AI chat) need the base class too; the subclass walk in
+      `tests/test_failed_interactions.py` lists any it misses. See PROJECT_CONTEXT.md entry 102
 
 ## To port: aiv2 -> production
 
