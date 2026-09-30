@@ -96,7 +96,7 @@ def test_the_link_account_form_defers_before_saving_the_key():
     async def run():
         interaction = _interaction()
         db = _RecordingDb(interaction)
-        modal = LinkUexModal(NS(db=db))
+        modal = LinkUexModal(NS(db=db, uex=NS(get_user_profile=AsyncMock(return_value={"username": "pilot"}))))
         modal.secret_key_input._value = "  secret-key  "
         await modal.on_submit(interaction)
         return interaction, db

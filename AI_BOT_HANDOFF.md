@@ -229,6 +229,11 @@ date - no open item, nothing to record here.
       `/alert-list` and the add confirmations saying how often each type fires. If aiv2's
       AI tools create alerts, they need the new `scope` argument.
       Tests: `tests/test_alert_delivery_choice.py`. See PROJECT_CONTEXT.md entry 105
+- [ ] Inventory stack/job autocompletes on the six id-taking inventory commands, and the
+      UEX key check on /link-uex-account (`UexClient.get_user_profile`) with the
+      leaderboard disclosure (`LEADERBOARD_NOTE`). If aiv2 links keys any other way, check
+      them the same way.
+      Tests: `tests/test_inventory_pickers_and_key_check.py`. See PROJECT_CONTEXT.md entry 106
 
 ## To port: aiv2 -> production
 

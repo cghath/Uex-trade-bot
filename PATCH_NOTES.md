@@ -1,7 +1,23 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.25.
+the oldest entry below); the next new entry is 2.26.
+
+---
+
+## 2.25 - 2026-09-30 - Pick from a list; linking checks your key
+
+**Changed**
+- `/inventory-set-minimum`, `/inventory-remove`, `/inventory-post-now` - Pick the stack from a list of your own
+  stacks instead of looking up its number in `/inventory` first.
+- `/inventory-confirm-sale`, `/inventory-cancel-post`, `/inventory-resolve-floor` - Pick the listing from a list,
+  showing only the ones that command can act on.
+- `/link-uex-account`, `/uex-account-status` - Now say that a linked account appears on the server's `/leaderboard`,
+  and how to come off it.
+
+**Fixed**
+- `/link-uex-account` - Checks your key with UEX before saving it. A wrong key is no longer "linked" only to fail
+  later, and the confirmation names the UEX account it belongs to.
 
 ---
 
