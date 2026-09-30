@@ -197,6 +197,12 @@ date - no open item, nothing to record here.
       clear-default-ship, clear-trading-preferences, `/negotiation-alerts` off). aiv2 shares
       these cogs; re-run the same first-await sweep there (the entry describes it).
       Test: `tests/test_defer_before_db_writes.py`. See PROJECT_CONTEXT.md entry 100
+- [ ] Listing ids in `/marketplace-search`, `/my-favorites` and `/my-negotiations`; the new
+      `bot/delivery.py: fit_lines` for plain-text lists (favorites, negotiations, trade log,
+      UEX trades); `/trade-log` limit 1-50; `/uex-trades` dates as Discord timestamps and
+      its error via `describe_uex_api_error`. aiv2's AI tools that list listings should show
+      the listing id too. Tests: `tests/test_listing_ids.py`, `tests/test_long_lists.py`.
+      See PROJECT_CONTEXT.md entry 101
 
 ## To port: aiv2 -> production
 

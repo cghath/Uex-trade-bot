@@ -3584,6 +3584,34 @@ they're in sync).
        old cogs. Three existing tests that read the reply from `response.send_message`
        now read the followup.
 
+101. **Listing ids where players need them, and plain-text lists that always send.** Audit
+     findings UX-4, UX-13, MSG-9 and MSG-10.
+     - **UX-4.** `/marketplace-listing` and `/marketplace-delete-listing` take a listing id,
+       and their option descriptions say it's shown in `/marketplace-search` - it wasn't.
+       - `/my-favorites` printed the favourite row's own `id`, and `/my-negotiations` the
+         negotiation's. No command accepts either, and negotiation-alert DMs don't show
+         the negotiation id.
+       - All three now show the listing's id: search as "· listing #N" on each result plus a
+         footer pointer, and the two lists as "Listing #N — ...".
+     - **UX-13.** A sweep for plain-text `"\n".join(lines)` sends found four with no length
+       guard: `/my-favorites`, `/my-negotiations`, `/trade-log` and `/uex-trades`. Over
+       Discord's 2,000 characters a send is refused outright, so the command failed.
+       `/trade-log`'s `limit` was also unbounded.
+       - New `fit_lines` (`bot/delivery.py`, beside `fit_message`) keeps whole lines, counts
+         the rest as "…and N more.", and always keeps a footer line.
+       - All four use it now, and `/trade-log`'s `limit` is `Range[int, 1, 50]`.
+       - The other joined-list sends already guard themselves: `/alert-list` truncates,
+         the blueprint list slices to 1,900, and `/command-usage` pages.
+     - **MSG-9.** `/uex-trades` printed UEX's `date_added` unix timestamp raw. It's now a
+       Discord `<t:N:f>` timestamp, shown in each viewer's own time zone.
+     - **MSG-10.** `/uex-trades` told the player their key "may be invalid or expired" for
+       any UEX failure, an outage included. It now uses `describe_uex_api_error`, which
+       only suggests re-linking for a `UexAuthError`. That was the only such message in
+       the account and trade cogs.
+     - Tests: `tests/test_listing_ids.py` (3) and `tests/test_long_lists.py` (8). All 8
+       command tests fail against the old cogs; only the 3 pure `fit_lines` tests pass
+       there.
+
 ## Where to look for what
 
 Six docs, deliberately scoped so they don't duplicate each other:

@@ -18,6 +18,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from bot.autocomplete import fetch_within
+from bot.delivery import fit_lines
 from bot.uex.charts import render_price_history_chart
 from bot.uex.exceptions import UexApiError, describe_uex_api_error
 from bot.uex.inventory import extract_listing_id
@@ -533,12 +534,16 @@ class Marketplace(commands.Cog):
             quality = parse_listing_quality(listing.get("quality"))
             quality_text = f" · quality {quality:.0f}" if quality is not None else ""
             price_text = f"{listing.get('operation', '?').title()} · {price:,.0f} {currency}" if price is not None else "Price n/a"
+            # The id /marketplace-listing and /marketplace-delete-listing take, which their
+            # own descriptions say is found here - it wasn't shown (audit UX-4).
+            if listing.get("id") is not None:
+                price_text += f" · listing #{listing['id']}"
             embed.add_field(
                 name=listing.get("title", "Untitled listing")[:256],
                 value=price_text + f"\nby {seller} · {location}{stock_text}{quality_text}",
                 inline=False,
             )
-        footer = "UEX Marketplace · player-to-player listings"
+        footer = "UEX Marketplace · player-to-player listings · /marketplace-listing <id> for details"
         if min_quality is not None or max_quality is not None:
             footer += " · quality filter applied (0-1000 scale, only listings the seller set a quality on)"
         embed.set_footer(text=footer)
@@ -804,8 +809,13 @@ class Marketplace(commands.Cog):
             price_text = f"{price:,.0f} {f.get('currency', 'UEC')}" if price is not None else "price n/a"
             title = f.get("title") or f.get("listing_title") or "Untitled listing"
             sold_note = " (sold out)" if f.get("is_sold_out") else ""
-            lines.append(f"#{f.get('id')} — **{marketplace_item_link(title, id_item)}** · {price_text}{sold_note}")
-        await interaction.followup.send("\n".join(lines))
+            # id_listing, not the favourite row's own id: that one no command accepts, while
+            # /marketplace-listing takes this (audit UX-4).
+            lines.append(f"Listing #{f.get('id_listing')} — **{marketplace_item_link(title, id_item)}** · "
+                         f"{price_text}{sold_note}")
+        await interaction.followup.send(
+            fit_lines(lines, footer="-# `/marketplace-listing <id>` shows a listing's full details.")
+        )
 
     @app_commands.command(name="my-negotiations", description="Your own active UEX Marketplace deals.")
     async def my_negotiations(self, interaction: discord.Interaction) -> None:
@@ -834,11 +844,13 @@ class Marketplace(commands.Cog):
             price = parse_uex_number(n.get("price"))
             price_text = f"{price:,.0f}" if price is not None else "?"
             title = marketplace_item_link(n.get("listing_title", "Untitled"), id_item)
+            # The listing's id, as in /my-favorites: the negotiation's own id isn't taken by any
+            # command or shown in negotiation alerts (audit UX-4).
             lines.append(
-                f"#{n.get('id')} {role} — {title} · "
+                f"Listing #{n.get('id_listing')} {role} — {title} · "
                 f"{price_text} {n.get('currency', 'UEC')} · {status}"
             )
-        await interaction.followup.send("\n".join(lines))
+        await interaction.followup.send(fit_lines(lines))
 
     async def _resolve_id_item(self, id_listing: Any) -> int | None:
         """UEX's negotiations/favorites don't carry id_item directly - resolve it from the

@@ -21,7 +21,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from bot.uex.exceptions import UexApiError
+from bot.delivery import fit_lines
+from bot.uex.exceptions import UexApiError, describe_uex_api_error
 from bot.uex.leaderboard import LeaderboardEntry, rank_leaderboard, sum_sell_revenue
 
 logger = logging.getLogger("uexbot.trades")
@@ -34,6 +35,15 @@ OPERATION_CHOICES = [
 # Small pacing delay between per-user /user_trades calls in /leaderboard, so a server with
 # many linked accounts doesn't burst well past what's reasonable against UEX's rate limit.
 _LEADERBOARD_CALL_DELAY = 0.3
+
+
+def _trade_time(value) -> str:
+    """A UEX trade's `date_added` (a unix timestamp) as a Discord timestamp, shown in each
+    viewer's own time zone - it used to print as a raw number like 1790000000 (audit MSG-9)."""
+    try:
+        return f"<t:{int(value)}:f>"
+    except (TypeError, ValueError):
+        return str(value) if value not in (None, "") else "date unknown"
 LEADERBOARD_LIMIT = 10
 
 
@@ -79,7 +89,10 @@ class Trades(commands.Cog):
         )
 
     @app_commands.command(name="trade-log", description="Show your recent logged trades.")
-    async def trade_log(self, interaction: discord.Interaction, limit: int = 10) -> None:
+    @app_commands.describe(limit="How many recent trades to show (1-50, default 10)")
+    async def trade_log(
+        self, interaction: discord.Interaction, limit: app_commands.Range[int, 1, 50] = 10,
+    ) -> None:
         entries = await self.bot.db.get_trade_log(interaction.user.id, limit=limit)
         if not entries:
             await interaction.response.send_message("No trades logged yet. Use /trade-log-add.", ephemeral=True)
@@ -92,7 +105,7 @@ class Trades(commands.Cog):
                 f"{e['quantity_scu']} SCU {e['commodity_name']}{terminal} "
                 f"({e['unit_price']:.2f} aUEC/unit)"
             )
-        await interaction.response.send_message("\n".join(lines), ephemeral=True)
+        await interaction.response.send_message(fit_lines(lines), ephemeral=True)
 
     @app_commands.command(name="uex-trades", description="Show your trade history as logged on UEX itself (requires a linked account).")
     async def uex_trades(self, interaction: discord.Interaction) -> None:
@@ -110,11 +123,10 @@ class Trades(commands.Cog):
         try:
             rows = await self.bot.uex.get_user_trades(secret_key=secret_key)
         except UexApiError as exc:
+            # Only an auth failure is the key's fault; this used to tell the player to
+            # re-link for any failure, a UEX outage included (audit MSG-10).
             await interaction.followup.send(
-                f"Couldn't fetch UEX trade history: {exc}\n"
-                "Your linked secret key may be invalid or expired — try /unlink-uex-account "
-                "then /link-uex-account again with a fresh key.",
-                ephemeral=True,
+                f"Couldn't fetch UEX trade history. {describe_uex_api_error(exc)}", ephemeral=True,
             )
             return
 
@@ -124,10 +136,10 @@ class Trades(commands.Cog):
 
         lines = [
             f"{r.get('operation', '?')} {r.get('scu', '?')} SCU {r.get('commodity_name', '?')} "
-            f"@ {r.get('price', '?')} aUEC/unit ({r.get('date_added', '?')})"
+            f"@ {r.get('price', '?')} aUEC/unit ({_trade_time(r.get('date_added'))})"
             for r in rows[:15]
         ]
-        await interaction.followup.send("\n".join(lines), ephemeral=True)
+        await interaction.followup.send(fit_lines(lines), ephemeral=True)
 
     @app_commands.command(
         name="leaderboard",
