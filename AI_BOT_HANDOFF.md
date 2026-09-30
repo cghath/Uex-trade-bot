@@ -240,6 +240,13 @@ date - no open item, nothing to record here.
       `BotView.grey_out(**edit_kwargs)`. If aiv2's AI chat posts route results, it can send
       them the same way. Tests: `tests/test_route_pages.py`, `tests/route_results.py`.
       See PROJECT_CONTEXT.md entry 107
+- [ ] Saved preferences named and disclosed: `PREFERENCE_READERS`/`preference_scope` and
+      `describe_active_preferences(..., saved=)` ("Filters: ... (saved)") in
+      `bot/uex/trading_preferences.py`; `_filters_note` in the mixed-cargo commands;
+      `/intelligence-brief` applying saved preferences; `/my-trading-preferences` naming a
+      UEX outage. If aiv2 adds or changes a route command, update `PREFERENCE_READERS`:
+      `tests/test_preference_scope.py` checks it against the code. See PROJECT_CONTEXT.md
+      entry 108
 
 ## To port: aiv2 -> production
 

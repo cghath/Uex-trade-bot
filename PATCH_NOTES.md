@@ -1,7 +1,25 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.27.
+the oldest entry below); the next new entry is 2.28.
+
+---
+
+## 2.27 - 2026-09-30 - Saved preferences, said plainly
+
+**Changed**
+- `/intelligence-brief` - Its route suggestions now use your saved `/set-trading-preferences` defaults (budget,
+  space-only, capital-ship access, auto-load-only, system and risk tolerance), like every other route command. Its
+  own budget and space-only options still win when you set them.
+- Every route command - The footer lists the filters shaping the results, and marks the ones that came from your
+  saved preferences "(saved)". `/mixed-routes`, `/multi-stop-route` and `/route-from-multi` used to leave out a
+  saved auto-load, system or risk filter.
+- `/set-trading-preferences`, `/my-trading-preferences` - Now say which commands each default really applies to.
+  Several named the wrong ones.
+
+**Fixed**
+- `/my-trading-preferences` - No longer says your default ship may have been renamed when UEX's ship list just
+  didn't load.
 
 ---
 

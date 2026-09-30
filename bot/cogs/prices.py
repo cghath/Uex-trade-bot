@@ -46,6 +46,18 @@ from bot.uex.trading_preferences import (
     saved_filter_labels,
     saved_filters_hint,
 )
+
+
+def _filters_note(prefs: dict, saved_filters: dict, *, space_only: bool, auto_load_only: bool,
+                  system: str | None) -> str | None:
+    """The footer's "Filters: ..." line for the mixed-cargo commands (audit MSG-8), with
+    the ones that came from saved preferences marked. `saved_filters` is each command's
+    own record of which filters came from saved preferences."""
+    return describe_active_preferences(
+        space_only=space_only, capital_ship_access=bool(prefs["capital_ship_access"]),
+        auto_load_only=auto_load_only, system=system, risk_tolerance=prefs["risk_tolerance"],
+        saved={name for name, value in saved_filters.items() if value},
+    )
 from bot.cogs.route_progression import RouteLegInput, TrackableRoute
 from bot.route_pages import RoutePage, send_route_pages, text_pages
 from bot.uex.route_presentation import (
@@ -425,16 +437,20 @@ class Prices(commands.Cog):
         prefs = await self.bot.db.get_trading_preferences(interaction.user.id)
         # Which filters came from saved preferences rather than this command, so an empty
         # result can say the player's own setting is the cause (audit UX-2).
-        auto_load_hint = saved_filters_hint(saved_filter_labels(
-            auto_load_only=auto_load_only is None and bool(prefs["auto_load_only"])))
+        auto_load_saved = auto_load_only is None and bool(prefs["auto_load_only"])
+        system_saved = system is None and bool(prefs["preferred_system"])
+        auto_load_hint = saved_filters_hint(saved_filter_labels(auto_load_only=auto_load_saved))
         system_hint = saved_filters_hint(saved_filter_labels(
-            system=prefs["preferred_system"] if system is None else None))
+            system=prefs["preferred_system"] if system_saved else None))
         if auto_load_only is None:
             auto_load_only = prefs["auto_load_only"]
         system_value = system.value if system else prefs["preferred_system"]
         # No risk_tolerance here: the player named this commodity, so it isn't filtered out;
         # the note below says when it's outside their tolerance instead.
-        preferences_note = describe_active_preferences(auto_load_only=auto_load_only, system=system_value)
+        preferences_note = describe_active_preferences(
+            auto_load_only=auto_load_only, system=system_value,
+            saved={name for name, on in (("auto_load_only", auto_load_saved), ("system", system_saved)) if on},
+        )
         try:
             rows = await self.bot.uex.get_commodities_prices(commodity_name=commodity)
         except UexApiError as exc:
@@ -1182,6 +1198,8 @@ class Prices(commands.Cog):
         # /mixed-routes) - tracking buttons are additive, never required for the command's
         # own result.
         tracking_cog = self.bot.get_cog("RouteProgression")
+        filters_note = _filters_note(prefs, saved_filters, space_only=space_only, auto_load_only=auto_load_only,
+                                     system=system_value)
         pages: list[RoutePage] = []
         for index, route in enumerate(routes, 1):
             origin_health = (
@@ -1218,8 +1236,8 @@ class Prices(commands.Cog):
             footer = "Collected UEX data · prices can change before arrival · warnings do not change profit ranking"
             if budget is not None:
                 footer += f" · budget {float(budget):,.0f} aUEC"
-            if space_only:
-                footer += " · surface terminals excluded"
+            if filters_note:
+                footer += f" · {filters_note}"
             if capital_access_only:
                 footer += " · capital access confirmed at both ends"
             if origin_name:
@@ -1431,7 +1449,8 @@ class Prices(commands.Cog):
         await self._send_multi_stop_routes(
             interaction, routes, ship_vehicle=ship_vehicle, ship_query=ship_query, budget=budget,
             space_only=space_only, capital_access_only=capital_access_only, auto_load_only=auto_load_only,
-            system=system_value,
+            system=system_value, filters_note=_filters_note(
+                prefs, saved_filters, space_only=space_only, auto_load_only=auto_load_only, system=system_value),
         )
 
     async def _send_multi_stop_routes(
@@ -1446,6 +1465,7 @@ class Prices(commands.Cog):
         capital_access_only: bool,
         auto_load_only: bool,
         system: str | None = None,
+        filters_note: str | None = None,
     ) -> None:
         """Shared per-route embed/tracking/fallback sending for /multi-stop-route and
         /route-from-multi - both build a `routes: list[MultiStopRoute]` differently
@@ -1483,8 +1503,8 @@ class Prices(commands.Cog):
             )
             if budget is not None:
                 route_footer += f" · starting budget {float(budget):,.0f} aUEC"
-            if space_only:
-                route_footer += " · surface terminals excluded"
+            if filters_note:
+                route_footer += f" · {filters_note}"
             if capital_access_only:
                 route_footer += " · capital access confirmed at every stop"
             if note := approximation_note(route.is_exact, per_leg=True):
@@ -1780,7 +1800,8 @@ class Prices(commands.Cog):
         await self._send_multi_stop_routes(
             interaction, routes, ship_vehicle=ship_vehicle, ship_query=ship_query, budget=budget,
             space_only=space_only, capital_access_only=capital_access_only, auto_load_only=auto_load_only,
-            system=system_value,
+            system=system_value, filters_note=_filters_note(
+                prefs, saved_filters, space_only=space_only, auto_load_only=auto_load_only, system=system_value),
         )
 
     @app_commands.command(
@@ -1930,10 +1951,10 @@ class Prices(commands.Cog):
             )
         embed.description = note
         footer = "Collected UEX data · one route search per budget checkpoint, stops early once it plateaus"
-        preferences_note = describe_active_preferences(
-            space_only=space_only, capital_ship_access=capital_access_only,
-            auto_load_only=auto_load_only, system=system_value, risk_tolerance=prefs["risk_tolerance"],
-        )
+        if capital_access_only:
+            footer += " · capital access confirmed at every stop"
+        preferences_note = _filters_note(prefs, saved_filters, space_only=space_only,
+                                         auto_load_only=auto_load_only, system=system_value)
         if preferences_note:
             footer += " · " + preferences_note
         embed.set_footer(text=footer)

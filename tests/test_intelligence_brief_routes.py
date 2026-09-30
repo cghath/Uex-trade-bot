@@ -16,6 +16,9 @@ from bot.cogs import intelligence_brief as intelligence_brief_module
 from bot.cogs.intelligence_brief import IntelligenceBrief
 from bot.db.database import Database
 from bot.uex.client import UexClient
+from bot.uex.trading_preferences import DEFAULT_TRADING_PREFERENCES
+
+_NO_PREFS = dict(DEFAULT_TRADING_PREFERENCES)
 
 
 def _row(commodity_id, terminal_id, name, terminal, **values):
@@ -149,7 +152,7 @@ def test_routes_embed_offloads_cargo_allocation_to_a_worker_thread(tmp_path, mon
 
         monkeypatch.setattr(intelligence_brief_module, "build_mixed_routes", spy)
         try:
-            embed = await cog._routes_embed("TestShip", None, False)
+            embed = await cog._routes_embed("TestShip", _NO_PREFS, budget=None, space_only=False)
         finally:
             await client.aclose()
 
@@ -173,7 +176,7 @@ def test_routes_embed_now_shows_limiting_factors_health_and_confidence(tmp_path)
     async def run():
         cog, client = await _make_cog(tmp_path, "brief_limiting_factors.sqlite3", _MIXED_ROUTES_ROWS, ship_scu=10)
         try:
-            embed = await cog._routes_embed("TestShip", None, False)
+            embed = await cog._routes_embed("TestShip", _NO_PREFS, budget=None, space_only=False)
         finally:
             await client.aclose()
 
@@ -193,7 +196,7 @@ def test_routes_embed_shows_the_budget_in_the_footer(tmp_path):
     async def run():
         cog, client = await _make_cog(tmp_path, "brief_budget_footer.sqlite3", _MIXED_ROUTES_ROWS, ship_scu=10)
         try:
-            embed = await cog._routes_embed("TestShip", 5000.0, False)
+            embed = await cog._routes_embed("TestShip", _NO_PREFS, budget=5000.0, space_only=False)
         finally:
             await client.aclose()
 
@@ -207,7 +210,7 @@ def test_routes_embed_has_no_budget_footer_when_none_was_given(tmp_path):
     async def run():
         cog, client = await _make_cog(tmp_path, "brief_no_budget_footer.sqlite3", _MIXED_ROUTES_ROWS, ship_scu=10)
         try:
-            embed = await cog._routes_embed("TestShip", None, False)
+            embed = await cog._routes_embed("TestShip", _NO_PREFS, budget=None, space_only=False)
         finally:
             await client.aclose()
 
@@ -236,7 +239,7 @@ def test_routes_embed_discloses_truncation_instead_of_silently_dropping_routes(t
 
         monkeypatch.setattr(intelligence_brief_module, "add_chunked_fields", flaky_add_chunked_fields)
         try:
-            embed = await cog._routes_embed("TestShip", None, False)
+            embed = await cog._routes_embed("TestShip", _NO_PREFS, budget=None, space_only=False)
         finally:
             await client.aclose()
 
@@ -254,7 +257,7 @@ def test_routes_embed_discloses_when_cargo_allocation_is_approximate(tmp_path):
         # allocation approximate, not proven-optimal.
         cog, client = await _make_cog(tmp_path, "brief_disclosure.sqlite3", _MIXED_ROUTES_ROWS, ship_scu=30)
         try:
-            embed = await cog._routes_embed("TestShip", None, False)
+            embed = await cog._routes_embed("TestShip", _NO_PREFS, budget=None, space_only=False)
         finally:
             await client.aclose()
 

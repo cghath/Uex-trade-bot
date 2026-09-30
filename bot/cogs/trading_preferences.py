@@ -10,7 +10,7 @@ from bot.cogs.prices import SYSTEM_CHOICES
 from bot.cogs.ships import ship_name_autocomplete
 from bot.uex.exceptions import UexApiError, describe_uex_api_error
 from bot.uex.ships import resolve_ship
-from bot.uex.trading_preferences import UNSET, format_trading_preferences
+from bot.uex.trading_preferences import UNSET, format_trading_preferences, preference_scope
 
 SYSTEM_PREFERENCE_CHOICES = [*SYSTEM_CHOICES, app_commands.Choice(name="Any (no restriction)", value="any")]
 
@@ -31,11 +31,11 @@ class TradingPreferences(commands.Cog):
     )
     @app_commands.describe(
         ship="Your default ship - also settable via /set-default-ship, same underlying setting",
-        budget="Default starting aUEC for mixed-routes/multi-stop-route/route-from-multi/route-on-the-way",
-        space_only="mixed-routes/multi-stop-route default: require confirmed space stations only",
-        capital_ship_access="mixed-routes/multi-stop-route default: force XL-hangar/freight-elevator filtering, any ship",
-        auto_load_only="Default auto-load-only for all 4 route commands",
-        system="Default star-system restriction for all 4 route commands ('Any' clears it)",
+        budget=f"Default starting aUEC for {preference_scope('budget')}",
+        space_only="Mixed-cargo commands (e.g. /mixed-routes): only confirmed space stations, no surface",
+        capital_ship_access="Mixed-cargo commands (e.g. /mixed-routes): only XL-hangar/freight-elevator stops, any ship",
+        auto_load_only=f"Default auto-load-only for {preference_scope('auto_load_only')}",
+        system=f"Default star-system restriction for {preference_scope('preferred_system')} ('Any' clears it)",
         risk_tolerance="Which risky goods route suggestions skip (illegal, explosive, volatile, buggy)",
     )
     @app_commands.rename(
@@ -153,12 +153,16 @@ class TradingPreferences(commands.Cog):
         # of just deleted with a real loss of information.
         if ship_name:
             await interaction.response.defer(ephemeral=True)
+            lookup_failed = False
             try:
                 vehicles = await self.bot.uex.get_vehicles()
                 vehicle = resolve_ship(vehicles, ship_name)
             except UexApiError:
-                vehicle = None
-            if vehicle is None:
+                vehicle, lookup_failed = None, True
+            if lookup_failed:
+                # Audit MSG-5: this used to say "maybe renamed" during a UEX outage too.
+                ship_detail = "(UEX's ship list didn't load, so its cargo capacity can't be shown right now)"
+            elif vehicle is None:
                 ship_detail = (
                     "(couldn't be matched against UEX's current ship list - maybe renamed; "
                     "try /set-default-ship again)"

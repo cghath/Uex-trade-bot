@@ -3808,6 +3808,46 @@ they're in sync).
        back for the ten command test files updated to it. Each change was undone one at a
        time (13 in all), and its test failed every time.
 
+108. **Saved preferences: the right commands named, every footer disclosing them.** Audit
+     findings MSG-5, MSG-6 and MSG-8, plus the last case of UX-14.
+     - **MSG-6.** The `/set-trading-preferences` option descriptions and
+       `/my-trading-preferences` named the wrong commands. Budget said four commands (seven
+       read it), space-only and capital-ship access said two (five), and auto-load-only and
+       system said "all 4 route commands" (eight or nine).
+       - The truth is now one table, `PREFERENCE_READERS` in `bot/uex/trading_preferences.py`.
+         The descriptions are worded from it by `preference_scope`, e.g. "every route
+         command except /route-on-the-way".
+       - `tests/test_preference_scope.py` reads each route command's code (its callback plus
+         the cog methods it calls) and checks every `prefs["..."]` read against the table,
+         so neither can drift again.
+     - **MSG-6, second half.** `/intelligence-brief` read no saved preferences at all. Its
+       personalized routes now apply the saved budget, space-only, capital-ship access,
+       auto-load-only, system and risk tolerance. Its own budget and space-only options
+       still win (space-only now defaults to unset, not off, so a saved one can apply). An
+       empty result names the saved filters, pointing to `/set-trading-preferences`
+       (`saved_filters_hint(..., can_override=False)`, since the brief has no options for
+       most of them).
+     - **MSG-8.** `/mixed-routes`, `/multi-stop-route` and `/route-from-multi` never said a
+       saved auto-load, system or risk filter shaped their results; the others did.
+       - Every route command's footer now has the same line from
+         `describe_active_preferences`, now "Filters: ..." rather than "Active
+         preferences: ...", since a filter set on the command itself isn't a preference.
+       - Filters that came from saved preferences are marked "(saved)", e.g. "Filters:
+         auto-load-only (saved), system: Stanton (saved), risk tolerance: low (saved)".
+         Capital-ship access and risk tolerance have no per-command option, so they're
+         always saved.
+       - The mixed-cargo commands share `_filters_note` in `bot/cogs/prices.py`. Their
+         "surface terminals excluded" fragment is gone, since the Filters line says
+         space-only. "Capital access confirmed at ..." stays: it's a fact about the routes,
+         and a ship can need it without the preference. `/diminishing-returns` now shows it
+         too.
+     - **MSG-5.** `/my-trading-preferences` said the default ship "couldn't be matched ...
+       maybe renamed" when UEX's ship list simply didn't load. An outage now says so.
+       UX-14's other cases were fixed with MSG-4 (entry 91).
+     - Tests: `tests/test_preference_scope.py` (5), and the `/top-routes` footer test now
+       checks the "(saved)" marks. Each change was undone one at a time (14 in all), and its
+       test failed every time.
+
 ## Where to look for what
 
 Six docs, deliberately scoped so they don't duplicate each other:
