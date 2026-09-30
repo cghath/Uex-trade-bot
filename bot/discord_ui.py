@@ -248,6 +248,10 @@ class AlertRemovePickerView(BotView):
         await interaction.response.edit_message(view=self)
 
     async def _on_select(self, interaction: discord.Interaction) -> None:
+        # Acknowledged before remove_callback's DB write, which can wait on a lock past
+        # Discord's 3-second window; the player would see "did not respond" and pick again.
+        # REL-8's sweep (entry 100) missed this callback.
+        await interaction.response.defer()
         raw_value = interaction.data["values"][0]  # type: ignore[index]
         selected = next((a for a in self.alerts if str(a["id"]) == raw_value), None)
         alert_id = selected["id"] if selected is not None else raw_value
@@ -261,7 +265,7 @@ class AlertRemovePickerView(BotView):
 
         if not self.alerts:
             self.stop()
-        await interaction.response.edit_message(content=confirmation, view=self)
+        await interaction.edit_original_response(content=confirmation, view=self)
 
 
 async def send_alert_remove_picker(

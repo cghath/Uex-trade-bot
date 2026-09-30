@@ -81,7 +81,7 @@ UEX does not expose a live in-game cargo hold, so the bot cannot discover newly 
 items automatically. `/inventory-add` is the source of truth for personal Marketplace stock;
 quality and location create separate stacks. `/inventory` shows quantity, reservations, manual
 price floor, Sellability Rating, and a clickable UEX item page. `/inventory-sell` opens a paged
-checklist and an explicit authorization preview; posting happens within minutes, though UEX
+checklist and an explicit authorization preview, where a custom price can be set per stack; posting happens within minutes, though UEX
 staff approval before a listing actually goes live is outside the bot's control. Scheduled posts
 are catalogued UEC sell listings only. An unsold listing with no open negotiation relists 5% lower
 every 48 hours down to its hard floor, then DMs to ask what to do next; an open negotiation pauses

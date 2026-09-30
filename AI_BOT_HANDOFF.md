@@ -269,6 +269,12 @@ date - no open item, nothing to record here.
       points to `/set-trading-preferences`. `tests/test_ship_setting_fold.py` fails on any
       bot string naming a command that doesn't exist; aiv2's `ai-` commands will need its
       command set built the same way. See PROJECT_CONTEXT.md entry 112
+- [ ] `/trade-log` remove menu (`AlertRemovePickerView`, `Database.delete_trade_log_entry`)
+      and `/trade-log-add` commodity/terminal autocomplete; `AlertRemovePickerView._on_select`
+      now defers before its DB write and edits via `edit_original_response`; per-stack
+      custom prices on `/inventory-sell` batches (`StackPricesModal`,
+      `AuthorizeScheduleView.custom_prices`, `item_name` in the authorize specs). See
+      PROJECT_CONTEXT.md entry 113
 
 ## To port: aiv2 -> production
 

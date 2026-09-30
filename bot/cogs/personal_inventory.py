@@ -13,6 +13,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
+from bot.delivery import fit_lines
 from bot.discord_ui import BotModal, BotView
 from bot.uex.exceptions import UexApiError, UexRejectedError
 from bot.uex.inventory import (
@@ -431,6 +432,11 @@ class SetMinimumModal(BotModal, title="Set a minimum price"):
         await self.view.resolve_minimum_set(interaction, self.inventory_id, price)
 
 
+# A modal holds at most five text inputs (a Discord limit), so a bigger batch is priced
+# five stacks per form.
+PRICES_PER_FORM = 5
+
+
 class AuthorizeScheduleView(BotView):
     def __init__(self, cog: "PersonalInventory", author_id: int, specs: list[dict[str, Any]]) -> None:
         super().__init__(timeout=180)
@@ -439,7 +445,57 @@ class AuthorizeScheduleView(BotView):
         self.specs = specs
         self.resolved = False
         self.pricing_strategy = "balanced"
-        self.custom_price: int | None = None
+        # A custom price per stack, by inventory id. Every stack needs one before a custom
+        # batch can be authorized; an absolute price doesn't carry from one item to another.
+        self.custom_prices: dict[int, int] = {}
+        self.next_price_start = 0
+        self.price_button: discord.ui.Button = discord.ui.Button(style=discord.ButtonStyle.blurple, row=2)
+        self.price_button.callback = self.open_price_form  # type: ignore[method-assign]
+
+    def price_form_label(self) -> str:
+        total = len(self.specs)
+        if total <= PRICES_PER_FORM:
+            return "Change custom prices" if len(self.custom_prices) == total else "Set custom prices"
+        end = min(self.next_price_start + PRICES_PER_FORM, total)
+        verb = "Change" if len(self.custom_prices) == total else "Set"
+        return f"{verb} prices for stacks {self.next_price_start + 1}-{end} of {total}"
+
+    def sync_price_button(self) -> None:
+        """Shown while custom pricing is chosen, so a price can be changed (or the next five
+        set) without re-running /inventory-sell (audit UX-20)."""
+        if self.pricing_strategy == "custom" and not self.resolved:
+            self.price_button.label = self.price_form_label()
+            if self.price_button not in self.children:
+                self.add_item(self.price_button)
+        elif self.price_button in self.children:
+            self.remove_item(self.price_button)
+
+    async def open_price_form(self, interaction: discord.Interaction) -> None:
+        await interaction.response.send_modal(StackPricesModal(self, self.next_price_start))
+
+    async def stack_prices_saved(self, interaction: discord.Interaction) -> None:
+        """After a StackPricesModal saved its stacks: on to the five holding the first stack
+        still without a price, or list them all once every stack has one."""
+        total = len(self.specs)
+        unpriced = [i for i, spec in enumerate(self.specs) if spec["inventory_id"] not in self.custom_prices]
+        priced = total - len(unpriced)
+        self.pricing_strategy = "custom"
+        for option in self.choose_pricing_strategy.options:
+            option.default = option.value == "custom"
+        if unpriced:
+            self.next_price_start = unpriced[0] - unpriced[0] % PRICES_PER_FORM
+            self.sync_price_button()
+            content = (f"Custom prices set for {priced} of {total} stacks - tap **{self.price_button.label}** "
+                       "for the rest before authorizing.")
+        else:
+            self.next_price_start = 0
+            self.sync_price_button()
+            content = fit_lines(
+                ["Pricing strategy: **custom**",
+                 *(f"{stack_name(spec)}: **{self.custom_prices[spec['inventory_id']]:,} UEC/unit**"
+                   for spec in self.specs)],
+            )
+        await interaction.response.edit_message(content=content, view=self)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         await super().interaction_check(interaction)
@@ -465,23 +521,17 @@ class AuthorizeScheduleView(BotView):
     async def choose_pricing_strategy(self, interaction: discord.Interaction, select: discord.ui.Select) -> None:
         chosen = select.values[0]
         if chosen == "custom":
-            if len(self.specs) != 1:
-                for option in select.options:
-                    option.default = option.value == self.pricing_strategy
-                await interaction.response.edit_message(
-                    content=(
-                        "Custom pricing works one stack at a time - re-run `/inventory-sell` and select "
-                        "just this stack to set an exact price."
-                    ),
-                    view=self,
-                )
-                return
-            await interaction.response.send_modal(
-                CustomPriceModal(self, minimum_price=int(self.specs[0]["minimum_price"]))
-            )
+            # A price for every stack, five per form. This used to refuse any batch of more
+            # than one stack and send the player back to /inventory-sell (audit UX-20).
+            # Custom from here on, so Authorize can't quietly fall back to another strategy
+            # while prices are missing; it asks for them instead.
+            self.pricing_strategy = "custom"
+            self.next_price_start = 0
+            await interaction.response.send_modal(StackPricesModal(self, 0))
             return
         self.pricing_strategy = chosen
-        self.custom_price = None
+        self.custom_prices.clear()
+        self.sync_price_button()
         for option in select.options:
             option.default = option.value == self.pricing_strategy
         await interaction.response.edit_message(
@@ -491,12 +541,22 @@ class AuthorizeScheduleView(BotView):
 
     @discord.ui.button(label="Authorize scheduled posts", style=discord.ButtonStyle.green)
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if self.pricing_strategy == "custom":
+            missing = [spec for spec in self.specs if spec["inventory_id"] not in self.custom_prices]
+            if missing:
+                self.sync_price_button()
+                await interaction.response.edit_message(
+                    content=(f"{len(missing)} of {len(self.specs)} stacks still need a custom price - tap "
+                             f"**{self.price_button.label}** first. Nothing was scheduled."),
+                    view=self,
+                )
+                return
         self.disable()
         await interaction.response.edit_message(view=self)
         for spec in self.specs:
             spec["pricing_strategy"] = self.pricing_strategy
             if self.pricing_strategy == "custom":
-                spec["custom_price"] = self.custom_price
+                spec["custom_price"] = self.custom_prices[spec["inventory_id"]]
         try:
             job_ids = await self.cog.bot.db.create_inventory_post_jobs(self.author_id, self.specs)
         except ValueError as exc:
@@ -514,12 +574,70 @@ class AuthorizeScheduleView(BotView):
         await interaction.followup.send("Cancelled—no inventory was reserved or scheduled.", ephemeral=True)
 
 
+def stack_name(spec: dict[str, Any]) -> str:
+    return f"#{spec['inventory_id']} {spec.get('item_name') or ''}".strip()
+
+
+class StackPricesModal(BotModal, title="Enter custom prices"):
+    """A custom price for each of up to five stacks of an /inventory-sell batch, each input
+    prefilled with any price already set. Saves the form's prices only if every one is valid;
+    otherwise it lists what's wrong on the same message and keeps nothing from the form."""
+
+    def __init__(self, view: AuthorizeScheduleView, start: int) -> None:
+        super().__init__()
+        self.view = view
+        self.start = start
+        self.stacks = view.specs[start:start + PRICES_PER_FORM]
+        self.inputs: list[discord.ui.TextInput] = []
+        for spec in self.stacks:
+            current = view.custom_prices.get(spec["inventory_id"])
+            text_input: discord.ui.TextInput = discord.ui.TextInput(
+                label=stack_name(spec)[:45],
+                placeholder=f"UEC per unit, at least {int(spec['minimum_price']):,}"[:100],
+                default=str(current) if current else None,
+                style=discord.TextStyle.short,
+                max_length=15,
+            )
+            self.add_item(text_input)
+            self.inputs.append(text_input)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        prices: dict[int, int] = {}
+        problems: list[str] = []
+        for spec, text_input in zip(self.stacks, self.inputs):
+            name = stack_name(spec)
+            minimum = int(spec["minimum_price"])
+            try:
+                price = int(text_input.value.strip().replace(",", ""))
+            except ValueError:
+                problems.append(f"{name}: not a whole number")
+                continue
+            if price < max(minimum, 1):
+                problems.append(f"{name}: below your minimum of {minimum:,} UEC" if price > 0
+                                else f"{name}: must be a positive whole number")
+                continue
+            prices[spec["inventory_id"]] = price
+        if problems:
+            self.view.next_price_start = self.start
+            self.view.sync_price_button()
+            await interaction.response.edit_message(
+                content=fit_lines(
+                    ["Nothing was saved from that form:", *problems],
+                    footer=(f"Tap **{self.view.price_button.label}** to try again (or lower a minimum first "
+                            "with `/inventory-set-minimum`)."),
+                ),
+                view=self.view,
+            )
+            return
+        self.view.custom_prices.update(prices)
+        await self.view.stack_prices_saved(interaction)
+
+
 class CustomPriceModal(BotModal, title="Enter a custom price"):
-    """Shared by PostNowView (single item) and AuthorizeScheduleView (batch, gated to exactly
-    one selected stack - an absolute price doesn't scale across different items the way the
-    undercut/premium percentage strategies do). Either view just needs `.pricing_strategy`,
+    """PostNowView's custom price for its one stack (AuthorizeScheduleView's batches use
+    StackPricesModal, a price per stack). The view needs `.pricing_strategy`,
     `.custom_price`, and `.choose_pricing_strategy` (the decorated Select); minimum_price is
-    passed in explicitly so this modal doesn't need to know which shape of view it's on.
+    passed in explicitly.
     """
     price_input: discord.ui.TextInput = discord.ui.TextInput(
         label="Price per unit (UEC)",
@@ -528,7 +646,7 @@ class CustomPriceModal(BotModal, title="Enter a custom price"):
         max_length=15,
     )
 
-    def __init__(self, view: "PostNowView | AuthorizeScheduleView", *, minimum_price: int) -> None:
+    def __init__(self, view: "PostNowView", *, minimum_price: int) -> None:
         super().__init__()
         self.view = view
         self.minimum_price = minimum_price
@@ -1243,6 +1361,7 @@ class PersonalInventory(commands.Cog):
                     "scheduled_for": scheduled_for,
                     "auto_relist": True,
                     "minimum_price": int(row["minimum_price"]),
+                    "item_name": str(row["item_name"]),
                 }
             )
             embed.add_field(

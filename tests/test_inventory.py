@@ -15,6 +15,7 @@ import httpx
 from bot.cogs.personal_inventory import (
     AuthorizeScheduleView,
     CustomPriceModal,
+    StackPricesModal,
     FloorReachedView,
     InventorySelectionView,
     LowerFloorModal,
@@ -979,23 +980,23 @@ def test_custom_price_modal_rejects_below_minimum_and_accepts_a_valid_price():
         assert view.choose_pricing_strategy.options[-1].default is True
 
 
-def test_custom_price_modal_also_works_for_the_batch_authorize_view():
-    """CustomPriceModal is shared between PostNowView (single item) and AuthorizeScheduleView
-    (batch, gated to one selected stack) - this guards the generalization actually applies to
-    both, not just the view it was originally written for."""
+def test_a_one_stack_batch_takes_its_custom_price_from_the_per_stack_form():
+    """AuthorizeScheduleView prices every batch size with StackPricesModal, one input per
+    stack (audit UX-20); a one-stack batch is just a one-input form."""
     async def run():
         cog = PersonalInventory.__new__(PersonalInventory)
         specs = [{"inventory_id": 1, "quantity": 5, "scheduled_for": datetime.now(timezone.utc),
-                   "auto_relist": True, "minimum_price": 1000}]
+                   "auto_relist": True, "minimum_price": 1000, "item_name": "Laranite"}]
         view = AuthorizeScheduleView(cog, 42, specs)
-        modal = CustomPriceModal(view, minimum_price=specs[0]["minimum_price"])
-        modal.price_input._value = "2,500,000"
+        modal = StackPricesModal(view, 0)
+        (price_input,) = modal.inputs
+        price_input._value = "2,500,000"
 
         interaction = _FakeInteraction(42)
         await modal.on_submit(interaction)
 
         assert view.pricing_strategy == "custom"
-        assert view.custom_price == 2500000
+        assert view.custom_prices == {1: 2500000}
 
     asyncio.run(run())
 
@@ -1022,7 +1023,7 @@ def test_authorize_schedule_view_confirm_creates_a_custom_priced_job(tmp_path):
         }]
         view = AuthorizeScheduleView(cog, user_id, specs)
         view.pricing_strategy = "custom"
-        view.custom_price = 6_833_000
+        view.custom_prices = {inventory_id: 6_833_000}
         interaction = _FakeInteraction(user_id)
 
         await view.confirm.callback(interaction)
