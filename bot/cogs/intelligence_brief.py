@@ -171,7 +171,7 @@ class IntelligenceBrief(commands.Cog):
 
         embed.description = f"Top opportunities for **{vehicle.get('name', ship_query)}**"
         # Consistency fix: budget was already used above to build these routes, but never
-        # shown anywhere - unlike /mixed-routes, /multi-stop-route, and /route-on-the-way,
+        # shown anywhere - unlike /mixed-routes, /multi-stop-route, and /top-routes,
         # which all surface it. Set BEFORE the field loop, not after - add_chunked_fields'
         # own budget check measures the embed's real total via len(embed), which only
         # includes the footer once it's actually set (see route_presentation.py's

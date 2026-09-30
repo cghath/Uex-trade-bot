@@ -184,7 +184,7 @@ POOL = [
 @pytest.mark.parametrize("command, builder, options", [
     ("mixed_routes", "build_mixed_routes", {}),
     ("multi_stop_route", "build_multi_stop_routes", {}),
-    ("route_from_multi", "build_multi_stop_routes", {"location": "Origin"}),
+    ("multi_stop_route", "build_multi_stop_routes", {"origin": "Origin"}),
     ("diminishing_returns", "sweep_budget_curve", {}),
 ])
 def test_mixed_cargo_commands_search_only_goods_within_the_tolerance(monkeypatch, command, builder, options):

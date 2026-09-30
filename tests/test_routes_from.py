@@ -1,7 +1,8 @@
-"""Tests for /routes-from: the terminal name lookup it's built on (Database.
-search_terminals_by_name/resolve_terminal_id_by_name) and the command itself, which
-filters the SAME background-refreshed candidate pool /top-routes reads from down to one
-origin terminal rather than computing its own ranking."""
+"""Tests for /top-routes' origin option (the old /routes-from, folded in by audit UX-8):
+the terminal name lookup it's built on (Database.search_terminals_by_name/
+resolve_terminal_id_by_name) and the command itself, which filters the SAME
+background-refreshed candidate pool unpinned /top-routes reads from down to one origin
+terminal rather than computing its own ranking."""
 from __future__ import annotations
 
 import asyncio
@@ -177,7 +178,7 @@ def test_routes_from_defers_before_the_terminal_lookup(tmp_path):
         db.resolve_terminal_id_by_name = spying_resolve
 
         try:
-            await cog.routes_from.callback(cog, interaction, location="Area18")
+            await cog.top_routes.callback(cog, interaction, origin="Area18")
         finally:
             await client.aclose()
 
@@ -205,7 +206,7 @@ def test_routes_from_reports_when_the_location_cannot_be_resolved(tmp_path):
         interaction = _FakeInteraction(1)
 
         try:
-            await cog.routes_from.callback(cog, interaction, location="Nowhere Station")
+            await cog.top_routes.callback(cog, interaction, origin="Nowhere Station")
         finally:
             await client.aclose()
 
@@ -241,7 +242,7 @@ def test_routes_from_reports_when_no_routes_originate_there(tmp_path):
 
         try:
             # Area18 (id 1) has no routes in the pool - only Port Tressler (id 2) does.
-            await cog.routes_from.callback(cog, interaction, location="Area18")
+            await cog.top_routes.callback(cog, interaction, origin="Area18")
         finally:
             await client.aclose()
 
@@ -282,7 +283,7 @@ def test_routes_from_filters_the_shared_pool_to_the_resolved_origin(tmp_path):
         interaction = _FakeInteraction(1)
 
         try:
-            await cog.routes_from.callback(cog, interaction, location="Area18")
+            await cog.top_routes.callback(cog, interaction, origin="Area18")
         finally:
             await client.aclose()
 
@@ -326,7 +327,7 @@ def test_routes_from_shows_the_budget_in_the_footer_and_caps_the_cargo_estimate(
         interaction = _FakeInteraction(1)
 
         try:
-            await cog.routes_from.callback(cog, interaction, location="Area18", budget=1000.0)
+            await cog.top_routes.callback(cog, interaction, origin="Area18", budget=1000.0)
         finally:
             await client.aclose()
 
@@ -367,7 +368,7 @@ def test_routes_from_falls_back_to_a_saved_budget_preference(tmp_path):
         interaction = _FakeInteraction(1)
 
         try:
-            await cog.routes_from.callback(cog, interaction, location="Area18")
+            await cog.top_routes.callback(cog, interaction, origin="Area18")
         finally:
             await client.aclose()
 

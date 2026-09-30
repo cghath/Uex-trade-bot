@@ -62,8 +62,8 @@ def test_each_preference_names_the_commands_that_really_read_it():
 def test_the_descriptions_say_which_commands_each_preference_reaches():
     assert preference_scope("budget") == "every route command except /best-route and /diminishing-returns"
     assert preference_scope("auto_load_only") == "every route command"
-    assert preference_scope("preferred_system") == "every route command except /route-on-the-way"
-    assert "/intelligence-brief" in preference_scope("space_only")
+    assert preference_scope("preferred_system") == "every route command"
+    assert preference_scope("space_only") == "every route command except /best-route and /top-routes"
 
     params = {param.name: str(param.description)
               for param in TradingPreferences.set_trading_preferences.parameters}
@@ -140,7 +140,7 @@ def test_mixed_cargo_footers_name_the_saved_filters(monkeypatch):
         for name, run_command in (
             ("mixed-routes", lambda cog, i: cog.mixed_routes.callback(cog, i)),
             ("multi-stop-route", lambda cog, i: cog.multi_stop_route.callback(cog, i)),
-            ("route-from-multi", lambda cog, i: cog.route_from_multi.callback(cog, i, location="Station A")),
+            ("multi-stop-route origin", lambda cog, i: cog.multi_stop_route.callback(cog, i, origin="Station A")),
         ):
             assert expected in await footer(run_command), name
 

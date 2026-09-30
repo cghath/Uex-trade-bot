@@ -34,12 +34,9 @@ RISK_TOLERANCE_LEVELS = ("low", "medium", "high")
 # code). The option descriptions and /my-trading-preferences are worded from this, and
 # tests/test_preference_scope.py checks it against each command's code.
 ROUTE_COMMANDS = (
-    "best-route", "top-routes", "routes-from", "route-on-the-way", "mixed-routes",
-    "multi-stop-route", "route-from-multi", "diminishing-returns", "intelligence-brief",
+    "best-route", "top-routes", "mixed-routes", "multi-stop-route", "diminishing-returns", "intelligence-brief",
 )
-_MIXED_CARGO_COMMANDS = (
-    "mixed-routes", "multi-stop-route", "route-from-multi", "diminishing-returns", "intelligence-brief",
-)
+_MIXED_CARGO_COMMANDS = ("mixed-routes", "multi-stop-route", "diminishing-returns", "intelligence-brief")
 PREFERENCE_READERS: dict[str, tuple[str, ...]] = {
     # /best-route has no budget option; /diminishing-returns sweeps budgets itself.
     "budget": tuple(c for c in ROUTE_COMMANDS if c not in ("best-route", "diminishing-returns")),
@@ -47,14 +44,15 @@ PREFERENCE_READERS: dict[str, tuple[str, ...]] = {
     "space_only": _MIXED_CARGO_COMMANDS,
     "capital_ship_access": _MIXED_CARGO_COMMANDS,
     "auto_load_only": ROUTE_COMMANDS,
-    # /route-on-the-way's two terminals are named, so there's nothing to restrict.
-    "preferred_system": tuple(c for c in ROUTE_COMMANDS if c != "route-on-the-way"),
+    # /top-routes skips it when both its ends are named: nothing is left to restrict.
+    "preferred_system": ROUTE_COMMANDS,
 }
 
 
 def preference_scope(key: str) -> str:
     """Which commands a saved default applies to, e.g. "every route command except
-    /route-on-the-way" - from PREFERENCE_READERS, so the wording can't drift from it."""
+    /best-route and /diminishing-returns" - from PREFERENCE_READERS, so the wording can't
+    drift from it."""
     readers = PREFERENCE_READERS[key]
     left_out = [command for command in ROUTE_COMMANDS if command not in readers]
     if not left_out:

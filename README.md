@@ -235,9 +235,8 @@ bot/
   cogs/              one per feature area; "loop" = a background poller
     account.py            /link-uex-account, /unlink-uex-account, /uex-account-status
     prices.py             /price, /terminal-history, /best-route, /mixed-routes, /multi-stop-route,
-                          /route-from-multi, /diminishing-returns
-    trends.py             /trending, /top-routes, /routes-from, /route-on-the-way, /movers,
-                          /commodity-history + loop
+                          /diminishing-returns
+    trends.py             /trending, /top-routes, /movers, /commodity-history + loop
     route_progression.py  route tracking threads (the Track this route button) + loops
     trading_preferences.py /set-trading-preferences, /clear-trading-preferences, /my-trading-preferences
     ships.py              /set-default-ship, /clear-default-ship

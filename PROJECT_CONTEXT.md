@@ -3901,6 +3901,40 @@ they're in sync).
        systems and a UEX distance fake. Each change was undone one at a time (15 in all),
        and its test failed every time.
 
+110. **Three route commands folded into their parents (70 commands to 67).** Audit finding
+     UX-8: nine commands suggested routes, a lot to choose from for a new player.
+     - Six of them were three searches, each with a location-pinned twin. The twins are now
+       options on their parent. Nothing was lost: each twin filtered the same results.
+       - `/routes-from location:` became `/top-routes origin:`.
+       - `/route-on-the-way origin: destination:` became `/top-routes origin: destination:`.
+         With both ends set, the system filter is skipped, as before, since nothing is left
+         for it to restrict.
+       - `/route-from-multi location:` became `/multi-stop-route origin:`. Diffing the two
+         callbacks showed the location lookup and `start_terminal_id` were the only
+         differences.
+       - The option names match what `/mixed-routes` already used (`origin`,
+         `destination`). `/top-routes destination:` on its own, "routes ending here", is
+         new, since it cost nothing.
+     - Command usage on the Pi (tracked since 2026-09-22): `/multi-stop-route` 16,
+       `/top-routes` 4, `/route-from-multi` 2, `/best-route` 1, the rest 0.
+     - Options weighed with the user:
+       - One `/routes` command with a "kind" choice was rejected: Discord shows every
+         option at once, so `strict`, `max-legs` and `space-only` would all appear
+         together.
+       - Only tidying `/intro` was the other alternative.
+       - `/diminishing-returns` stays as it is, at the user's choice.
+     - `/top-routes` now defers before any work, and its "still gathering" reply is a
+       followup. Before, it read preferences before deferring.
+     - `/command-usage` already lists commands no longer in the tree under "Retired", so
+       the three keep their history.
+     - `ROUTE_COMMANDS`/`PREFERENCE_READERS` (entry 108) now list six commands, so the saved
+       system reaches "every route command", and space-only "every route command except
+       /best-route and /top-routes".
+     - Tests: the three twins' tests now call `/top-routes` or `/multi-stop-route` with the
+       same options, and `tests/test_route_folds.py` (3) covers what's new. The README layout
+       test from entry 109 caught the stale layout lines. Each change was undone one at a time
+       (8 in all), and its test failed every time.
+
 ## Where to look for what
 
 Six docs, deliberately scoped so they don't duplicate each other:

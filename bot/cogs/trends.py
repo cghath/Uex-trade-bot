@@ -446,11 +446,9 @@ class Trends(commands.Cog):
     ) -> None:
         # auto_load_saved/system_saved: that filter came from the player's saved
         # preferences, not this command - an empty result then says so (audit UX-2).
-        # already_deferred is set by a caller (routes_from, route_on_the_way) that had to do its
-        # own DB work (terminal-name resolution) before this point and so deferred itself, right
-        # at the top of its own function, before that work - deferring again here would raise
-        # discord.InteractionResponded. /top-routes has no such pre-work and still relies on the
-        # unconditional defer below.
+        # already_deferred: the caller deferred itself before its own DB work (resolving a
+        # terminal, reading preferences) - deferring again here would raise
+        # discord.InteractionResponded.
         if not already_deferred:
             await interaction.response.defer()
 
@@ -814,6 +812,8 @@ class Trends(commands.Cog):
 
     @app_commands.command(name="top-routes", description="Top trade routes by profit, with live-stock filtering.")
     @app_commands.describe(
+        origin="Optional: only routes starting at this terminal, e.g. where you are now",
+        destination="Optional: only routes ending at this terminal, e.g. where you're heading",
         ship="Optional: check cargo/profit for a specific ship instead of your default (/set-default-ship)",
         strict="Require live stock at the origin and live demand at the destination (safer).",
         auto_load_only="Only show routes where both the origin and destination terminal offer UEX's auto-load",
@@ -822,56 +822,102 @@ class Trends(commands.Cog):
     )
     @app_commands.rename(auto_load_only="auto-load-only")
     @app_commands.choices(system=SYSTEM_CHOICES)
-    @app_commands.autocomplete(ship=ship_name_autocomplete)
+    @app_commands.autocomplete(
+        ship=ship_name_autocomplete, origin=terminal_name_autocomplete, destination=terminal_name_autocomplete,
+    )
     async def top_routes(
         self,
         interaction: discord.Interaction,
+        origin: str | None = None,
+        destination: str | None = None,
         strict: bool = False,
         ship: str | None = None,
         auto_load_only: bool | None = None,
         system: app_commands.Choice[str] | None = None,
         budget: app_commands.Range[float, 1, 1_000_000_000] | None = None,
     ) -> None:
+        """Also answers what /routes-from (origin) and /route-on-the-way (origin and
+        destination) did before they were folded in here (audit UX-8): the same ranked
+        list, filtered to the named terminals - no separate ranking, no extra UEX calls."""
+        # Deferred first: naming a terminal means resolving it, and preferences are a DB
+        # read too - both before Discord's ~3s deadline would otherwise be at risk.
+        await interaction.response.defer()
+        pins: dict[str, tuple[int, str]] = {}
+        for key, query in (("origin", origin), ("destination", destination)):
+            if not query:
+                continue
+            resolved = await self.bot.db.resolve_terminal_id_by_name(query)
+            if resolved is None:
+                await interaction.followup.send(
+                    f"Couldn't find a single terminal matching '{query}' - pick one from the "
+                    "autocomplete list to make sure it's unambiguous."
+                )
+                return
+            pins[key] = resolved
+        origin_id, origin_name = pins.get("origin", (None, None))
+        destination_id, destination_name = pins.get("destination", (None, None))
+        if origin_id is not None and origin_id == destination_id:
+            await interaction.followup.send("Origin and destination can't be the same terminal.")
+            return
+        # With both ends named there's nothing left for a star-system filter to restrict.
+        both_ends = origin_id is not None and destination_id is not None
+
         prefs = await self.bot.db.get_trading_preferences(interaction.user.id)
         auto_load_saved = auto_load_only is None and bool(prefs["auto_load_only"])
-        system_saved = system is None and bool(prefs["preferred_system"])
+        system_saved = not both_ends and system is None and bool(prefs["preferred_system"])
         if auto_load_only is None:
             auto_load_only = prefs["auto_load_only"]
-        system_value = system.value if system else prefs["preferred_system"]
-        # Consistency fix: /mixed-routes, /multi-stop-route, and /route-on-the-way all
-        # already fall back to the saved trading-preference budget - /top-routes and
-        # /routes-from shared the exact same underlying cargo/budget machinery
-        # (_build_route_field, estimate_route_cargo) but never plumbed a budget option
-        # through to it at all, so a user's saved budget silently had no effect here.
+        system_value = None if both_ends else (system.value if system else prefs["preferred_system"])
+        # Consistency fix: /top-routes shared the exact same cargo/budget machinery as the
+        # mixed-cargo commands (_build_route_field, estimate_route_cargo) but never plumbed
+        # a budget through to it, so a user's saved budget silently had no effect here.
         if budget is None:
             budget = prefs["budget"]
         if strict:
             async with self._top_in_stock_routes_lock:
-                entries = list(self._top_in_stock_routes)
+                pool = list(self._top_in_stock_routes)
                 updated_at = self._top_in_stock_routes_updated_at
                 gap = self._top_in_stock_routes_gap
-            title = "Top Trade Routes — Strict Live Availability"
-            footer_note = (
-                "Ranked by profit (ROI% as a tie-breaker) · one route per commodity · requires "
-                "real stock at the origin and real demand at the destination right now"
-            )
         else:
             async with self._top_scored_routes_lock:
-                entries = list(self._top_scored_routes)
+                pool = list(self._top_scored_routes)
                 updated_at = self._top_scored_routes_updated_at
                 gap = self._top_scored_routes_gap
-            title = "Top Trade Routes"
-            footer_note = (
-                "Ranked by profit (ROI% as a tie-breaker) · one route per commodity · filtered "
-                "to real buy-side stock at the origin right now · use strict:True for live demand too"
-            )
 
+        # Direction-specific: a route the other way round is found by swapping the two.
+        entries = [
+            r for r in pool
+            if (origin_id is None or r.origin_terminal_id == origin_id)
+            and (destination_id is None or r.destination_terminal_id == destination_id)
+        ]
+        if both_ends:
+            where = f"from **{origin_name}** to **{destination_name}**"
+            title = f"Best Routes: {origin_name} → {destination_name}"
+        elif origin_id is not None:
+            where, title = f"starting from **{origin_name}**", f"Best Routes from {origin_name}"
+        elif destination_id is not None:
+            where, title = f"ending at **{destination_name}**", f"Best Routes to {destination_name}"
+        else:
+            where, title = None, "Top Trade Routes — Strict Live Availability" if strict else "Top Trade Routes"
         if not entries:
-            await interaction.response.send_message(
-                "Still gathering route data (this refreshes on a timer after startup) - try again in a few minutes."
+            if where is None:
+                await interaction.followup.send(
+                    "Still gathering route data (this refreshes on a timer after startup) - try again in a few minutes."
+                )
+                return
+            still_gathering = " (still gathering route data - try again in a few minutes)" if not pool else ""
+            await interaction.followup.send(
+                f"No profitable routes found {where} right now{still_gathering}." + partial_refresh_hint(gap)
             )
             return
 
+        per_commodity = " · one route per commodity" if where is None else ""
+        footer_note = (
+            f"Ranked by profit (ROI% as a tie-breaker){per_commodity} · requires real stock at the origin and "
+            "real demand at the destination right now" if strict else
+            f"Ranked by profit (ROI% as a tie-breaker){per_commodity} · filtered to real buy-side stock at the "
+            "origin right now · use strict:True for live demand too"
+        )
         await self._send_ranked_routes(
             interaction,
             entries=entries,
@@ -887,216 +933,6 @@ class Trends(commands.Cog):
             risk_tolerance=prefs["risk_tolerance"],
             auto_load_saved=auto_load_saved,
             system_saved=system_saved,
-            budget=float(budget) if budget is not None else None,
-        )
-
-    @app_commands.command(name="routes-from", description="Best trade routes starting from wherever you currently are.")
-    @app_commands.describe(
-        location="Terminal you're currently at, e.g. 'Area18' or 'Port Tressler'",
-        ship="Optional: check cargo/profit for a specific ship instead of your default (/set-default-ship)",
-        strict="Require live stock at the origin and live demand at the destination (safer).",
-        auto_load_only="Only show routes where both the origin and destination terminal offer UEX's auto-load",
-        system="Optional: require the destination to be in this star system too",
-        budget="Optional: cap the cargo shown by how much you can actually afford to spend",
-    )
-    @app_commands.rename(auto_load_only="auto-load-only")
-    @app_commands.choices(system=SYSTEM_CHOICES)
-    @app_commands.autocomplete(ship=ship_name_autocomplete, location=terminal_name_autocomplete)
-    async def routes_from(
-        self,
-        interaction: discord.Interaction,
-        location: str,
-        strict: bool = False,
-        ship: str | None = None,
-        auto_load_only: bool | None = None,
-        system: app_commands.Choice[str] | None = None,
-        budget: app_commands.Range[float, 1, 1_000_000_000] | None = None,
-    ) -> None:
-        # Deferred immediately, before resolve_terminal_id_by_name or the preferences
-        # lookup below - both are real DB work, and either one running long risks Discord's
-        # ~3s initial-response deadline (the same "defer before any network/DB work"
-        # convention as /set-trading-preferences). Every response after this point goes
-        # through interaction.followup, never interaction.response, including the error
-        # paths below.
-        await interaction.response.defer()
-        resolved = await self.bot.db.resolve_terminal_id_by_name(location)
-        if resolved is None:
-            await interaction.followup.send(
-                f"Couldn't find a single terminal matching '{location}' - pick one from the "
-                "autocomplete list to make sure it's unambiguous."
-            )
-            return
-        origin_id, origin_name = resolved
-
-        prefs = await self.bot.db.get_trading_preferences(interaction.user.id)
-        auto_load_saved = auto_load_only is None and bool(prefs["auto_load_only"])
-        system_saved = system is None and bool(prefs["preferred_system"])
-        if auto_load_only is None:
-            auto_load_only = prefs["auto_load_only"]
-        system_value = system.value if system else prefs["preferred_system"]
-        # See /top-routes' own identical fix for why this consistency gap existed.
-        if budget is None:
-            budget = prefs["budget"]
-
-        # Reuses the SAME background-refreshed candidate pool /top-routes reads from
-        # (comprehensive across every commodity UEX has route data for, not truncated),
-        # just filtered down to routes departing from the resolved origin - no separate
-        # ranking logic, no extra UEX calls.
-        if strict:
-            async with self._top_in_stock_routes_lock:
-                pool = list(self._top_in_stock_routes)
-                updated_at = self._top_in_stock_routes_updated_at
-                gap = self._top_in_stock_routes_gap
-        else:
-            async with self._top_scored_routes_lock:
-                pool = list(self._top_scored_routes)
-                updated_at = self._top_scored_routes_updated_at
-                gap = self._top_scored_routes_gap
-
-        entries = [r for r in pool if r.origin_terminal_id == origin_id]
-        if not entries:
-            still_gathering = " (still gathering route data - try again in a few minutes)" if not pool else ""
-            await interaction.followup.send(
-                f"No profitable routes found starting from **{origin_name}** right now{still_gathering}."
-                + partial_refresh_hint(gap)
-            )
-            return
-
-        title = f"Best Routes from {origin_name}"
-        footer_note = (
-            "Ranked by profit (ROI% as a tie-breaker) · requires real stock at the origin and "
-            "real demand at the destination right now" if strict else
-            "Ranked by profit (ROI% as a tie-breaker) · filtered to real buy-side stock at the "
-            "origin right now · use strict:True for live demand too"
-        )
-        await self._send_ranked_routes(
-            interaction,
-            entries=entries,
-            updated_at=updated_at,
-            gap=gap,
-            ship=ship,
-            title=title,
-            footer_note=footer_note,
-            log_label="/routes-from",
-            display_limit=TOP_IN_STOCK_ROUTES_KEEP if strict else TOP_SCORED_ROUTES_KEEP,
-            auto_load_only=auto_load_only,
-            system=system_value,
-            risk_tolerance=prefs["risk_tolerance"],
-            auto_load_saved=auto_load_saved,
-            system_saved=system_saved,
-            budget=float(budget) if budget is not None else None,
-            already_deferred=True,
-        )
-
-    @app_commands.command(
-        name="route-on-the-way",
-        description="Check for a profitable route between two specific terminals you're already traveling between.",
-    )
-    @app_commands.describe(
-        origin="Terminal you're currently at, e.g. 'Area18' or 'Port Tressler'",
-        destination="Terminal you're heading to",
-        ship="Optional: check cargo/profit for a specific ship instead of your default (/set-default-ship)",
-        budget="Optional: cap how much of the commodity you buy by this starting capital, in aUEC",
-        strict="Require live stock at the origin and live demand at the destination (safer).",
-        auto_load_only="Only show routes where both the origin and destination terminal offer UEX's auto-load",
-    )
-    @app_commands.rename(auto_load_only="auto-load-only")
-    @app_commands.autocomplete(
-        ship=ship_name_autocomplete, origin=terminal_name_autocomplete, destination=terminal_name_autocomplete
-    )
-    async def route_on_the_way(
-        self,
-        interaction: discord.Interaction,
-        origin: str,
-        destination: str,
-        strict: bool = False,
-        ship: str | None = None,
-        budget: app_commands.Range[float, 1, 1_000_000_000] | None = None,
-        auto_load_only: bool | None = None,
-    ) -> None:
-        # Deferred immediately, before either terminal resolution or the preferences lookup
-        # below - see routes_from's identical comment. Every response after this point goes
-        # through interaction.followup, never interaction.response.
-        await interaction.response.defer()
-        resolved_origin = await self.bot.db.resolve_terminal_id_by_name(origin)
-        if resolved_origin is None:
-            await interaction.followup.send(
-                f"Couldn't find a single terminal matching '{origin}' - pick one from the "
-                "autocomplete list to make sure it's unambiguous."
-            )
-            return
-        origin_id, origin_name = resolved_origin
-
-        resolved_destination = await self.bot.db.resolve_terminal_id_by_name(destination)
-        if resolved_destination is None:
-            await interaction.followup.send(
-                f"Couldn't find a single terminal matching '{destination}' - pick one from the "
-                "autocomplete list to make sure it's unambiguous."
-            )
-            return
-        destination_id, destination_name = resolved_destination
-
-        if origin_id == destination_id:
-            await interaction.followup.send("Origin and destination can't be the same terminal.")
-            return
-
-        prefs = await self.bot.db.get_trading_preferences(interaction.user.id)
-        auto_load_saved = auto_load_only is None and bool(prefs["auto_load_only"])
-        if auto_load_only is None:
-            auto_load_only = prefs["auto_load_only"]
-        if budget is None:
-            budget = prefs["budget"]
-
-        # Same reuse pattern as /routes-from: filter the SAME background-refreshed
-        # candidate pool /top-routes reads from, this time down to routes matching BOTH
-        # the resolved origin AND destination - no separate ranking logic, no extra UEX
-        # calls. Direction-specific (origin -> destination only, matching how the player
-        # actually asked the question) - a route in the reverse direction, if one exists,
-        # is what /route-on-the-way with the two locations swapped would find.
-        if strict:
-            async with self._top_in_stock_routes_lock:
-                pool = list(self._top_in_stock_routes)
-                updated_at = self._top_in_stock_routes_updated_at
-                gap = self._top_in_stock_routes_gap
-        else:
-            async with self._top_scored_routes_lock:
-                pool = list(self._top_scored_routes)
-                updated_at = self._top_scored_routes_updated_at
-                gap = self._top_scored_routes_gap
-
-        entries = [
-            r for r in pool if r.origin_terminal_id == origin_id and r.destination_terminal_id == destination_id
-        ]
-        if not entries:
-            still_gathering = " (still gathering route data - try again in a few minutes)" if not pool else ""
-            await interaction.followup.send(
-                f"No profitable routes found from **{origin_name}** to **{destination_name}** "
-                f"right now{still_gathering}."
-                + partial_refresh_hint(gap)
-            )
-            return
-
-        title = f"Best Routes: {origin_name} → {destination_name}"
-        footer_note = (
-            "Ranked by profit (ROI% as a tie-breaker) · requires real stock at the origin and "
-            "real demand at the destination right now" if strict else
-            "Ranked by profit (ROI% as a tie-breaker) · filtered to real buy-side stock at the "
-            "origin right now · use strict:True for live demand too"
-        )
-        await self._send_ranked_routes(
-            interaction,
-            entries=entries,
-            updated_at=updated_at,
-            gap=gap,
-            ship=ship,
-            title=title,
-            footer_note=footer_note,
-            log_label="/route-on-the-way",
-            display_limit=TOP_IN_STOCK_ROUTES_KEEP if strict else TOP_SCORED_ROUTES_KEEP,
-            auto_load_only=auto_load_only,
-            system=None,
-            risk_tolerance=prefs["risk_tolerance"],
-            auto_load_saved=auto_load_saved,
             budget=float(budget) if budget is not None else None,
             already_deferred=True,
         )
