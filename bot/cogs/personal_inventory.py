@@ -192,6 +192,7 @@ class InventorySelectionView(BotView):
         )
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        await super().interaction_check(interaction)
         if interaction.user.id != self.author_id:
             await interaction.response.send_message("This inventory menu belongs to someone else.", ephemeral=True)
             return False
@@ -235,10 +236,10 @@ class InventorySelectionView(BotView):
         selected = [row for row in self.rows if int(row["id"]) in self.selected_ids]
         missing_floor = [row for row in selected if not row.get("minimum_price")]
         if missing_floor:
-            await interaction.followup.send(
+            view = SetMinimumPricesView(self.cog, self.author_id, selected, missing_floor)
+            view.message = await interaction.followup.send(
                 "Set a minimum price before these can be authorized - never posted or relisted below it.",
-                view=SetMinimumPricesView(self.cog, self.author_id, selected, missing_floor),
-                ephemeral=True,
+                view=view, ephemeral=True, wait=True,
             )
             return
 
@@ -247,7 +248,7 @@ class InventorySelectionView(BotView):
             await interaction.followup.send("None of those stacks currently has unreserved inventory.", ephemeral=True)
             return
         embed, view = result
-        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+        view.message = await interaction.followup.send(embed=embed, view=view, ephemeral=True, wait=True)
 
 
 MAX_MINIMUM_PRICE_BUTTONS = 24  # a View caps at 25 components total; leave one for Cancel
@@ -273,6 +274,7 @@ class SetMinimumPricesView(BotView):
         self._rebuild()
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        await super().interaction_check(interaction)
         if interaction.user.id != self.author_id:
             await interaction.response.send_message("This menu belongs to someone else.", ephemeral=True)
             return False
@@ -320,6 +322,9 @@ class SetMinimumPricesView(BotView):
             return
 
         result = await self.cog._build_authorize_screen(self.author_id, self.selected)
+        # This message is about to lose this view, so stop it: its timeout would otherwise put
+        # its greyed-out buttons back on the message.
+        self.stop()
         if result is None:
             await interaction.response.edit_message(
                 content="None of those stacks currently has unreserved inventory.", embed=None, view=None
@@ -327,6 +332,7 @@ class SetMinimumPricesView(BotView):
             return
         embed, view = result
         await interaction.response.edit_message(content=None, embed=embed, view=view)
+        view.origin = interaction
 
 
 class SetMinimumModal(BotModal, title="Set a minimum price"):
@@ -375,6 +381,7 @@ class AuthorizeScheduleView(BotView):
         self.custom_price: int | None = None
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        await super().interaction_check(interaction)
         if interaction.user.id != self.author_id:
             await interaction.response.send_message("Only the inventory owner can authorize these posts.", ephemeral=True)
             return False
@@ -503,6 +510,7 @@ class PostNowView(BotView):
         self.resolved = False
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        await super().interaction_check(interaction)
         if interaction.user.id != self.author_id:
             await interaction.response.send_message("Only the inventory owner can confirm this.", ephemeral=True)
             return False
@@ -879,6 +887,7 @@ class PersonalInventory(commands.Cog):
             return
         view = InventorySelectionView(self, interaction.user.id, available)
         await interaction.response.send_message(content=view.status_text, view=view, ephemeral=True)
+        view.origin = interaction
 
     @app_commands.command(
         name="inventory-post-now",
@@ -937,7 +946,8 @@ class PersonalInventory(commands.Cog):
             ),
             color=discord.Color.orange(),
         )
-        await interaction.followup.send(embed=embed, view=PostNowView(self, interaction.user.id, entry, available), ephemeral=True)
+        view = PostNowView(self, interaction.user.id, entry, available)
+        view.message = await interaction.followup.send(embed=embed, view=view, ephemeral=True, wait=True)
 
     @app_commands.command(name="inventory-confirm-sale", description="Resolve a tracked listing when UEX cannot prove how many sold.")
     @app_commands.describe(job_id="Posting job number from the bot's warning", quantity_sold="How many actually sold; use 0 if none sold")

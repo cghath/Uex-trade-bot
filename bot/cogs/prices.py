@@ -796,7 +796,7 @@ class Prices(commands.Cog):
                     view = RouteTrackingView(tracking_cog, [trackable_route])
 
                 if view is not None:
-                    await interaction.followup.send(embed=route_embed, view=view)
+                    view.message = await interaction.followup.send(embed=route_embed, view=view, wait=True)
                 else:
                     await interaction.followup.send(embed=route_embed)
 
@@ -1299,7 +1299,7 @@ class Prices(commands.Cog):
             if not embed_too_large:
                 try:
                     if view is not None:
-                        await interaction.followup.send(embed=route_embed, view=view)
+                        view.message = await interaction.followup.send(embed=route_embed, view=view, wait=True)
                     else:
                         await interaction.followup.send(embed=route_embed)
                 except discord.HTTPException:
@@ -1635,7 +1635,7 @@ class Prices(commands.Cog):
                         )])
                 try:
                     if view is not None:
-                        await interaction.followup.send(embed=route_embed, view=view)
+                        view.message = await interaction.followup.send(embed=route_embed, view=view, wait=True)
                     else:
                         await interaction.followup.send(embed=route_embed)
                 except discord.HTTPException:

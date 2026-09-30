@@ -3650,6 +3650,43 @@ they're in sync).
      - Tests: `tests/test_failed_interactions.py` (26). Each fix was undone one at a time, and
        its test failed every time.
 
+103. **Expired buttons and menus grey out.** Audit finding UX-7. A view's controls stop
+     working when it times out, but they looked as usable as before, and a click just showed
+     Discord's "This interaction failed". Only the scanner's Turn off button and the Ship
+     Parts Finder browser greyed out. The two marketplace confirmations and the alert
+     remover disabled their buttons in memory but never edited the message, so they still
+     looked live.
+     - `BotView` (`bot/discord_ui.py`) now greys out every control on its message when it
+       times out (`on_timeout` -> `grey_out`). Editing that message needs something that still
+       reaches it, so it tries, in order:
+       1. the freshest click whose answer updated the message (`message_update` or
+          `deferred_message_update`) - a click answered with a new reply or "thinking..." has
+          a different message as its reply, so it's skipped;
+       2. `origin`, the interaction that sent the view with `response.send_message` or
+          `edit_message`;
+       3. `message`, the sent message (`followup.send(..., wait=True)` - without `wait`,
+          discord.py returns nothing);
+       4. for a public message only, a plain channel edit of the same message.
+     - The first three use interaction tokens, which last 15 minutes and are the only way to
+       edit an ephemeral message. Clicks are remembered in `BotView.interaction_check`, so a
+       subclass that overrides it calls `super()` first; the six that do were updated.
+     - Every timed view's send site now sets `origin` or `message` (15 sites, including all
+       four route commands' Track buttons). The blueprint Configure crafting menu (ephemeral)
+       drops from 15 to 10 idle minutes, so its token still works when it times out.
+     - A view that hands its message to another view must `stop()` first, or its timeout
+       would put its greyed-out buttons back over the new ones. `SetMinimumPricesView` was the
+       one case: it turns into the authorize screen, or clears its buttons.
+     - The scanner's own `on_timeout` is gone (the base class does the same), and the
+       marketplace confirmations' timeouts now call `super()`. The Ship Parts Finder browser
+       keeps its own, which adds a Refresh note.
+     - Not verified live: that the channel-edit fallback can edit a public message sent as an
+       interaction followup once its token has expired. The Track buttons on route results
+       (public, 15 minutes) depend on it. If it can't, those buttons simply stay as they were
+       before this change.
+     - Tests: `tests/test_expired_views.py` (11), with `tests/bot_views.py` listing every
+       BotView subclass. Each change was undone one at a time (12 in all), and its test
+       failed every time.
+
 ## Where to look for what
 
 Six docs, deliberately scoped so they don't duplicate each other:

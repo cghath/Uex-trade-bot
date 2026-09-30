@@ -12,6 +12,7 @@ all-or-nothing, and sync_result_is_plausible refuses a truncated response before
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import re
 import time
@@ -357,18 +358,25 @@ class Blueprints(commands.Cog):
         return SearchResult("found", tuple(pages), name, embed if use_embed else None, omitted=omitted, recipe=recipe, craft_quantity=craft_quantity)
 
     async def deliver(self, send: Callable[..., Awaitable], result: SearchResult) -> None:
-        """Send a result via `send` (a followup.send / channel.send). Prefers the embed; if none fits, or
-        Discord rejects it, sends the complete text pages instead - same facts, same disclosures."""
+        """Send a result via `send` (a followup.send with wait=True, or a channel.send - either
+        returns the message, which the craft buttons need to grey out when they expire).
+        Prefers the embed; if none fits, or Discord rejects it, sends the complete text pages
+        instead - same facts, same disclosures."""
         view = CraftLaunchView(self, result.recipe, result.craft_quantity) if result.recipe else None
         extras = {"view": view} if view else {}
         if result.embed is not None:
             try:
-                await send(embed=result.embed, allowed_mentions=_NO_MENTIONS, **extras)
+                sent = await send(embed=result.embed, allowed_mentions=_NO_MENTIONS, **extras)
+                if view is not None:
+                    view.message = sent
                 return
             except discord.HTTPException as exc:
                 logger.warning("Blueprint embed send failed (%s); falling back to text", exc)
         for index, page in enumerate(result.pages):
-            await send(content=page, allowed_mentions=_NO_MENTIONS, **(extras if index == len(result.pages) - 1 else {}))
+            last = index == len(result.pages) - 1
+            sent = await send(content=page, allowed_mentions=_NO_MENTIONS, **(extras if last else {}))
+            if last and view is not None:
+                view.message = sent
 
     # -- command --------------------------------------------------------------------------------
 
@@ -385,7 +393,7 @@ class Blueprints(commands.Cog):
         # The very first search can trigger a full sync (~9 requests) - acknowledge before any of it.
         await interaction.response.defer()
         result = await self.search(blueprint, craft_quantity=craft_quantity)
-        await self.deliver(interaction.followup.send, result)
+        await self.deliver(functools.partial(interaction.followup.send, wait=True), result)
 
     @app_commands.command(name="blueprint-list", description="Open your private combined blueprint shopping list.")
     async def blueprint_list(self, interaction: discord.Interaction) -> None:

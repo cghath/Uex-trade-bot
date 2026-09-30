@@ -278,7 +278,9 @@ SELECTORS_PER_PAGE = 4
 class CraftConfigView(BotView):
     def __init__(self, cog: "Blueprints", recipe: Recipe, count: int,
                  quality_options: dict[str, tuple[int, ...]]) -> None:
-        super().__init__(timeout=900)
+        # 10 idle minutes, not 15: this reply is ephemeral, so it can only be greyed out
+        # through an interaction token, and those last 15 minutes from the click that opened it.
+        super().__init__(timeout=600)
         self.cog, self.recipe, self.count = cog, recipe, count
         self.choices: dict[str, list[int]] = {}
         self.qualities: dict[str, int] = {}
@@ -356,7 +358,9 @@ class CraftLaunchView(BotView):
         await interaction.response.defer(ephemeral=True)
         options = await self.cog.quality_options(self.recipe)
         view = CraftConfigView(self.cog, self.recipe, self.count, options)
-        await interaction.followup.send(view.text(), view=view, ephemeral=True, allowed_mentions=NO_MENTIONS)
+        view.message = await interaction.followup.send(
+            view.text(), view=view, ephemeral=True, allowed_mentions=NO_MENTIONS, wait=True,
+        )
 
     @discord.ui.button(label="Add to shopping list", style=discord.ButtonStyle.success, row=0)
     async def add_default(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
