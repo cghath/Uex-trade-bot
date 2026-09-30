@@ -310,16 +310,17 @@ def missing_ship_note(ship_query: str | None, *, lookup_failed: bool) -> str:
     who already has one to set one, when really UEX was down or the saved name no longer
     matches a ship."""
     if not ship_query:
-        return "set a default ship with /set-default-ship for cargo/run-profit numbers"
+        return "set a default ship with /set-trading-preferences for cargo/run-profit numbers"
     if lookup_failed:
         return "UEX's ship list didn't load, so no cargo/run-profit numbers this time"
-    return f"'{ship_query}' didn't match a single ship - pick one from autocomplete or update /set-default-ship"
+    return (f"'{ship_query}' didn't match a single ship - pick one from autocomplete or update it with "
+            "/set-trading-preferences")
 
 
 def missing_ship_cargo_line(ship_query: str | None, *, lookup_failed: bool) -> str:
     """The per-route "Cargo: unknown" line, with the same three causes as missing_ship_note."""
     if not ship_query:
-        return "Cargo: unknown (set a ship with /set-default-ship to see haulable SCU)"
+        return "Cargo: unknown (set a ship with /set-trading-preferences to see haulable SCU)"
     if lookup_failed:
         return "Cargo: unknown (UEX's ship list didn't load)"
     return f"Cargo: unknown ('{ship_query}' didn't match a single ship)"

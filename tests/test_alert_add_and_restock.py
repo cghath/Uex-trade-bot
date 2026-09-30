@@ -155,13 +155,13 @@ def test_many_restocks_become_one_message_cheapest_first_with_the_rest_counted()
     assert lines[0] == "stock alert #7: **Gold** is in stock at 14 terminals:"
     assert lines[1].startswith("• **Terminal 14** — 86.00") and lines[RESTOCK_MESSAGE_MAX_TERMINALS].startswith("• **Terminal 5**")
     assert "…and 4 more." in lines
-    assert text.count("set /set-default-ship") == 1, "the no-ship hint appears once, not on every line"
+    assert text.count("/set-trading-preferences") == 1, "the no-ship hint appears once, not on every line"
 
 
 def test_a_known_ship_puts_the_cargo_fit_on_each_line():
     text = format_restock_message(7, "Gold", [_terminal(1, 10.0, scu=50), _terminal(2, 11.0, scu=500)], 96)
     assert "(fills 50 of your 96 SCU hold)" in text and "(fills your full 96 SCU hold)" in text
-    assert "set /set-default-ship" not in text
+    assert "/set-trading-preferences" not in text
 
 
 def test_the_combined_message_stays_well_inside_discords_limit():

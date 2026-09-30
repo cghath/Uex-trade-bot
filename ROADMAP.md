@@ -204,7 +204,8 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
   `/multi-stop-route` whenever their matching option is left unset; space-only/
   capital-ship-access only affect the latter two today. Default ship (`/set-default-ship`)
   was folded into the same `user_trading_preferences` row rather than kept in its own
-  table, per user direction - see `PROJECT_CONTEXT.md` entries 52-53 for the full design
+  table, per user direction, and the command itself was folded into
+  `/set-trading-preferences ship:` on 2026-09-30 (entry 112) - see `PROJECT_CONTEXT.md` entries 52-53 for the full design
   history, the real SQLite migration bug found and fixed along the way, and the known
   gap (space-only/capital-access filtering doesn't exist yet for `/best-route`/
   `/top-routes` - bundled into Centralized Route Presentation below instead).

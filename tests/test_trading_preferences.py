@@ -525,7 +525,7 @@ def test_set_trading_preferences_command_sets_ship_with_validation(tmp_path):
         assert "Default ship: **Cutlass Black**" in message
         prefs = await db.get_trading_preferences(1)
         assert prefs["ship_name"] == "Cutlass Black"
-        # /set-default-ship and /my-trading-preferences read the same underlying value.
+        # Route commands read the ship back through get_default_ship.
         assert await db.get_default_ship(1) == "Cutlass Black"
 
     asyncio.run(run())

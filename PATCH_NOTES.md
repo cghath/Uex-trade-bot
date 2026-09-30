@@ -1,7 +1,18 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.31.
+the oldest entry below); the next new entry is 2.32.
+
+---
+
+## 2.31 - 2026-09-30 - One place for your ship
+
+**Removed**
+- `/set-default-ship`, `/clear-default-ship` - Your default ship is now set with `/set-trading-preferences ship:`,
+  alongside your other saved defaults. Choose "No default ship" in its list to clear it. Your saved ship is unchanged.
+
+**Changed**
+- Every "set a default ship" hint now points to `/set-trading-preferences`.
 
 ---
 

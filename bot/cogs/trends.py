@@ -157,7 +157,7 @@ def _build_route_field(
             for hedge_item in hedge_items or ():
                 value_lines.append(f"Hedge: {cargo_item_line(hedge_item)}")
     elif not ship_vehicle:
-        value_lines.append(missing_ship_line or "Cargo: unknown (set a ship with /set-default-ship to see haulable SCU)")
+        value_lines.append(missing_ship_line or "Cargo: unknown (set a ship with /set-trading-preferences to see haulable SCU)")
 
     pct_bits = []
     if r.price_margin is not None:
@@ -814,7 +814,7 @@ class Trends(commands.Cog):
     @app_commands.describe(
         origin="Optional: only routes starting at this terminal, e.g. where you are now",
         destination="Optional: only routes ending at this terminal, e.g. where you're heading",
-        ship="Optional: check cargo/profit for a specific ship instead of your default (/set-default-ship)",
+        ship="Optional: check cargo/profit for a specific ship instead of your saved default",
         strict="Require live stock at the origin and live demand at the destination (safer).",
         auto_load_only="Only show routes where both the origin and destination terminal offer UEX's auto-load",
         system="Optional: require both ends of the route to be in this star system",

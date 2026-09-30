@@ -263,6 +263,12 @@ date - no open item, nothing to record here.
       shop names, Ship Parts Finder's wiki-failure messages, `/price`'s shown-only footer,
       and `default_permissions(manage_guild=True)` on the digest setup commands and
       `/command-usage`. See PROJECT_CONTEXT.md entry 111
+- [ ] `/set-default-ship` and `/clear-default-ship` removed: `bot/cogs/ships.py` keeps only
+      `ship_name_autocomplete`, and `/set-trading-preferences`' `ship` option gains a "No
+      default ship (clear it)" choice (value `none`). Every hint naming `/set-default-ship`
+      points to `/set-trading-preferences`. `tests/test_ship_setting_fold.py` fails on any
+      bot string naming a command that doesn't exist; aiv2's `ai-` commands will need its
+      command set built the same way. See PROJECT_CONTEXT.md entry 112
 
 ## To port: aiv2 -> production
 

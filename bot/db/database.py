@@ -262,7 +262,7 @@ CREATE TABLE IF NOT EXISTS marketplace_item_tier_stats (
 -- Commodity restock watches: unlike price_alerts (one-shot), these are persistent - a
 -- background poller checks /commodities_prices across every terminal and notifies whenever
 -- one flips from no-stock to has-stock. ship_query is optional (falls back to the watcher's
--- /set-default-ship at notify time if unset) and is only used to describe how much of a
+-- saved default ship at notify time if unset) and is only used to describe how much of a
 -- restock would fill that ship's hold, not to filter/gate the alert itself. `scope` picks the
 -- delivery: 'global' posts in the channel the alert was created in and pings the creator
 -- (visible to everyone else there too); 'personal' DMs only the creator, nobody else sees it.
@@ -1055,7 +1055,8 @@ class Database:
         Guarded by ship_preference_migrated, not just "ship_name IS NULL on the
         preferences row": a follow-up review found that guard couldn't distinguish "never
         migrated yet" from "migrated, then the user deliberately cleared it" -
-        /clear-default-ship sets ship_name back to NULL (see clear_default_ship), and
+        clearing the ship (/clear-default-ship then, the 'No default ship' choice of
+        /set-trading-preferences now) sets ship_name back to NULL, and
         /clear-trading-preferences deletes the whole preferences row outright, and either
         one looked identical to "not migrated" to the old NULL-based check, so the legacy
         ship reappeared on the very next restart regardless of what the user had just
