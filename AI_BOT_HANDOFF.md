@@ -223,7 +223,7 @@ date - no open item, nothing to record here.
       tracking thread's), and a `/best-route` note; `risk_tolerance_hint` for empty results.
       If aiv2's AI tools suggest routes, they should honour it too.
       Tests: `tests/test_risk_tolerance.py`. See PROJECT_CONTEXT.md entry 104 (skipped:
-      superseded by PR #TBD, which removed the saved risk tolerance from production
+      superseded by PR #96, which removed the saved risk tolerance from production
       altogether - see its entry below, and PROJECT_CONTEXT.md entry 114)
 - [ ] One `delivery` option on all three alert commands (`bot/delivery.py`:
       `DELIVERY_CHOICES`, `delivery_scope`, `send_alert`), DM by default; `scope` columns on
@@ -277,7 +277,7 @@ date - no open item, nothing to record here.
       custom prices on `/inventory-sell` batches (`StackPricesModal`,
       `AuthorizeScheduleView.custom_prices`, `item_name` in the authorize specs). See
       PROJECT_CONTEXT.md entry 113
-- [ ] PR #TBD - The saved risk tolerance is removed; routes keep their "⚠️ Cargo risk: ..."
+- [ ] PR #96 - The saved risk tolerance is removed; routes keep their "⚠️ Cargo risk: ..."
       labels. `/set-trading-preferences` loses its `risk-tolerance` option (and
       `RISK_TOLERANCE_CHOICES`); `format_trading_preferences` and the "Filters: ..." footer
       (`describe_active_preferences`, which no longer takes it) stop showing it;
