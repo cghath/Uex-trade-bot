@@ -2712,6 +2712,14 @@ class Database:
             await db.commit()
             return cursor.lastrowid
 
+    async def delete_trade_log_entry(self, user_id: int, entry_id: int) -> bool:
+        """Removes one of the user's own logged trades (the /trade-log menu, audit UX-16).
+        Keyed on user_id as well as id, so an id alone can't remove someone else's entry."""
+        async with self.connect() as db:
+            cursor = await db.execute("DELETE FROM trade_log WHERE id = ? AND user_id = ?", (entry_id, user_id))
+            await db.commit()
+            return cursor.rowcount > 0
+
     async def get_trade_log(self, user_id: int, limit: int = 20) -> list[dict[str, Any]]:
         async with self.connect() as db:
             cursor = await db.execute(

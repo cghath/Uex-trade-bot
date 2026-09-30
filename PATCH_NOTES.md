@@ -1,7 +1,19 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.32.
+the oldest entry below); the next new entry is 2.33.
+
+---
+
+## 2.32 - 2026-09-30 - Fix a trade, price every stack
+
+**Added**
+- `/trade-log` - A menu under your list removes a wrong entry. To correct one, remove it and log it again.
+- `/inventory-sell` - "Enter a custom price..." works for any number of stacks, with a price for each (five per form).
+  A button lets you set the next five or change a price without starting over.
+
+**Changed**
+- `/trade-log-add` - The commodity and terminal options autocomplete.
 
 ---
 

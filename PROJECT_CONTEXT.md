@@ -4010,6 +4010,41 @@ they're in sync).
      - Tests: `tests/test_ship_setting_fold.py` (5), plus updated hint assertions. Each
        change was undone one at a time (6 in all), and its test failed every time.
 
+113. **A wrong trade-log entry can be removed, and a batch takes a custom price per stack.**
+     Audit findings UX-16 and UX-20.
+     - **UX-16.** `/trade-log-add` had no autocomplete and nothing could fix a mistyped
+       entry.
+       - `commodity` and `terminal` now autocomplete, using `/price`'s and the route
+         commands' own autocompletes.
+       - `/trade-log` now has a "Select a trade to remove" menu under its list, the
+         shared `AlertRemovePickerView` (as `/alert-remove`). Picking one deletes it
+         (`Database.delete_trade_log_entry`, keyed on user id as well as entry id) and
+         redraws the list without it. There's no separate edit: remove, then log it again,
+         as the user chose.
+     - **REL-8, one more.** That menu's select callback wrote to the DB before answering
+       Discord. Entry 100's sweep had treated UI callbacks as in-memory, but this one's
+       first await is `remove_callback`'s delete. It now defers first and edits the
+       message with `edit_original_response`, which also covers `/alert-remove`.
+     - **UX-20.** Picking "Enter a custom price..." on an `/inventory-sell` batch of more
+       than one stack refused and said to re-run the command with a single stack; an
+       absolute price doesn't carry across different items. It now opens
+       `StackPricesModal`, one input per stack labelled with the stack's id and name,
+       five per form (Discord's limit).
+       - A form saves only if every price in it is a whole number at or above that
+         stack's minimum. Otherwise the message lists what's wrong and nothing from that
+         form is kept.
+       - A button under the preview opens the next five ("Set prices for stacks 6-7 of
+         7"), or reopens the prices, prefilled, to change one ("Change custom prices").
+         Before, a changed price meant starting over.
+       - Authorize refuses a custom batch until every stack has a price, and shows the
+         button. Picking another strategy drops the custom prices.
+       - The per-stack prices go into each job's existing `custom_price` column; the DB
+         already checked each against its stack's minimum. `CustomPriceModal` is now
+         only `/inventory-post-now`'s.
+     - Tests: `tests/test_trade_log_and_stack_prices.py` (7), plus two inventory tests
+       moved to the per-stack prices. Each change was undone one at a time (12 in all),
+       and its test failed every time.
+
 ## Where to look for what
 
 Six docs, deliberately scoped so they don't duplicate each other:
