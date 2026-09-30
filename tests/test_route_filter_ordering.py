@@ -17,6 +17,7 @@ from bot.cogs.trends import Trends
 from bot.db.database import Database
 from bot.uex.client import UexClient
 from bot.uex.trends import ScoredRouteEntry
+from tests.route_results import route_results
 
 
 class _FakeResponse:
@@ -270,8 +271,7 @@ def test_top_routes_falls_back_to_a_second_best_route_for_the_same_commodity(tmp
             # names (see /best-route's identical per-route-message restructuring), not a
             # shared embed with one field per route.
             titles = " ".join(
-                kwargs["embed"].title for _, kwargs in interaction.followup.sent
-                if kwargs.get("embed") and kwargs["embed"].title
+                title for title in route_results(interaction.followup.sent).titles
             )
             assert "AutoOrigin2" in titles and "AutoDest2" in titles, (
                 f"expected the second-best auto-load-capable route for 'Multi', got: {titles}"
@@ -334,8 +334,7 @@ def test_top_routes_dedupes_to_one_route_per_commodity_after_filtering(tmp_path)
 
             assert interaction.followup.sent, "expected at least one followup"
             titles = " ".join(
-                kwargs["embed"].title for _, kwargs in interaction.followup.sent
-                if kwargs.get("embed") and kwargs["embed"].title
+                title for title in route_results(interaction.followup.sent).titles
             )
             assert "HighOrigin" in titles, f"expected the higher-scored route, got: {titles}"
             assert "LowOrigin" not in titles, (
@@ -410,8 +409,7 @@ def test_top_routes_auto_load_filter_finds_a_lower_scored_route(tmp_path):
 
             assert interaction.followup.sent, "expected at least one followup"
             titles = " ".join(
-                kwargs["embed"].title for _, kwargs in interaction.followup.sent
-                if kwargs.get("embed") and kwargs["embed"].title
+                title for title in route_results(interaction.followup.sent).titles
             )
             assert "AutoOrigin" in titles and "AutoDest" in titles, (
                 f"expected the auto-load-capable route in the response, got: {titles}"
@@ -459,11 +457,10 @@ def test_top_routes_shows_the_budget_in_the_footer_and_caps_the_cargo_estimate(t
         finally:
             await client.aclose()
 
-        embeds = [kwargs["embed"] for _, kwargs in interaction.followup.sent if kwargs.get("embed")]
-        intro_footer = embeds[0].footer.text
+        intro_footer = route_results(interaction.followup.sent).header
         assert "budget 1,000 aUEC" in intro_footer
 
-        route_embed = next(e for e in embeds if e.title and "Gold" in e.title)
+        route_embed = next(e for e in route_results(interaction.followup.sent).embeds if e.title and "Gold" in e.title)
         route_text = route_embed.fields[0].value
         assert "limited by your budget" in route_text
 
@@ -504,7 +501,6 @@ def test_top_routes_falls_back_to_a_saved_budget_preference(tmp_path):
         finally:
             await client.aclose()
 
-        embeds = [kwargs["embed"] for _, kwargs in interaction.followup.sent if kwargs.get("embed")]
-        assert "budget 1,000 aUEC" in embeds[0].footer.text
+        assert "budget 1,000 aUEC" in route_results(interaction.followup.sent).header
 
     asyncio.run(run())

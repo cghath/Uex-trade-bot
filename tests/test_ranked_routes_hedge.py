@@ -20,6 +20,7 @@ from cryptography.fernet import Fernet
 from bot.cogs.trends import Trends
 from bot.db.database import Database
 from bot.uex.trends import ScoredRouteEntry
+from tests.route_results import route_results
 
 SHIP_SCU = 100
 
@@ -75,13 +76,12 @@ async def _send(cog, entries, **kwargs):
 
 
 def _route_text(inter) -> str:
-    """Every field value of every route embed (the first embed-bearing call is the intro)."""
-    embeds = [call.kwargs["embed"] for call in inter.followup.send.call_args_list if call.kwargs.get("embed")]
-    return "\n".join(field.value or "" for embed in embeds[1:] for field in embed.fields)
+    """Every field value of every route embed - each route is a page of one message."""
+    return route_results(inter.followup.send).field_text()
 
 
 def _route_embeds(inter):
-    return [call.kwargs["embed"] for call in inter.followup.send.call_args_list if call.kwargs.get("embed")][1:]
+    return route_results(inter.followup.send).embeds
 
 
 def test_a_stock_limited_route_warns_and_suggests_a_hedge_at_the_same_terminal_pair(tmp_path):

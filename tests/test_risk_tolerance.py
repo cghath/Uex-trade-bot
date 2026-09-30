@@ -34,6 +34,7 @@ from bot.uex.trading_preferences import (
     risk_tolerance_hint,
 )
 from bot.uex.trends import ScoredRouteEntry
+from tests.route_results import route_results
 from tests.test_route_messages import USER, _client, _db, _Interaction
 from tests.test_route_progression import (
     _create_thread_for_legs,
@@ -106,12 +107,8 @@ def _entry(id_commodity: int, name: str) -> ScoredRouteEntry:
 
 
 def _everything_sent(interaction: _Interaction) -> str:
-    parts = [interaction.texts()]
-    for _, kwargs in interaction.sent:
-        if embed := kwargs.get("embed"):
-            parts += [embed.title or "", embed.description or ""]
-            parts += [f"{field.name}\n{field.value}" for field in embed.fields]
-    return "\n".join(parts)
+    results = route_results(interaction.sent)
+    return "\n".join([interaction.texts(), results.all_text() if results else ""])
 
 
 async def _top_routes(tmp_path, tolerance, entries):

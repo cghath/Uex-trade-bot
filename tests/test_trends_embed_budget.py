@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock
 
 from bot.cogs.trends import Trends
 from bot.uex.trends import ScoredRouteEntry
+from tests.route_results import route_results
 
 
 def _interaction():
@@ -75,15 +76,15 @@ def _routes(num_routes: int) -> list[ScoredRouteEntry]:
 
 
 def _route_embed_calls(mock) -> list:
-    """Every route now sends as its own message (see /best-route's identical per-route-
-    message restructuring in prices.py) - the first embed-bearing call is always the intro
-    (no fields, just title/footer), so route embeds are every embed call AFTER that one."""
-    embed_calls = [call for call in mock.call_args_list if call.kwargs.get("embed") is not None]
-    return embed_calls[1:]
+    """Each route is a page of the one results message (bot/route_pages.py); its embed,
+    dressed as a send call."""
+    return route_results(mock).embed_calls()
 
 
 def _plain_messages(mock) -> list[str]:
-    return [call.args[0] for call in mock.call_args_list if call.args]
+    """Every plain-text message, and every message's text above its embed."""
+    return ([call.args[0] for call in mock.call_args_list if call.args]
+            + [call.kwargs["content"] for call in mock.call_args_list if call.kwargs.get("content")])
 
 
 def test_warning_heavy_routes_fit_the_total_embed_limit(tmp_path):
@@ -94,10 +95,8 @@ def test_warning_heavy_routes_fit_the_total_embed_limit(tmp_path):
             inter, entries=_routes(10), updated_at=None, ship=None,
             title="Top routes", footer_note="Collected data", log_label="test", display_limit=10,
         )
-        for call in inter.followup.send.call_args_list:
-            embed = call.kwargs.get("embed")
-            if embed is not None:
-                assert len(embed) <= 6000, (len(embed), len(embed.fields))
+        for embed in route_results(inter.followup.send).embeds:
+            assert len(embed) <= 6000, (len(embed), len(embed.fields))
 
     asyncio.run(run())
 
@@ -398,7 +397,7 @@ def test_send_ranked_routes_names_the_resolved_ship_in_the_footer_unconditionall
             inter, entries=_routes(1), updated_at=None, ship=None,
             title="Top routes", footer_note="Collected data", log_label="test", display_limit=10,
         )
-        intro_footer = inter.followup.send.call_args_list[0].kwargs["embed"].footer.text
+        intro_footer = _intro_footer(inter)
         assert "Ship's 100 SCU hold" in intro_footer, intro_footer
         assert "set a default ship" not in intro_footer
 
@@ -414,7 +413,7 @@ def test_send_ranked_routes_footer_prompts_for_a_ship_when_none_resolves():
             inter, entries=_routes(1), updated_at=None, ship=None,
             title="Top routes", footer_note="Collected data", log_label="test", display_limit=10,
         )
-        intro_footer = inter.followup.send.call_args_list[0].kwargs["embed"].footer.text
+        intro_footer = _intro_footer(inter)
         assert "set a default ship" in intro_footer
         assert "SCU hold" not in intro_footer
 
@@ -519,7 +518,8 @@ def test_top_routes_re_ranks_before_truncating_to_the_display_size():
 
 
 def _intro_footer(inter) -> str:
-    return inter.followup.send.call_args_list[0].kwargs["embed"].footer.text
+    """The intro text above every page (it was the intro embed's footer)."""
+    return route_results(inter.followup.send).header
 
 
 async def _send(cog, inter, entries, **overrides):

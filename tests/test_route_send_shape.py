@@ -20,12 +20,14 @@ import httpx
 
 from bot.cogs import prices as prices_module
 from bot.cogs.prices import Prices
-from bot.cogs.route_progression import RouteProgression, RouteTrackingView
+from bot.cogs.route_progression import RouteProgression
 from bot.db.database import Database
+from bot.route_pages import RoutePagesView
 from bot.uex.client import UexClient
 from bot.uex.mixed_routes import MixedCargoItem, MixedRoute
 from bot.uex.multi_stop_routes import MultiStopLeg, MultiStopRoute
 from bot.uex.trading_preferences import DEFAULT_TRADING_PREFERENCES
+from tests.route_results import route_results
 
 
 class _FakeResponse:
@@ -213,7 +215,7 @@ def test_route_from_multi_only_returns_chains_starting_at_the_resolved_location(
 
 def test_route_from_multi_attaches_a_tracking_view(monkeypatch, tmp_path):
     """Reuses the same _send_multi_stop_routes helper /multi-stop-route uses - a tracking
-    cog must still get a RouteTrackingView, with start_terminal_id correctly threaded
+    cog must still get a Track button, with start_terminal_id correctly threaded
     into build_multi_stop_routes."""
     async def run():
         captured_kwargs = {}
@@ -251,7 +253,7 @@ def test_route_from_multi_attaches_a_tracking_view(monkeypatch, tmp_path):
         assert captured_kwargs.get("start_terminal_id") == 1, captured_kwargs
         views = [kwargs["view"] for _, kwargs in interaction.followup.sent if kwargs.get("view")]
         assert views, "expected a tracking view on the real command output"
-        assert isinstance(views[0], RouteTrackingView)
+        assert isinstance(views[0], RoutePagesView)
 
     asyncio.run(run())
 
@@ -596,10 +598,10 @@ def test_multi_stop_route_attaches_a_track_button_with_flattened_legs(monkeypatc
         assert interaction.followup.sent, "expected at least one followup"
         _, kwargs = interaction.followup.sent[0]
         view = kwargs.get("view")
-        assert isinstance(view, RouteTrackingView)
+        assert isinstance(view, RoutePagesView)
         assert len(view.children) == 1, "one route -> one tracking button"
 
-        legs = view.routes[0].legs
+        legs = view.pages[0].route.legs
         assert [progression_leg.display_label for progression_leg in legs] == [
             "Buy Gold at Station A", "Buy Cobalt at Station A",
             "Sell Gold at Station B", "Sell Cobalt at Station B",
@@ -646,7 +648,7 @@ def test_multi_stop_route_flattened_legs_use_side_specific_market_scu_not_the_pa
 
         await cog.multi_stop_route.callback(cog, interaction)
 
-        legs = interaction.followup.sent[0][1]["view"].routes[0].legs
+        legs = route_results(interaction.followup.sent).pages[0].route.legs
         buy_leg, sell_leg = legs[0], legs[1]
         assert buy_leg.side == "buy" and buy_leg.market_scu == 80
         assert sell_leg.side == "sell" and sell_leg.market_scu == 20
@@ -704,7 +706,7 @@ def test_best_route_names_the_resolved_ship_in_the_footer_unconditionally(tmp_pa
         finally:
             await client.aclose()
 
-        intro_footer = interaction.followup.sent[0][1]["embed"].footer.text
+        intro_footer = route_results(interaction.followup.sent).header
         assert "Polaris's 576 SCU hold" in intro_footer, intro_footer
         assert "set a default ship" not in intro_footer
 
@@ -882,15 +884,12 @@ def test_best_route_discloses_when_routes_are_truncated_for_size(tmp_path, monke
         finally:
             await client.aclose()
 
-        # Each route is now its own message: intro (no fields), route 1, route 3 (route 2
-        # skipped - continue, no send at all), then a trailing "omitted" note.
-        assert len(interaction.followup.sent) == 4, interaction.followup.sent
-        _, route1_kwargs = interaction.followup.sent[1]
-        assert route1_kwargs["embed"].title == "Origin 1 → Destination 1"
-        _, route3_kwargs = interaction.followup.sent[2]
-        assert route3_kwargs["embed"].title == "Origin 3 → Destination 3"
-        omitted_args, _ = interaction.followup.sent[3]
-        assert "omitted" in omitted_args[0].lower(), omitted_args
+        # One message: routes 1 and 3 as its pages (route 2 skipped), with an "omitted"
+        # note in the header above them.
+        assert len(interaction.followup.sent) == 1, interaction.followup.sent
+        results = route_results(interaction.followup.sent)
+        assert results.titles == ["Origin 1 → Destination 1", "Origin 3 → Destination 3"], results.titles
+        assert "1 more route omitted" in results.header, results.header
 
     asyncio.run(run())
 
@@ -944,9 +943,9 @@ def test_best_route_primary_branch_now_warns_on_a_cross_system_route(tmp_path):
         finally:
             await client.aclose()
 
-        assert len(interaction.followup.sent) >= 2, "expected the intro plus at least one route message"
-        _, kwargs = interaction.followup.sent[1]
-        embed = kwargs["embed"]
+        results = route_results(interaction.followup.sent)
+        assert results and results.embeds, "expected at least one route page"
+        embed = results.embeds[0]
         assert any("crosses systems" in (f.value or "") for f in embed.fields), embed.fields
 
     asyncio.run(run())
@@ -997,10 +996,10 @@ def test_best_route_attaches_a_route_tracking_view_when_the_cog_is_loaded(tmp_pa
         finally:
             await client.aclose()
 
-        assert len(interaction.followup.sent) >= 2, "expected the intro plus the route message"
-        _, kwargs = interaction.followup.sent[1]
+        assert len(interaction.followup.sent) == 1, "one results message, the intro above the route"
+        _, kwargs = interaction.followup.sent[0]
         view = kwargs.get("view")
-        assert isinstance(view, RouteTrackingView)
+        assert isinstance(view, RoutePagesView)
         assert len(view.children) == 1, "one route shown -> one tracking button"
 
     asyncio.run(run())
@@ -1055,8 +1054,8 @@ def test_best_route_primary_branch_discloses_missing_distance_instead_of_silence
         finally:
             await client.aclose()
 
-        assert len(interaction.followup.sent) >= 2, "expected the intro plus the route message"
-        _, kwargs = interaction.followup.sent[1]
+        assert len(interaction.followup.sent) == 1, "one results message, the intro above the route"
+        _, kwargs = interaction.followup.sent[0]
         embed = kwargs["embed"]
         combined = "\n".join(f.value or "" for f in embed.fields)
         assert "GM" not in combined, combined
@@ -1229,8 +1228,8 @@ def test_best_route_primary_branch_shows_investment(tmp_path):
         finally:
             await client.aclose()
 
-        assert len(interaction.followup.sent) >= 2, "expected the intro plus the route message"
-        _, kwargs = interaction.followup.sent[1]
+        assert len(interaction.followup.sent) == 1, "one results message, the intro above the route"
+        _, kwargs = interaction.followup.sent[0]
         embed = kwargs["embed"]
         combined = "\n".join(f.value or "" for f in embed.fields)
         assert "Investment:" in combined, combined
@@ -1285,8 +1284,7 @@ def test_best_route_primary_branch_warns_when_stock_is_the_binding_limit(tmp_pat
         finally:
             await client.aclose()
 
-        _, kwargs = interaction.followup.sent[1]
-        embed = kwargs["embed"]
+        embed = route_results(interaction.followup.sent).embeds[0]
         combined = "\n".join(f.value or "" for f in embed.fields)
         assert "/mixed-routes" in combined, combined
 
@@ -1340,8 +1338,7 @@ def test_best_route_primary_branch_does_not_warn_when_the_ship_is_the_binding_li
         finally:
             await client.aclose()
 
-        _, kwargs = interaction.followup.sent[1]
-        embed = kwargs["embed"]
+        embed = route_results(interaction.followup.sent).embeds[0]
         combined = "\n".join(f.value or "" for f in embed.fields)
         assert "/mixed-routes" not in combined, combined
 
@@ -1403,8 +1400,7 @@ def test_best_route_primary_branch_suggests_a_hedge_at_the_same_terminal_pair(tm
         finally:
             await client.aclose()
 
-        _, kwargs = interaction.followup.sent[1]
-        embed = kwargs["embed"]
+        embed = route_results(interaction.followup.sent).embeds[0]
         combined = "\n".join(f.value or "" for f in embed.fields)
         assert "Hedge:" in combined, combined
         assert "Cobalt" in combined, combined
@@ -1460,7 +1456,7 @@ def test_best_route_primary_branch_a_hedge_lookup_failure_still_sends_the_route(
         finally:
             await client.aclose()
 
-        route_embeds = [kwargs["embed"] for _, kwargs in interaction.followup.sent[1:] if kwargs.get("embed") is not None]
+        route_embeds = route_results(interaction.followup.sent).embeds
         assert len(route_embeds) == 1, "the route must still be sent, not silently dropped"
         combined = "\n".join(f.value or "" for f in route_embeds[0].fields)
         assert "/mixed-routes" in combined, combined
@@ -1821,10 +1817,10 @@ def test_mixed_routes_attaches_a_track_button_with_flattened_legs(monkeypatch):
         assert interaction.followup.sent, "expected at least one followup"
         _, kwargs = interaction.followup.sent[0]
         view = kwargs.get("view")
-        assert isinstance(view, RouteTrackingView)
+        assert isinstance(view, RoutePagesView)
         assert len(view.children) == 1, "one route -> one tracking button"
 
-        legs = view.routes[0].legs
+        legs = view.pages[0].route.legs
         assert [leg.display_label for leg in legs] == [
             "Buy Gold at Station A", "Buy Cobalt at Station A",
             "Sell Gold at Station B", "Sell Cobalt at Station B",
@@ -1870,7 +1866,7 @@ def test_mixed_routes_flattened_legs_use_side_specific_market_scu_not_the_pair_m
 
         await cog.mixed_routes.callback(cog, interaction)
 
-        legs = interaction.followup.sent[0][1]["view"].routes[0].legs
+        legs = route_results(interaction.followup.sent).pages[0].route.legs
         buy_leg, sell_leg = legs[0], legs[1]
         assert buy_leg.side == "buy" and buy_leg.market_scu == 80
         assert sell_leg.side == "sell" and sell_leg.market_scu == 20
@@ -1912,9 +1908,9 @@ def test_mixed_routes_matched_report_writes_real_market_stock_not_the_allocated_
 
         try:
             await cog.mixed_routes.callback(cog, interaction, ship="TestShip")
-            views = [kwargs["view"] for _, kwargs in interaction.followup.sent if kwargs.get("view")]
-            assert views, "expected a tracking view on the real command output"
-            route = views[0].routes[0]
+            results = route_results(interaction.followup.sent)
+            assert results and results.view, "expected a tracking view on the real command output"
+            route = results.pages[0].route
             cobalt_buy_leg = next(leg for leg in route.legs if leg.side == "buy" and leg.id_commodity == 2)
             # The ship's small cargo pool means the allocation is nowhere near the real stock.
             assert cobalt_buy_leg.quoted_scu < real_origin_scu_buy
@@ -1993,8 +1989,9 @@ def test_mixed_routes_a_route_that_does_not_fit_falls_back_on_its_own(monkeypatc
         await cog.mixed_routes.callback(cog, interaction)
 
         assert interaction.followup.sent, "expected at least one followup"
-        embed_titles = [kwargs["embed"].title for _, kwargs in interaction.followup.sent if kwargs.get("embed")]
-        plain_texts = [kwargs["content"] for _, kwargs in interaction.followup.sent if kwargs.get("content")]
+        results = route_results(interaction.followup.sent)
+        embed_titles = results.titles
+        plain_texts = results.text_pages
         assert any("Origin 1" in title for title in embed_titles), embed_titles
         assert any("Origin 3" in title for title in embed_titles), embed_titles
         assert not any("Origin 2" in title for title in embed_titles), (
@@ -2081,7 +2078,8 @@ _PINNING_TERMINALS = [
 
 
 def _titles(interaction):
-    return [kwargs["embed"].title for _, kwargs in interaction.followup.sent if kwargs.get("embed") is not None]
+    results = route_results(interaction.followup.sent)
+    return results.titles if results else []
 
 
 def _mixed(tmp_path, name, **options):

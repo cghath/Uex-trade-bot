@@ -44,8 +44,6 @@ logger = logging.getLogger("uexbot.route_progression")
 ABANDONMENT_POLL_HOURS = 6
 ABANDONMENT_HOURS = 48
 
-MAX_TRACKABLE_ROUTES = 5
-
 # A leg-outcome button/modal's real commit point (claim() + the Discord acknowledgement)
 # happens BEFORE handle_leg_outcome/abandon_thread ever runs - by the time either of those
 # raises, the user has already been told "reported" and the leg is locked. Retrying the
@@ -606,31 +604,6 @@ class HedgeReportView(BotView):
                 # on this edit landing. Not just HTTPException: LegOutcomeView's own copy of this
                 # was widened for the same reason by the 2026-09-13 audit.
                 logger.info("Could not disable a hedge report button (non-critical)", exc_info=True)
-
-
-class RouteTrackingView(BotView):
-    """Attach to a route-recommendation embed - one 'Track' button per route (up to
-    MAX_TRACKABLE_ROUTES), each opening its own private thread. Built with plain
-    discord.ui.Button instances (not the @discord.ui.button decorator) since the number of
-    routes shown varies per command call."""
-
-    def __init__(self, cog: "RouteProgression", routes: list[TrackableRoute]) -> None:
-        super().__init__(timeout=900)
-        self.cog = cog
-        routes = routes[:MAX_TRACKABLE_ROUTES]
-        self.routes = routes
-        for index, route in enumerate(routes):
-            label = "Track this route" if len(routes) == 1 else f"Track route #{index + 1}"
-            button: discord.ui.Button = discord.ui.Button(
-                label=label, style=discord.ButtonStyle.blurple, row=0,
-            )
-            button.callback = self._make_callback(route)
-            self.add_item(button)
-
-    def _make_callback(self, route: TrackableRoute):
-        async def callback(interaction: discord.Interaction) -> None:
-            await self.cog.start_tracking(interaction, route)
-        return callback
 
 
 class RouteProgression(commands.Cog):

@@ -860,9 +860,9 @@ def test_top_routes_send_ranked_routes_shows_active_preferences_in_footer(monkey
             risk_tolerance="low",
         )
         assert sent, "expected a followup"
-        embed = sent[0]["embed"]
-        assert "auto-load-only" in embed.footer.text
-        assert "system: Pyro" in embed.footer.text
-        assert "risk tolerance: low" in embed.footer.text
+        header = sent[0]["content"]  # the intro text above the route
+        assert "auto-load-only" in header
+        assert "system: Pyro" in header
+        assert "risk tolerance: low" in header
 
     asyncio.run(run())

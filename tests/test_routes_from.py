@@ -14,6 +14,7 @@ from bot.cogs.trends import Trends
 from bot.db.database import Database
 from bot.uex.client import UexClient
 from bot.uex.trends import ScoredRouteEntry
+from tests.route_results import route_results
 
 
 def _make_db(tmp_path) -> Database:
@@ -287,8 +288,7 @@ def test_routes_from_filters_the_shared_pool_to_the_resolved_origin(tmp_path):
 
         assert interaction.followup.sent, "expected at least one followup"
         titles = " ".join(
-            kwargs["embed"].title for _, kwargs in interaction.followup.sent
-            if kwargs.get("embed") and kwargs["embed"].title
+            title for title in route_results(interaction.followup.sent).titles
         )
         assert "Destination A" in titles
         assert "Destination B" not in titles, "a route from a different origin must not appear"
@@ -330,11 +330,10 @@ def test_routes_from_shows_the_budget_in_the_footer_and_caps_the_cargo_estimate(
         finally:
             await client.aclose()
 
-        embeds = [kwargs["embed"] for _, kwargs in interaction.followup.sent if kwargs.get("embed")]
-        intro_footer = embeds[0].footer.text
+        intro_footer = route_results(interaction.followup.sent).header
         assert "budget 1,000 aUEC" in intro_footer
 
-        route_embed = next(e for e in embeds if e.title and "Commodity 1" in e.title)
+        route_embed = next(e for e in route_results(interaction.followup.sent).embeds if e.title and "Commodity 1" in e.title)
         route_text = route_embed.fields[0].value
         assert "limited by your budget" in route_text
 
@@ -372,7 +371,6 @@ def test_routes_from_falls_back_to_a_saved_budget_preference(tmp_path):
         finally:
             await client.aclose()
 
-        embeds = [kwargs["embed"] for _, kwargs in interaction.followup.sent if kwargs.get("embed")]
-        assert "budget 1,000 aUEC" in embeds[0].footer.text
+        assert "budget 1,000 aUEC" in route_results(interaction.followup.sent).header
 
     asyncio.run(run())

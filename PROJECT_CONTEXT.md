@@ -3779,6 +3779,35 @@ they're in sync).
      - Tests: `tests/test_inventory_pickers_and_key_check.py` (15). Each change was undone
        one at a time (11 in all), and its test failed every time.
 
+107. **Route commands answer in one message, a page per route.** Audit finding UX-6.
+     - Seven route commands (`/top-routes`, `/routes-from`, `/route-on-the-way`, `/best-route`,
+       `/mixed-routes`, `/multi-stop-route`, `/route-from-multi`) posted an intro and then a
+       public message per route, up to 11 for one `/top-routes`, with the Track buttons on
+       the last. Each now sends one message (`send_route_pages` in `bot/route_pages.py`):
+       the intro as text above one route's embed, ◀ ▶ to page, and **Track this route** for
+       the route showing. `/best-route`'s collected-data branch already sent one embed and
+       is unchanged.
+     - Two options were weighed with the user: a saved "only me" setting that made results
+       private, and this. They chose this because it "lets other people see what the bot
+       does while also cutting down on clutter".
+     - Only whoever ran the command can page, since the routes were worked out for their
+       ship, budget and saved settings. Anyone else gets a private note to run it
+       themselves. Anyone can still track the route showing, and now every route can be
+       tracked, not just the first five (`RouteTrackingView` and `MAX_TRACKABLE_ROUTES` are
+       gone).
+     - The message shows one route's embed at a time, never all of them. Several embeds in
+       one message share Discord's combined 6,000-character limit, which left
+       `/multi-stop-route` stuck on "thinking..." before (entry 36).
+     - A route too long for an embed becomes plain-text pages marked "part 1 of 2"
+       (`text_pages`), so no line is dropped. If Discord refuses a page's embed anyway, on
+       the first send or a page turn, that page is shown as its text.
+     - The buttons still close after 15 idle minutes. The message then greys them out and
+       says so (`BotView.grey_out` now takes message fields, for the note). A single route
+       that can't be tracked is sent with no buttons at all.
+     - Tests: `tests/test_route_pages.py` (9). `tests/route_results.py` reads the new message
+       back for the ten command test files updated to it. Each change was undone one at a
+       time (13 in all), and its test failed every time.
+
 ## Where to look for what
 
 Six docs, deliberately scoped so they don't duplicate each other:

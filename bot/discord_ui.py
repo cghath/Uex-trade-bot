@@ -117,14 +117,15 @@ class BotView(discord.ui.View):
     async def on_timeout(self) -> None:
         await self.grey_out()
 
-    async def grey_out(self) -> bool:
-        """Disable every control and show that on the message. True if the message was edited."""
+    async def grey_out(self, **edit_kwargs: Any) -> bool:
+        """Disable every control and show that on the message, along with any other message
+        fields passed (e.g. a note in `content`). True if the message was edited."""
         for child in self.children:
             if hasattr(child, "disabled"):
                 child.disabled = True
         for edit in self._message_editors():
             try:
-                await edit(view=self)
+                await edit(view=self, **edit_kwargs)
                 return True
             except discord.HTTPException:
                 continue

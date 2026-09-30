@@ -46,7 +46,8 @@ from bot.uex.trading_preferences import (
     saved_filter_labels,
     saved_filters_hint,
 )
-from bot.cogs.route_progression import RouteLegInput, RouteTrackingView, TrackableRoute
+from bot.cogs.route_progression import RouteLegInput, TrackableRoute
+from bot.route_pages import RoutePage, send_route_pages, text_pages
 from bot.uex.route_presentation import (
     add_chunked_fields,
     approximation_note,
@@ -588,9 +589,6 @@ class Prices(commands.Cog):
                 if pair[1] is not None
             ]
             track_record = await self.bot.db.get_route_progression_track_record(track_record_pairs)
-            intro_embed = discord.Embed(title=f"{commodity_display} — Best Trade Routes", color=discord.Color.green())
-            if risk_warning:
-                intro_embed.description = risk_warning
             footer = "Data from UEX Corp /commodities_routes"
             # Consistency fix: a resolved ship used to only get named inside a per-route
             # cargo line, and only for a route that happened to be ship-limited
@@ -605,15 +603,12 @@ class Prices(commands.Cog):
                 footer += " · " + missing_ship_note(ship_query, lookup_failed=ship_lookup_failed)
             if preferences_note:
                 footer += " · " + preferences_note
-            intro_embed.set_footer(text=footer)
-            await interaction.followup.send(embed=intro_embed)
-
-            # Each route gets its OWN message with its OWN "Track this route" button
-            # directly beneath it, rather than one combined embed with every route's
-            # button bundled at the end - Discord has no way to place a component between
-            # two fields of a single embed, only below the whole message.
+            # The intro is the text above every page of the one results message, and each
+            # route is a page with its own Track button (audit UX-6).
+            header = "\n".join(part for part in (
+                f"**{commodity_display} — Best Trade Routes**", risk_warning, f"-# {footer}") if part)
             tracking_cog = self.bot.get_cog("RouteProgression")
-            routes_shown = 0
+            pages: list[RoutePage] = []
             for index, r in enumerate(ranked):
                 origin = r.get("origin_terminal_name", "Unknown")
                 dest = r.get("destination_terminal_name", "Unknown")
@@ -770,15 +765,13 @@ class Prices(commands.Cog):
                 if note := travel_warning(origin_system, destination_system, has_real_distance=distance is not None):
                     value_lines.append(note)
                 route_embed = discord.Embed(title=f"{origin} → {dest}", color=discord.Color.green())
-                route_embed.set_footer(text=f"Route {index + 1} of {len(ranked)}")
                 # Per-route embed, budget-checked on its own now rather than shared across
                 # all 5 - stop and disclose instead of silently dropping a route that can't
                 # fit (see /top-routes' identical pattern in trends.py).
                 if not _add_chunked_fields(route_embed, name="Details", lines=value_lines):
                     continue
-                routes_shown += 1
 
-                view = None
+                trackable_route = None
                 # RouteProgression may not be loaded (a cog load failure elsewhere shouldn't
                 # break /best-route) - tracking buttons are additive, never required for the
                 # command's own result.
@@ -804,16 +797,11 @@ class Prices(commands.Cog):
                             ),
                         ],
                     )
-                    view = RouteTrackingView(tracking_cog, [trackable_route])
+                pages.append(RoutePage(route_embed, "\n".join([f"**{origin} → {dest}**", *value_lines]),
+                                       trackable_route))
 
-                if view is not None:
-                    view.message = await interaction.followup.send(embed=route_embed, view=view, wait=True)
-                else:
-                    await interaction.followup.send(embed=route_embed)
-
-            omitted = len(ranked) - routes_shown
-            if omitted > 0:
-                await interaction.followup.send(f"{omitted} more route(s) omitted - too large to display.")
+            await send_route_pages(interaction, pages, tracking_cog=tracking_cog, header=header,
+                                   omitted=len(ranked) - len(pages))
             return
 
         # Fallback: derive routes ourselves from raw price rows (no distance data available).
@@ -1194,6 +1182,7 @@ class Prices(commands.Cog):
         # /mixed-routes) - tracking buttons are additive, never required for the command's
         # own result.
         tracking_cog = self.bot.get_cog("RouteProgression")
+        pages: list[RoutePage] = []
         for index, route in enumerate(routes, 1):
             origin_health = (
                 classify_terminal_health(health_rows[route.origin_id])
@@ -1263,7 +1252,7 @@ class Prices(commands.Cog):
             # already fixed for /multi-stop-route's own warnings section).
             warnings_fit = _add_chunked_fields(route_embed, name="Warnings & practical checks", lines=unique_warnings)
 
-            view = None
+            trackable_route = None
             if tracking_cog:
                 # All buys first, then all sells - matches how a player actually executes
                 # this (buy everything at the one origin stop, travel, sell everything at
@@ -1303,32 +1292,22 @@ class Prices(commands.Cog):
                         for item in route.cargo
                     ],
                 )
-                view = RouteTrackingView(tracking_cog, [trackable_route])
 
-            # Sent one route per message (matching /best-route, /top-routes, and
-            # /multi-stop-route) - each embed is independently budget-checked now, not
-            # bundled with up to 4 others into Discord's shared combined-embed-text limit,
-            # so a send failure here means only THIS route's own content is too large.
-            embed_too_large = not warnings_fit
-            if not embed_too_large:
-                try:
-                    if view is not None:
-                        view.message = await interaction.followup.send(embed=route_embed, view=view, wait=True)
-                    else:
-                        await interaction.followup.send(embed=route_embed)
-                except discord.HTTPException:
-                    embed_too_large = True
-            if embed_too_large:
-                # Includes footer last - it carries the route.is_exact approximation
-                # disclosure plus the budget/space-only/capital-access notes, none of
-                # which the embed path would ever drop, so the fallback must not
-                # silently lose them either.
-                fallback_text = "\n".join([
-                    f"**#{index} {route.origin_name} → {route.destination_name}**",
-                    *value_lines, *unique_warnings, footer,
-                ])
-                for chunk in _chunk_lines([fallback_text], max_length=1900):
-                    await interaction.followup.send(content=chunk)
+            # One page per route of the one results message (audit UX-6). Each embed is
+            # budget-checked on its own, never bundled with the others into Discord's shared
+            # combined-embed-text limit. The plain-text version includes the footer last - it
+            # carries the route.is_exact approximation disclosure plus the budget/space-only/
+            # capital-access notes, none of which the embed path would ever drop, so the
+            # text must not silently lose them either.
+            fallback_text = "\n".join([
+                f"**#{index} {route.origin_name} → {route.destination_name}**",
+                *value_lines, *unique_warnings, footer,
+            ])
+            if warnings_fit:
+                pages.append(RoutePage(route_embed, fallback_text, trackable_route))
+            else:
+                pages.extend(text_pages(fallback_text, route=trackable_route))
+        await send_route_pages(interaction, pages, tracking_cog=tracking_cog)
 
     @app_commands.command(
         name="multi-stop-route",
@@ -1481,6 +1460,7 @@ class Prices(commands.Cog):
         # /multi-stop-route) - tracking buttons are additive, never required for the
         # command's own result.
         tracking_cog = self.bot.get_cog("RouteProgression")
+        pages: list[RoutePage] = []
         for index, route in enumerate(routes, 1):
             path_label = " → ".join(
                 [route.legs[0].origin_name, *(leg.destination_name for leg in route.legs)]
@@ -1610,69 +1590,62 @@ class Prices(commands.Cog):
             # limit in testing - with nothing catching the send failure, Discord never
             # got a followup at all and the interaction looked permanently "thinking."
             embed_too_large = not warnings_fit or not all_legs_fit
-            if not embed_too_large:
-                # A multi-stop leg carries several commodities at once (allocate_pair_cargo's
-                # mixed load), not one - flattened here into one buy + one sell progression-
-                # leg per commodity per hop, in order, so the existing leg-by-leg cog can walk
-                # a chain exactly the same way it already walks /best-route's simple 2-leg case.
-                view = None
-                if tracking_cog:
-                    progression_legs: list[RouteLegInput] = []
-                    for chain_leg in route.legs:
-                        for item in chain_leg.cargo:
-                            progression_legs.append(RouteLegInput(
-                                side="buy", id_terminal=chain_leg.origin_id, id_commodity=item.id_commodity,
-                                terminal_name=chain_leg.origin_name, commodity_name=item.commodity_name,
-                                display_label=f"Buy {item.commodity_name} at {chain_leg.origin_name}",
-                                quoted_price=item.buy_price, quoted_scu=item.quantity_scu,
-                                quoted_status=item.source.get("status_buy"),
-                                # Same allocation-vs-real-availability split as /mixed-routes
-                                # above - quantity_scu is this hop's planned load, not what
-                                # the terminal actually has. market_scu is THIS side's own
-                                # real figure (source's scu_buy), not available_scu (the
-                                # pair-minimum across both ends - wrong whenever stock and
-                                # demand differ).
-                                market_scu=float(item.source["scu_buy"]),
-                            ))
-                        for item in chain_leg.cargo:
-                            progression_legs.append(RouteLegInput(
-                                side="sell", id_terminal=chain_leg.destination_id, id_commodity=item.id_commodity,
-                                terminal_name=chain_leg.destination_name, commodity_name=item.commodity_name,
-                                display_label=f"Sell {item.commodity_name} at {chain_leg.destination_name}",
-                                quoted_price=item.sell_price, quoted_scu=item.quantity_scu,
-                                quoted_status=item.destination.get("status_sell"),
-                                market_scu=float(item.destination["scu_sell"]),
-                            ))
-                    if progression_legs:
-                        view = RouteTrackingView(tracking_cog, [TrackableRoute(
-                            route_kind="multi_stop_route", title=f"#{index} {path_label}", legs=progression_legs,
-                            space_only=space_only, capital_access_only=capital_access_only,
-                            auto_load_only=auto_load_only, system=system,
-                        )])
-                try:
-                    if view is not None:
-                        view.message = await interaction.followup.send(embed=route_embed, view=view, wait=True)
-                    else:
-                        await interaction.followup.send(embed=route_embed)
-                except discord.HTTPException:
-                    embed_too_large = True
+            # A multi-stop leg carries several commodities at once (allocate_pair_cargo's
+            # mixed load), not one - flattened here into one buy + one sell progression-
+            # leg per commodity per hop, in order, so the existing leg-by-leg cog can walk
+            # a chain exactly the same way it already walks /best-route's simple 2-leg case.
+            trackable_route = None
+            if tracking_cog:
+                progression_legs: list[RouteLegInput] = []
+                for chain_leg in route.legs:
+                    for item in chain_leg.cargo:
+                        progression_legs.append(RouteLegInput(
+                            side="buy", id_terminal=chain_leg.origin_id, id_commodity=item.id_commodity,
+                            terminal_name=chain_leg.origin_name, commodity_name=item.commodity_name,
+                            display_label=f"Buy {item.commodity_name} at {chain_leg.origin_name}",
+                            quoted_price=item.buy_price, quoted_scu=item.quantity_scu,
+                            quoted_status=item.source.get("status_buy"),
+                            # Same allocation-vs-real-availability split as /mixed-routes
+                            # above - quantity_scu is this hop's planned load, not what
+                            # the terminal actually has. market_scu is THIS side's own
+                            # real figure (source's scu_buy), not available_scu (the
+                            # pair-minimum across both ends - wrong whenever stock and
+                            # demand differ).
+                            market_scu=float(item.source["scu_buy"]),
+                        ))
+                    for item in chain_leg.cargo:
+                        progression_legs.append(RouteLegInput(
+                            side="sell", id_terminal=chain_leg.destination_id, id_commodity=item.id_commodity,
+                            terminal_name=chain_leg.destination_name, commodity_name=item.commodity_name,
+                            display_label=f"Sell {item.commodity_name} at {chain_leg.destination_name}",
+                            quoted_price=item.sell_price, quoted_scu=item.quantity_scu,
+                            quoted_status=item.destination.get("status_sell"),
+                            market_scu=float(item.destination["scu_sell"]),
+                        ))
+                if progression_legs:
+                    trackable_route = TrackableRoute(
+                        route_kind="multi_stop_route", title=f"#{index} {path_label}", legs=progression_legs,
+                        space_only=space_only, capital_access_only=capital_access_only,
+                        auto_load_only=auto_load_only, system=system,
+                    )
+            # The plain-text version, for a route whose embed is too large (or whose warnings
+            # section didn't fit) - warnings (risk flags, stock/demand limits, practical
+            # notes) must survive here too, not just the profit figures, split over as many
+            # text pages as it takes rather than silently dropping anything.
+            per_leg_note = approximation_note(route.is_exact, per_leg=True)
+            fallback_lines = [
+                f"**#{index} {path_label}**",
+                *summary_lines,
+                "⚠️ Full leg-by-leg cargo/distance details omitted - too large for one Discord message.",
+                *([] if per_leg_note is None else [f"⚠️ {per_leg_note[0].upper()}{per_leg_note[1:]}"]),
+                *unique_warnings,
+            ]
             if embed_too_large:
-                # Plain-message fallback for an embed too large to send (or whose warnings
-                # section didn't fit) - warnings (risk flags, stock/demand limits, practical
-                # notes) must survive here too, not just the profit figures, so this goes
-                # through the same chunking helper the embed fields use (with Discord's
-                # plain-message cap of 2000 chars, not the embed field's 1024) and sends as
-                # many messages as it takes rather than silently dropping anything.
-                per_leg_note = approximation_note(route.is_exact, per_leg=True)
-                fallback_lines = [
-                    f"**#{index} {path_label}**",
-                    *summary_lines,
-                    "⚠️ Full leg-by-leg cargo/distance details omitted - too large for one Discord message.",
-                    *([] if per_leg_note is None else [f"⚠️ {per_leg_note[0].upper()}{per_leg_note[1:]}"]),
-                    *unique_warnings,
-                ]
-                for chunk in _chunk_lines(fallback_lines, max_length=1900):
-                    await interaction.followup.send(content=chunk)
+                pages.extend(text_pages("\n".join(fallback_lines), route=trackable_route))
+            else:
+                pages.append(RoutePage(route_embed, "\n".join(fallback_lines), trackable_route))
+        # One results message, one route per page (audit UX-6).
+        await send_route_pages(interaction, pages, tracking_cog=tracking_cog)
 
     @app_commands.command(
         name="route-from-multi",
