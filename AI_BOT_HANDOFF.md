@@ -223,6 +223,12 @@ date - no open item, nothing to record here.
       tracking thread's), and a `/best-route` note; `risk_tolerance_hint` for empty results.
       If aiv2's AI tools suggest routes, they should honour it too.
       Tests: `tests/test_risk_tolerance.py`. See PROJECT_CONTEXT.md entry 104
+- [ ] One `delivery` option on all three alert commands (`bot/delivery.py`:
+      `DELIVERY_CHOICES`, `delivery_scope`, `send_alert`), DM by default; `scope` columns on
+      `price_alerts`/`marketplace_alerts` with migrations that keep old alerts' delivery;
+      `/alert-list` and the add confirmations saying how often each type fires. If aiv2's
+      AI tools create alerts, they need the new `scope` argument.
+      Tests: `tests/test_alert_delivery_choice.py`. See PROJECT_CONTEXT.md entry 105
 
 ## To port: aiv2 -> production
 

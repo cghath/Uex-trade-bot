@@ -105,9 +105,9 @@ def test_one_failing_price_alert_does_not_block_the_next():
     async def run():
         alerts = [
             {"id": 1, "user_id": 10, "channel_id": 99, "commodity_name": "Gold",
-             "direction": "sell_at_least", "target_price": 1},
+             "direction": "sell_at_least", "target_price": 1, "scope": "global"},
             {"id": 2, "user_id": 20, "channel_id": 99, "commodity_name": "Gold",
-             "direction": "sell_at_least", "target_price": 1},
+             "direction": "sell_at_least", "target_price": 1, "scope": "global"},
         ]
 
         async def deactivate(alert_id):

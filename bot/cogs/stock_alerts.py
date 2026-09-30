@@ -7,11 +7,11 @@ poller remembers each watch's last-known per-terminal availability
 (stock_alert_terminal_state) and only notifies on a genuine empty->available transition, not
 on every poll while a terminal just stays in stock.
 
-Delivery is per-alert, via the `scope` option on /stock-alert-add: 'global' (default) posts in
-the channel the alert was created in and @-mentions the creator there, visible to everyone else
-in that channel too; 'personal' DMs only the creator, same as Marketplace alerts. Two people
-independently watching the same commodity in the same channel on 'global' stay fully separate
-alerts - no merging, so both would post on the same restock.
+Delivery is per-alert, via the `delivery` option every alert command shares (stored as
+`scope`): 'personal' (the default since audit UX-12) DMs only the creator; 'global' posts in the
+channel the alert was created in and @-mentions the creator there, visible to everyone else in
+that channel too. Two people independently watching the same commodity in the same channel on
+'global' stay fully separate alerts - no merging, so both would post on the same restock.
 """
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ from discord.ext import commands, tasks
 
 from bot.cogs.prices import commodity_name_autocomplete
 from bot.cogs.ships import ship_name_autocomplete
-from bot.delivery import Delivery, send_dm, send_to_channel_or_dm
+from bot.delivery import DELIVERY_CHOICES, DELIVERY_DESCRIPTION, Delivery, delivery_note, delivery_scope, send_alert
 from bot.uex.exceptions import UexApiError, describe_uex_api_error
 from bot.uex.ships import resolve_ship
 from bot.uex.stock_alerts import compute_terminal_availability, detect_restocks, format_restock_message
@@ -34,12 +34,6 @@ logger = logging.getLogger("uexbot.stock_alerts")
 # /commodities_prices is cached 30 min client-side (bot/uex/client.py) - polling faster
 # wouldn't see fresher data, just repeat the same cached response.
 POLL_INTERVAL_MINUTES = 30
-
-SCOPE_CHOICES = [
-    app_commands.Choice(name="Global - post in this channel, ping me (default)", value="global"),
-    app_commands.Choice(name="Personal - DM me only, nothing posted in-channel", value="personal"),
-]
-
 
 class StockAlerts(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
@@ -56,32 +50,34 @@ class StockAlerts(commands.Cog):
     @app_commands.describe(
         commodity="Commodity name, e.g. 'Gold' or 'Laranite'",
         ship="Optional: which ship to report the cargo fit against (defaults to your /set-default-ship)",
-        scope="Global (default): post in this channel and ping me. Personal: DM me only, nothing posted in-channel.",
+        delivery=DELIVERY_DESCRIPTION,
     )
     @app_commands.autocomplete(ship=ship_name_autocomplete, commodity=commodity_name_autocomplete)
-    @app_commands.choices(scope=SCOPE_CHOICES)
+    @app_commands.choices(delivery=DELIVERY_CHOICES)
     async def stock_alert_add(
         self,
         interaction: discord.Interaction,
         commodity: str,
         ship: str | None = None,
-        scope: app_commands.Choice[str] | None = None,
+        delivery: app_commands.Choice[str] | None = None,
     ) -> None:
-        scope_value = scope.value if scope else "global"
+        scope_value = delivery_scope(delivery)
         # Deferred before the UEX lookup and the DB write (audit REL-8), at the reply's own
         # visibility: a personal alert's replies stay private.
-        await interaction.response.defer(ephemeral=(scope_value == "personal"))
+        private = scope_value == "personal"
+        await interaction.response.defer(ephemeral=private)
         try:
             commodities = await self.bot.uex.get_commodities()
         except UexApiError as exc:
             await interaction.followup.send(
                 f"Couldn't check the commodity name against UEX right now, so no alert was set. "
-                f"Try again in a minute. ({describe_uex_api_error(exc)})"
+                f"Try again in a minute. ({describe_uex_api_error(exc)})",
+                ephemeral=private,
             )
             return
         resolved = resolve_tradeable_commodity(commodities, commodity)
         if resolved is None:
-            await interaction.followup.send(unknown_commodity_message(commodities, commodity))
+            await interaction.followup.send(unknown_commodity_message(commodities, commodity), ephemeral=private)
             return
         commodity = resolved["name"]
         alert_id = await self.bot.db.add_stock_alert(
@@ -93,13 +89,11 @@ class StockAlerts(commands.Cog):
             scope=scope_value,
         )
         ship_note = f" (cargo fit checked against **{ship}**)" if ship else " (set /set-default-ship for a cargo-fit estimate)"
-        delivery_note = (
-            "I'll post here and ping you" if scope_value == "global" else "I'll DM you (nothing posted in this channel)"
-        )
         await interaction.followup.send(
-            f"Stock alert #{alert_id} set: {delivery_note} when **{commodity}** has real stock "
+            f"Stock alert #{alert_id} set: {delivery_note(scope_value)} when **{commodity}** has real stock "
             f"at any terminal{ship_note} (checked every {POLL_INTERVAL_MINUTES} min). This keeps "
             "watching - it fires again on every future restock, not just the first one.",
+            ephemeral=private,
         )
 
     @tasks.loop(minutes=POLL_INTERVAL_MINUTES)
@@ -181,17 +175,7 @@ class StockAlerts(commands.Cog):
         self, alert: dict, commodity_name: str, terminals: list[dict], ship_cargo_scu: float | None
     ) -> Delivery:
         body = format_restock_message(alert["id"], commodity_name, terminals, ship_cargo_scu)
-        label = f"stock alert #{alert['id']}"
-        if alert.get("scope") == "personal":
-            # DM only - nothing posted to the channel, so no @-mention needed (it's
-            # already unambiguously addressed to whoever's reading their own DMs).
-            return await send_dm(self.bot, alert["user_id"], label=label, content=f"Your {body}")
-        # A 'global' alert posts in its channel, falling back to a DM when the channel
-        # can't be resolved (deleted) or refuses the post (e.g. 403/50013 Missing
-        # Permissions) instead of silently dropping it.
-        return await send_to_channel_or_dm(
-            self.bot, alert["channel_id"], alert["user_id"], label=label, content=f"<@{alert['user_id']}> {body}",
-        )
+        return await send_alert(self.bot, alert, body, label=f"stock alert #{alert['id']}")
 
     @poll_stock_alerts.before_loop
     async def before_poll_stock_alerts(self) -> None:

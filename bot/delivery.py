@@ -22,11 +22,37 @@ from typing import Any
 
 import aiohttp
 import discord
+from discord import app_commands
 
 logger = logging.getLogger("uexbot.delivery")
 
 # Discord rejects a message longer than this outright (HTTP 400, error 50035).
 MAX_MESSAGE_CHARS = 2000
+
+# The same "where should this alert arrive?" option on every alert command (audit UX-12),
+# stored in each alert table's `scope` column. New alerts default to a DM.
+DELIVERY_CHOICES = [
+    app_commands.Choice(name="DM me (default)", value="personal"),
+    app_commands.Choice(name="Post in this channel and ping me", value="global"),
+]
+DELIVERY_DESCRIPTION = "Where it arrives: DM me (default), or post in this channel and ping me"
+
+
+def delivery_scope(choice: app_commands.Choice[str] | None) -> str:
+    return choice.value if choice else "personal"
+
+
+def delivery_note(scope: str) -> str:
+    """How an alert's confirmation says where it'll arrive."""
+    return "I'll post here and ping you" if scope == "global" else "I'll DM you"
+
+
+def delivery_label(alert: dict[str, Any]) -> str:
+    """Where an existing alert arrives, for /alert-list and /alert-remove."""
+    if alert.get("scope") == "global" and alert.get("channel_id") is not None:
+        return f"<#{alert['channel_id']}>"
+    return "DM"
+
 
 # Everything a send can raise that says "didn't arrive" rather than "the code is broken".
 _SEND_ERRORS = (discord.HTTPException, aiohttp.ClientError, asyncio.TimeoutError, OSError)
@@ -116,3 +142,16 @@ async def send_to_channel_or_dm(bot: Any, channel_id: int | None, user_id: int, 
     if Delivery.RETRY in (channel_outcome, dm_outcome):
         return Delivery.RETRY
     return Delivery.UNDELIVERABLE
+
+
+async def send_alert(bot: Any, alert: dict[str, Any], body: str, *, label: str, **send_kwargs: Any) -> Delivery:
+    """Send an alert where its owner asked. `body` starts with the alert's own name, e.g.
+    "price alert #3 triggered for ...".
+
+    - 'global': posts in the channel the alert was set in and pings the owner there,
+      falling back to a DM (send_to_channel_or_dm).
+    - Anything else, including no scope at all: a DM."""
+    if alert.get("scope") == "global" and alert.get("channel_id") is not None:
+        return await send_to_channel_or_dm(bot, alert["channel_id"], alert["user_id"],
+                                           f"<@{alert['user_id']}> {body}", label=label, **send_kwargs)
+    return await send_dm(bot, alert["user_id"], f"Your {body}", label=label, **send_kwargs)

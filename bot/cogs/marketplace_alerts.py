@@ -4,8 +4,8 @@ keyword they're watching, optionally at or better than a target price.
 Unlike bot/cogs/alerts.py's price alerts (one-shot: fire once, deactivate), these are
 persistent watches - new listings keep appearing, so each alert stays active indefinitely
 and instead dedups per-listing-id (a listing only ever notifies once) via
-marketplace_alert_seen_listings. Delivery is always a DM, not a channel post, since a
-listing match is personal to whoever set the watch.
+marketplace_alert_seen_listings. Delivery is the player's choice, like every alert type: a DM
+(the default) or a post in the channel the alert was set in (audit UX-12).
 """
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from bot.cogs.marketplace import OPERATION_CHOICES, traded_item_autocomplete
-from bot.delivery import Delivery, send_dm
+from bot.delivery import DELIVERY_CHOICES, DELIVERY_DESCRIPTION, Delivery, delivery_note, delivery_scope, send_alert
 from bot.uex.exceptions import UexApiError
 from bot.uex.marketplace import (
     QUALITY_MAX,
@@ -54,8 +54,9 @@ class MarketplaceAlerts(commands.Cog):
         target_price="Optional: only notify at or better than this price",
         min_quality="Optional: only listings with quality at least this, 0-1000 (seller-set)",
         max_quality="Optional: only listings with quality at most this, 0-1000 (seller-set)",
+        delivery=DELIVERY_DESCRIPTION,
     )
-    @app_commands.choices(operation=OPERATION_CHOICES)
+    @app_commands.choices(operation=OPERATION_CHOICES, delivery=DELIVERY_CHOICES)
     @app_commands.autocomplete(keyword=traded_item_autocomplete)
     async def marketplace_alert_add(
         self,
@@ -65,11 +66,14 @@ class MarketplaceAlerts(commands.Cog):
         target_price: float | None = None,
         min_quality: app_commands.Range[float, 0, QUALITY_MAX] | None = None,
         max_quality: app_commands.Range[float, 0, QUALITY_MAX] | None = None,
+        delivery: app_commands.Choice[str] | None = None,
     ) -> None:
+        scope = delivery_scope(delivery)
         # Deferred before any DB write: a write can wait on a lock past Discord's
         # 3-second window, and a player who sees "did not respond" retries into a
         # duplicate (audit REL-8).
-        await interaction.response.defer(ephemeral=True)
+        private = scope == "personal"
+        await interaction.response.defer(ephemeral=private)
         alert_id = await self.bot.db.add_marketplace_alert(
             user_id=interaction.user.id,
             keyword=keyword,
@@ -77,6 +81,9 @@ class MarketplaceAlerts(commands.Cog):
             target_price=target_price,
             min_quality=min_quality,
             max_quality=max_quality,
+            scope=scope,
+            guild_id=interaction.guild_id,
+            channel_id=interaction.channel_id,
         )
         side_note = "sell listings (so you can buy)" if operation.value == "sell" else "buy listings (so you can sell into them)"
         price_note = f" at or better than **{target_price:,.0f}**" if target_price is not None else ""
@@ -89,10 +96,10 @@ class MarketplaceAlerts(commands.Cog):
             else ""
         )
         await interaction.followup.send(
-            f"Marketplace alert #{alert_id} set: I'll DM you when a new {side_note} matching "
+            f"Marketplace alert #{alert_id} set: {delivery_note(scope)} when a new {side_note} matching "
             f"'{keyword}'{price_note}{quality_note} appears (checked every {POLL_INTERVAL_MINUTES} min)."
-            f"{quality_caveat} This keeps watching - it won't turn off after the first match.",
-            ephemeral=True,
+            f"{quality_caveat} This keeps watching - it fires on every new matching listing, not just the first.",
+            ephemeral=private,
         )
 
     @tasks.loop(minutes=POLL_INTERVAL_MINUTES)
@@ -214,11 +221,11 @@ class MarketplaceAlerts(commands.Cog):
         price_text = f"{price:,.0f} {currency}" if price is not None else "price n/a"
         quality = parse_listing_quality(listing.get("quality"))
         quality_text = f" · quality {quality:.0f}" if quality is not None else ""
-        message = (
-            f"Marketplace alert #{alert['id']} ('{alert['keyword']}'): new **{alert['operation']}** listing — "
+        body = (
+            f"marketplace alert #{alert['id']} ('{alert['keyword']}'): new **{alert['operation']}** listing — "
             f"**{marketplace_item_link(title, listing.get('id_item'))}** · {price_text}{quality_text} · by {seller}"
         )
-        return await send_dm(self.bot, alert["user_id"], label=f"marketplace alert #{alert['id']}", content=message)
+        return await send_alert(self.bot, alert, body, label=f"marketplace alert #{alert['id']}")
 
     @poll_marketplace_alerts.before_loop
     async def before_poll_marketplace_alerts(self) -> None:

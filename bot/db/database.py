@@ -41,7 +41,11 @@ CREATE TABLE IF NOT EXISTS price_alerts (
     target_price REAL NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     triggered_at TEXT,
-    active INTEGER NOT NULL DEFAULT 1
+    active INTEGER NOT NULL DEFAULT 1,
+    -- Where it arrives: 'personal' = DM, 'global' = channel_id with a ping. Same values on
+    -- all three alert tables. The default is for rows from before the option existed (all
+    -- channel alerts); new alerts are written with an explicit scope, DM by default.
+    scope TEXT NOT NULL DEFAULT 'global' CHECK (scope IN ('personal', 'global'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_price_alerts_active ON price_alerts (active);
@@ -114,7 +118,11 @@ CREATE TABLE IF NOT EXISTS marketplace_alerts (
     min_quality REAL,
     max_quality REAL,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    active INTEGER NOT NULL DEFAULT 1
+    active INTEGER NOT NULL DEFAULT 1,
+    -- Where it arrives, as on price_alerts. Rows from before the option existed were DMs.
+    scope TEXT NOT NULL DEFAULT 'personal' CHECK (scope IN ('personal', 'global')),
+    guild_id INTEGER,
+    channel_id INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_marketplace_alerts_active ON marketplace_alerts (active);
@@ -1231,6 +1239,12 @@ class Database:
             # their actual existing behavior (channel post, ping the creator) exactly, so
             # nothing changes for anyone's already-running watches.
             "ALTER TABLE stock_alerts ADD COLUMN scope TEXT NOT NULL DEFAULT 'global'",
+            # The same delivery choice on price and marketplace alerts (audit UX-12). Each
+            # default matches how that table's existing alerts were already delivered.
+            "ALTER TABLE price_alerts ADD COLUMN scope TEXT NOT NULL DEFAULT 'global'",
+            "ALTER TABLE marketplace_alerts ADD COLUMN scope TEXT NOT NULL DEFAULT 'personal'",
+            "ALTER TABLE marketplace_alerts ADD COLUMN guild_id INTEGER",
+            "ALTER TABLE marketplace_alerts ADD COLUMN channel_id INTEGER",
             "ALTER TABLE liquidity_scores ADD COLUMN id_item INTEGER",
             "ALTER TABLE liquidity_scores ADD COLUMN negotiations_success INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE liquidity_scores ADD COLUMN negotiations_open INTEGER NOT NULL DEFAULT 0",
@@ -2632,13 +2646,14 @@ class Database:
         commodity_name: str,
         direction: str,
         target_price: float,
+        scope: str = "personal",
     ) -> int:
         async with self.connect() as db:
             cursor = await db.execute(
                 """INSERT INTO price_alerts
-                   (guild_id, channel_id, user_id, commodity_name, direction, target_price)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (guild_id, channel_id, user_id, commodity_name, direction, target_price),
+                   (guild_id, channel_id, user_id, commodity_name, direction, target_price, scope)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (guild_id, channel_id, user_id, commodity_name, direction, target_price, scope),
             )
             await db.commit()
             return cursor.lastrowid
@@ -2897,12 +2912,16 @@ class Database:
         target_price: float | None = None,
         min_quality: float | None = None,
         max_quality: float | None = None,
+        scope: str = "personal",
+        guild_id: int | None = None,
+        channel_id: int | None = None,
     ) -> int:
         async with self.connect() as db:
             cursor = await db.execute(
-                """INSERT INTO marketplace_alerts (user_id, keyword, operation, target_price, min_quality, max_quality)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (user_id, keyword, operation, target_price, min_quality, max_quality),
+                """INSERT INTO marketplace_alerts
+                   (user_id, keyword, operation, target_price, min_quality, max_quality, scope, guild_id, channel_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (user_id, keyword, operation, target_price, min_quality, max_quality, scope, guild_id, channel_id),
             )
             await db.commit()
             return cursor.lastrowid
@@ -4159,7 +4178,7 @@ class Database:
         user_id: int,
         commodity_name: str,
         ship_query: str | None = None,
-        scope: str = "global",
+        scope: str = "personal",
     ) -> int:
         async with self.connect() as db:
             cursor = await db.execute(
