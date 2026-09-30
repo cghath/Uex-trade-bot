@@ -131,7 +131,7 @@ def test_stock_alert_saves_the_canonical_name_and_keeps_a_personal_reply_private
 
 def test_stock_alert_refuses_a_typo_without_saving_anything():
     order = _stock_alert_add("Laranit")
-    assert order[0] == ("defer", {"ephemeral": False})
+    assert order[0] == ("defer", {"ephemeral": True}), "a DM alert (the default) replies privately"
     assert "add_stock_alert" not in [step for step, _ in order]
     assert "Couldn't find a tradeable commodity called **Laranit**" in order[-1][1]
 

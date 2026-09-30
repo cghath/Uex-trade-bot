@@ -1,7 +1,19 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.24.
+the oldest entry below); the next new entry is 2.25.
+
+---
+
+## 2.24 - 2026-09-30 - Choose where alerts arrive
+
+**Changed**
+- `/alert-add`, `/stock-alert-add`, `/marketplace-alert-add` - All three now have the same `delivery` option: **DM me**
+  (the default) or **Post in this channel and ping me**. Price alerts used to only post in the channel, and
+  Marketplace alerts only DM. Alerts you already have keep arriving where they did.
+- `/stock-alert-add` - The `scope` option is now `delivery`, and new restock alerts are DMs unless you pick the channel.
+- `/alert-list`, and each alert's confirmation - Now say how often each type fires (a price alert once, restock and
+  Marketplace alerts every time) and where each of your alerts arrives.
 
 ---
 

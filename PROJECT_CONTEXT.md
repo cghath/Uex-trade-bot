@@ -3723,6 +3723,35 @@ they're in sync).
        all, including each of the four mixed-cargo pools separately), and its test failed
        every time.
 
+105. **One delivery choice for all three alert types, and each says how often it fires.** Audit
+     finding UX-12, decided with the user on 2026-09-30.
+     - Before: price alerts (`/alert-add`) only posted in the channel they were set in;
+       marketplace alerts only DMed; restock alerts had a `scope` option defaulting to the
+       channel. On the Pi: 0 active price alerts, 2 restock alerts (both in-channel), 2
+       marketplace alerts.
+     - All three add commands now share one `delivery` option (`bot/delivery.py`:
+       `DELIVERY_CHOICES`): "DM me (default)" or "Post in this channel and ping me". It's
+       stored in each table's `scope` column ('personal' / 'global'), which restock alerts
+       already had. Restock's own `scope` option is renamed to `delivery` to match.
+     - `price_alerts` and `marketplace_alerts` gain `scope` (plus `guild_id`/`channel_id` on
+       marketplace alerts). The column defaults keep existing alerts where they were: old
+       price alerts are 'global', old marketplace alerts 'personal'. Restock alerts were
+       already stored with their scope.
+     - `send_alert` delivers any alert: a channel post with a ping (falling back to a DM), or
+       a DM starting "Your ...". Each alert's message now starts with its own name ("price
+       alert #3 ..."), so both forms read naturally.
+     - A DM alert's add replies are private; a channel alert's are public, as restock's
+       already were. Every reply passes `ephemeral=` itself: only the first followup after an
+       ephemeral defer inherits it.
+     - How often each fires is unchanged - the user agreed each fits its event: a price
+       crossing a target fires once (repeating would ping every poll while the price stays
+       there), while restocks and new listings are separate events. It's now said
+       everywhere: each add confirmation, each `/alert-list` section heading, and next to
+       every alert where it arrives (DM or the channel).
+     - Tests: `tests/test_alert_delivery_choice.py` (11). Each change was undone one at a time
+       (9 in all), and its test failed every time. Three existing tests were updated for the
+       new default and wording.
+
 ## Where to look for what
 
 Six docs, deliberately scoped so they don't duplicate each other:
