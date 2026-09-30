@@ -7,8 +7,6 @@ from __future__ import annotations
 
 from collections.abc import Collection
 
-from bot.uex.commodity_risk import RISK_TOLERANCE_SKIPS
-
 # Sentinel for Database.set_trading_preferences: distinguishes "caller didn't pass this
 # field, leave it unchanged" from a real value (including False/None, both meaningful).
 # Public (no leading underscore) because callers outside bot/db/database.py - the
@@ -16,18 +14,18 @@ from bot.uex.commodity_risk import RISK_TOLERANCE_SKIPS
 # changing in a given /set-trading-preferences call.
 UNSET = object()
 
+# Every saved preference, and the user_trading_preferences columns the DB reads and writes.
+# The table's risk_tolerance column isn't here: the setting was removed on 2026-09-30
+# (PROJECT_CONTEXT.md entry 114). The column stays, since the schema is additive-only,
+# but nothing reads or writes it.
 DEFAULT_TRADING_PREFERENCES: dict[str, object] = {
     "space_only": False,
     "capital_ship_access": False,
     "auto_load_only": False,
     "preferred_system": None,
-    "risk_tolerance": None,
     "ship_name": None,
     "budget": None,
 }
-
-# Ordered low -> high; "high" means no restriction (the default once a filter exists).
-RISK_TOLERANCE_LEVELS = ("low", "medium", "high")
 
 # Every command that suggests routes, and which of them read each saved default when its
 # own matching option is left unset (audit MSG-6: the descriptions had drifted from the
@@ -68,7 +66,6 @@ def describe_active_preferences(
     capital_ship_access: bool = False,
     auto_load_only: bool = False,
     system: str | None = None,
-    risk_tolerance: str | None = None,
     saved: Collection[str] = (),
 ) -> str | None:
     """The footer line naming every filter shaping this result, or None if none are on.
@@ -78,9 +75,9 @@ def describe_active_preferences(
     capital-ship-access concept (e.g. /best-route) should simply not pass them. `saved`
     names the keyword arguments that came from the player's saved /set-trading-preferences
     rather than this command's own options; those are marked "(saved)". Capital-ship
-    access and risk tolerance have no per-command option, so they're always saved: pass
-    capital_ship_access only for the saved preference, not for a ship that needs it."""
-    saved = {*saved, "capital_ship_access", "risk_tolerance"}
+    access has no per-command option, so it's always saved: pass capital_ship_access only
+    for the saved preference, not for a ship that needs it."""
+    saved = {*saved, "capital_ship_access"}
     parts: list[tuple[str, str]] = []
     if space_only:
         parts.append(("space_only", "space-only"))
@@ -90,8 +87,6 @@ def describe_active_preferences(
         parts.append(("auto_load_only", "auto-load-only"))
     if system:
         parts.append(("system", f"system: {system}"))
-    if risk_tolerance and risk_tolerance != "high":
-        parts.append(("risk_tolerance", f"risk tolerance: {risk_tolerance}"))
     if not parts:
         return None
     return "Filters: " + ", ".join(f"{label} (saved)" if key in saved else label for key, label in parts)
@@ -111,7 +106,6 @@ def format_trading_preferences(prefs: dict[str, object], *, ship_detail: str | N
         return "Yes" if value else "No"
 
     system = prefs.get("preferred_system") or "Any (no restriction)"
-    risk = prefs.get("risk_tolerance") or "High (no restriction, default)"
     ship = prefs.get("ship_name") or "None set"
     ship_line = f"Default ship: **{ship}**" + (f" {ship_detail}" if ship_detail else "")
     budget = prefs.get("budget")
@@ -124,18 +118,7 @@ def format_trading_preferences(prefs: dict[str, object], *, ship_detail: str | N
         f"({preference_scope('capital_ship_access')})",
         f"Auto-load only: **{_yes_no(prefs.get('auto_load_only'))}** ({preference_scope('auto_load_only')})",
         f"Preferred system: **{system}** ({preference_scope('preferred_system')})",
-        f"Risk tolerance: **{risk}**" + (f" (route suggestions skip {RISK_TOLERANCE_SKIPS[risk]})"
-                                          if risk in RISK_TOLERANCE_SKIPS else ""),
     ])
-
-
-def risk_tolerance_hint(tolerance: str | None) -> str:
-    """Appended to a "nothing found" message when the saved risk tolerance left routes out.
-    It has no per-command option to override, unlike saved_filters_hint's filters."""
-    if tolerance not in RISK_TOLERANCE_SKIPS:
-        return ""
-    return (f" Your saved risk tolerance ({tolerance}) skips {RISK_TOLERANCE_SKIPS[tolerance]} - "
-            "change it with /set-trading-preferences.")
 
 
 def saved_filters_hint(labels: list[str], *, can_override: bool = True) -> str:

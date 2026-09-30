@@ -1,7 +1,18 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.33.
+the oldest entry below); the next new entry is 2.34.
+
+---
+
+## 2.33 - 2026-09-30 - Risk tolerance removed
+
+**Removed**
+- `/set-trading-preferences` `risk-tolerance` - Gone. Almost nobody used it, and Low and Medium left out the same
+  goods, the illegal ones. Route suggestions no longer leave out any cargo for being risky.
+  - Routes still label risky cargo with ⚠️, e.g. "⚠️ Cargo risk: restricted in some jurisdictions", so you can see
+    what you'd be hauling before you pick a route.
+  - A risk tolerance you saved before is simply no longer used. Your other saved preferences are unchanged.
 
 ---
 

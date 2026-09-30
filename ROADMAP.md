@@ -200,7 +200,8 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
   `/clear-trading-preferences`, `/my-trading-preferences` store per-user defaults for
   space-only terminals, capital-ship access, auto-loading, preferred system, and risk
   tolerance (risk tolerance was stored/shown only at first, a deliberate scoping choice;
-  enforced since 2026-09-30, PROJECT_CONTEXT.md entry 104). Applied automatically by `/best-route`, `/top-routes`, `/mixed-routes`, and
+  enforced since 2026-09-30, PROJECT_CONTEXT.md entry 104, then removed the same day,
+  entry 114 - routes keep their ⚠️ cargo-risk labels instead). Applied automatically by `/best-route`, `/top-routes`, `/mixed-routes`, and
   `/multi-stop-route` whenever their matching option is left unset; space-only/
   capital-ship-access only affect the latter two today. Default ship (`/set-default-ship`)
   was folded into the same `user_trading_preferences` row rather than kept in its own

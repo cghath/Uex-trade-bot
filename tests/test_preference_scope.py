@@ -33,7 +33,7 @@ from bot.uex.trading_preferences import (
 from tests.route_results import route_results
 from tests.test_route_send_shape import _FakeInteraction
 
-SAVED = dict(DEFAULT_TRADING_PREFERENCES, auto_load_only=True, preferred_system="Stanton", risk_tolerance="low")
+SAVED = dict(DEFAULT_TRADING_PREFERENCES, auto_load_only=True, preferred_system="Stanton")
 
 
 def _command_sources() -> dict[str, str]:
@@ -57,6 +57,8 @@ def test_each_preference_names_the_commands_that_really_read_it():
     for key, readers in PREFERENCE_READERS.items():
         in_code = {name for name, source in sources.items() if f'prefs["{key}"]' in source}
         assert in_code == set(readers), (key, sorted(in_code ^ set(readers)))
+    # The saved risk tolerance was removed (PROJECT_CONTEXT.md entry 114): no route command reads it.
+    assert not [name for name, source in sources.items() if "risk_tolerance" in source]
 
 
 def test_the_descriptions_say_which_commands_each_preference_reaches():
@@ -136,7 +138,7 @@ def test_mixed_cargo_footers_name_the_saved_filters(monkeypatch):
         return route_results(interaction.followup.sent).embeds[0].footer.text
 
     async def run():
-        expected = "Filters: auto-load-only (saved), system: Stanton (saved), risk tolerance: low (saved)"
+        expected = "Filters: auto-load-only (saved), system: Stanton (saved)"
         for name, run_command in (
             ("mixed-routes", lambda cog, i: cog.mixed_routes.callback(cog, i)),
             ("multi-stop-route", lambda cog, i: cog.multi_stop_route.callback(cog, i)),
@@ -158,12 +160,7 @@ def test_intelligence_brief_applies_saved_preferences(monkeypatch):
         seen.update(kwargs)
         return []
 
-    def tolerate(rows, tolerance):
-        seen["risk_tolerance"] = tolerance
-        return rows
-
     monkeypatch.setattr(intelligence_brief_module, "build_mixed_routes", build)
-    monkeypatch.setattr(intelligence_brief_module, "within_risk_tolerance", tolerate)
 
     async def run():
         cog = IntelligenceBrief.__new__(IntelligenceBrief)
@@ -173,7 +170,7 @@ def test_intelligence_brief_applies_saved_preferences(monkeypatch):
 
         embed = await cog._routes_embed("Ship", prefs, budget=None, space_only=None)
         assert seen["budget"] == 5000.0 and seen["space_only"] is True
-        assert seen["auto_load_only"] is True and seen["system"] == "Stanton" and seen["risk_tolerance"] == "low"
+        assert seen["auto_load_only"] is True and seen["system"] == "Stanton"
         assert "Your saved space-only, auto-load-only and system Stanton settings are on" in embed.description
         assert "set those options on this command" not in embed.description, "the brief has no such options"
 

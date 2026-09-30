@@ -9,7 +9,6 @@ from discord.ext import commands
 
 from bot.cogs.digest import _format_data_freshness, _format_rating_movers
 from bot.cogs.ships import ship_name_autocomplete
-from bot.uex.commodity_risk import within_risk_tolerance
 from bot.uex.data_health import classify_terminal_health
 from bot.uex.exceptions import UexApiError
 from bot.uex.marketplace import marketplace_item_link
@@ -30,7 +29,6 @@ from bot.uex.ships import resolve_ship
 from bot.uex.status import build_status_lookup
 from bot.uex.trading_preferences import (
     describe_active_preferences,
-    risk_tolerance_hint,
     saved_filter_labels,
     saved_filters_hint,
 )
@@ -134,8 +132,7 @@ class IntelligenceBrief(commands.Cog):
                 raise ValueError(missing_ship_note(ship_query, lookup_failed=False))
             if not vehicle.get("scu"):
                 raise ValueError(f"UEX lists no cargo capacity for {vehicle.get('name', ship_query)}")
-            all_rows = await self.bot.db.get_mixed_route_market_rows()
-            rows = within_risk_tolerance(all_rows, prefs["risk_tolerance"])
+            rows = await self.bot.db.get_mixed_route_market_rows()
             capital_gate = requires_capital_cargo_access(vehicle) or bool(prefs["capital_ship_access"])
             if capital_gate:
                 stations = await self.bot.uex.get_space_stations()
@@ -164,9 +161,8 @@ class IntelligenceBrief(commands.Cog):
                 capital_ship_access=bool(prefs["capital_ship_access"]) and not requires_capital_cargo_access(vehicle),
                 auto_load_only=auto_load_only, system=system,
             ), can_override=False)
-            risk_hint = risk_tolerance_hint(prefs["risk_tolerance"]) if len(rows) < len(all_rows) else ""
             embed.description = ("No verified mixed routes fit the selected ship, budget, and safety filters."
-                                 + saved_hint + risk_hint)
+                                 + saved_hint)
             return embed
 
         embed.description = f"Top opportunities for **{vehicle.get('name', ship_query)}**"
@@ -178,7 +174,7 @@ class IntelligenceBrief(commands.Cog):
         # docstring and trends.py's identical footer-before-loop ordering).
         filters_note = describe_active_preferences(
             space_only=space_only, capital_ship_access=bool(prefs["capital_ship_access"]),
-            auto_load_only=auto_load_only, system=system, risk_tolerance=prefs["risk_tolerance"], saved=saved,
+            auto_load_only=auto_load_only, system=system, saved=saved,
         )
         footer_text = " · ".join(part for part in (
             f"Budget {budget:,.0f} aUEC" if budget is not None else None, filters_note) if part) or None
