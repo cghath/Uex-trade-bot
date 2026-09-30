@@ -108,10 +108,16 @@ background posting/sale updates are delivered only by private DM.
 
 1. Go to the [Discord Developer Portal](https://discord.com/developers/applications) → New Application.
 2. Bot tab → Reset Token → copy it. This is `DISCORD_BOT_TOKEN`.
-3. Under **Bot**, no privileged intents are required for this bot (it only uses slash commands).
-4. Under **OAuth2 → URL Generator**, check `bot` and `applications.commands` scopes, then
-   `Send Messages`, `Embed Links`, `Read Message History` permissions. Use the generated URL to
-   invite the bot to your server.
+3. Under **Bot**, leave all three privileged intents (Presence, Server Members, Message Content)
+   off. The bot only uses slash commands, buttons and forms, so it never needs to read messages.
+4. Under **OAuth2 → URL Generator**, check the `bot` and `applications.commands` scopes, then these
+   permissions:
+   - `View Channels`, `Send Messages`, `Embed Links`, `Read Message History`;
+   - `Attach Files`, for charts and long lists;
+   - `Create Private Threads`, `Send Messages in Threads` and `Manage Threads`, for the private
+     threads that route tracking, the ship-parts list and the blueprint list use.
+
+   Use the generated URL to invite the bot to your server.
 5. (Optional, recommended while developing) Enable Developer Mode in Discord, right-click your
    test server → Copy Server ID → put it in `DISCORD_DEV_GUILD_ID` in `.env`. This makes slash
    commands sync instantly to that one server instead of up to an hour globally.
@@ -208,56 +214,63 @@ code) so everyone's already-linked UEX accounts keep working — see "Security n
 
 ```
 bot/
-  main.py            entrypoint, bot setup, cog loading, slash command sync
+  main.py            entrypoint, bot setup, cog loading (INITIAL_COGS), slash command sync
   config.py          .env loading and validation
-  discord_ui.py      shared Discord UI helpers (embeds, pagination)
-  uex/
+  discord_ui.py      BotView/BotModal base classes: failed clicks answer, expired buttons grey out
+  route_pages.py     route results as one message, a route per page
+  delivery.py        alert/notification delivery (channel with DM fallback) and message fitting
+  autocomplete.py    time-limited autocomplete fetches
+  wiki_api.py        Star Citizen Wiki API client (ship loadouts, part stats, blueprints)
+  uex/               pure, unit-tested helpers plus the UEX client:
     client.py        async UEX API 2.0 client (auth, caching, rate-limit handling)
-    trading.py       buy/sell/route ranking helpers (fallback when /commodities_routes lacks data)
-    trends.py        trade-volume + price-mover aggregation (pure functions, unit tested)
-    charts.py        matplotlib price-history chart rendering
-    marketplace.py   Marketplace listings + 30-day rolling price averages
-    inventory.py     personal-inventory pricing
-    scanner.py       Raw Materials Deal Scanner matching logic (pure functions, unit tested)
-    mixed_routes.py    dependency-free mixed-cargo load allocation + terminal-access gates
-    route_confidence.py route confidence scoring (terminal freshness, report depth, stock/demand, volatility)
-    supply_demand.py    time-weighted supply/demand history from terminal observations
-    commodity_risk.py   commodity risk labels (jurisdiction, explosion, volatility) from UEX flags
-    data_health.py       terminal data-freshness scoring
-    practical_routes.py  practical route checks (container limits, cargo infra, refuel/repair/services)
-    ships.py         ship data lookups
-    ship_shops.py    ship buy/rent location ranking + formatting (pure functions, unit tested)
-    stock_alerts.py  terminal stock-level change detection
-    leaderboard.py   UEX leaderboard fetching
-    status.py        /commodities_status code definitions
-    exceptions.py
+    trading.py, trends.py, mixed_routes.py, multi_stop_routes.py, backup_routes.py,
+    route_confidence.py, route_presentation.py, supply_demand.py, commodity_risk.py,
+    data_health.py, practical_routes.py, trading_preferences.py,
+    marketplace.py, scanner.py, inventory.py, charts.py, ships.py, ship_shops.py,
+    ship_parts.py, ship_part_display.py, item_finder.py, refinery.py, mining_locations.py,
+    stock_alerts.py, leaderboard.py, status.py, exceptions.py, ...
   db/
     database.py      SQLite schema + queries (aiosqlite)
     crypto.py        Fernet key management for encrypting per-user secret keys
-  cogs/
-    account.py            /link-uex-account (modal), /unlink-uex-account, /uex-account-status
-    prices.py             /price, /best-route
-    alerts.py             /alert-add, /alert-list, /alert-remove (list/remove cover all 3 alert types) + background poller
-    trades.py             /trade-log-add, /trade-log, /uex-trades
-    trends.py             /trending, /movers, /commodity-history, /top-routes + background trending refresh
-    marketplace.py        /marketplace-average and Marketplace lookups
-    personal_inventory.py inventory UI + guarded posting/reconciliation worker
-    marketplace_alerts.py Marketplace listing alerts + background poller
-    negotiation_alerts.py /negotiation-alerts opt-in DM alerts + background poller
-    scanner.py             /set-scanner-channel, /scanner-status, /scan-now + background poller
-    liquidity.py           /liquidity-rank, /liquidity-trends
-    stock_alerts.py       terminal stock alerts + background poller
-    ships.py              ship info commands
+  cogs/              one per feature area; "loop" = a background poller
+    account.py            /link-uex-account, /unlink-uex-account, /uex-account-status
+    prices.py             /price, /terminal-history, /best-route, /mixed-routes, /multi-stop-route,
+                          /route-from-multi, /diminishing-returns
+    trends.py             /trending, /top-routes, /routes-from, /route-on-the-way, /movers,
+                          /commodity-history + loop
+    route_progression.py  route tracking threads (the Track this route button) + loops
+    trading_preferences.py /set-trading-preferences, /clear-trading-preferences, /my-trading-preferences
+    ships.py              /set-default-ship, /clear-default-ship
+    alerts.py             /alert-add, /alert-list, /alert-remove (list/remove cover all 3 alert types) + loop
+    stock_alerts.py       /stock-alert-add + loop
+    marketplace_alerts.py /marketplace-alert-add + loop
+    negotiation_alerts.py /negotiation-alerts + loop
+    trades.py             /trade-log-add, /trade-log, /uex-trades, /leaderboard
+    marketplace.py        /marketplace-search, /marketplace-trending, /marketplace-movers,
+                          /marketplace-average, /marketplace-history, /marketplace-index-status,
+                          /my-favorites, /my-negotiations, /marketplace-post, /marketplace-listing,
+                          /marketplace-delete-listing + loop
+    personal_inventory.py /inventory-add, /inventory, /inventory-set-minimum, /inventory-remove,
+                          /inventory-sell, /inventory-post-now, /inventory-confirm-sale,
+                          /inventory-cancel-post, /inventory-resolve-floor + loop
+    liquidity.py          /liquidity-rank, /liquidity-trends
+    scanner.py            /set-scanner-channel, /scanner-status, /scan-now + loop
+    digest.py             /set-digest-channel, /digest-disable, /digest-now + loop
+    intelligence.py       background market/data-health/fuel/reference collectors, no commands
+    intelligence_brief.py /intelligence-brief
+    refinery.py           /refinery-advisor
+    mining_locations.py   /where-to-mine
+    blueprints.py         /blueprint-search, /blueprint-list + loop (blueprint_planner.py: its shopping list)
+    item_finder.py        /ingame-item-finder
     ship_shops.py         /where-to-buy-ship
-    ship_parts_finder.py  /ship-parts-finder + daily ship-slot reference refresh
-    digest.py             scheduled guild digest posts
-    intelligence.py       background market/data-health/fuel/reference collectors, no slash commands
-    intelligence_brief.py /intelligence-brief on-demand deep view
-    diagnostics.py        bot health/diagnostic commands
-    help.py               /help
+    ship_parts_finder.py  /ship-parts-finder + loop
+    diagnostics.py        /test-dm, /command-usage
+    help.py               /intro (the categorized command guide)
 scripts/
+  deploy_and_backup.sh, revert_last_deploy.sh   Pi deploys and rollback (see above)
+  sync_pi_backups.sh      archive the Pi's deploy backups to this PC, keep the Pi lean
   dump_status_codes.py    one-off diagnostic: dump UEX /commodities_status code definitions
-tests/                    pytest suite (pure-logic helpers)
+tests/                    pytest suite
 ```
 
 ## Rate limits & caching
@@ -269,8 +282,7 @@ that window don't re-hit the API.
 
 ## Ideas for what else the UEX API enables (not yet built)
 
-- `/fuel_prices` — cheapest refuel stops
-- `/marketplace_listings` — player-to-player marketplace search
-- `/companies`, `/factions` — reputation/contact info lookups
-- `/refineries_yields`, `/refineries_methods` — mining refinery yield calculators
-- `/data_submit` — the bot could let users submit price observations back to UEX
+- `/fuel_prices`: cheapest refuel stops. The bot already collects fuel prices in the background,
+  but no command shows them yet.
+- `/companies`, `/factions`: reputation/contact info lookups
+- `/data_submit`: the bot could let users submit price observations back to UEX

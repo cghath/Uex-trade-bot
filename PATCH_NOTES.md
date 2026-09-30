@@ -1,7 +1,19 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.28.
+the oldest entry below); the next new entry is 2.29.
+
+---
+
+## 2.28 - 2026-09-30 - Nearby means nearby
+
+**Changed**
+- Route tracking threads - After a sell-side shortfall, the suggested buyer is now really nearby: in the same star
+  system and within 25 Gm, and the thread says how far it is. If nothing that close buys it, the thread says so.
+- `/ship-parts-finder` - Your shopping list now shows each part's cheapest shop and price right now, every time it's
+  drawn, plus what it cost when you locked it in if that changed. "Refresh list" updates the prices.
+- `/refinery-advisor` - Says how often its data updates (yield bonuses every 24h, sell prices every 30 min) instead of
+  calling it live, and says when UEX didn't answer instead of showing no data.
 
 ---
 

@@ -3848,6 +3848,59 @@ they're in sync).
        checks the "(saved)" marks. Each change was undone one at a time (14 in all), and its
        test failed every time.
 
+109. **Four labels made true: "nearby", "live", lock-in prices, and the README.** Audit
+     findings MSG-11 to MSG-14; the user chose each fix's direction.
+     - **MSG-11, the sell-shortfall reroute's "nearby" (PATCH_NOTES 2.8).** It suggested the
+       best-paying buyer anywhere, within the tracked route's own filters only.
+       - It now only suggests a buyer in the current terminal's star system, within
+         `MAX_REROUTE_DISTANCE_GM` (25) by UEX's `/terminals_distances`, and says how far
+         ("(12 Gm away)"). A buyer UEX has no distance for isn't claimed as nearby.
+       - 25 Gm was measured live on 2026-09-30, from three terminals to the 72 that buy
+         Processed Food. Terminals around one planet sit 3-6 Gm apart, the neighbouring
+         planet's stations 14-24 Gm, and the far side of Stanton 28-78 Gm. So 25 Gm reaches
+         the next planet over and no further.
+       - Same system is required because UEX's distance is a straight line that ignores
+         jump points: Levski (Nyx) reads as 56 Gm from ARC-L3 (Stanton).
+       - `reroute_buyer_ids` (`bot/uex/backup_routes.py`) lists the same-system buyers,
+         best-paying first. Only the first `MAX_REROUTE_DISTANCE_LOOKUPS` (24) get a
+         distance lookup, one live call each. `find_backup_routes` takes `destination_ids`
+         to search only those in reach.
+       - The batched distance lookup is now `fetch_terminal_distances` in
+         `bot/uex/client.py`, shared with `/ingame-item-finder`. Ship Parts Finder keeps its
+         own copy, which has a load deadline.
+     - **MSG-12, `/refinery-advisor`.** Its footer said sell prices were "live from UEX"
+       (cached 30 min) and yields were "collected periodically".
+       - It now says "Refinery yield bonuses updated every 24h · sell prices updated every
+         30 min". Both are read from the real settings: `REFERENCE_SNAPSHOT_HOURS`, and the
+         new `cache_interval_text`, which reads the client's own cache table.
+       - Failures used to read as missing data. Now a failed sell-price lookup says "UEX
+         didn't answer" instead of "No current sell price data". A failed methods lookup
+         shows a note instead of dropping the section, and a failed star-system lookup says
+         the ranking is by yield bonus alone.
+     - **MSG-13, the ship-parts list.** Prices were saved at lock-in and "Refresh list" only
+       redrew them. Every redraw now re-prices each part from the same cached
+       `/items_prices_all` rows the browser uses (one call, cached 12h). Each line shows the
+       cheapest shop and price right now, "(was X aUEC at lock-in)" if it moved, or "no shop
+       sells it right now". If UEX doesn't answer, the list shows lock-in prices, labelled
+       as such. `list_price_text` in `bot/uex/ship_part_display.py` words it. The saved
+       lock-in price is never overwritten, so the "was" stays meaningful.
+     - **MSG-14, README.**
+       - It said no privileged intents were needed, while `bot/main.py` asked for Message
+         Content. Nothing reads other people's messages (the one `thread.history` call only
+         reads the bot's own embeds, which a bot always sees), so the intent was removed.
+         That's also least privilege, and removes a way startup could fail on a fresh
+         bot.
+       - The invite permissions now include Attach Files and the three thread permissions
+         that route tracking and the shopping lists need.
+       - The ideas list dropped two things since built (Marketplace search,
+         `/refinery-advisor`) and notes fuel prices are already collected.
+       - The project layout said `/help`; the command is `/intro`. The layout now lists
+         every cog and its commands, and a test fails if a command is added or removed
+         without updating it.
+     - Tests: `tests/test_honest_labels.py` (12). The five existing reroute tests got star
+       systems and a UEX distance fake. Each change was undone one at a time (15 in all),
+       and its test failed every time.
+
 ## Where to look for what
 
 Six docs, deliberately scoped so they don't duplicate each other:

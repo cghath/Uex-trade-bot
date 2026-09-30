@@ -17,6 +17,7 @@ from bot.autocomplete import gather_within
 from bot.cogs.prices import terminal_name_autocomplete
 from bot.uex.exceptions import UexApiError, describe_uex_api_error
 from bot.uex.item_finder import format_item_listing_line, rank_item_listings
+from bot.uex.client import fetch_terminal_distances
 from bot.uex.marketplace import find_item_id_by_name
 from bot.uex.route_presentation import add_chunked_fields, chunk_lines
 
@@ -209,25 +210,7 @@ class ItemFinder(commands.Cog):
         widely-stocked item doesn't serialize dozens of live /terminals_distances calls.
         The origin terminal itself (if it's also a candidate) never needs a live call -
         distance to itself is trivially 0."""
-        distances: dict[int, float | None] = {}
-        to_fetch = [tid for tid in terminal_ids if tid != origin_id]
-        if origin_id in terminal_ids:
-            distances[origin_id] = 0.0
-        for start in range(0, len(to_fetch), DISTANCE_BATCH_SIZE):
-            batch = to_fetch[start:start + DISTANCE_BATCH_SIZE]
-            results = await asyncio.gather(
-                *(self.bot.uex.get_terminal_distance(origin_id, tid) for tid in batch),
-                return_exceptions=True,
-            )
-            for tid, result in zip(batch, results):
-                if isinstance(result, Exception) or not result:
-                    distances[tid] = None
-                    continue
-                try:
-                    distances[tid] = float(result.get("distance"))
-                except (TypeError, ValueError):
-                    distances[tid] = None
-        return distances
+        return await fetch_terminal_distances(self.bot.uex, origin_id, terminal_ids, batch_size=DISTANCE_BATCH_SIZE)
 
 
 async def setup(bot: commands.Bot) -> None:

@@ -292,6 +292,29 @@ def shop_text(terminal_name: str | None) -> str | None:
     return f"{place} ({vendor})"
 
 
+def list_price_text(locked_price: float | None, locked_shop: str | None,
+                    current: tuple[float, str | None] | None, *, prices_loaded: bool) -> str:
+    """One shopping-list line's price (audit MSG-13: the list used to show the price from
+    lock-in forever, and Refresh list didn't change it).
+
+    `current` is the part's cheapest shop right now as (price, full terminal name), None
+    when no shop sells it. With `prices_loaded` False (UEX didn't answer) the lock-in price
+    is shown and labelled as such. A price that moved since lock-in says what it was."""
+    def price_and_shop(price: float, shop: str | None) -> str:
+        return " · ".join(part for part in (f"{price:,.0f} aUEC", shop_text(shop)) if part)
+
+    if not prices_loaded:
+        if locked_price is None:
+            return "no shop price on record"
+        return f"{price_and_shop(locked_price, locked_shop)} (at lock-in)"
+    was = f" (was {locked_price:,.0f} aUEC at lock-in)" if locked_price is not None else ""
+    if current is None:
+        return f"no shop sells it right now{was}"
+    price, shop = current
+    moved = locked_price is not None and round(locked_price) != round(price)
+    return price_and_shop(price, shop) + (was if moved else "")
+
+
 def format_part_block(detail: dict, *, shared: list[str], selected: bool = False) -> str:
     name = detail.get("name") or "Unknown"
     marker = "✅ " if selected else ""

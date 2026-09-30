@@ -9,6 +9,8 @@ from discord import app_commands
 from discord.ext import commands
 
 from bot.autocomplete import fetch_within
+from bot.cogs.intelligence import REFERENCE_SNAPSHOT_HOURS
+from bot.uex.client import cache_interval_text
 from bot.uex.exceptions import UexApiError, describe_uex_api_error
 from bot.uex.mining_locations import names_for_ids
 from bot.uex.refinery import (
@@ -116,6 +118,7 @@ class Refinery(commands.Cog):
         # failed fetch here just degrades to the original yield-only ordering, not a broken
         # command.
         systems_by_ore: dict[str, set[str]] = {}
+        systems_failed = False
         try:
             star_systems = await self.bot.uex.get_star_systems()
             star_systems_by_id = {s["id"]: s["name"] for s in star_systems}
@@ -124,7 +127,9 @@ class Refinery(commands.Cog):
                     names_for_ids(commodity.get("ids_star_systems"), star_systems_by_id)
                 )
         except UexApiError:
-            pass  # combine_mining_systems gets {} and ranking stays by yield alone
+            # combine_mining_systems gets {} and ranking stays by yield alone - said in the
+            # footer below, rather than silently (audit MSG-12).
+            systems_failed = True
         # Several ores are judged against the systems where ALL of them are mined, not the
         # union (see combine_mining_systems) - a union let a refinery near ore B's system
         # pass unflagged for ore A.
@@ -140,10 +145,11 @@ class Refinery(commands.Cog):
             all_ranked, min_shown=MAX_TERMINALS, max_in_system=MAX_IN_SYSTEM_TERMINALS,
         )
 
+        methods_failed = False
         try:
             methods = await self.bot.uex.get_refineries_methods()
         except UexApiError:
-            methods = []
+            methods, methods_failed = [], True
         methods_high_yield = high_yield_refining_methods(methods)
 
         title = " + ".join(c["name"] for c in resolved)
@@ -157,10 +163,17 @@ class Refinery(commands.Cog):
         # disclosure is computed here too, for the same reason - it's a genuinely different
         # notice than "no data for this ore" (below), so it's spelled out once rather than
         # repeated per flagged terminal.
+        # Audit MSG-12: these said "live" and "periodically"; they're the bot's own copies,
+        # refreshed on the collector's and the UEX cache's schedules.
         footer_text = (
-            "Refinery yield bonus collected periodically · sell prices live from UEX · "
+            f"Refinery yield bonuses updated every {REFERENCE_SNAPSHOT_HOURS}h · "
+            f"sell prices updated every {cache_interval_text('commodities_prices')} · "
             "methods apply at any refinery, not tied to a specific terminal."
         )
+        if systems_failed:
+            footer_text += (
+                " · ⚠️ UEX didn't say where these ores are mined, so refineries are ranked by yield bonus alone."
+            )
         if any(t.in_mining_system is False for t in ranked_terminals):
             footer_text += (
                 " · ⚠️ marks a terminal outside where this ore is actually mined - still "
@@ -199,6 +212,9 @@ class Refinery(commands.Cog):
             lines = [_rating_line(m) for m in methods_high_yield]
             if not add_chunked_fields(embed, name="High-yield refining methods", lines=lines):
                 omitted_sections.append("refining methods")
+        elif methods_failed:
+            embed.add_field(name="High-yield refining methods",
+                            value="UEX didn't answer, so the refining methods can't be shown right now.", inline=False)
 
         seen_parent_ids: set[int] = set()
         for commodity in resolved:
@@ -209,13 +225,16 @@ class Refinery(commands.Cog):
             refined = next((c for c in commodities if c.get("id") == id_parent), None)
             if refined is None:
                 continue
+            prices_failed = False
             try:
                 price_rows = await self.bot.uex.get_commodities_prices(commodity_name=refined["name"])
             except UexApiError:
-                price_rows = []
+                price_rows, prices_failed = [], True
             top_sell = best_sell_locations(price_rows, limit=MAX_SELL_LOCATIONS)
             if top_sell:
                 lines = [f"**{r['terminal_name']}** — {r['price_sell']:.2f} aUEC/unit" for r in top_sell]
+            elif prices_failed:
+                lines = ["UEX didn't answer, so sell prices can't be shown right now."]
             else:
                 lines = ["No current sell price data."]
             # inline=True to keep this command's existing side-by-side layout for up to 3

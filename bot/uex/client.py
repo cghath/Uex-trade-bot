@@ -70,6 +70,44 @@ _ENDPOINT_CACHE_TTL = {
     "terminals_distances": 12 * 3600,
 }
 
+
+
+def cache_interval_text(path: str) -> str:
+    """How often the bot's copy of an endpoint's data can change, for telling players e.g.
+    "sell prices updated every 30 min" instead of calling cached data "live" (audit
+    MSG-12). Read from the same table the cache uses, so the two can't disagree."""
+    seconds = _ENDPOINT_CACHE_TTL.get(path, _DEFAULT_CACHE_TTL)
+    if seconds % 3600 == 0:
+        return f"{seconds // 3600}h"
+    return f"{max(1, round(seconds / 60))} min"
+
+
+async def fetch_terminal_distances(uex: Any, origin_id: int, terminal_ids: list[int], *,
+                                   batch_size: int = 8) -> dict[int, float | None]:
+    """id_terminal -> gigameters from origin_id, None where UEX has no usable distance (it
+    answers a bare `false` for some pairs, even in one system). There's no batch endpoint,
+    so it's one /terminals_distances call per pair, batch_size at a time to stay well
+    under UEX's 120/min. `uex` is a UexClient (or anything with get_terminal_distance)."""
+    distances: dict[int, float | None] = {}
+    to_fetch = [tid for tid in terminal_ids if tid != origin_id]
+    if origin_id in terminal_ids:
+        distances[origin_id] = 0.0
+    for start in range(0, len(to_fetch), batch_size):
+        batch = to_fetch[start:start + batch_size]
+        results = await asyncio.gather(
+            *(uex.get_terminal_distance(origin_id, tid) for tid in batch), return_exceptions=True,
+        )
+        for tid, result in zip(batch, results):
+            if isinstance(result, Exception) or not result:
+                distances[tid] = None
+                continue
+            try:
+                distances[tid] = float(result.get("distance"))
+            except (TypeError, ValueError, AttributeError):
+                distances[tid] = None
+    return distances
+
+
 # Entries were only ever replaced by a later call with the same key, never removed, so
 # high-variety keys (terminal-distance pairs, per-listing lookups, per-item prices) grew
 # the cache for as long as the bot ran (audit REL-9). Expired entries are swept every

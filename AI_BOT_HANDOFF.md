@@ -247,6 +247,13 @@ date - no open item, nothing to record here.
       UEX outage. If aiv2 adds or changes a route command, update `PREFERENCE_READERS`:
       `tests/test_preference_scope.py` checks it against the code. See PROJECT_CONTEXT.md
       entry 108
+- [ ] Honest labels: the sell-shortfall reroute's same-system/25 Gm limit
+      (`reroute_buyer_ids`, `find_backup_routes(destination_ids=)`, `fetch_terminal_distances`,
+      `MAX_REROUTE_DISTANCE_GM`); `/refinery-advisor`'s update intervals
+      (`cache_interval_text`) and failure notes; the ship-parts list re-priced on every
+      redraw (`list_price_text`); no Message Content intent in `bot/main.py` - check aiv2's
+      AI chat doesn't read message text before porting that one. See PROJECT_CONTEXT.md
+      entry 109
 
 ## To port: aiv2 -> production
 
