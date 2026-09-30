@@ -43,7 +43,7 @@ def test_describe_active_preferences_only_reports_what_it_was_told_about():
     # A command with no space-only/capital-ship-access concept (e.g. /best-route) simply
     # never passes those kwargs - the function must not invent them.
     note = describe_active_preferences(auto_load_only=True, system="Pyro")
-    assert note == "Active preferences: auto-load-only, system: Pyro"
+    assert note == "Filters: auto-load-only, system: Pyro"
 
 
 def test_describe_active_preferences_covers_all_five_fields():
@@ -51,9 +51,10 @@ def test_describe_active_preferences_covers_all_five_fields():
         space_only=True, capital_ship_access=True, auto_load_only=True,
         system="Stanton", risk_tolerance="low",
     )
+    # Capital-ship access and risk tolerance have no per-command option: always saved.
     assert note == (
-        "Active preferences: space-only, capital-ship access, auto-load-only, "
-        "system: Stanton, risk tolerance: low"
+        "Filters: space-only, capital-ship access (saved), auto-load-only, "
+        "system: Stanton, risk tolerance: low (saved)"
     )
 
 
@@ -858,11 +859,11 @@ def test_top_routes_send_ranked_routes_shows_active_preferences_in_footer(monkey
             auto_load_only=True,
             system="Pyro",
             risk_tolerance="low",
+            system_saved=True,
         )
         assert sent, "expected a followup"
         header = sent[0]["content"]  # the intro text above the route
-        assert "auto-load-only" in header
-        assert "system: Pyro" in header
-        assert "risk tolerance: low" in header
+        # Audit MSG-8: the saved ones are marked, the one set on the command isn't.
+        assert "Filters: auto-load-only, system: Pyro (saved), risk tolerance: low (saved)" in header, header
 
     asyncio.run(run())

@@ -649,7 +649,8 @@ class Trends(commands.Cog):
         if budget is not None:
             footer += f" · budget {budget:,.0f} aUEC"
         preferences_note = describe_active_preferences(
-            auto_load_only=auto_load_only, system=system, risk_tolerance=risk_tolerance
+            auto_load_only=auto_load_only, system=system, risk_tolerance=risk_tolerance,
+            saved={name for name, on in (("auto_load_only", auto_load_saved), ("system", system_saved)) if on},
         )
         if preferences_note:
             footer += " · " + preferences_note

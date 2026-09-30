@@ -9,6 +9,7 @@ from discord.ext import commands
 
 from bot.cogs.digest import _format_data_freshness, _format_rating_movers
 from bot.cogs.ships import ship_name_autocomplete
+from bot.uex.commodity_risk import within_risk_tolerance
 from bot.uex.data_health import classify_terminal_health
 from bot.uex.exceptions import UexApiError
 from bot.uex.marketplace import marketplace_item_link
@@ -27,6 +28,12 @@ from bot.uex.route_presentation import (
 )
 from bot.uex.ships import resolve_ship
 from bot.uex.status import build_status_lookup
+from bot.uex.trading_preferences import (
+    describe_active_preferences,
+    risk_tolerance_hint,
+    saved_filter_labels,
+    saved_filters_hint,
+)
 
 
 class IntelligenceBrief(commands.Cog):
@@ -39,8 +46,8 @@ class IntelligenceBrief(commands.Cog):
     )
     @app_commands.describe(
         ship="Optional ship; otherwise uses your saved default",
-        budget="Optional maximum aUEC to invest in a mixed load",
-        space_only="Exclude surface terminals from route recommendations",
+        budget="Optional maximum aUEC to invest in a mixed load; otherwise uses your saved default",
+        space_only="Exclude surface terminals from route recommendations; otherwise uses your saved default",
     )
     @app_commands.rename(space_only="space-only")
     @app_commands.autocomplete(ship=ship_name_autocomplete)
@@ -49,7 +56,7 @@ class IntelligenceBrief(commands.Cog):
         interaction: discord.Interaction,
         ship: str | None = None,
         budget: app_commands.Range[float, 1, 1_000_000_000] | None = None,
-        space_only: bool = False,
+        space_only: bool | None = None,
     ) -> None:
         await interaction.response.defer()
         freshness = await self.bot.db.get_digest_data_freshness()
@@ -62,7 +69,8 @@ class IntelligenceBrief(commands.Cog):
 
         ship_query = ship or await self.bot.db.get_default_ship(interaction.user.id)
         if ship_query:
-            route_embed = await self._routes_embed(ship_query, budget, space_only)
+            prefs = await self.bot.db.get_trading_preferences(interaction.user.id)
+            route_embed = await self._routes_embed(ship_query, prefs, budget=budget, space_only=space_only)
             embeds.insert(1, route_embed)
         else:
             embeds[0].add_field(
@@ -106,8 +114,19 @@ class IntelligenceBrief(commands.Cog):
             return {"buy": {}, "sell": {}}
         return build_status_lookup(status_data)
 
-    async def _routes_embed(self, ship_query: str, budget: float | None, space_only: bool) -> discord.Embed:
+    async def _routes_embed(self, ship_query: str, prefs: dict, *, budget: float | None,
+                            space_only: bool | None) -> discord.Embed:
         embed = discord.Embed(title="Personalized Mixed Routes", color=discord.Color.green())
+        # Saved /set-trading-preferences defaults apply here as on every other route command
+        # (audit MSG-6). Only budget and space-only have options on this command.
+        if budget is None:
+            budget = prefs["budget"]
+        space_only_saved = space_only is None and bool(prefs["space_only"])
+        if space_only is None:
+            space_only = bool(prefs["space_only"])
+        auto_load_only = bool(prefs["auto_load_only"])
+        system = prefs["preferred_system"]
+        saved = {"auto_load_only", "system", *(("space_only",) if space_only_saved else ())}
         try:
             vehicles = await self.bot.uex.get_vehicles()
             vehicle = resolve_ship(vehicles, ship_query)
@@ -115,8 +134,9 @@ class IntelligenceBrief(commands.Cog):
                 raise ValueError(missing_ship_note(ship_query, lookup_failed=False))
             if not vehicle.get("scu"):
                 raise ValueError(f"UEX lists no cargo capacity for {vehicle.get('name', ship_query)}")
-            rows = await self.bot.db.get_mixed_route_market_rows()
-            capital_gate = requires_capital_cargo_access(vehicle)
+            all_rows = await self.bot.db.get_mixed_route_market_rows()
+            rows = within_risk_tolerance(all_rows, prefs["risk_tolerance"])
+            capital_gate = requires_capital_cargo_access(vehicle) or bool(prefs["capital_ship_access"])
             if capital_gate:
                 stations = await self.bot.uex.get_space_stations()
                 station_map = {int(s["id"]): s for s in stations if s.get("id") and int(s["id"]) > 0}
@@ -132,14 +152,21 @@ class IntelligenceBrief(commands.Cog):
                 rows, ship_capacity_scu=float(vehicle["scu"]),
                 budget=float(budget) if budget is not None else None,
                 limit=3, max_commodities=3, space_only=space_only,
-                capital_access_only=capital_gate,
+                capital_access_only=capital_gate, auto_load_only=auto_load_only, system=system,
             )
         except (UexApiError, ValueError) as exc:
             embed.description = f"Route intelligence unavailable: {exc}"
             return embed
 
         if not routes:
-            embed.description = "No verified mixed routes fit the selected ship, budget, and safety filters."
+            saved_hint = saved_filters_hint(saved_filter_labels(
+                space_only=space_only_saved,
+                capital_ship_access=bool(prefs["capital_ship_access"]) and not requires_capital_cargo_access(vehicle),
+                auto_load_only=auto_load_only, system=system,
+            ), can_override=False)
+            risk_hint = risk_tolerance_hint(prefs["risk_tolerance"]) if len(rows) < len(all_rows) else ""
+            embed.description = ("No verified mixed routes fit the selected ship, budget, and safety filters."
+                                 + saved_hint + risk_hint)
             return embed
 
         embed.description = f"Top opportunities for **{vehicle.get('name', ship_query)}**"
@@ -149,7 +176,12 @@ class IntelligenceBrief(commands.Cog):
         # own budget check measures the embed's real total via len(embed), which only
         # includes the footer once it's actually set (see route_presentation.py's
         # docstring and trends.py's identical footer-before-loop ordering).
-        footer_text = f"Budget {budget:,.0f} aUEC" if budget is not None else None
+        filters_note = describe_active_preferences(
+            space_only=space_only, capital_ship_access=bool(prefs["capital_ship_access"]),
+            auto_load_only=auto_load_only, system=system, risk_tolerance=prefs["risk_tolerance"], saved=saved,
+        )
+        footer_text = " · ".join(part for part in (
+            f"Budget {budget:,.0f} aUEC" if budget is not None else None, filters_note) if part) or None
         if footer_text:
             embed.set_footer(text=footer_text)
         terminal_ids = [terminal_id for route in routes for terminal_id in (route.origin_id, route.destination_id)]

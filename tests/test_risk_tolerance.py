@@ -85,7 +85,7 @@ def test_market_rows_are_filtered_by_their_own_flags():
 
 
 def test_the_preference_no_longer_says_it_isnt_enforced():
-    assert describe_active_preferences(risk_tolerance="medium") == "Active preferences: risk tolerance: medium"
+    assert describe_active_preferences(risk_tolerance="medium") == "Filters: risk tolerance: medium (saved)"
     shown = format_trading_preferences(dict(DEFAULT_TRADING_PREFERENCES, risk_tolerance="medium"))
     assert "Risk tolerance: **medium** (route suggestions skip illegal and buggy goods)" in shown
     assert "not yet enforced" not in shown
