@@ -14,12 +14,6 @@ from bot.uex.trading_preferences import UNSET, format_trading_preferences, prefe
 
 SYSTEM_PREFERENCE_CHOICES = [*SYSTEM_CHOICES, app_commands.Choice(name="Any (no restriction)", value="any")]
 
-RISK_TOLERANCE_CHOICES = [
-    app_commands.Choice(name="Low - avoid illegal/explosive/buggy/volatile goods", value="low"),
-    app_commands.Choice(name="Medium - avoid illegal or buggy goods only", value="medium"),
-    app_commands.Choice(name="High - no restriction (default)", value="high"),
-]
-
 
 # The ship option's "clear it" choice, like the system option's "Any" (audit UX-15:
 # /clear-default-ship was folded in here).
@@ -51,15 +45,13 @@ class TradingPreferences(commands.Cog):
         capital_ship_access="Mixed-cargo commands (e.g. /mixed-routes): only XL-hangar/freight-elevator stops, any ship",
         auto_load_only=f"Default auto-load-only for {preference_scope('auto_load_only')}",
         system=f"Default star-system restriction for {preference_scope('preferred_system')} ('Any' clears it)",
-        risk_tolerance="Which risky goods route suggestions skip (illegal, explosive, volatile, buggy)",
     )
     @app_commands.rename(
         space_only="space-only",
         capital_ship_access="capital-ship-access",
         auto_load_only="auto-load-only",
-        risk_tolerance="risk-tolerance",
     )
-    @app_commands.choices(system=SYSTEM_PREFERENCE_CHOICES, risk_tolerance=RISK_TOLERANCE_CHOICES)
+    @app_commands.choices(system=SYSTEM_PREFERENCE_CHOICES)
     @app_commands.autocomplete(ship=ship_preference_autocomplete)
     async def set_trading_preferences(
         self,
@@ -70,7 +62,6 @@ class TradingPreferences(commands.Cog):
         capital_ship_access: bool | None = None,
         auto_load_only: bool | None = None,
         system: app_commands.Choice[str] | None = None,
-        risk_tolerance: app_commands.Choice[str] | None = None,
     ) -> None:
         if (
             ship is None
@@ -79,7 +70,6 @@ class TradingPreferences(commands.Cog):
             and capital_ship_access is None
             and auto_load_only is None
             and system is None
-            and risk_tolerance is None
         ):
             # No network/DB work on this path - safe to respond immediately rather than
             # deferring first.
@@ -133,7 +123,6 @@ class TradingPreferences(commands.Cog):
             preferred_system=(
                 UNSET if system is None else (None if system.value == "any" else system.value)
             ),
-            risk_tolerance=UNSET if risk_tolerance is None else risk_tolerance.value,
         )
         await interaction.followup.send(
             f"Trading preferences updated.\n{format_trading_preferences(prefs, ship_detail=ship_detail)}",

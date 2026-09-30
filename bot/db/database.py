@@ -78,8 +78,9 @@ CREATE TABLE IF NOT EXISTS user_ship_preference (
 
 -- Saved route-filtering defaults, applied whenever a route command's matching option is
 -- left unset so a user doesn't have to repeat the same options every call. risk_tolerance
--- has no per-command option: route commands always apply it (bot/uex/commodity_risk.py's
--- RISK_TOLERANCE_EXCLUDES). preferred_system/risk_tolerance/ship_name NULL means "no preference
+-- is no longer read or written: the setting was removed on 2026-09-30 (PROJECT_CONTEXT.md
+-- entry 114), and the column stays only because this schema is additive-only; any value in
+-- it is ignored. preferred_system/ship_name NULL means "no preference
 -- set", not "explicitly disabled". ship_name supersedes the older user_ship_preference
 -- table (kept, but no longer written to, purely as the one-time migration source run in
 -- Database.init() - see _migrate_ship_preference_into_trading_preferences) - the user's
@@ -2801,10 +2802,12 @@ class Database:
     # -- saved trading preferences (route-filter defaults + default ship) ----
 
     async def get_trading_preferences(self, user_id: int) -> dict[str, Any]:
-        """Always returns all 7 fields, defaulted, so callers never null-check a missing row."""
+        """Always returns all 6 fields, defaulted, so callers never null-check a missing row.
+        Selects only those columns: the retired risk_tolerance column is never read (entry 114)."""
         async with self.connect() as db:
             cursor = await db.execute(
-                "SELECT * FROM user_trading_preferences WHERE user_id = ?", (user_id,)
+                f"SELECT {', '.join(DEFAULT_TRADING_PREFERENCES)} FROM user_trading_preferences WHERE user_id = ?",
+                (user_id,),
             )
             row = await cursor.fetchone()
         if row is None:
@@ -2814,7 +2817,6 @@ class Database:
             "capital_ship_access": bool(row["capital_ship_access"]),
             "auto_load_only": bool(row["auto_load_only"]),
             "preferred_system": row["preferred_system"],
-            "risk_tolerance": row["risk_tolerance"],
             "ship_name": row["ship_name"],
             "budget": row["budget"],
         }
@@ -2831,13 +2833,14 @@ class Database:
         capital_ship_access: bool | object = UNSET,
         auto_load_only: bool | object = UNSET,
         preferred_system: str | None | object = UNSET,
-        risk_tolerance: str | None | object = UNSET,
         ship_name: str | None | object = UNSET,
         budget: float | None | object = UNSET,
     ) -> dict[str, Any]:
         """Partial update: a field left at UNSET (the default) keeps its current value -
         only fields the caller explicitly passes are changed, so a single-option
-        /set-trading-preferences call never resets the other 6.
+        /set-trading-preferences call never resets the other 5. The retired risk_tolerance
+        column (entry 114) is never named, so a new row leaves it NULL and an old row's
+        value is left alone, unread.
 
         Built as ONE atomic INSERT ... ON CONFLICT DO UPDATE whose DO UPDATE SET clause
         names ONLY the columns the caller actually passed - not a Python-side
@@ -2860,7 +2863,6 @@ class Database:
             ("capital_ship_access", capital_ship_access),
             ("auto_load_only", auto_load_only),
             ("preferred_system", preferred_system),
-            ("risk_tolerance", risk_tolerance),
             ("ship_name", ship_name),
             ("budget", budget),
         ):

@@ -25,7 +25,6 @@ from discord.ext import commands, tasks
 from bot.discord_ui import BotModal, BotView
 from bot.uex.backup_routes import find_backup_routes, reroute_buyer_ids
 from bot.uex.client import fetch_terminal_distances
-from bot.uex.commodity_risk import within_risk_tolerance
 from bot.uex.mixed_routes import find_hedge_cargo
 from bot.uex.route_presentation import cargo_item_line
 from bot.uex.route_progression import (
@@ -35,7 +34,6 @@ from bot.uex.route_progression import (
     terminal_state_update_for_outcome,
     update_confirms_depletion,
 )
-from bot.uex.trading_preferences import risk_tolerance_hint
 
 logger = logging.getLogger("uexbot.route_progression")
 
@@ -965,12 +963,7 @@ class RouteProgression(commands.Cog):
             if paired_sell is None:
                 return
             remaining_budget = (leg.quoted_price * shortfall_scu) if leg.quoted_price else None
-            # A hedge is a different commodity, so it respects the owner's saved risk tolerance.
-            thread_row = await self.bot.db.get_route_progression_thread(thread_id)
-            tolerance = ((await self.bot.db.get_trading_preferences(thread_row["user_id"]))["risk_tolerance"]
-                         if thread_row else None)
-            all_market_rows = await self.bot.db.get_mixed_route_market_rows()
-            market_rows = within_risk_tolerance(all_market_rows, tolerance)
+            market_rows = await self.bot.db.get_mixed_route_market_rows()
             hedge = find_hedge_cargo(
                 market_rows,
                 origin_terminal_id=leg.id_terminal,
@@ -984,7 +977,6 @@ class RouteProgression(commands.Cog):
                 await channel.send(
                     f"That shortfall left ~{shortfall_scu:,.0f} SCU of cargo space unused - nothing else "
                     f"trades between **{leg.terminal_name}** and your destination right now."
-                    + (risk_tolerance_hint(tolerance) if len(market_rows) < len(all_market_rows) else "")
                 )
                 return
             item = hedge[0]

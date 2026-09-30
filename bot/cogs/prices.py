@@ -21,7 +21,7 @@ from bot.uex.data_health import (
 )
 from bot.uex.route_confidence import coalesce_report_count, compute_route_confidence, track_record_modifier
 from bot.uex.practical_routes import route_in_system, route_practical_notes, route_supports_auto_load
-from bot.uex.commodity_risk import format_commodity_risk, outside_risk_tolerance, within_risk_tolerance
+from bot.uex.commodity_risk import format_commodity_risk
 from bot.uex.supply_demand import (
     SELL_SIDE_STATUS_CLARIFIER,
     analyze_terminal_market_history,
@@ -43,7 +43,6 @@ from bot.uex.multi_stop_routes import (
 from bot.uex.charts import render_budget_curve_chart
 from bot.uex.trading_preferences import (
     describe_active_preferences,
-    risk_tolerance_hint,
     saved_filter_labels,
     saved_filters_hint,
 )
@@ -56,7 +55,7 @@ def _filters_note(prefs: dict, saved_filters: dict, *, space_only: bool, auto_lo
     own record of which filters came from saved preferences."""
     return describe_active_preferences(
         space_only=space_only, capital_ship_access=bool(prefs["capital_ship_access"]),
-        auto_load_only=auto_load_only, system=system, risk_tolerance=prefs["risk_tolerance"],
+        auto_load_only=auto_load_only, system=system,
         saved={name for name, value in saved_filters.items() if value},
     )
 from bot.cogs.route_progression import RouteLegInput, TrackableRoute
@@ -441,8 +440,6 @@ class Prices(commands.Cog):
         if auto_load_only is None:
             auto_load_only = prefs["auto_load_only"]
         system_value = system.value if system else prefs["preferred_system"]
-        # No risk_tolerance here: the player named this commodity, so it isn't filtered out;
-        # the note below says when it's outside their tolerance instead.
         preferences_note = describe_active_preferences(
             auto_load_only=auto_load_only, system=system_value,
             saved={name for name, on in (("auto_load_only", auto_load_saved), ("system", system_saved)) if on},
@@ -480,12 +477,7 @@ class Prices(commands.Cog):
         risk_warning: str | None = None
         if id_commodity is not None:
             commodity_references = await self.bot.db.get_commodity_references([int(id_commodity)])
-            reference = commodity_references.get(int(id_commodity))
-            risk_warning = format_commodity_risk(reference)
-            if outside_risk_tolerance(reference, prefs["risk_tolerance"]):
-                tolerance_note = (f"Outside your saved risk tolerance ({prefs['risk_tolerance']}) - other route "
-                                  "commands leave it out. Shown here because you asked for it.")
-                risk_warning = "\n".join(filter(None, [risk_warning, tolerance_note]))
+            risk_warning = format_commodity_risk(commodity_references.get(int(id_commodity)))
 
         # Loaded lazily, only when a route turns out to be stock-limited with room to spare
         # (see stock_headroom_warning) - most /best-route calls never need it.
@@ -703,8 +695,7 @@ class Prices(commands.Cog):
                             # a raised exception here would silently never be sent.
                             try:
                                 if market_rows is None:
-                                    market_rows = within_risk_tolerance(
-                                        await self.bot.db.get_mixed_route_market_rows(), prefs["risk_tolerance"])
+                                    market_rows = await self.bot.db.get_mixed_route_market_rows()
                                 for hedge_item in find_hedge_cargo(
                                     market_rows, origin_terminal_id=origin_id, destination_terminal_id=destination_id,
                                     exclude_commodity_id=id_commodity, remaining_capacity_scu=room.capacity_scu,
@@ -971,8 +962,7 @@ class Prices(commands.Cog):
                         # Additive - see the identical try/except in the primary branch above.
                         try:
                             if market_rows is None:
-                                market_rows = within_risk_tolerance(
-                                    await self.bot.db.get_mixed_route_market_rows(), prefs["risk_tolerance"])
+                                market_rows = await self.bot.db.get_mixed_route_market_rows()
                             for hedge_item in find_hedge_cargo(
                                 market_rows, origin_terminal_id=route.buy_terminal_id,
                                 destination_terminal_id=route.sell_terminal_id,
@@ -1120,9 +1110,7 @@ class Prices(commands.Cog):
             )
             return
 
-        all_market_rows = await self.bot.db.get_mixed_route_market_rows()
-        market_rows = within_risk_tolerance(all_market_rows, prefs["risk_tolerance"])
-        risk_hint = risk_tolerance_hint(prefs["risk_tolerance"]) if len(market_rows) < len(all_market_rows) else ""
+        market_rows = await self.bot.db.get_mixed_route_market_rows()
         # OR'd with the saved preference, not replaced by it - either a genuine capital
         # ship or an explicit "always require capital-ship access" preference should force
         # this filter on; the ship-derived signal never gets to silently disable it.
@@ -1172,7 +1160,7 @@ class Prices(commands.Cog):
             auto_load_note = " with auto-load at both ends" if auto_load_only else ""
             system_note = f" entirely within {system_value}" if system_value else ""
             saved_hint = saved_filters_hint(saved_filter_labels(**saved_filters, capital_ship_access=(
-                bool(prefs["capital_ship_access"]) and not requires_capital_cargo_access(ship_vehicle)))) + risk_hint
+                bool(prefs["capital_ship_access"]) and not requires_capital_cargo_access(ship_vehicle))))
             if origin_name and destination_name:
                 pin_note = f" from **{origin_name}** to **{destination_name}**"
             elif origin_name:
@@ -1400,9 +1388,7 @@ class Prices(commands.Cog):
             )
             return
 
-        all_market_rows = await self.bot.db.get_mixed_route_market_rows()
-        market_rows = within_risk_tolerance(all_market_rows, prefs["risk_tolerance"])
-        risk_hint = risk_tolerance_hint(prefs["risk_tolerance"]) if len(market_rows) < len(all_market_rows) else ""
+        market_rows = await self.bot.db.get_mixed_route_market_rows()
         # OR'd with the saved preference, not replaced by it - either a genuine capital
         # ship or an explicit "always require capital-ship access" preference should force
         # this filter on; the ship-derived signal never gets to silently disable it.
@@ -1451,7 +1437,7 @@ class Prices(commands.Cog):
             auto_load_note = " with auto-load at every stop" if auto_load_only else ""
             system_note = f" entirely within {system_value}" if system_value else ""
             saved_hint = saved_filters_hint(saved_filter_labels(**saved_filters, capital_ship_access=(
-                bool(prefs["capital_ship_access"]) and not requires_capital_cargo_access(ship_vehicle)))) + risk_hint
+                bool(prefs["capital_ship_access"]) and not requires_capital_cargo_access(ship_vehicle))))
             await interaction.followup.send(
                 f"No multi-stop chains{f' from **{origin_name}**' if origin_name else ''} "
                 f"fit **{ship_vehicle.get('name', ship_query)}**"
@@ -1733,9 +1719,7 @@ class Prices(commands.Cog):
             )
             return
 
-        all_market_rows = await self.bot.db.get_mixed_route_market_rows()
-        market_rows = within_risk_tolerance(all_market_rows, prefs["risk_tolerance"])
-        risk_hint = risk_tolerance_hint(prefs["risk_tolerance"]) if len(market_rows) < len(all_market_rows) else ""
+        market_rows = await self.bot.db.get_mixed_route_market_rows()
         capital_access_only = requires_capital_cargo_access(ship_vehicle) or prefs["capital_ship_access"]
         if capital_access_only:
             try:
@@ -1775,7 +1759,7 @@ class Prices(commands.Cog):
         plottable = [p for p in points if p.investment > 0]
         if len(plottable) < 2:
             saved_hint = saved_filters_hint(saved_filter_labels(**saved_filters, capital_ship_access=(
-                bool(prefs["capital_ship_access"]) and not requires_capital_cargo_access(ship_vehicle)))) + risk_hint
+                bool(prefs["capital_ship_access"]) and not requires_capital_cargo_access(ship_vehicle))))
             await interaction.followup.send(
                 f"Couldn't find enough profitable multi-stop chains for "
                 f"**{ship_vehicle.get('name', ship_query)}** to chart a budget curve right now.{saved_hint}"

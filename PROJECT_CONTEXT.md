@@ -1383,7 +1383,7 @@ they're in sync).
       it - every occurrence is labeled "(not yet enforced)" so this isn't mistaken for a
       real guarantee. Building the actual filter (against `is_illegal`/`is_explosive`/
       `is_volatile_qt`/`is_volatile_time`/`is_buggy`) is future work. (Built later: see
-      entry 104.)
+      entry 104. Then removed altogether: see entry 114.)
 
     A real scoping gap, surfaced deliberately rather than silently: **space-only and
     capital-ship-access preferences only affect `/mixed-routes` and `/multi-stop-route`**,
@@ -3722,6 +3722,8 @@ they're in sync).
      - Tests: `tests/test_risk_tolerance.py` (26). Each change was undone one at a time (13 in
        all, including each of the four mixed-cargo pools separately), and its test failed
        every time.
+     - Superseded by entry 114: the setting and all of this filtering were removed the same
+       day. The ⚠️ cargo-risk labels stay.
 
 105. **One delivery choice for all three alert types, and each says how often it fires.** Audit
      finding UX-12, decided with the user on 2026-09-30.
@@ -3835,7 +3837,8 @@ they're in sync).
        - Filters that came from saved preferences are marked "(saved)", e.g. "Filters:
          auto-load-only (saved), system: Stanton (saved), risk tolerance: low (saved)".
          Capital-ship access and risk tolerance have no per-command option, so they're
-         always saved.
+         always saved. (Risk tolerance has since been removed, from the footer and
+         `/intelligence-brief` too: entry 114.)
        - The mixed-cargo commands share `_filters_note` in `bot/cogs/prices.py`. Their
          "surface terminals excluded" fragment is gone, since the Filters line says
          space-only. "Capital access confirmed at ..." stays: it's a fact about the routes,
@@ -4044,6 +4047,67 @@ they're in sync).
      - Tests: `tests/test_trade_log_and_stack_prices.py` (7), plus two inventory tests
        moved to the per-stack prices. Each change was undone one at a time (12 in all),
        and its test failed every time.
+
+114. **The saved risk tolerance is removed; the ⚠️ cargo-risk labels stay.** Decided by the
+     user on 2026-09-30, after research into what entry 104's filter actually did. Supersedes
+     entry 104.
+     - What the research found:
+       - Only UEX's illegal flag ever changed a result. UEX flags 18 commodities illegal (11
+         traded at terminals), 2 explosive, 1 volatile in quantum travel, 2 unstable over
+         time and 0 buggy, and none of the non-illegal flagged ones can form a route:
+         Detatrine has no buyer, and raw Quantainium, Diluthermex and Zeta-Prolanide have no
+         terminal rows. So Low and Medium behaved identically.
+       - What players haul is clean. On the Pi, 1 of 169 tracked buy legs was a flagged
+         commodity (Human Food Bars); Laranite, Gold, refined Quantainium, Agricium,
+         Taranite and Bexalite are all unflagged.
+       - `/mixed-routes` and `/multi-stop-route` almost never suggest flagged cargo (0-1 of
+         the top 5; filtering cost under 1% of profit), because black-market terminals
+         rarely report demand. `/top-routes` is where it showed: once a ship is set, 1-3 of
+         the top 10 are illegal goods (Osoian Hides, Neon, E'tam), often #1, and filtering
+         cost 8-25% of top-10 profit.
+       - Usage on the Pi: 11 players have saved preferences. Risk tolerance was unset for
+         5, High (the same as off) for 5, Medium for 1 and Low for none.
+       - The illegal flag is coarse: Neon and Human Food Bars are only restricted in some
+         jurisdictions, yet carry the same flag as WiDoW.
+     - So a three-level setting almost nobody used, whose two filtering levels behaved the
+       same, wasn't worth its surface. The labels already tell players what they're
+       hauling, and removing it fits the "trim for new users" direction.
+     - Removed:
+       - The `risk-tolerance` option on `/set-trading-preferences` (`RISK_TOLERANCE_CHOICES`
+         in `bot/cogs/trading_preferences.py`), its line in `/my-trading-preferences` and
+         the command's confirmation (`format_trading_preferences`), and "risk tolerance:
+         ..." in every route footer (`describe_active_preferences` no longer takes it).
+       - The filtering and its helpers: `RISK_TOLERANCE_EXCLUDES`, `RISK_TOLERANCE_SKIPS`,
+         `outside_risk_tolerance` and `within_risk_tolerance` (`bot/uex/commodity_risk.py`),
+         and `risk_tolerance_hint` plus the unused `RISK_TOLERANCE_LEVELS`
+         (`bot/uex/trading_preferences.py`). Every use went with them: `/top-routes`
+         (`_send_ranked_routes`), the market pools of `/mixed-routes`, `/multi-stop-route`
+         (both forms) and `/diminishing-returns`, `/intelligence-brief`, every "Hedge:"
+         suggestion (`/best-route`'s two branches, the ranked list, a tracking thread's
+         buy-side shortfall hedge), the empty-result hints, and `/best-route`'s "Outside
+         your saved risk tolerance" note.
+     - Kept: `commodity_risk_labels`, `format_commodity_risk` and
+       `has_commodity_risk_metadata`, so every "⚠️ Cargo risk: ..." line (and "risk metadata
+       unavailable") still shows on `/best-route`, `/top-routes`, `/mixed-routes`,
+       `/multi-stop-route` and `/intelligence-brief`.
+     - Database: the `risk_tolerance` column stays in `user_trading_preferences`, since the
+       schema is additive-only and the column has held real values. Nothing reads or writes
+       it. It's out of `DEFAULT_TRADING_PREFERENCES`; `get_trading_preferences` selects only
+       the six live columns; `set_trading_preferences` no longer takes it, so a new row
+       leaves it NULL and an old row's value sits there unread. `/clear-trading-preferences`
+       still deletes the whole row.
+     - Command surface: still 65 commands, and `/set-trading-preferences` has six options.
+       A walk of the command tree found every name, description and choice within
+       Discord's limits.
+     - Tests: `tests/test_risk_tolerance.py`, rewritten (20). Each test that needs a saved
+       value writes it straight into the old column. They check that the option is gone,
+       that the DB keeps the column but never reads or writes it (through an update, a
+       restart and a clear), that no reply or footer mentions it, that `/top-routes`,
+       `/best-route`, the mixed-cargo pools, `/intelligence-brief` and all four hedge paths
+       leave nothing out, and that flagged cargo keeps its label on each route command.
+       Run against the code from before this change, all 20 fail, each because goods were
+       left out or the setting was shown. `tests/test_preference_scope.py` also fails if any
+       route command's code mentions `risk_tolerance`.
 
 ## Where to look for what
 
@@ -4314,7 +4378,9 @@ guessed at.
   volatility, and recent gameplay bugs. `is_illegal` is worded as restricted in some
   jurisdictions, matching UEX's definition rather than overstating it as universal contraband.
   If the commodity reference row or any risk flag is missing, route views explicitly warn that
-  risk metadata is unavailable rather than silently presenting the cargo as safe.
+  risk metadata is unavailable rather than silently presenting the cargo as safe. The labels
+  only inform: no setting leaves flagged cargo out of routes (the saved risk tolerance that
+  did was removed, entry 114).
 - **Mixed Routes** intentionally rank by estimated profit *after* ship, stock, demand, and
   optional budget limits. They do not include travel time/distance in the score, so the output
   retains cross-system and missing-distance warnings. A qualifying result must allocate at

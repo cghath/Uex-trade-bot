@@ -92,7 +92,7 @@ def _set(db, uex, **options):
     cog.bot = NS(db=db, uex=uex)
     interaction = _Interaction()
     values = dict(ship=None, budget=None, space_only=None, capital_ship_access=None, auto_load_only=None,
-                  system=None, risk_tolerance=None)
+                  system=None)
     values.update(options)
     asyncio.run(cog.set_trading_preferences.callback(cog, interaction, **values))
     return interaction.followup.send.call_args.args[0]
