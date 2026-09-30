@@ -200,14 +200,6 @@ class Digest(commands.Cog):
     async def before_post_scheduled_digests(self) -> None:
         await self.bot.wait_until_ready()
 
-    async def cog_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
-        if isinstance(error, app_commands.MissingPermissions):
-            await interaction.response.send_message(
-                "You need the Manage Server permission to configure the digest.", ephemeral=True
-            )
-            return
-        raise error
-
 
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(Digest(bot))

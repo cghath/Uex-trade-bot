@@ -20,6 +20,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from bot.delivery import Delivery, send_to_channel_or_dm
+from bot.discord_ui import BotView
 from bot.uex.exceptions import UexApiError, describe_uex_api_error
 from bot.uex.marketplace import marketplace_item_link, marketplace_item_url
 from bot.uex.scanner import StealEntry, build_fair_price_index, find_steals
@@ -198,7 +199,7 @@ class Scanner(commands.Cog):
         await self.bot.wait_until_ready()
 
 
-class ScannerOffView(discord.ui.View):
+class ScannerOffView(BotView):
     """A "Turn off" button on /scanner-status: before it there was no way to stop the
     scanner at all (audit UX-3), short of pointing it at a channel nobody reads. Lives on
     the status reply rather than as its own command, to keep the command list short."""

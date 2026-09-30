@@ -19,6 +19,7 @@ from discord.ext import commands, tasks
 
 from bot.autocomplete import fetch_within
 from bot.delivery import fit_lines
+from bot.discord_ui import BotModal, BotView
 from bot.uex.charts import render_price_history_chart
 from bot.uex.exceptions import UexApiError, describe_uex_api_error
 from bot.uex.inventory import extract_listing_id
@@ -147,7 +148,7 @@ async def unit_autocomplete(interaction: discord.Interaction, current: str) -> l
     return [app_commands.Choice(name=u, value=u) for u in matches]
 
 
-class ConfirmListingView(discord.ui.View):
+class ConfirmListingView(BotView):
     """Confirm/cancel gate in front of the real POST - times out safely if ignored."""
 
     def __init__(self, bot: commands.Bot, secret_key: str, payload: dict, author_id: int) -> None:
@@ -213,7 +214,7 @@ class ConfirmListingView(discord.ui.View):
         await interaction.followup.send("Cancelled - nothing was posted.", ephemeral=True)
 
 
-class ConfirmDeleteListingView(discord.ui.View):
+class ConfirmDeleteListingView(BotView):
     """Confirm/cancel gate in front of a real DELETE against a public UEX listing - the
     original single-command version had no recovery from a mistyped listing_id."""
 
@@ -319,7 +320,7 @@ class ConfirmDeleteListingView(discord.ui.View):
         await interaction.followup.send("Cancelled - nothing was deleted.", ephemeral=True)
 
 
-class ListingDetailsModal(discord.ui.Modal, title="Marketplace listing details"):
+class ListingDetailsModal(BotModal, title="Marketplace listing details"):
     listing_title = discord.ui.TextInput(label="Title", max_length=140, required=True)
     price = discord.ui.TextInput(label="Price (whole number)", max_length=12, required=True)
     description = discord.ui.TextInput(label="Description", style=discord.TextStyle.paragraph, max_length=2000, required=True)

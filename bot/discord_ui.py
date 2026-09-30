@@ -1,17 +1,25 @@
 """Shared Discord UI components used across more than one cog.
 
-Currently just AlertRemovePickerView: a paginated dropdown for removing an alert by picking
-it from a menu instead of having to already know (and type) its numeric id. Used by every
-alert family in this bot (bot/cogs/alerts.py, bot/cogs/marketplace_alerts.py,
-bot/cogs/stock_alerts.py) so the interaction is consistent no matter which kind of alert
-you're removing.
+- BotView / BotModal: the base class for every view and modal in this bot. When a button,
+  menu or form handler raises, they tell the player it failed instead of leaving them on
+  "thinking..." or a click that seems to do nothing. `on_app_command_error` does the same for
+  slash commands; bot/main.py registers it on the command tree.
+- AlertRemovePickerView: a paginated dropdown for removing an alert by picking it from a
+  menu instead of having to already know (and type) its numeric id. Used by every alert
+  family in this bot (bot/cogs/alerts.py, bot/cogs/marketplace_alerts.py,
+  bot/cogs/stock_alerts.py) so the interaction is consistent no matter which kind of alert
+  you're removing.
 """
 from __future__ import annotations
 
+import logging
 import math
 from typing import Any, Awaitable, Callable
 
 import discord
+from discord import app_commands
+
+logger = logging.getLogger("uexbot.discord_ui")
 
 # Discord technically allows up to 25 options in one select menu, but a page this size gets
 # hard to scan at a glance - paging at 10 keeps each menu screen-sized, per how this was
@@ -20,8 +28,69 @@ PAGE_SIZE = 10
 
 RemoveCallback = Callable[[discord.Interaction, Any], Awaitable[str]]
 
+UNEXPECTED_ERROR_MESSAGE = (
+    "Something went wrong on my end with that. Please try again in a moment - if it keeps "
+    "happening, let the bot owner know."
+)
+# Discord's own names for the permissions a command checks, as players see them in settings.
+_PERMISSION_NAMES = {"manage_guild": "Manage Server"}
 
-class AlertRemovePickerView(discord.ui.View):
+
+async def tell_player_it_failed(interaction: discord.Interaction, message: str = UNEXPECTED_ERROR_MESSAGE) -> None:
+    """Answer an interaction whose handler raised (audit REL-13). Without this, a deferred
+    command stays on "thinking..." forever and an unanswered click shows Discord's own
+    "interaction failed", with nothing saying what to do next.
+
+    A deferred interaction gets a followup (the first one replaces "thinking..."); an
+    unanswered one gets a direct reply. Never raises: if Discord refuses this too (the
+    interaction expired), that's only logged."""
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(message, ephemeral=True)
+        else:
+            await interaction.response.send_message(message, ephemeral=True)
+    except discord.HTTPException as exc:
+        logger.warning("Couldn't tell the player an interaction failed: %s", exc)
+
+
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
+    """The command tree's error handler, so every slash command answers when it fails.
+
+    Always answers, so a cog shouldn't add its own `cog_app_command_error` that replies too:
+    the player would get two messages. A failure a command expects (UEX down, a bad name)
+    should still be caught in the command with a specific message; this is the backstop."""
+    command = interaction.command
+    name = f"/{command.qualified_name}" if command is not None else "that command"
+    if isinstance(error, app_commands.MissingPermissions):
+        needed = ", ".join(_PERMISSION_NAMES.get(p, p.replace("_", " ").title()) for p in error.missing_permissions)
+        message = f"You need the {needed} permission to use `{name}`."
+    elif isinstance(error, app_commands.CheckFailure):
+        message = f"You can't use `{name}` here."
+    else:
+        logger.error("Unhandled error in %s", name, exc_info=error)
+        message = UNEXPECTED_ERROR_MESSAGE
+    await tell_player_it_failed(interaction, message)
+
+
+class BotView(discord.ui.View):
+    """Base class for every view in this bot: a failing button or menu tells the player
+    instead of discord.py's default of only logging it."""
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception, item: discord.ui.Item[Any], /) -> None:
+        logger.error("Unhandled error in %s for %r", type(self).__name__, item, exc_info=error)
+        await tell_player_it_failed(interaction)
+
+
+class BotModal(discord.ui.Modal):
+    """Base class for every modal in this bot: a failing form submit tells the player instead
+    of discord.py's default of only logging it."""
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception, /) -> None:
+        logger.error("Unhandled error in %s", type(self).__name__, exc_info=error)
+        await tell_player_it_failed(interaction)
+
+
+class AlertRemovePickerView(BotView):
     """Renders a page of alerts as a dropdown (plus Prev/Next buttons once there's more than
     one page) and calls back into the cog to actually delete whichever one is selected.
 

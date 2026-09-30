@@ -89,6 +89,22 @@ do), the real API is `bot.tree.add_command(app_commands.Command(name=..., descri
 callback=...))` — but check whether an existing cog already solves your problem with plain
 decorators first, because one always does.
 
+## Views and modals subclass `BotView` / `BotModal`
+
+discord.py's default error handling only logs. A button, menu or form whose callback raises
+then shows the player "interaction failed" with no next step, and a deferred command stays
+on "thinking..." forever. `bot/discord_ui.py` fixes both:
+
+- `BotView` and `BotModal` (use them instead of `discord.ui.View` / `discord.ui.Modal`)
+  answer the player when a callback raises.
+- `on_app_command_error`, registered on the command tree in `bot/main.py`, does the same for
+  every slash command. It always answers, so don't add a `cog_app_command_error` that
+  replies too - the player would get two messages.
+
+Still catch the failures you expect (UEX down, a name that doesn't match) in the command
+itself, with a message that says what to do; these handlers are the backstop.
+`tests/test_failed_interactions.py` fails if a view or modal uses the plain base.
+
 ## New DB tables need an actual `CREATE TABLE`
 
 Referencing a table in a query doesn't create it. Every table your feature reads or writes
@@ -286,6 +302,7 @@ Run through this before considering a feature finished:
       manual `bot.tree.command(callback=...)` or `func=...` anywhere
 - [ ] Any new DB table has a real `CREATE TABLE IF NOT EXISTS` in `bot/db/database.py`'s
       `SCHEMA` string
+- [ ] Any new view or modal subclasses `BotView` / `BotModal` from `bot/discord_ui.py`
 - [ ] Any new config value is read in `bot/config.py` and documented in `.env.example`
 - [ ] `python -m pytest -q` passes
 - [ ] With authorization, started the bot locally and saw `Loaded extension bot.cogs.<yours>` and a plausible

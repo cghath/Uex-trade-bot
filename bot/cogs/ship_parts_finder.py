@@ -45,6 +45,7 @@ from discord.ext import commands, tasks
 from bot.autocomplete import gather_within
 from bot.cogs.prices import terminal_name_autocomplete
 from bot.cogs.ships import ship_name_autocomplete
+from bot.discord_ui import BotView
 from bot.uex.exceptions import UexApiError, describe_uex_api_error
 from bot.uex.ship_part_display import (
     LIST_BUDGET_CHARS,
@@ -61,9 +62,9 @@ from bot.uex.ship_parts import (
     MOUNTS_CATEGORY,
     ShipPort,
     candidate_items_for_port,
-    child_gun_ports,
     category_label,
     cheapest_listing_by_item,
+    child_gun_ports,
     group_ports_by_category,
     parse_ports,
     part_fits_port,
@@ -112,6 +113,7 @@ EXPIRED_NOTE = (f"⏸️ Closed after {BROWSER_IDLE_SECONDS // 60} minutes idle.
 _REFRESH_PREFIX = "ship-parts-browse:refresh"
 REFRESH_TEMPLATE = _REFRESH_PREFIX + r":(?P<vehicle>\d+):(?P<terminal>\d+):(?P<category>.*)"
 MAX_CUSTOM_ID_CHARS = 100  # Discord's limit
+MAX_SELECT_OPTIONS = 25  # Discord's limit
 # Wiki detail fields no display or fit check reads - dropped before caching, so a full
 # cache stays small on the Pi.
 _UNUSED_DETAIL_KEYS = frozenset({
@@ -223,10 +225,18 @@ def _entry_slot_label(entry: dict) -> str:
 class ShipPartsShoppingService:
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
+        # One get-or-create at a time per player and server (audit REL-16): without it, two
+        # quick clicks each found no thread, each created one, and one was left orphaned.
+        self._thread_locks: dict[tuple[int, int], asyncio.Lock] = {}
 
     async def _thread(self, interaction: discord.Interaction) -> discord.Thread | None:
         if interaction.guild_id is None:
             return None
+        lock = self._thread_locks.setdefault((interaction.user.id, interaction.guild_id), asyncio.Lock())
+        async with lock:
+            return await self._get_or_create_thread(interaction)
+
+    async def _get_or_create_thread(self, interaction: discord.Interaction) -> discord.Thread | None:
         saved = await self.bot.db.get_ship_parts_thread(interaction.user.id, interaction.guild_id)
         if saved:
             thread = self.bot.get_channel(saved["thread_id"])
@@ -386,13 +396,13 @@ class _RemoveEntrySelect(discord.ui.Select):
         await interaction.followup.send(f"Removed **{entry['item_name']}** ({category_label(entry['category'])}).", ephemeral=True)
 
 
-class _RemoveEntryView(discord.ui.View):
+class _RemoveEntryView(BotView):
     def __init__(self, service: "ShipPartsShoppingService", entries: list[dict]) -> None:
         super().__init__(timeout=300)
         self.add_item(_RemoveEntrySelect(service, entries))
 
 
-class ShipPartsShoppingView(discord.ui.View):
+class ShipPartsShoppingView(BotView):
     """Persistent controls whose callbacks always re-check the stored owner - survives a bot
     restart (timeout=None, fixed custom_ids, registered once via cog_load's bot.add_view).
     Mirrors bot/cogs/blueprint_planner.py's ShoppingView exactly."""
@@ -461,7 +471,7 @@ class ShipPartsShoppingView(discord.ui.View):
             await interaction.followup.send("Ship parts list cleared.", ephemeral=True)
 
 
-class PartsBrowserView(discord.ui.View):
+class PartsBrowserView(BotView):
     """Transient (NOT persistent, matches blueprint_planner.py's CraftConfigView) - browsing
     a ship's slots doesn't need to survive a restart, only a locked-in choice does. If this
     view goes stale on a restart, the user just re-runs /ship-parts-finder.
@@ -526,6 +536,13 @@ class PartsBrowserView(discord.ui.View):
         """Say when the Star Citizen Wiki didn't answer, since a list built without its data
         can be short or wrong-sized - otherwise that looks like a real "none for sale"."""
         notes = [self.notice] if self.notice else []
+        slots = len(self.grouped_ports.get(self.category, [])) if self.category else 0
+        if slots > MAX_SELECT_OPTIONS:
+            # A menu holds 25 options. No ship has more than 12 slots in one category today
+            # (checked across all 201 on 2026-09-29), so this only guards against that
+            # changing - and says so rather than dropping slots silently (audit REL-17).
+            notes.append(f"⚠️ This ship has {slots} {category_label(self.category)} slots; "
+                         f"only the first {MAX_SELECT_OPTIONS} can be listed.")
         if self.turret_guns_unanswered:
             notes.append("⚠️ The Star Citizen Wiki didn't respond, so turret guns aren't listed. "
                          "Try again in a few minutes.")
@@ -681,6 +698,7 @@ class PartsBrowserView(discord.ui.View):
         load = self._load_seq
         self.selected_port = port
         self.parts_unanswered = 0
+        self.notice = None
         # Drop the previous slot's parts (and their dropdown) now, not when this load
         # finishes - otherwise one of them could be picked and locked in under this slot.
         self._set_candidates([])
@@ -690,10 +708,16 @@ class PartsBrowserView(discord.ui.View):
                 candidates = await self.cog.candidates_for_port(
                     port, category=self.category, origin_id=self.origin_terminal[0],
                 )
-            except (UexApiError, WikiApiError) as exc:
+            except Exception as exc:
+                # Any failure, not only UEX's or the wiki's (audit REL-13): the message used
+                # to keep the old parts on screen while this view had already dropped them.
+                if not isinstance(exc, (UexApiError, WikiApiError)):
+                    logger.exception("Ship parts options failed to load for %s", self.category)
                 if load != self._load_seq:
                     return
-                await interaction.edit_original_response(content=f"Couldn't load {self.category} options: {exc}", view=self)
+                self.notice = (f"⚠️ Couldn't load {category_label(self.category)} options right now. "
+                               "Pick it again to retry.")
+                await interaction.edit_original_response(content=self.text(), view=self)
                 return
         if load != self._load_seq:
             # The player picked another category or slot while this one loaded (a cold
@@ -748,7 +772,7 @@ class _SlotSelect(discord.ui.Select):
     """Shown only when a category has more than one physical port on this ship."""
     def __init__(self, parent: PartsBrowserView, ports: list[ShipPort]) -> None:
         options = [discord.SelectOption(label=_format_port_label(port)[:100], value=str(i))
-                   for i, port in enumerate(ports[:25])]
+                   for i, port in enumerate(ports[:MAX_SELECT_OPTIONS])]
         super().__init__(placeholder="Choose a slot", options=options)
         self.parent_view = parent
         self._ports = ports
@@ -1255,7 +1279,15 @@ class ShipPartsFinder(commands.Cog):
                 "I couldn't open your private ship parts thread. Check thread permissions.", ephemeral=True,
             )
             return
-        view.message = await thread.send(content=view.text(), view=view, allowed_mentions=NO_MENTIONS)
+        try:
+            view.message = await thread.send(content=view.text(), view=view, allowed_mentions=NO_MENTIONS)
+        except discord.HTTPException:
+            logger.exception("Could not post the ship parts browser in thread %s", thread.id)
+            view.stop()
+            await interaction.followup.send(
+                f"I couldn't post the browser in {thread.mention}. Please try again.", ephemeral=True,
+            )
+            return
         self._browsers[view.message.id] = view
         await interaction.followup.send(
             f"Opened {thread.mention} - browse **{vehicle.get('name')}**'s parts there.", ephemeral=True,

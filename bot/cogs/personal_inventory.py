@@ -13,6 +13,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
+from bot.discord_ui import BotModal, BotView
 from bot.uex.exceptions import UexApiError, UexRejectedError
 from bot.uex.inventory import (
     DEFAULT_MARKETPLACE_TIMEZONE,
@@ -163,7 +164,7 @@ class InventoryEntrySelect(discord.ui.Select):
         )
 
 
-class InventorySelectionView(discord.ui.View):
+class InventorySelectionView(BotView):
     def __init__(self, cog: "PersonalInventory", author_id: int, rows: list[dict[str, Any]]) -> None:
         super().__init__(timeout=300)
         self.cog = cog
@@ -252,7 +253,7 @@ class InventorySelectionView(discord.ui.View):
 MAX_MINIMUM_PRICE_BUTTONS = 24  # a View caps at 25 components total; leave one for Cancel
 
 
-class SetMinimumPricesView(discord.ui.View):
+class SetMinimumPricesView(BotView):
     """Lets /inventory-sell set a missing minimum price inline instead of dead-ending with
     "run /inventory-set-minimum and start over" - one button per stack that still needs a
     floor. The moment the last one gets set, this same message turns into the authorize
@@ -328,7 +329,7 @@ class SetMinimumPricesView(discord.ui.View):
         await interaction.response.edit_message(content=None, embed=embed, view=view)
 
 
-class SetMinimumModal(discord.ui.Modal, title="Set a minimum price"):
+class SetMinimumModal(BotModal, title="Set a minimum price"):
     price_input: discord.ui.TextInput = discord.ui.TextInput(
         label="Minimum price per unit (UEC)",
         placeholder="e.g. 500000",
@@ -363,7 +364,7 @@ class SetMinimumModal(discord.ui.Modal, title="Set a minimum price"):
         await self.view.resolve_minimum_set(interaction, self.inventory_id, price)
 
 
-class AuthorizeScheduleView(discord.ui.View):
+class AuthorizeScheduleView(BotView):
     def __init__(self, cog: "PersonalInventory", author_id: int, specs: list[dict[str, Any]]) -> None:
         super().__init__(timeout=180)
         self.cog = cog
@@ -445,7 +446,7 @@ class AuthorizeScheduleView(discord.ui.View):
         await interaction.followup.send("Cancelled—no inventory was reserved or scheduled.", ephemeral=True)
 
 
-class CustomPriceModal(discord.ui.Modal, title="Enter a custom price"):
+class CustomPriceModal(BotModal, title="Enter a custom price"):
     """Shared by PostNowView (single item) and AuthorizeScheduleView (batch, gated to exactly
     one selected stack - an absolute price doesn't scale across different items the way the
     undercut/premium percentage strategies do). Either view just needs `.pricing_strategy`,
@@ -490,7 +491,7 @@ class CustomPriceModal(discord.ui.Modal, title="Enter a custom price"):
         )
 
 
-class PostNowView(discord.ui.View):
+class PostNowView(BotView):
     def __init__(self, cog: "PersonalInventory", author_id: int, entry: dict[str, Any], quantity: int) -> None:
         super().__init__(timeout=180)
         self.cog = cog
@@ -575,7 +576,7 @@ class PostNowView(discord.ui.View):
         await interaction.followup.send("Cancelled - nothing was posted.", ephemeral=True)
 
 
-class LowerFloorModal(discord.ui.Modal, title="Set a new minimum price"):
+class LowerFloorModal(BotModal, title="Set a new minimum price"):
     price_input: discord.ui.TextInput = discord.ui.TextInput(
         label="New minimum price per unit (UEC)",
         placeholder="e.g. 800000",
@@ -609,7 +610,7 @@ class LowerFloorModal(discord.ui.Modal, title="Set a new minimum price"):
         await interaction.response.edit_message(content=content, embed=None, view=self.view)
 
 
-class FloorReachedView(discord.ui.View):
+class FloorReachedView(BotView):
     """Sent as a plain DM (not an interaction followup), so it can arrive whenever the 48h
     discount cycle actually hits the floor - possibly hours after any command was run."""
 
