@@ -2,12 +2,42 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
+
+from bot.uex.data_health import TerminalDataHealth
 
 
 MIN_HISTORY_HOURS = 24
+# A single recorded observation (state_changes == 0) is one point in time extrapolated
+# forward to observed_until, with zero corroboration that the state actually persisted -
+# requiring at least one real recorded change is the minimum bar for "this has genuinely
+# been watched," not just "time has passed since the collector wrote one row."
+MIN_STATE_CHANGES = 1
 SELL_SIDE_NO_DEMAND_CODE = 7
+# The buy side's own analogous "confirmed can't do business here" signal - UEX's code 1
+# is literally "Out of Stock (Empty)": the terminal has nothing to sell you, even if a
+# stale positive price_buy is still on record. bot/uex/route_progression.py already
+# treats these two codes (this one and SELL_SIDE_NO_DEMAND_CODE) as the only status codes
+# it ever writes, for exactly this reason - both are the one authoritative "zero" on their
+# respective side, unlike scu_buy/scu_sell themselves, which are frequently 0 for
+# perfectly legitimate reasons (e.g. a real Out-of-Stock SELL-side terminal wants to buy
+# but has no live confirmed transaction amount - excluding it would be exactly backwards).
+BUY_SIDE_OUT_OF_STOCK_CODE = 1
+
+# Confirmed by directly querying UEX's own /commodities_status: the sell side runs opposite
+# to the buy side. A terminal's "sell side" status is ITS OWN inventory of the commodity, so
+# "Out of Stock"/low there means the terminal is depleted and wants to buy (good for you)
+# while "Maximum" means it's fully stocked - UEX's own code table literally names that top
+# band "Maximum Inventory (No Demand)", the same SELL_SIDE_NO_DEMAND_CODE above. Without
+# this, "sell side: Out Stock" reads exactly backwards in plain English, so it's spelled out
+# once per embed rather than re-explained per entry. Lives here (not in a cog) so any
+# command showing sell-side status - /top-routes and /price both do - can share the exact
+# same wording without one cog importing from another.
+SELL_SIDE_STATUS_CLARIFIER = (
+    "'sell side' status is the TERMINAL's own stock: Out of Stock/low = they're empty and want "
+    "to buy (good for you); Maximum = fully stocked, little to no demand"
+)
 
 
 def has_sell_side_demand(scu_wanted: Any, status_sell: Any) -> bool:
@@ -24,6 +54,76 @@ def has_sell_side_demand(scu_wanted: Any, status_sell: Any) -> bool:
     return wanted > 0 and status not in (None, 0, SELL_SIDE_NO_DEMAND_CODE)
 
 
+def effective_sell_scu(scu: Any, status_sell: Any) -> float | None:
+    """A sell-side (terminal-buying-from-you) SCU figure, overridden to 0 when UEX status
+    code 7 ("Maximum Inventory, No Demand") confirms zero real demand even though scu
+    itself still reports a stale positive number - the same inversion has_sell_side_demand
+    exists for, but returning the quantity itself (not just a bool) so callers can display
+    it. Unlike has_sell_side_demand, an unknown/missing status never zeroes a live figure -
+    only code 7 is an authoritative zero-demand signal. Returns None when scu itself is
+    unparseable/missing, so a caller can distinguish "no data" from "confirmed zero"."""
+    try:
+        wanted = float(scu) if scu is not None else None
+    except (TypeError, ValueError):
+        return None
+    if wanted is None:
+        return None
+    try:
+        status_code = int(float(status_sell)) if status_sell is not None else None
+    except (TypeError, ValueError):
+        status_code = None
+    if status_code == SELL_SIDE_NO_DEMAND_CODE:
+        return 0.0
+    return wanted
+
+
+@dataclass(frozen=True)
+class SellCapacityEstimate:
+    scu: float
+    # Age (in days) of the specific historical record the estimate's max stock reading
+    # came from, as of `now` at call time - None if that record carries no timestamp.
+    # A quiet terminal's "highest ever seen" can itself be based on data UEX hasn't
+    # refreshed in days, which is worth disclosing alongside the number so it doesn't
+    # read as more current than it is.
+    source_age_days: float | None
+
+
+def estimate_sell_capacity_from_history(
+    history_rows: list[dict[str, Any]], current_stock: float | None, *, now: datetime | None = None
+) -> SellCapacityEstimate | None:
+    """Estimate how much MORE a terminal with no live confirmed buying figure might take,
+    from UEX's own /commodities_prices_history: the highest scu_sell_stock ever recorded
+    for this (terminal, commodity) pair, minus what it currently holds.
+
+    This is a real, UEX-provided historical figure (not something this bot has collected
+    itself), but it is still only an ESTIMATE, never a confirmed number - the terminal's
+    true capacity could exceed anything observed in whatever window UEX's history happens
+    to cover, so this is a lower bound at best, not a guarantee. Returns None when there's
+    no usable history, no current-stock context to subtract from, or the terminal is
+    already at/above its own historical high (no evidence of room to spare) - callers
+    should fall back to a plainer "holds ~N already" figure in that case, not silently
+    show nothing.
+    """
+    if current_stock is None:
+        return None
+    stock_rows = [row for row in history_rows if row.get("scu_sell_stock") is not None]
+    if not stock_rows:
+        return None
+    peak_row = max(stock_rows, key=lambda row: float(row["scu_sell_stock"]))
+    estimate = float(peak_row["scu_sell_stock"]) - current_stock
+    if estimate <= 0:
+        return None
+    age_days = None
+    date_added = peak_row.get("date_added")
+    if date_added is not None:
+        try:
+            recorded_at = datetime.fromtimestamp(float(date_added), tz=timezone.utc)
+            age_days = ((now or datetime.now(timezone.utc)) - recorded_at).total_seconds() / 86400
+        except (TypeError, ValueError, OSError):
+            age_days = None
+    return SellCapacityEstimate(scu=estimate, source_age_days=age_days)
+
+
 @dataclass(frozen=True)
 class TerminalMarketHistory:
     observed_hours: float
@@ -34,7 +134,7 @@ class TerminalMarketHistory:
 
     @property
     def enough_history(self) -> bool:
-        return self.observed_hours >= MIN_HISTORY_HOURS
+        return self.observed_hours >= MIN_HISTORY_HOURS and self.state_changes >= MIN_STATE_CHANGES
 
 
 def _timestamp(value: str) -> datetime:
@@ -78,3 +178,81 @@ def analyze_terminal_market_history(
         state_changes=max(0, len(rows) - 1),
         last_change_at=_timestamp(str(rows[-1]["observed_at"])),
     )
+
+
+# Evidence-Level Labels: what a route's stock/demand figure actually rests on, distinct
+# from the blended 0-100 RouteConfidence score (bot/uex/route_confidence.py) - that score
+# answers "how much should I trust this route overall," this answers "where did THIS
+# specific number come from." Four tiers, in descending order of directness:
+#   "current"  - a live reported figure, and the terminal's data is fresh/recent
+#   "aging"    - a live reported figure, but the terminal's data is limited/stale/unknown
+#                (a real number, just not a fresh one - not the same as having none)
+#   "inferred" - no live figure at all, but enough collected history (>= MIN_HISTORY_HOURS
+#                AND >= MIN_STATE_CHANGES real recorded transitions, not just one stale
+#                point extrapolated forward) to estimate how often this terminal has had
+#                supply/demand historically
+#   "unknown"  - no live figure AND no usable history - genuinely no information, which
+#                must never be displayed as if it meant "confirmed zero"
+EVIDENCE_TIERS = ("current", "aging", "inferred", "unknown")
+
+
+@dataclass(frozen=True)
+class EvidenceLevel:
+    tier: str
+    quantity_scu: float | None = None
+    historical_availability_pct: float | None = None
+    observed_hours: float | None = None
+
+
+def classify_supply_evidence(
+    *,
+    scu: float | None,
+    health: TerminalDataHealth | None,
+    history: TerminalMarketHistory | None,
+    side: str,
+    status_sell: Any = None,
+) -> EvidenceLevel:
+    """side is 'supply' (origin/buy) or 'demand' (destination/sell) - selects which of
+    history's two percentages describes this side.
+
+    status_sell is only consulted when side == 'demand'. UEX status code 7 ("Maximum
+    Inventory, No Demand") means the terminal is CONFIRMED to have zero real demand even
+    when scu itself reports a real positive number (the same buy/sell status inversion
+    has_sell_side_demand already exists for) - without this, a route could show e.g.
+    "Demand: 500 SCU (verify before departure)" in the same embed that separately shows
+    "sell side: Maximum Inventory (No Demand)", directly contradicting itself. Any other
+    status (including unknown/None) never overrides a live scu figure - only code 7 is an
+    authoritative zero-demand signal, not merely a missing one, so a genuine live report
+    with no status information is still trusted as reported.
+
+    Audit-confirmed carry-forward defect: this authoritative status check used to run
+    ONLY when scu was also present (effective_sell_scu itself returns None outright for a
+    missing scu, by design - see its own docstring - since IT is meant to distinguish "no
+    data" from "confirmed zero" for callers that already have a real quantity in hand).
+    But status_sell==7 is authoritative independent of whether a live quantity happens to
+    be reported at all - a MISSING scu must not let the history fallback below quietly
+    override a status that's already confirmed there's no real demand, producing e.g.
+    "inferred demand, 100% historically available" for a terminal UEX itself reports as
+    maximum inventory. Checked directly here, not by loosening effective_sell_scu's own
+    contract (which other callers - e.g. /price's capacity estimate - rely on to tell
+    "confirmed zero" apart from "no data" using scu alone).
+    """
+    effective_scu = scu
+    if side == "demand":
+        if scu is not None:
+            effective_scu = effective_sell_scu(scu, status_sell)
+        else:
+            try:
+                status_code = int(float(status_sell)) if status_sell is not None else None
+            except (TypeError, ValueError):
+                status_code = None
+            if status_code == SELL_SIDE_NO_DEMAND_CODE:
+                effective_scu = 0.0
+    if effective_scu is not None:
+        status = health.status if health is not None else "unknown"
+        tier = "current" if status in ("fresh", "recent") else "aging"
+        return EvidenceLevel(tier=tier, quantity_scu=float(effective_scu))
+    if history is not None and history.enough_history:
+        pct = history.demand_available_pct if side == "demand" else history.supply_available_pct
+        return EvidenceLevel(tier="inferred", historical_availability_pct=pct, observed_hours=history.observed_hours)
+    return EvidenceLevel(tier="unknown")

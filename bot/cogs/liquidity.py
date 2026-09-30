@@ -3,6 +3,7 @@ Allows users to see which items are moving the fastest in the marketplace.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 
@@ -64,13 +65,13 @@ class LiquidityCog(commands.Cog):
             
             if not rows:
                 await interaction.response.send_message(
-                    "No liquidity data available yet. The bot is still calculating scores based on recent trends.",
+                    "No Sellability Ratings yet. The bot is still calculating them from recent Marketplace activity.",
                     ephemeral=True,
                 )
                 return
 
             embed = discord.Embed(
-                title="🔥 Marketplace Liquidity Leaderboard",
+                title="🔥 Top Sellability Ratings",
                 description="Items ranked by estimated sellability, rated from 0 to 100.",
                 color=discord.Color.orange()
             )
@@ -103,7 +104,7 @@ class LiquidityCog(commands.Cog):
         except Exception as e:
             logger.error("Error fetching liquidity rank: %s", e)
             await interaction.response.send_message(
-                "An error occurred while fetching the liquidity rank. Please try again later.",
+                "Couldn't load the Sellability Ratings. Please try again later.",
                 ephemeral=True,
             )
 
@@ -119,15 +120,18 @@ class LiquidityCog(commands.Cog):
             history = await self.db.get_liquidity_history(item)
             if len(history) < 2:
                 await interaction.followup.send(
-                    f"Still collecting liquidity history for **{item}**. Check back after another hourly refresh."
+                    f"Still collecting Sellability Rating history for **{item}**. Check back after another hourly refresh."
                 )
                 return
             first, latest = history[0], history[-1]
             change = float(latest["score"]) - float(first["score"])
             pct_change = (change / float(first["score"]) * 100) if float(first["score"]) else None
-            chart = render_liquidity_history_chart(item_name=latest["item_name"], history_rows=history)
+            # Off the event loop: drawing a chart is CPU-bound (audit REL-14).
+            chart = await asyncio.to_thread(
+                render_liquidity_history_chart, item_name=latest["item_name"], history_rows=history
+            )
             embed = discord.Embed(
-                title=f"{latest['item_name']} — Liquidity trends",
+                title=f"{latest['item_name']} — Sellability Rating history",
                 description=f"{len(history)} hourly observations over the last 7 days.",
                 color=discord.Color.orange(),
             )
@@ -158,11 +162,11 @@ class LiquidityCog(commands.Cog):
         movers = await self.db.get_liquidity_movers()
         if not movers:
             await interaction.followup.send(
-                "Still collecting liquidity history. This list appears after at least two hourly snapshots."
+                "Still collecting Sellability Rating history. This list appears after at least two hourly snapshots."
             )
             return
         embed = discord.Embed(
-            title="📈 Marketplace Liquidity Movers",
+            title="📈 Sellability Rating Movers",
             description="Biggest sellability-rating changes over the available history from the last 24 hours.",
             color=discord.Color.gold(),
         )

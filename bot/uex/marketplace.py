@@ -93,9 +93,22 @@ def parse_uex_number(raw: Any) -> float | None:
         return None
 
 
+QUALITY_MAX = 1000
+
+
+def format_quality_range(min_quality: float | None, max_quality: float | None) -> str:
+    """"lo-hi" for an alert's quality bounds, an unset end shown as the scale's own limit
+    (0 or QUALITY_MAX). A missing max used to show as "100", from UEX's docs, which say
+    0-100 for listings - but real listings use the game's 0-1000 scale."""
+    lo = f"{min_quality:.0f}" if min_quality is not None else "0"
+    hi = f"{max_quality:.0f}" if max_quality is not None else str(QUALITY_MAX)
+    return f"{lo}-{hi}"
+
+
 def parse_listing_quality(raw: Any) -> float | None:
-    """UEX documents a listing's `quality` as a 0-100 *string|null*, set by the seller when
-    posting (this bot can't set it yet - UEX's POST /marketplace_advertise doesn't expose it
+    """A listing's `quality`, set by the seller when posting. UEX documents it as a 0-100
+    *string|null*, but every real listing uses the game's 0-1000 scale, the same as UEX's
+    other quality fields - trust the data (see CLAUDE.md). This bot can't set it yet - UEX's POST /marketplace_advertise doesn't expose it
     as a field, even though it's readable on listings). Returns None for null/unset/unparsable
     values, and also for 0 - a seller who never set a quality and one who explicitly reported
     the ore as worthless read the same in this API, and treating 0 as "no data" avoids either
@@ -138,6 +151,9 @@ class MarketplaceMoverEntry:
     baseline_avg_sell: float
     pct_change: float
     listings_count_sell: int | None
+    # UEX trades items in more than one currency (UEC, WIF, MGS); each row is priced in
+    # its own, so a WIF price must never be labelled UEC.
+    currency: str = "UEC"
 
 
 def compute_marketplace_movers(rows: list[dict], limit: int = 5) -> tuple[list[MarketplaceMoverEntry], list[MarketplaceMoverEntry]]:
@@ -172,6 +188,7 @@ def compute_marketplace_movers(rows: list[dict], limit: int = 5) -> tuple[list[M
                 baseline_avg_sell=round(baseline, 2),
                 pct_change=pct_change,
                 listings_count_sell=row.get("listings_count_sell"),
+                currency=row.get("currency") or "UEC",
             )
         )
 

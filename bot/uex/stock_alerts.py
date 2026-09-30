@@ -77,7 +77,41 @@ def format_cargo_fit_note(scu_available: float, ship_cargo_scu: float | None) ->
     just omitting the detail silently.
     """
     if ship_cargo_scu is None or ship_cargo_scu <= 0:
-        return "set /set-default-ship (or pass one to /stock-alert-add) to see how much of this would fill your hold"
+        return ("set a ship with /set-trading-preferences (or pass one to /stock-alert-add) to see how much "
+                "of this would fill your hold")
     if scu_available >= ship_cargo_scu:
         return f"fills your full {ship_cargo_scu:,.0f} SCU hold"
     return f"fills {scu_available:,.0f} of your {ship_cargo_scu:,.0f} SCU hold"
+
+
+# Terminals listed in one combined restock message before "and N more".
+RESTOCK_MESSAGE_MAX_TERMINALS = 10
+
+
+def format_restock_message(
+    alert_id: int, commodity_name: str, terminals: list[dict[str, Any]], ship_cargo_scu: float | None,
+) -> str:
+    """One notification for every terminal an alert's check found newly in stock. It used
+    to be one ping per terminal, and on an alert's first check that's every terminal that
+    already has stock - a flood for a common commodity (audit UX-1). Cheapest first, since
+    a restock alert is about where to buy."""
+    if len(terminals) == 1:
+        terminal = terminals[0]
+        return (
+            f"stock alert #{alert_id}: **{commodity_name}** is back in stock at "
+            f"**{terminal['terminal_name']}** — {terminal['price_buy']:.2f} aUEC/unit, "
+            f"{terminal['scu_buy']:,.0f} SCU available ({format_cargo_fit_note(terminal['scu_buy'], ship_cargo_scu)})"
+        )
+    ordered = sorted(terminals, key=lambda t: (t["price_buy"], -t["scu_buy"]))
+    shown = ordered[:RESTOCK_MESSAGE_MAX_TERMINALS]
+    known_ship = ship_cargo_scu is not None and ship_cargo_scu > 0
+    lines = [f"stock alert #{alert_id}: **{commodity_name}** is in stock at {len(terminals)} terminals:"]
+    for terminal in shown:
+        fit = f" ({format_cargo_fit_note(terminal['scu_buy'], ship_cargo_scu)})" if known_ship else ""
+        lines.append(f"• **{terminal['terminal_name']}** — {terminal['price_buy']:.2f} aUEC/unit, "
+                     f"{terminal['scu_buy']:,.0f} SCU{fit}")
+    if len(ordered) > len(shown):
+        lines.append(f"…and {len(ordered) - len(shown)} more.")
+    if not known_ship:
+        lines.append(f"({format_cargo_fit_note(0, None)})")
+    return "\n".join(lines)

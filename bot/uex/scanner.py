@@ -31,6 +31,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from bot.uex.inventory import _flag
 from bot.uex.marketplace import parse_listing_quality, parse_uex_number, quality_to_tier
 
 SELL_OPERATION = "sell"
@@ -160,6 +161,14 @@ def find_steals(
             continue
         id_item = listing.get("id_item")
         if id_item is None:
+            continue
+
+        # A sold-out or zero-remaining-stock listing isn't an opportunity - nothing is
+        # actually purchasable at the flagged price, no matter how deep the discount.
+        if _flag(listing.get("is_sold_out")):
+            continue
+        in_stock = parse_uex_number(listing.get("in_stock"))
+        if in_stock is not None and in_stock <= 0:
             continue
 
         quality = parse_listing_quality(listing.get("quality"))

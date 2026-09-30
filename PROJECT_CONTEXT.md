@@ -632,10 +632,3422 @@ they're in sync).
     fix and watching the corresponding test fail before restoring it, same discipline as
     entry 38. 209 tests passing (2 new, in `tests/test_mixed_routes.py` and
     `tests/test_route_filter_ordering.py`).
+40. **4 more confirmed defects from continued review of entries 37-39, all reproduced
+    directly (not assumed) before touching code, and every new test verified to actually
+    catch its bug by reverting the fix first:**
+    - `/top-routes`' background loop kept only the single highest-scored route *per
+      commodity* (`select_best_available_route`/`select_best_in_stock_route`, both
+      `max(candidates, key=score)`) - entry 37's fix (keep every commodity, not just the
+      top 10 overall) never addressed this: if a commodity's one kept route failed
+      `auto-load-only`/`system`, there was no second-best for that same commodity to
+      fall back to, since nothing else was ever kept anywhere. Renamed to
+      `select_available_routes`/`select_in_stock_routes`, now returning every qualifying
+      route per commodity sorted by score. `_send_ranked_routes` dedupes back to one
+      route per commodity *after* filtering (entries are already score-sorted, so
+      keeping the first occurrence per commodity keeps the highest-scoring survivor) -
+      preserves the "one route per commodity" display property while letting a
+      same-commodity alternative surface when the top choice is filtered out.
+    - `build_multi_stop_routes`'s candidate-terminal ranking (entry 37: rank assuming
+      unlimited capital, so budget-compounded-but-later-affordable edges stay reachable)
+      could itself be crowded out: 21 decoy edges needing far more capital than any
+      realistic chain would ever compound to (individually unaffordable at the real
+      budget) scored enormous at unlimited budget and pushed a genuinely
+      immediately-affordable 2-leg chain out of the bounded top-20 candidate window
+      entirely - `build_multi_stop_routes(...)` returned `[]` for data that should
+      produce a route. Fixed by ranking candidates *twice* - once at unlimited budget,
+      once at the real starting budget - and taking the union of both top-20 lists (only
+      when a real budget was given; with none, the second ranking would be an identical,
+      wasted recomputation).
+    - `allocate_pair_cargo`'s two-greedy-orderings approach (entry 37) is meaningfully
+      non-optimal, not just in the one counterexample it was built to fix - a random
+      search over 20,000 small 2-commodity scenarios (capacity 9, budget 51) found cases
+      over 2x off optimal (57 vs 157 profit). Added `_exact_allocate`: for a small enough
+      candidate set and capacity (`EXACT_SEARCH_MAX_CANDIDATES`=8,
+      `EXACT_SEARCH_MAX_CAPACITY`=25 - measured ~65-85ms at those thresholds, climbing
+      sharply past them), brute-force every subset of size min_commodities..max_commodities
+      and every quantity split of all-but-one item in the subset (bounded by capacity,
+      since a unit of any commodity always costs exactly 1 SCU), choosing the last item's
+      quantity greedily from whatever remains - provably optimal for a fixed subset, and
+      exhausting every subset finds the true global optimum. Larger cases keep the
+      existing two-ordering approximation - `build_multi_stop_routes`' search can call
+      this thousands of times per command, so unbounded exactness isn't affordable there;
+      this is a deliberate, documented speed/optimality trade-off, not a claim of
+      universal optimality. One existing test's premise (`budget=400` finds no route) no
+      longer held once the exact solver could find a real, valid, better one the old
+      greedy-only code missed entirely - updated to a budget genuinely below the cheapest
+      possible 2-item combination instead.
+    - `/multi-stop-route`'s embed-too-large fallback (entry 38) carried
+      `summary_lines` (investment/revenue/profit/ROI/distance/confidence) into the
+      plain-text fallback but silently dropped `warnings` (risk flags, stock/demand
+      limits, practical notes, health) - confirmed by reading the fallback's own variable
+      references, then reproducing with a stock-limited leg whose warning never made it
+      into the fallback text. Fixed by running the fallback's lines through the same
+      `_chunk_lines` helper the embed fields already use (capped at 1900, under
+      Discord's separate 2,000-character plain-message limit, not the embed limit this
+      fallback exists to route around), sending as many messages as it takes rather than
+      dropping anything.
+    215 tests passing (6 new): the 21-decoy multi-stop crowding case; the exact-solver's
+    171-vs-76-profit case plus one confirming graceful fallback past the exact-search
+    thresholds; two `/top-routes` cog-level cases (a same-commodity fallback, and a
+    dedupe case proving two passing routes for one commodity still collapse to just the
+    higher-scored one); and the multi-stop fallback-preserves-warnings case.
+41. **2 more confirmed defects, this time reproduced directly against the real
+    collected `data/uexbot.sqlite3` snapshot (2593 rows), not just synthetic data -
+    entry 40's own fixes had real-world edges that synthetic test cases hadn't
+    surfaced:**
+    - `build_multi_stop_routes`' shared `MAX_CHAINS_EXPLORED` budget (2000) was consumed
+      in whatever order the `opportunities` dict happened to iterate in, not by how
+      promising each branch actually was. On the real snapshot, a 24-SCU ship with a
+      100,000-aUEC budget found only a 323,124-profit chain while a genuinely valid
+      426,056-profit chain existed - increasing only the search allowance (with nothing
+      else changed) found it, confirming the cutoff itself, not a missing route, was the
+      cause. The real candidate graph for that data (~30 terminals, ~150 edges) needed
+      on the order of 20,000 edge-considerations to exhaust itself, with measured search
+      time staying *flat* (~0.3s) even at 100x that - the graph's own size bounds the
+      real work regardless of the ceiling. Fixed two ways together: raised
+      `MAX_CHAINS_EXPLORED` to 50,000 (comfortable headroom above the measured real
+      need), and made exploration order itself profit-prioritized - both each node's
+      outgoing edges and which terminal to start from are sorted by profit potential
+      (from the existing unlimited-budget ranking pass) descending, so a bounded budget
+      is spent on the most promising branches first regardless of dict/set iteration
+      order, and a truncated search finds a near-best result even in some future case
+      this measurement didn't cover.
+    - `allocate_pair_cargo`'s exact solve (entry 39) stops above
+      `EXACT_SEARCH_MAX_CAPACITY` (25 SCU) and falls straight to the two-ordering
+      heuristic - meaning a *bigger* ship could silently score worse than a smaller one
+      on identical data, confirmed on the real snapshot: 25 SCU returned 59,404 profit,
+      26 SCU returned 49,360, even though the better 25-SCU load still physically fits
+      in 26 SCU of capacity. Fixed by always trying a capped exact solve (as if capacity
+      were the threshold) as one candidate even above the threshold, comparing it
+      against the heuristic's full-capacity result and keeping whichever earns more -
+      the capped solution is always a valid allocation for the larger ship too (it just
+      doesn't try to use the extra capacity), so this can only help, never hurt. Also
+      added `allocation_is_exact()` and a footer disclosure on `/mixed-routes` and
+      `/multi-stop-route` ("cargo allocation above 25 SCU is approximate, not
+      proven-optimal") for the cases where even the capped-plus-heuristic result still
+      isn't a proven optimum - the review's second point, that the approximation went
+      undisclosed in the commands' own wording, was also valid on its own.
+    Both were reproduced against the real data first (patching a stale local snapshot's
+    schema to add a since-added column rather than trusting a synthetic guess), and both
+    new tests were confirmed to actually catch their bug - not just pass - by temporarily
+    reverting each fix and watching the test fail before restoring it, same discipline as
+    entries 38-40. Constructing a *synthetic* regression test for the traversal-order bug
+    took real care: Python's set iteration order for small ints turned out not to follow
+    insertion order or numeric order in any way that was easy to predict or lean on, so
+    the working version instead controls order directly through a dict-insertion-order
+    trick (decoy edges inserted before the real one, all from a shared origin) rather
+    than relying on set/hash behavior at all. 218 tests passing (3 new).
+42. **3 more confirmed defects, again independently reproduced (two directly against real
+    numbers/behavior, not just synthetic data):**
+    - `_exact_allocate` (entry 39) computed each candidate's `available` (stock/demand
+      limit) as `min(scu_buy, scu_sell, capacity)` - folding the solver's own search
+      capacity into a value that also became the reported `available_scu`, so a
+      "stock/demand limits this load to N SCU" warning showed the solver's cap, not the
+      real market figure. Confirmed against the real snapshot: Astatine (1,570 SCU real
+      demand) and Quartz (55 SCU real stock) both reported as capped to 25 SCU. Fixed by
+      splitting the single value into `market_available` (real stock/demand, used for the
+      returned `MixedCargoItem.available_scu` and never touched by capacity) and
+      `search_bound = min(market_available, capacity)` (used only to bound the
+      combinatorial search's ranges) - the search space explored is identical to before,
+      only the reported number changed.
+    - Cargo allocation (`allocate_pair_cargo`, in particular entry 40's "always try a
+      capped exact solve" fix) runs a real combinatorial search per candidate route and
+      can take meaningful wall-clock time on dense-enough data - reproduced at ~15s for a
+      fully-connected 8-terminal/8-commodity synthetic snapshot via `/mixed-routes`
+      end-to-end (a single `_exact_allocate` call at 8 candidates/capacity 25 alone
+      measured ~0.12s, and `build_mixed_routes` calls it once per origin/destination
+      pair - 56 pairs for that snapshot). Both `build_mixed_routes` and
+      `build_multi_stop_routes` were called directly on the coroutine handling the
+      interaction, so that cost ran synchronously on the bot's one asyncio event loop,
+      freezing every other interaction and background poller for the whole duration -
+      confirmed experimentally with a concurrent heartbeat coroutine that ticked zero
+      times during an equivalent direct synchronous call but kept ticking once offloaded.
+      Fixed by wrapping both calls in `await asyncio.to_thread(...)` in `bot/cogs/prices.py` -
+      moves the CPU-bound work off the event loop without touching the algorithm itself
+      or its optimality guarantees. The regression test checks this directly (the actual
+      thread `build_mixed_routes`/`build_multi_stop_routes` runs on must not be
+      `threading.main_thread()`) rather than via timing, since a timing/heartbeat-based
+      version passed even without the fix - ticks accumulated from unrelated awaits
+      earlier in the same command (fetching vehicles, market rows) gave a false pass
+      before the blocking call was ever reached.
+    - The "cargo allocation is approximate" disclosure (entry 41) checked only
+      `ship_vehicle["scu"] > EXACT_SEARCH_MAX_CAPACITY`, so a small ship choosing among
+      more than `EXACT_SEARCH_MAX_CANDIDATES` (8) commodities at one stop - which also
+      forces the pure two-ordering heuristic, no exact solve at all - got no disclosure.
+      It also lived only in the embed footer, so a route needing the plain-text fallback
+      (embed too large) silently lost it. Fixed by giving `MixedRoute` and
+      `MultiStopLeg`/`MultiStopRoute` their own `is_exact` (from the already-existing but
+      previously-uncalled `allocation_is_exact(num_pairs, capacity)`, computed once per
+      edge/leg at build time; a chain's `is_exact` is `all(leg.is_exact for leg in legs)`
+      - only as exact as its least-exact leg) and switching both the cog's footer checks
+      and the multi-stop fallback's line-list to `if not route.is_exact`.
+    Building the dense-mixed-route test fixture required a real fix mid-session: an
+    initial version used two separate rows per (terminal, commodity) - one buy-only, one
+    sell-only - which looked fine passed directly to `build_mixed_routes`, but collapsed
+    to just the second row once round-tripped through
+    `record_terminal_market_snapshot`/`get_mixed_route_market_rows`, since the DB's
+    upsert key is `(id_commodity, id_terminal)` and the real schema expects one row per
+    pair carrying both buy and sell fields together - caught because the cog-level test
+    returned "no routes found" in under a millisecond instead of taking real time.
+    All three fixes were confirmed to actually catch their bug - not just pass - by
+    temporarily reverting each one and watching the corresponding test fail before
+    restoring it, same discipline as entries 38-41. 224 tests passing (6 new).
+43. **Entry 42's two `build_mixed_routes`-caller fixes were incomplete - a third caller,
+    `/intelligence-brief`, was missed entirely.** `bot/cogs/intelligence_brief.py`'s
+    `_routes_embed` calls the same `build_mixed_routes` as `/mixed-routes` and
+    `/multi-stop-route` but wasn't touched in entry 42: it still called it directly
+    (not offloaded, so a dense snapshot could stall the bot exactly like the fixed
+    commands used to), and never checked `route.is_exact` at all, so a recommendation
+    could be an unproven approximation - a controlled example matching an earlier
+    allocator counterexample (75 vs a feasible 189 profit) - with no warning, unlike
+    `/mixed-routes`' footer for the same case. Both fixed the same way as entry 42:
+    `await asyncio.to_thread(build_mixed_routes, ...)`, and an
+    `if not route.is_exact: notes.append(...)` alongside this function's other
+    per-route conditional warnings (risk labels, unknown risk metadata, cross-system).
+    New test file `tests/test_intelligence_brief_routes.py` (this cog had no
+    request-level test harness before) - a thread-identity check for the offload (same
+    approach as entry 42, not timing-based) and a disclosure check reusing the existing
+    `/mixed-routes` 30-SCU-ship fixture shape. Both confirmed to actually catch their bug
+    by reverting and restoring each fix. The lesson generalizes: when a shared helper
+    gets a caller-side fix (offloading, a new disclosure field), grep for *every* caller
+    before considering it done, not just the one(s) the original report named. 226 tests
+    passing (2 new).
+44. **Live incident: the daily digest showed terminal-market data as "overdue" (3h15m
+    since the last snapshot) even though `intelligence.py`'s collector runs every 2h.**
+    Diagnosed from `journalctl` on the Pi: at 17:54:41, the terminal-market snapshot
+    failed with `sqlite3.OperationalError: database is locked` (caught and logged, not
+    fatal - see `bot/cogs/intelligence.py`'s existing try/except - but it silently
+    dropped that collection cycle). Root cause: `intelligence.py`'s 1h (data-health) and
+    2h (terminal-market) loops both start counting from the same bot-startup moment, so
+    they coincide every 2 hours - confirmed directly in the logs (both fire within ~1
+    second of each other at 01:54, 03:54, 05:54, ... every odd hour). Each opens its own
+    `aiosqlite` connection via `Database.connect()`/`init()`, which never set
+    `PRAGMA journal_mode` or `PRAGMA busy_timeout` - meaning every connection ran on
+    aiosqlite/sqlite3's own implicit default (rollback-journal mode, 5s busy timeout).
+    Reproduced standalone: two connections to the same file, one holding a write
+    transaction open, the second's write fails at ~5.5s with the exact same error. Most
+    2h coincidences (8 of 9 that day) resolved fine within that 5s window; this one
+    didn't, most likely because terminal-market's own write (up to 2,593 rows via
+    `executemany`) is the single largest write in the whole app and can occasionally run
+    long enough to blow past 5s when it overlaps another writer. Fixed in
+    `bot/db/database.py` with a new `_configure_connection()` (called from both `init()`
+    and `connect()`, since WAL persists in the file itself but `busy_timeout` is a
+    per-connection runtime setting that resets on every new connection): enables
+    `PRAGMA journal_mode=WAL` (also makes each commit itself faster/cheaper, shrinking
+    the window a lock is held at all) and raises `busy_timeout` to 30s. New
+    `tests/test_database_concurrency.py`: a fast deterministic PRAGMA-value check, plus
+    a real concurrency test holding a write lock for 6s (deliberately past the old 5s
+    default, to prove the fix covers contention the old implicit default wouldn't have,
+    not just contention either default would tolerate) - both confirmed to fail with the
+    exact production error when the fix is temporarily reverted. Side benefit: the full
+    test suite got noticeably faster (roughly halved) purely from WAL's cheaper commits.
+    228 tests passing (2 new).
+45. **A full project audit (`data/full-audit-20260905/AUDIT_REPORT.md`, 15 findings: 4 P1,
+    11 P2) landed 2026-09-05 - all 4 P1s fixed and independently verified same day**,
+    each confirmed against real code first, then reproduced failing before the fix and
+    passing after (fix temporarily reverted, test re-run, restored):
+    - **A01 - a rejected listing deletion was reported as successful.** `client.py`'s
+      `_request` only ever raised for `_AUTH_ERROR_STATUSES` or a literal `"error"`
+      status; any other status (built for GET's soft "nothing matched" cases like
+      `no_trades_found`) fell through to "log and return data" - so DELETE
+      `/marketplace_listings` rejecting with a real documented status like
+      `user_not_verified` (confirmed against `docs/UEX_API_2.0_reference.md`'s own DELETE
+      status list) returned normally with `data: null`, and `_cancel_listed_job` reported
+      the listing deleted and released the reservation even though nothing was actually
+      deleted on UEX. Fixed by making `_request` require an explicit `"ok"` status for
+      POST/DELETE specifically (both of this client's only two write endpoints document
+      exclusively real rejection reasons alongside `"ok"` - no soft-empty-result case
+      exists for either) while leaving GET's existing soft-status handling untouched.
+      `tests/test_client_write_status.py` (new) plus
+      `tests/test_personal_inventory.py::test_rejected_delete_must_not_release_inventory`.
+    - **A02 - a double-click could post the same listing twice.**
+      `ConfirmListingView.confirm` (`bot/cogs/marketplace.py`) set `self.resolved = True`
+      but never checked it - two already-dispatched callbacks could both get past that
+      line before either's `edit_message` round-trip disabled the button on Discord's
+      side, so both reached the real POST. Fixed with a check-before-set guard on both
+      `confirm` and `cancel`: safe because asyncio is single-threaded and nothing awaits
+      between the check and the set, so the second callback to actually run always
+      observes the first one's write. `tests/test_marketplace.py::
+      test_confirm_listing_view_only_posts_once_on_concurrent_double_click` reproduced
+      `await_count == 2` before the fix.
+    - **A03 - confirming an uncertain POST's sale could queue a live duplicate.**
+      `inventory_confirm_sale` auto-relisted a job's unsold remainder whenever
+      `auto_relist` was set, with no check on whether the *original* POST's outcome was
+      ever actually confirmed. A job only reaches `needs_confirmation` with `listing_id`
+      still NULL via `mark_inventory_post_failed(ambiguous=True)` (a network error or
+      missing `id_listing` right after the POST) or `flag_stale_inventory_post_jobs` - in
+      both cases UEX's own acceptance of that POST was never verified, so a live,
+      untracked listing may already exist. Every *other* `needs_confirmation` path (both
+      call sites of `mark_inventory_post_needs_confirmation`) only fires after
+      independently observing an empty `GET /marketplace_listings` for that `listing_id` -
+      i.e. already confirmed gone - so relisting there was always safe and had to stay
+      allowed. Fixed in `confirm_ambiguous_inventory_sale` (`bot/db/database.py`): compute
+      `original_listing_unresolved = job["listing_id"] is None` and AND it into the
+      returned `auto_relist` flag; the cog surfaces a distinct message telling the user to
+      manually check UEX for a stray duplicate before using `/inventory-sell` themselves
+      in that case. Releasing the local reservation stays unconditional either way (it
+      never touches UEX, so it's always safe) - only the automatic *new POST* is gated.
+      `tests/test_personal_inventory.py`:
+      `test_uncertain_post_cannot_relist_without_resolving_live_listing`,
+      `test_uncertain_post_message_tells_the_user_to_check_uex_manually`, and
+      `test_resolved_ambiguous_listing_can_still_auto_relist` (the contrast case, proving
+      the fix doesn't over-block the safe path).
+    - **A04 - a floor raised during posting could be silently ignored.**
+      `set_inventory_minimum_price` deliberately excludes jobs in `'posting'` status from
+      its `UPDATE` (a currently-posting job's in-flight write shouldn't be edited out from
+      under it) - but `_post_one_job` then used that same frozen `job["minimum_price"]`
+      snapshot (read before `claim_inventory_post_job` even ran) for both the custom-price
+      floor check and the live-pricing floor, so a floor raised anywhere during the
+      pricing fetch's real network round trips (`_fetch_live_price`) was never honored by
+      the actual write. Fixed by re-reading the item's live `minimum_price` from
+      `get_inventory_item` right before building the POST payload (after pricing
+      completes, not before) and re-flooring the recommendation against that live value
+      via `dataclasses.replace` (`PriceRecommendation` is frozen) - applies to both the
+      custom and computed pricing paths, closing the window regardless of which one hit
+      it. `tests/test_personal_inventory.py::test_floor_increase_during_pricing_is_respected`
+      and `test_custom_price_still_checked_against_a_floor_raised_during_posting`.
+
+    The remaining 11 P2 findings (recovery fidelity, negotiation-alert scoping, embed
+    total-size budgeting, scanner sold-out filtering, data-health staleness, a transient
+    DB error killing a collector task, and three deploy/revert-script gaps) are not yet
+    fixed - see the audit report for full detail and suggested repair order. 238 tests
+    passing (10 new).
+46. **All 11 P2 findings from the same audit (entry 45) fixed and independently verified
+    the same session** - each confirmed against real code, reproduced failing before its
+    fix and passing after (temporarily reverted, test re-run, restored):
+    - **A05 - a custom relist price silently became 0.** `confirm_ambiguous_inventory_sale`
+      retained `pricing_strategy: custom` into its returned dict but dropped
+      `custom_price` entirely; `inventory_confirm_sale`'s replacement-job spec then never
+      included it, so `create_inventory_post_jobs` defaulted it to 0 and rejected the
+      replacement as below the floor - the user's stack fell out of the automatic system
+      with no explanation beyond "could not be rescheduled." Fixed by carrying
+      `custom_price` through both the DB method's return value and the cog's spec dict.
+      `tests/test_personal_inventory.py::test_custom_price_survives_relist_after_ambiguous_sale_resolution`.
+    - **A06 - one user's seen-state suppressed a different user's pending notification.**
+      `negotiation_message_seen` was keyed on a bare `message_id PRIMARY KEY` - genuinely
+      global, not per-recipient, confirmed straight from the schema. Two different Discord
+      users each independently watching the same negotiation (opposite sides, or even both
+      watching the same listing) shared one row per message, so whichever user's baseline
+      seed or delivered DM reached it first silently marked it seen for the other too.
+      Fixed with a `(user_id, message_id)` composite primary key, via the same
+      detect-and-rebuild pattern as `_migrate_pricing_strategy_check`
+      (`_migrate_negotiation_message_seen_scope`, `bot/db/database.py`) - pre-migration
+      rows carried no per-user attribution at all, so each old message_id is copied to
+      every user who had alerts enabled *at migration time* (the closest safe
+      approximation: it can't under-notify anyone who already saw it via a real poll, and
+      a user enabling alerts afterward always re-seeds from scratch regardless of this
+      table's contents anyway). `is_negotiation_message_seen`/`mark_negotiation_message_seen`
+      now take `user_id`; both call sites in `bot/cogs/negotiation_alerts.py` updated.
+      `tests/test_negotiation_alerts.py::test_negotiation_message_seen_is_scoped_per_user`.
+    - **A07 - a failed DM was recorded as delivered.** `_notify_user` swallowed
+      `discord.HTTPException` (DMs closed, a transient outage) and returned nothing, but
+      its caller (`_check_negotiation`) still called `mark_negotiation_message_seen`
+      unconditionally right after - a permanently-discarded notification the instant
+      `send()` raised, with no path back. Fixed by making `_notify_user` return whether
+      delivery actually succeeded, and only marking the message seen when it did; an
+      unseen message naturally gets retried on the next 5-minute poll cycle - a real,
+      bounded retry, not a special-cased mechanism.
+      `tests/test_negotiation_alerts.py::test_failed_dm_delivery_is_retried_not_permanently_discarded`.
+    - **A08 - per-field/name limits (1024/256 chars) don't protect Discord's separate
+      6000-char TOTAL embed limit.** Confirmed on both cited surfaces: ten valid inventory
+      entries reached 7,642 characters, and ten warning-rich routes reached 10,078 -
+      neither had any single field anywhere near its own 1024-char cap, so nothing existing
+      would have caught it, and Discord rejects the entire send in that case (losing every
+      field, not just the overflow). Fixed differently per surface, matching each one's
+      existing UX rather than forcing a shared shape: `/inventory` already has real
+      page/page_count navigation, so `_paginate_inventory_fields`
+      (`bot/cogs/personal_inventory.py`) now splits pages on the total-char budget *in
+      addition to* the existing 10-row cap - nothing is dropped, a page that would overflow
+      just becomes two pages. `/top-routes` (`_send_ranked_routes`, `bot/cogs/trends.py`)
+      has no such paging concept and sends one embed per call, so the shared
+      `_add_chunked_fields` helper (`bot/cogs/prices.py`, used by several route commands)
+      now returns `False` the moment adding a chunk would push the embed's total past
+      budget (measured via discord.py's own `len(embed)`, the same total Discord enforces);
+      `_send_ranked_routes` stops adding further routes at that point and appends
+      "N more route(s) omitted - message size limit" to the footer, so a truncation is
+      visible rather than a silent gap. Routes are already score-sorted, so what's kept is
+      always the best-ranked subset. New `tests/test_trends_embed_budget.py` and
+      `tests/test_personal_inventory.py::test_inventory_page_fits_the_total_embed_limit_even_with_long_fields`.
+    - **A09 - a sold-out listing could be flagged as a live steal.** `find_steals`
+      (`bot/uex/scanner.py`) compared price against the fair-price index with no
+      availability check at all - a listing marked sold out with zero remaining stock
+      still qualified as a 90%-below-average deal, even though nothing is actually
+      purchasable at that price. Fixed with an `is_sold_out`/`in_stock<=0` exclusion,
+      reusing `_flag` from `bot/uex/inventory.py` rather than duplicating the same
+      string/bool/int parsing a second time. An unreported (missing) stock value is *not*
+      treated as zero - only a confirmed unavailability excludes a listing.
+      `tests/test_scanner.py` gained 4 new cases (sold-out, zero-stock-not-flagged,
+      still-flags-in-stock, unreported-stock-not-excluded).
+    - **A10 - stored terminal health never aged between collections.**
+      `classify_terminal_health` (`bot/uex/data_health.py`) classified purely from UEX's
+      own age/TTL fields, captured once at collection time - if the hourly data-health
+      collector stops running (a crash, a bug, an outage), the last successfully stored
+      row keeps whatever numbers UEX reported back then forever, so a terminal not
+      actually re-checked in days could still read "fresh." Fixed by comparing the row's
+      own `last_seen` (this bot's local collection timestamp, always present on
+      `terminal_data_health_state`) against a new `now` parameter (defaults to real time,
+      injectable for tests): past `LOCAL_COLLECTION_STALE_HOURS` (6h - several missed
+      cycles' worth of slack above the collector's own 1h interval, not a tight cutoff), a
+      "fresh"/"recent" classification downgrades to "unknown" - not "stale", since this is
+      doubt about the bot's own data, not a claim that UEX's underlying prices expired; an
+      already-stale/limited classification is left alone, since it carries more specific
+      information than a generic "unknown" would. `tests/test_intelligence.py` gained 4
+      cases (old collection → unknown, recent collection unaffected, missing `last_seen`
+      unaffected, staleness never overrides an existing stale/limited status).
+    - **A11 - a single recent supply/demand change could disappear entirely.**
+      `get_terminal_market_shifts` (`bot/db/database.py`) first restricted to the 24h
+      window, then required 2+ observations *inside* it - since this table records changes
+      rather than periodic samples, a long-stable market with exactly one recent change
+      has only one in-window row and was silently dropped, however large that change was.
+      The first fix attempt (compare against the closest baseline strictly *before* the
+      window) broke an existing, equally valid case: a commodity/terminal pair only ever
+      observed recently, with no earlier baseline at all (nothing predates the window,
+      e.g. newly tracked) - `test_terminal_market_shifts_compare_oldest_and_newest_observation`
+      caught this immediately (both its observations sit inside a 2-hour span). The actual
+      fix ranks candidate baselines in priority order per pair - prefer the most recent
+      observation at or before the window start, however old; fall back to the earliest
+      observation still inside the window otherwise - via one combined ranked CTE rather
+      than two separately-joined ones, so both cases resolve correctly in a single query. A
+      pair with no observation earlier than its own latest one (a single-ever data point)
+      still has no baseline candidate and is correctly excluded, same as before. Two new
+      tests in `tests/test_intelligence.py` (single-change-against-an-old-baseline,
+      single-observation-pair-excluded) alongside the pre-existing multi-observation test,
+      all three now passing together.
+    - **A12 - a transient DB error could permanently stop marketplace collection.**
+      `snapshot_item_activity` (`bot/cogs/marketplace.py`) only wrapped its UEX fetch in
+      try/except; the DB write (`upsert_marketplace_item_activity`) and two further steps
+      (`upsert_marketplace_tier_stats`, the summary-logging queries) sat unguarded -
+      `discord.ext.tasks`' own auto-reconnect only covers a specific set of network
+      exceptions, not arbitrary ones, so an uncaught `sqlite3.OperationalError` (e.g. a
+      lock collision with another collector writing at the same moment) permanently killed
+      this hourly loop until the bot was restarted, confirmed by directly starting the real
+      decorated task with an injected error and checking `.failed()`. Fixed by wrapping all
+      three remaining unguarded steps in their own try/except, matching the pattern
+      `update_liquidity_scores` already used - one failed step no longer prevents the
+      others from running, and no failure here ever escapes the loop.
+      `tests/test_marketplace.py::test_transient_database_error_does_not_kill_marketplace_collector`.
+    - **A13 - deployment's missing-pip abort bypassed its own rollback.** bash's `ERR`
+      trap does not fire for an explicit `exit N` (only for a command that itself fails
+      under `set -e`) - `deploy_and_backup.sh`'s missing-virtualenv branch calls `exit 1`
+      directly, which `trap rollback_on_failure ERR` silently let bypass the promised
+      rollback entirely, leaving the service stopped with no recovery attempted. Fixed by
+      switching to `trap rollback_on_failure EXIT`, which fires on every termination path
+      (a failing command, an explicit exit, or normal completion) - `rollback_on_failure`'s
+      own `DEPLOY_SUCCEEDED`/`SERVICE_STOPPED` guards are what keep it a no-op on success,
+      not the trap type, so this needed no other change. Verified directly: a throwaway
+      harness reproducing the same trap/guard structure confirmed rollback now fires on an
+      injected `exit 1` where it previously wouldn't have.
+    - **A14 - revert still assumed the wrong Pi virtualenv path.** Unlike
+      `deploy_and_backup.sh` (fixed in entry from a prior session), `revert_last_deploy.sh`
+      still hardcoded `.venv/bin/pip`, so a requirements-changing revert on the Pi (which
+      uses `venv`, no dot) would fail after the code/DB were already restored but before
+      the service restarted. Fixed with the identical `.venv`-then-`venv` detection.
+      Verified directly (three branches - `.venv` present, `venv` present, neither -
+      confirmed to resolve correctly via a throwaway harness using `-f` checks, since
+      Windows Git-Bash's `/tmp` doesn't honor `chmod +x` for a reliable `-x` test - same
+      known limitation as before; the real Linux Pi is unaffected).
+    - **A15 - revert wrote a backup its own loader couldn't read.** The pre-revert
+      snapshot `revert_last_deploy.sh` writes before undoing a revert (so the revert itself
+      is undoable) only recorded `commit`/`db_path` into `meta.txt`, but the loader
+      unconditionally expands `timestamp_utc` and `branch` under `set -u` - reverting to
+      *that* snapshot later (undoing the undo) crashed with `timestamp_utc: unbound
+      variable` before touching anything. Fixed by writing the same complete 4-field
+      format `deploy_and_backup.sh` already uses, and defensively defaulting the two
+      informational-only fields (`${timestamp_utc:-unknown}`, `${branch:-unknown}`) at
+      their one point of use, so a meta.txt from any other source missing just those two
+      degrades gracefully instead of crashing - `commit`/`db_path` stay hard-required via
+      the pre-existing explicit checks, since the revert logic actually needs them.
+      Verified directly: the fixed writer's output loads cleanly, the defensive defaults
+      handle the old incomplete format, and removing the defaults reproduces the exact
+      original crash against that same old format.
+
+    256 tests passing (18 new since entry 45).
+47. **A follow-up review of `b1170e8`/`bd2d50b` (`data/audit-bd2d50b/REVIEW.md`, 2026-09-05)
+    found 5 P2 gaps INTRODUCED BY those two fix rounds themselves - not new independent
+    defects, but places where a fix was subtly incomplete or its own regression tests
+    happened to bypass the exact mechanism that still had a hole.** All 5 fixed and
+    verified the same session, each confirmed to fail without its fix and pass with it:
+    - **A failed DM still let the negotiation checkpoint advance.** The A07 fix (entry 46)
+      made `_check_negotiation` skip marking a failed-delivery message as seen, but the
+      function still unconditionally `return`ed `True` - so `poll_negotiation_messages`
+      still advanced that negotiation's `date_modified` checkpoint. Since the poller skips
+      any negotiation whose `date_modified` hasn't moved past its checkpoint, the
+      undelivered message was never retried unless the negotiation got further, unrelated
+      activity later. A07's own regression test called `_check_negotiation` directly,
+      bypassing the poller's checkpoint gate entirely - missing exactly this interaction.
+      Fixed by tracking `all_delivered` across the loop and returning that instead of a
+      hardcoded `True`. New test drives two real `poll_negotiation_messages` cycles (not
+      `_check_negotiation` directly) with delivery failing then succeeding.
+    - **The A11 (entry 46) fallback baseline picked the wrong end of the window.** The
+      unified ranked-candidates CTE ordered every tier `... DESC` - correct for the
+      pre-window-baseline tier (want the closest one to the window boundary, i.e. most
+      recent), but wrong for the in-window fallback tier, which needs the EARLIEST
+      in-window observation, not the most recent. A newly tracked pair with 3+ in-window
+      observations (100 @ -3h, 600 @ -2h, 200 @ -1h = latest) picked -2h (600) as
+      "baseline" instead of -3h (100), reporting -400 instead of the correct +100 - the
+      existing 2-observation test couldn't distinguish "most recent other row" from
+      "earliest row" since with only 2 rows they're the same row. Fixed by splitting back
+      into two separately-ranked CTEs (`pre_window_baseline` DESC, `in_window_earliest`
+      ASC) and `COALESCE`-preferring the pre-window one - each tier gets the ordering it
+      actually needs. Also made the window boundary consistent with the "at or before"
+      policy stated in the fix's own docstring (`windowed` now `>`, `pre_window_baseline`
+      now `<=`, complementary rather than both using non-matching comparisons). New test
+      reproduces the exact 3-observation case; the 2-observation and single-observation
+      tests from entry 46 still pass unchanged.
+    - **A confirmed rejection was still classified as ambiguous.** The A01 fix (entry 45)
+      made `UexClient._request` raise for any non-"ok" POST/DELETE status, but
+      `_post_one_job`'s classifier still matched `str(exc)` against the OLD message
+      prefixes (`"uex api error"`, `"uex auth error"`, `"quota reached"`) to decide
+      "definitely rejected" vs. "ambiguous" - the new `"UEX rejected POST ..."` message
+      never matched any of them, so a definite, documented rejection
+      (`user_active_listings_limit_reached`) was treated as ambiguous, reserving inventory
+      and telling the user to manually check for a listing UEX never created. Root cause:
+      classifying an outcome by parsing exception message text is inherently fragile to
+      message-format changes - exactly what A01 did while fixing something else entirely.
+      Fixed structurally: new `UexRejectedError(UexApiError)` (`bot/uex/exceptions.py`)
+      marks a response UEX explicitly and definitely rejected; `UexAuthError` and
+      `UexRateLimitError` now inherit from it (both were already treated as definite by
+      the old string classifier); `_request`'s two raise-on-rejection sites now raise
+      `UexRejectedError`; `_post_one_job` now checks `isinstance(exc, UexRejectedError)`
+      instead of message prefixes. Stable against any future message-text change.
+    - **The A08 (entry 46) route-embed budget didn't reserve for the real footer.**
+      `_add_chunked_fields`'s 100-char reserve assumed only a short truncation notice would
+      follow, but `/top-routes`' real footer (explanation + refresh timestamp + ship note)
+      is attached AFTER the field loop and can run well past 100 characters - confirmed to
+      let the final assembled embed land at 6,009 characters (254-char footer) with
+      longer-than-fixture terminal names. Fixed by computing and attaching the real footer
+      BEFORE the field loop in `_send_ranked_routes`, so `_add_chunked_fields`' own
+      `len(embed)` check already reflects it; the omission-count suffix is appended
+      afterward as a short, bounded addition the existing reserve still covers. Applied the
+      same reordering to `/best-route`'s two branches and `/multi-stop-route`'s per-route
+      embed in `bot/cogs/prices.py` for consistency, since all three had the identical
+      footer-after-loop shape (`/multi-stop-route`'s already has a full plain-text fallback
+      on `discord.HTTPException` that independently guarantees no data loss even before
+      this fix, so it was lower risk, but still worth correcting to avoid needlessly
+      triggering that fallback). New test sweeps terminal-name padding 0-150 checking
+      `len(embed) <= 6000` throughout, reproducing the exact 6,009-char/254-char-footer
+      case from the review at padding=80.
+    - **The A08 budget check could keep a route but silently drop its trailing warning.**
+      `_add_chunked_fields` added each chunk of a logical field one at a time, checking
+      budget before each - so a route whose first chunk (price/summary) fit but whose
+      second chunk (a cargo-risk warning, which lands in a trailing continuation chunk)
+      didn't would end up with its first chunk visible and its warning silently missing.
+      The caller only tracks whole-route omission, so this route wasn't even counted as
+      "omitted" in the footer - it looked like a normal, fully-displayed, warning-free
+      (i.e. safe-looking) route. Fixed by making `_add_chunked_fields` preflight the total
+      length of ALL chunks before adding any of them - all-or-nothing, never partial. New
+      `tests/test_prices_chunked_fields.py` unit-tests the helper directly (reproducing the
+      review's exact byte-length fixture); `tests/test_trends_embed_budget.py` adds an
+      end-to-end sweep confirming every displayed route field carries "Cargo risk:" text,
+      reproducing the review's route-5-visible-without-its-warning case exactly.
+
+    All 6 of the review's own probes (`data/audit-bd2d50b/test_fix_review.py`) pass against
+    the fixes. 264 tests passing (8 new).
+48. **A second follow-up review of `b95390c` (`data/audit-b95390c/REVIEW.md`, 2026-09-05)
+    found 2 more P2 gaps - both regressions from entry 47's own fixes, the same pattern as
+    entry 47 itself.** Both fixed and verified the same session:
+    - **`/multi-stop-route`'s warnings section could vanish with the route embed still
+      "successfully" sent.** Entry 47's atomic `_add_chunked_fields` fix is exactly right
+      for a per-route logical field (never show a route with its warning silently
+      missing) - but `/multi-stop-route` also uses it for ONE call covering the entire
+      accumulated warnings section for a route, and ignored its return value. If the leg
+      fields + route summary already consumed most of the 6000-char budget, the warnings
+      call could return `False` and add NOTHING - the resulting smaller, warning-free
+      embed then sends without raising `discord.HTTPException`, so the existing
+      too-large plain-text fallback (which independently rebuilds the full warning list)
+      never triggers. Every cargo-risk/cross-system/stale-health warning disappears with
+      no visible sign anything was omitted. Fixed by checking the warnings call's return
+      value and manually entering the same fallback path used for a real send failure.
+      New `tests/test_route_send_shape.py::
+      test_multi_stop_route_falls_back_to_plain_text_when_only_the_warnings_section_overflows`
+      (a controlled 3-leg/3-commodity-per-leg route, following the review's own approach
+      of injecting a fixed route via `monkeypatch` rather than trying to craft real market
+      data that happens to land on this exact budget boundary).
+    - **The 3-observation ordering fix (entry 47) still mixed two different baseline
+      rows' measurements.** The `baseline` selection used `COALESCE(pwb.scu_buy,
+      iwe.scu_buy)` and, separately, `COALESCE(pwb.scu_sell, iwe.scu_sell)` - column by
+      column, not row by row. Whenever the real pre-window baseline row (`pwb`) exists
+      but has just ONE of its two measurements NULL, the OTHER measurement silently came
+      from a completely different row (the in-window fallback, `iwe`) - presenting one
+      "since baseline" comparison actually built from two different points in time.
+      Confirmed: a 48h-old baseline (supply unknown, demand 500) plus in-window rows at
+      -3h (600, 400) and -1h/latest (200, 300) reported previous_supply=600 (borrowed
+      from -3h) alongside previous_demand=500 (correctly from the 48h baseline) - a
+      fabricated -400 supply_change describing no real comparison. Fixed with a
+      `baseline` CTE that picks the row ONCE (`pwb` if it exists at all via `CASE WHEN
+      pwb.id_commodity IS NOT NULL`, else `iwe`) and takes both measurements from that
+      one row - a genuinely NULL measurement on the chosen row stays NULL, and its
+      `*_change` becomes NULL too (not a number computed against a substituted value),
+      which `intelligence_brief.py`'s `if r["supply_change"]` ranking filter already
+      excludes naturally since `None` is falsy - no downstream handling needed. New
+      `tests/test_intelligence.py::
+      test_terminal_market_shifts_never_mixes_measurements_from_two_baseline_rows`.
+
+    Both of the review's own probes (`data/audit-b95390c/test_followup.py`) pass against
+    the fixes. 266 tests passing (2 new).
+49. **Self-directed audit of the whole `be40410..bcf9631` fix chain (2026-09-05/06), not
+    prompted by an external review this time** - two general-purpose subagents each
+    independently audited half the changed files (data/API layer vs. Discord-cogs/scripts),
+    plus a `security-review` skill pass over the same range. The security pass found
+    nothing (this chain only strengthens existing security properties - see its own report
+    for the specific areas checked and cleared). The two correctness subagents together
+    found 9 more real gaps, all following the exact same shape this whole chain has shown
+    repeatedly: a shared helper's contract improves, and a caller nobody re-checked keeps
+    the old, now-unsafe assumption. All 9 fixed and independently verified:
+    - **`/best-route`'s two branches never checked `_add_chunked_fields`'s return value**
+      (`bot/cogs/prices.py`) - unlike `/top-routes` (trends.py), which already stops and
+      discloses. A route past budget just vanished with no "N more omitted" note. Fixed
+      identically on both branches (the primary UEX-routes path and the derive-routes-
+      ourselves fallback), each independently, since they're materially different code
+      paths sharing only the same bug shape.
+    - **`/multi-stop-route`'s per-leg loop had the same unchecked-return-value gap** - and
+      it's worse than a missing disclosure: the route's title and "Route summary" field
+      both unconditionally describe ALL of `route.legs` regardless of which leg fields
+      actually got added, so a silently-dropped middle leg left the embed
+      self-contradictory (claims N legs, shows fewer, still totals profit for all N).
+      Fixed by tracking `all_legs_fit` and folding it into the existing `embed_too_large`
+      check already used for the warnings section (entry 48) - a dropped leg now routes
+      into the same full-fidelity plain-text fallback as a real send failure. Found and
+      fixed a second bug while implementing this: the gate right after
+      (`if warnings_fit:`) only checked the warnings flag, not the combined
+      `embed_too_large` - so a route with a dropped leg but warnings that DID fit would
+      still have sent the incomplete embed anyway. Changed to `if not embed_too_large:`.
+    - **`/mixed-routes` had no embed-size budget protection at all**, and batches up to 5
+      embeds into ONE message with no try/except. Discord enforces its 6,000-char embed
+      limit as a SUM across every embed in one message, not per individual embed -
+      confirmed by this same codebase's own comment in `/multi-stop-route` (which
+      switched to one-embed-per-message after discovering exactly this in testing).
+      Reproduced separately: 5 realistic routes each measured ~2,092 chars individually
+      (fine) but ~10,460 combined - an unhandled `discord.HTTPException`, the exact
+      "stuck thinking, no followup ever sent" failure this codebase already fixed once for
+      `/multi-stop-route` and never checked for `/mixed-routes`. Fixed by switching the
+      warnings section to the atomic `_add_chunked_fields` (checked), building a
+      plain-text fallback string per route alongside each embed, and wrapping the batched
+      send in the same try/except-then-fallback pattern already proven for
+      `/multi-stop-route`.
+    - **`ConfirmDeleteListingView` had no double-click guard at all**
+      (`bot/cogs/marketplace.py`) - unlike its sibling `ConfirmListingView` (fixed under
+      A02), which shares the identical real-DELETE-behind-a-button shape. Fixed with the
+      same check-then-set `resolved` guard, applied to both `confirm` and `cancel`.
+    - **`revert_last_deploy.sh` had no rollback trap at all** - unlike
+      `deploy_and_backup.sh` (fixed under A13), any failure between stopping the service
+      and restarting it left the bot down with no automatic recovery. Adapted (not
+      copied) for this script's different shape: `deploy_and_backup.sh` never overwrites
+      the DB so its rollback only restores the commit, but `revert_last_deploy.sh` DOES
+      overwrite `db_path` partway through - so its `rollback_on_failure` also restores
+      the DB from the just-taken `PRE_REVERT_DIR` snapshot whenever the failure happens
+      after that overwrite. `CURRENT_COMMIT`/`CURRENT_BRANCH` moved to the top of the
+      script (before anything destructive) so they're always defined by the time the trap
+      could ever need them. Verified via a throwaway harness simulating a mid-script
+      failure after the DB overwrite: confirmed the DB is restored, the original commit
+      checked out, and the service restarted.
+    - **`revert_last_deploy.sh`'s closing note still referenced `$branch` unguarded**,
+      unlike line 44's `${branch:-unknown}` (A15's own fix, applied to only one of the two
+      places `$branch` appears) - a meta.txt missing that field would crash on the very
+      last line under `set -u`, AFTER the DB restore/checkout/restart had already fully
+      succeeded, reporting a false failure at the least helpful possible moment.
+    - **A DELETE retried after a network error, then rejected, was misclassified as a
+      definite rejection.** `UexClient._request` never auto-retries POST after a network
+      failure (the request may have already reached UEX), but DOES retry DELETE (documented
+      as safe since "a repeated DELETE just gets listing_not_found the second time") - true
+      before A01, but A01 made ANY non-"ok" DELETE status raise `UexRejectedError`
+      ("definitely nothing happened, no reconciliation needed"). A `listing_not_found` on a
+      network-retried DELETE is genuinely ambiguous, though: it could mean the listing never
+      existed, OR that the FIRST (lost-response) attempt already deleted it. Fixed by
+      raising the plain, ambiguous `UexApiError` instead specifically when `method ==
+      "DELETE" and last_error is not None` (i.e. this attempt followed an earlier network-
+      level failure) - a DELETE rejected on its first attempt is untouched, still a genuine
+      `UexRejectedError`. `_cancel_listed_job` (`personal_inventory.py`) doesn't currently
+      branch on the exception type for this call, so this fix's practical effect today is
+      restoring the accuracy of `UexRejectedError`'s own contract for any future caller that
+      reasonably trusts it (exactly why that type was introduced in the first place -
+      entry 47's finding 3).
+    - **`format_health_note` never learned about A10's new "unknown" cause.**
+      `classify_terminal_health` can reach `status == "unknown"` two structurally different
+      ways: UEX's own TTL metadata being absent (the original cause), or UEX's metadata
+      saying "fresh" while the BOT's own collection has gone stale (A10, entry 46) - but
+      `format_health_note` kept hardcoding "TTL metadata missing" for both, which is
+      actively wrong for the second cause (the metadata is very much present and says the
+      opposite). Confirmed self-contradictory in practice: a locally-stale row showed
+      "TTL metadata missing; last update 0d ago" - claiming metadata is missing while
+      quoting an age figure that came from that same "missing" metadata. Fixed by adding
+      `TerminalDataHealth.locally_stale: bool` (set by `classify_terminal_health` at the
+      same point it downgrades to "unknown" for this reason) and branching on it in
+      `format_health_note` for a message that actually describes what's wrong.
+
+    9 new regression tests, each confirmed to fail without its fix and pass with it.
+    275 tests passing.
+50. **A fourth external follow-up review (`data/audit-b21aba0/REVIEW.md`, 2026-09-06),
+    against entry 49's own commit, found 3 more gaps - confirming the staging note's own
+    prediction that this chain hadn't necessarily terminated.** All 3 fixed:
+    - **`revert_last_deploy.sh`'s `DB_OVERWRITTEN` flag was set AFTER the destructive
+      copy succeeded, not before.** `cp` can fail partway through (disk exhaustion, an
+      I/O error) after already truncating/partially overwriting `db_path` - under
+      `set -e` that failure exits immediately, so a flag set only on success left
+      `rollback_on_failure` thinking the DB was never touched, skipping restoration of a
+      destination that might now hold a partially-written, corrupt file. Verified via a
+      throwaway harness reproducing the exact failure both ways: with the flag set
+      after the copy, a simulated mid-copy failure left the corrupted content in place;
+      with it moved before the copy, the same failure correctly triggered restoration
+      from `PRE_REVERT_DIR`. Also brought this script's `PRE_REVERT_DIR` snapshot and its
+      rollback restoration up to parity with `deploy_and_backup.sh`'s own backup step,
+      which already backs up the `-wal`/`-shm` sidecars alongside the main DB file -
+      this script's pre-revert snapshot and its recovery path had never done either.
+    - **`/mixed-routes`' plain-text fallback (added earlier this session) dropped the
+      footer entirely** - which is where the `route.is_exact` approximation disclosure
+      and the budget/space-only/capital-access notes actually live. An approximate
+      route's qualification silently vanished the moment the batch send was rejected or
+      a route's own warnings didn't fit, unlike `/multi-stop-route`'s fallback, which
+      already includes its equivalent disclosure explicitly. Fixed by appending `footer`
+      itself to each route's fallback text block.
+    - **The 3-observation/NULL-baseline fix (entry 47/48) only made the BASELINE side of
+      `get_terminal_market_shifts` NULL-safe - the CURRENT (`latest`) side was still
+      wrapped in `COALESCE(latest.scu_buy, 0)`.** A known baseline (500) paired with a
+      genuinely unknown current value (UEX simply didn't report `scu_buy` this cycle)
+      computed `0 - 500 = -500`, inventing a complete-depletion shift that
+      `current_supply` itself correctly reports as unknown, not zero. Fixed by making
+      each `*_change` NULL whenever EITHER side is NULL, symmetrically (`CASE WHEN
+      baseline.scu_buy IS NULL OR latest.scu_buy IS NULL THEN NULL ELSE latest.scu_buy -
+      baseline.scu_buy END`), removing the now-unnecessary `COALESCE`-to-zero entirely
+      rather than layering a second guard on top of it.
+
+    3 new regression tests (2 promoted from the review's own probes, 1 shell-only finding
+    verified via harness rather than pytest, matching this repo's established practice for
+    scripts), each confirmed to fail without its fix and pass with it. 277 tests passing.
+51. **A fifth external follow-up review (`data/audit-33d659f/REVIEW.md`, 2026-09-06),
+    against entry 50's own commit, found 1 more gap in the same function entry 50 had just
+    touched.** `revert_last_deploy.sh`'s `rollback_on_failure` moving `DB_OVERWRITTEN=1`
+    before the destructive copy (entry 50) correctly fixed the skipped-restoration path,
+    but the *recovery* copy itself (`cp "$PRE_REVERT_DIR/..." "$db_path"`) still only did
+    `|| echo "...fix manually." >&2` on failure and fell straight through to sidecar
+    handling, `git checkout`, and an unconditional `sudo systemctl start` - so if the
+    original copy failed for a persistent reason (disk/I/O problem), the recovery copy
+    could fail the exact same way, and the bot would still be started against whatever
+    was left in `db_path` (unrestored, possibly still the partially-written file from the
+    original failure). The sidecar cleanup/copy loop ran unconditionally afterward too,
+    regardless of whether the main file actually came back. Verified via a throwaway
+    harness (extracting the real `rollback_on_failure` function verbatim via `sed` and
+    driving it with mocked `cp`/`git`/`sudo`, matching entry 50's own verification style):
+    confirmed the pre-fix function called `systemctl start` in all three failure
+    scenarios (main DB restore cp fails, sidecar restore cp fails, `git checkout` back to
+    `CURRENT_COMMIT` fails) - none of the three left the service stopped. Fixed by
+    tracking a `restore_ok` flag through every recovery step (main DB cp, each sidecar cp,
+    and `git checkout`) and gating the final `sudo systemctl start` on all of them having
+    actually succeeded; on any failure the handler now says so explicitly and leaves the
+    service stopped rather than starting it against unverified state. `git checkout`
+    failure was folded into the same gate even though the review's reproduction only
+    named the DB/sidecar copies - it's the identical "continue past a failed recovery
+    step toward an unconditional restart" shape, one line further down in the same
+    function, and entry 49's own generalized lesson is to check a fix's bug shape against
+    every place it appears, not just the specific line a report named. Re-ran the same
+    harness against the fix: all three failure scenarios now correctly leave the service
+    stopped, and the clean-recovery control case still restarts normally. 277 tests
+    passing (bash-only fix, no new pytest cases - matching entry 50's precedent for
+    shell-script findings).
+52. **Saved Trading Preferences (roadmap item, not an audit fix) - a new
+    `bot.cogs.trading_preferences` cog storing per-user route-filter defaults, applied by
+    `/best-route`, `/top-routes`, `/mixed-routes`, and `/multi-stop-route` whenever their
+    matching option is left unset.** `/set-trading-preferences` (space-only,
+    capital-ship-access, auto-load-only, system, risk-tolerance - all optional, only
+    passed fields change, matching `negotiation_alert_settings`'s partial-update UPSERT
+    idiom via a `bot/uex/trading_preferences.py` `UNSET` sentinel), `/clear-trading-
+    preferences`, `/my-trading-preferences`. Two design decisions made with the user
+    before implementation, since neither mapped cleanly onto anything that already
+    existed:
+    - **"Capital-ship access" is a new independent force-on toggle, not just "use my
+      capital ship."** Previously, `capital_access_only` in `build_mixed_routes`/
+      `build_multi_stop_routes` was ONLY ever derived from `requires_capital_cargo_access
+      (ship_vehicle)` - there was no way to preview capital-tier routes without actually
+      setting a capital ship as your default. The saved preference now ORs into that same
+      variable (`requires_capital_cargo_access(ship_vehicle) or prefs["capital_ship_
+      access"]`) rather than replacing it, so a genuine capital ship still always
+      triggers the filter regardless of the preference. Per the user's own spec ("extra
+      large hangers or external freight elevators, docking is always buggy"),
+      `supports_capital_cargo_access` (`bot/uex/mixed_routes.py`) was also fixed to check
+      the terminal's own `has_freight_elevator` field - already joined into every market
+      row by `get_mixed_route_market_rows` (`t.has_freight_elevator` has been in that
+      SELECT since before this feature) but never actually checked by this function,
+      which only looked at `has_loading_dock`/`station_has_loading_dock` and
+      `station_pad_types`. `has_docking_port` (a real, separate `/terminals` field per
+      `docs/UEX_API_2.0_reference.md`) is deliberately never referenced - Star Citizen's
+      docking-collar mechanic is exactly the unreliable case the user wanted excluded, and
+      UEX's own doc-comment convention (`/commodities_routes`' `has_loading_dock_*`
+      fields are documented as `// external freight elevator / autoload area`) confirms
+      `has_loading_dock` means freight/autoload infrastructure, not the docking mechanic,
+      so including it was already safe.
+    - **Risk tolerance is stored and shown, but deliberately NOT enforced yet.** The
+      user chose "store now, filter later" over building real filtering immediately.
+      `risk_tolerance` accepts low/medium/high via `/set-trading-preferences` and is
+      surfaced in `/my-trading-preferences` and route-command footers via
+      `describe_active_preferences`, but no route command excludes any commodity based on
+      it - every occurrence is labeled "(not yet enforced)" so this isn't mistaken for a
+      real guarantee. Building the actual filter (against `is_illegal`/`is_explosive`/
+      `is_volatile_qt`/`is_volatile_time`/`is_buggy`) is future work. (Built later: see
+      entry 104.)
+
+    A real scoping gap, surfaced deliberately rather than silently: **space-only and
+    capital-ship-access preferences only affect `/mixed-routes` and `/multi-stop-route`**,
+    because those are the only two commands whose underlying pure functions
+    (`build_pair_opportunities`) already support `space_only`/`capital_access_only` as
+    filters at all - `/best-route` and `/top-routes` have no equivalent filter capability
+    today (they don't use `get_mixed_route_market_rows`/`build_pair_opportunities` at
+    all). Extending those two commands to support space-only/capital-ship filtering would
+    mean porting filtering logic across genuinely different code paths - correctly
+    bucketed as part of the future Centralized Route Presentation roadmap item, not
+    silently done here under a "low complexity" feature. `auto_load_only` and
+    `preferred_system`, by contrast, already existed uniformly on all 4 commands, so
+    those two preferences apply everywhere. `/my-trading-preferences` and
+    `/set-trading-preferences`'s option descriptions both say "mixed-routes/multi-stop-
+    route only" next to the two scoped fields so this isn't discoverable only by reading
+    code.
+
+    Verified end-to-end, not just via pytest: stopped the live Pi service (same Discord
+    bot token as local dev, confirmed with the user first since running both
+    simultaneously would fight over one gateway connection), ran the local bot with
+    `PYTHONUNBUFFERED=1` and confirmed `Loaded extension bot.cogs.trading_preferences`
+    and `Synced 59 commands` (was 56) with no errors, then immediately restarted the Pi
+    service (confirmed back to normal, 56 commands - the Pi hasn't been redeployed with
+    this feature yet). Actually invoking the new commands in a live Discord server was
+    not completed this round (Claude in Chrome wasn't connected, and downtime on the live
+    Pi bot was minimized by not troubleshooting that further) - that's the one item on
+    `CONTRIBUTING.md`'s pre-flight checklist still open for this feature. 21 new tests in
+    `tests/test_trading_preferences.py` (pure formatting, DB partial-update semantics,
+    cog command behavior, and route-command wiring) plus 2 new assertions in
+    `tests/test_mixed_routes.py` for the `has_freight_elevator`/`has_docking_port` fix.
+    298 tests passing.
+53. **Default ship folded into Saved Trading Preferences (user follow-up on entry 52) -
+    `user_ship_preference` is superseded by a `ship_name` column on
+    `user_trading_preferences`, and a real SQLite grammar limitation was found and
+    worked around along the way.** The user's reasoning: a ship shapes route
+    recommendations the same way space-only/auto-load/system do, so it belongs in the
+    same saved-preferences row, not a separate table. `get_default_ship`/
+    `set_default_ship`/`clear_default_ship` (`bot/db/database.py`) are now thin wrappers
+    over `get_trading_preferences`/`set_trading_preferences` - `/set-default-ship`,
+    `/clear-default-ship`, and `/my-ship` (`bot/cogs/ships.py`) needed zero code changes
+    beyond a docstring, since they only ever called those three methods by name.
+    `/set-trading-preferences` gained a `ship` option with the same `resolve_ship`
+    validation and `ship_name_autocomplete` `/set-default-ship` already used. Two
+    deliberately different clear semantics: `/clear-default-ship` only clears the ship
+    (`clear_default_ship` reads the current value first, so its existing bool-return
+    contract - "was anything actually cleared" - still holds); `/clear-trading-
+    preferences` now clears the ship too, since it's the same row (`DELETE FROM
+    user_trading_preferences`) - both the command description and confirmation message
+    say so explicitly, since this is a real behavior change from entry 52's version of
+    that command.
+
+    **Migrating real, already-live data**: the Pi already has a real user's saved ship
+    in `user_ship_preference` (confirmed against a copy of the local dev DB too - a
+    `Polaris`, coincidentally a capital ship). `_migrate_ship_preference_into_
+    trading_preferences` (`bot/db/database.py`, called from `init()` after
+    `_run_migrations` so the new `ship_name` column exists first) copies it over,
+    designed to run on every startup, not once: new rows are inserted where none exist
+    yet, and a NULL `ship_name` on an existing row is backfilled - but a `ship_name`
+    already set via the new path (`/set-trading-preferences` or `/set-default-ship`,
+    both of which write here now) is never overwritten by a stale value from the old
+    table on a later restart. `user_ship_preference` itself is left in place, unwritten,
+    matching this codebase's additive-only/never-drop convention for tables that have
+    held real data.
+
+    **A genuine SQLite grammar limitation, not a typo**: the first version of that
+    migration used one statement - `INSERT INTO user_trading_preferences (...) SELECT
+    ... FROM user_ship_preference ON CONFLICT(user_id) DO UPDATE SET ... WHERE
+    ship_name IS NULL` - and failed with `near "DO": syntax error` on this project's
+    actual SQLite build (3.50.4, bundled with Python 3.13). Confirmed via a standalone
+    repro this ISN'T a mistake in the query: SQLite's own documented upsert-from-SELECT
+    example (the `phonebook2`/`tempPhonebook` example from sqlite.org's UPSERT page)
+    fails identically on this build, while the exact same `ON CONFLICT DO UPDATE`
+    clause after `INSERT INTO ... VALUES (...)` (used everywhere else in this file)
+    works fine - the limitation is specifically pairing `ON CONFLICT` with an INSERT
+    whose source is a SELECT, not `ON CONFLICT`/`DO UPDATE` in general. `DO NOTHING`
+    and a CTE-wrapped SELECT both failed the same way, ruling out `DO UPDATE`
+    specifically or the SELECT's own shape as the cause. Worked around with two plain
+    statements (an `INSERT ... SELECT ... WHERE user_id NOT IN (...)` for brand-new
+    rows, then an `UPDATE ... SET ship_name = (SELECT ...) WHERE ship_name IS NULL AND
+    user_id IN (...)` for backfilling existing rows) instead of hunting for alternate
+    upsert syntax - both statement forms are unambiguously supported, and the two-step
+    version was verified for correctness and idempotency (new-row, backfill, and
+    already-set-don't-clobber cases, run 3x in a row) before being trusted. Worth
+    remembering if a future migration reaches for `INSERT ... SELECT ... ON CONFLICT
+    DO UPDATE/NOTHING` again on this project: it doesn't work here regardless of how
+    correct the SQL looks against SQLite's own docs - test it standalone first.
+
+    Verified against real data, not just synthetic tests: ran the actual migration
+    against a byte-for-byte copy of the local dev database (which has one real saved
+    ship) and confirmed the ship migrated correctly and stayed stable across 3 repeated
+    `init()` calls - the first attempt at this check appeared to fail (`ship_name` came
+    back `None`), which turned out to be a test-harness artifact (a git-bash-style
+    absolute path like `/c/Users/...` doesn't resolve correctly when handed to the
+    native Windows Python 3.13 used for this check, silently opening a fresh empty
+    database at a misinterpreted path instead of erroring) - re-run with a plain
+    relative path confirmed the migration was correct all along. Also re-ran the same
+    stop-Pi/run-local/restart-Pi verification as entry 52 (same live token constraint):
+    confirmed `Loaded extension bot.cogs.trading_preferences` and `Synced 59 commands`
+    against the real local dev DB (not just a fresh test DB) with no errors, and
+    confirmed via direct query afterward that the real `Polaris` row had actually been
+    copied into `user_trading_preferences`. 10 new tests (migration correctness/
+    idempotency/non-clobbering, ship round-trip through the new storage, clear-ship-only
+    vs. clear-everything semantics). 308 tests passing.
+54. **Load-Limiting Explanations (roadmap item) - every `/mixed-routes`/`/multi-stop-route`
+    cargo item now says which constraint actually capped its quantity: stock, demand,
+    cargo space, or budget.** `MixedCargoItem` gained a `limiting_factors: tuple[str,
+    ...]` field (`bot/uex/mixed_routes.py`), and a proof (in `allocate_pair_cargo`'s
+    docstring) that every item is provably capped by at least one of the four: since
+    every included item has strictly positive profit per unit, an item below its own
+    stock/demand cap must be capacity- or budget-bound instead, or a strictly more
+    profitable allocation (one more unit of that item) would have been found and chosen
+    instead. That proof only holds for `_exact_allocate`'s FINAL/aggregate totals,
+    though - it explores every valid combination jointly, not sequentially, so nothing
+    about "what remained at some intermediate point" matters there. `_greedy_fill` is
+    different: it processes commodities in a fixed order and never revisits an earlier
+    one once a later one consumes more of the shared capacity/budget pool, so it needs
+    each item's own LOCAL remaining capacity/budget at the moment it was actually picked,
+    not the final totals after the whole pass. Confirmed this distinction matters, not
+    just theoretically: a standalone repro using final-aggregate values for the greedy
+    path misattributed an item that was genuinely only budget-bound as also "cargo
+    space"-bound, purely because a later item exhausted whatever capacity happened to
+    remain - `test_greedy_path_does_not_misattribute_an_earlier_budget_bound_item_as_
+    cargo_space` (`tests/test_mixed_routes.py`) reproduces this exact scenario through
+    the public `allocate_pair_cargo` API (2 real commodities + 7 low-profit fillers to
+    force the greedy path past `EXACT_SEARCH_MAX_CANDIDATES`) and was verified to fail
+    against the aggregate-based version before being restored to the correct local-value
+    one.
+
+    Display: replaced the old imprecise per-item warning (`"origin stock limits this
+    load to N SCU"`, which fired whenever the market's own stock/demand was below the
+    ship's FULL capacity - not necessarily related to why THIS item's actual allocated
+    quantity ended up what it did) with a warning built from the new precise
+    `format_limiting_factors(item.limiting_factors)` in both `/mixed-routes` and
+    `/multi-stop-route`. First attempt put this text inline on the cargo line itself
+    instead of in the `warnings` list - wrong, because `/multi-stop-route`'s plain-text
+    overflow fallback explicitly omits per-leg cargo-line detail ("Full leg-by-leg cargo/
+    distance details omitted") and only carries `warnings`, so the new explanation would
+    have silently vanished in exactly the large/complex-route scenario where it matters
+    most. Moved into `warnings` instead, matching where the old (now-replaced) stock/
+    demand warning already lived - `test_multi_stop_route_fallback_preserves_warnings`
+    (already existing, updated for the new wording) confirms this survives the fallback
+    path. Two existing tests needed their synthetic fixtures updated after the old
+    warning's removal shortened the warnings section enough to no longer trigger the
+    size-overflow condition they were built to test - not a logic bug, just recalibrating
+    manually-constructed `MixedCargoItem`s that never previously specified
+    `limiting_factors` at all.
+
+    12 new tests in `tests/test_mixed_routes.py` (stock/demand/cargo-space/budget/tie,
+    each via both the exact and greedy solver paths where applicable, plus the
+    local-vs-aggregate regression above). 317 tests passing.
+55. **A sixth external review (`data/audit-f562ae0/REVIEW.md`, 2026-09-06), covering
+    entries 52-54's whole arc (saved preferences, ship consolidation, load-limiting
+    explanations), found 4 more P2 gaps - all reproduced independently before fixing,
+    all fixed:**
+    - **The ship migration re-applied a ship the user had just deliberately cleared.**
+      `_migrate_ship_preference_into_trading_preferences` (entry 53) guarded only on
+      "does `user_trading_preferences.ship_name` look empty" - which `/clear-default-ship`
+      (sets it to NULL) and `/clear-trading-preferences` (deletes the whole row) both
+      satisfy just as well as "never migrated yet," so the legacy ship silently came back
+      on the very next restart regardless of what the user had just asked to clear.
+      Fixed with a new `ship_preference_migrated (user_id)` marker table that neither
+      clear path touches - once a user is marked, the migration never looks at their row
+      again, and their `ship_name` is entirely under their own control from then on.
+    - **`set_trading_preferences` had a real lost-update race.** It read the whole
+      preferences row, applied its one field change in Python, then wrote the whole row
+      back - two concurrent calls touching DIFFERENT fields (e.g. one setting
+      `space_only`, the other `auto_load_only`) could both read the same pre-change row,
+      each merge their own change onto that same stale copy, and whichever wrote last
+      would silently discard the other's change. Reproduced with a synchronized
+      interleaving forcing both reads before either write. Fixed by rebuilding the method
+      around a single atomic `INSERT ... ON CONFLICT DO UPDATE` whose `DO UPDATE SET`
+      clause names ONLY the columns the caller actually passed (built dynamically from
+      the same six fixed, hardcoded column names - never string-built from caller input) -
+      two concurrent calls touching different columns now can never clobber each other,
+      regardless of interleaving, since neither statement's `SET` clause even mentions the
+      other's column. `DEFAULT_TRADING_PREFERENCES` still supplies fallback values for the
+      `INSERT` branch (a brand-new row has no prior state), but those defaults are never
+      named in `DO UPDATE SET`, so an untouched field on an existing row is never touched.
+    - **The load-limiting explanation (entry 54) exposed the exact solver's own internal
+      25-SCU search cap as if it were the ship's real capacity.** Above
+      `EXACT_SEARCH_MAX_CAPACITY`, `_exact_allocate` is still run capped at 25 (as if the
+      ship only had 25 SCU) and compared against the uncapped greedy passes - when that
+      capped result wins, `_annotate_exact_allocation_limits` was checking bindingness
+      against the SAME capped value it searched with, not the ship's real capacity, so a
+      26-SCU ship with 1 SCU of real spare room got told "cargo space" limited it,
+      identically to a genuinely full ship. Confirmed with the review's own reproduction
+      (26-SCU ship, 25 SCU used, both items labeled cargo-space-limited despite 1,000
+      stock/demand and a 1,000,000 budget on each). Fixed by threading the REAL,
+      uncapped ship capacity through `_exact_allocate` as a separate `real_capacity`
+      parameter (search bounding still uses the capped value, unchanged), checking
+      cargo-space bindingness against `real_capacity` instead, and adding a genuinely new
+      fifth factor - `"search cap"` - for the case where none of the four real
+      constraints (stock, demand, real cargo space, budget) explain an item's quantity
+      but the search itself stopped at its own internal boundary. Telling a player "bring
+      a bigger ship" when the ship they already have has room to spare is actively worse
+      than not explaining at all.
+    - **`/set-trading-preferences` could exceed Discord's ~3s initial-response deadline.**
+      When a `ship` option is passed, the command awaited `self.bot.uex.get_vehicles()`
+      (and then the DB write) before ever acknowledging the interaction - a cold UEX
+      vehicle-list cache or a slow/retried request could exceed that window, and the
+      eventual `interaction.response.send_message` call then fails with an
+      expired-interaction error even though the preferences may have already been saved,
+      leaving the user with an apparently-failed command and silently changed settings.
+      Fixed by deferring (ephemerally) immediately after the cheap "at least one option
+      passed" validation and before any network/DB work, routing every response after
+      that point through `interaction.followup.send` instead of
+      `interaction.response.send_message`. The validation-only early return (no
+      network/DB work at all) deliberately keeps responding immediately rather than
+      deferring first, since there's nothing slow on that path to defer around.
+
+    17 new tests across `tests/test_mixed_routes.py` and `tests/test_trading_preferences.py`
+    (migration-survives-both-clear-paths x2, concurrent-partial-update-preservation,
+    search-cap-vs-real-cargo-space, defer-before-network-fetch, plus updating 4 existing
+    command tests to read from `interaction.followup.send` instead of
+    `interaction.response.send_message` now that the command defers first). 322 tests
+    passing.
+56. **User-initiated investigation, not an audit: "why does /multi-stop-route's ROI go
+    down as budget goes up?" led to a real algorithmic bug in candidate-terminal
+    selection, not just expected diminishing returns.** Two real live-Discord screenshots
+    for the same ship (Ironclad Assault, 1440 SCU) showed a no-budget chain (35.9% ROI)
+    that was WORSE on both profit and ROI than an explicit 2,000,000-budget chain (170.8%
+    ROI) - not the shape "more budget dilutes margin but raises profit" would predict, so
+    it was investigated as a suspected search defect rather than accepted as "just
+    diminishing returns."
+
+    **Confirmed diminishing returns is real, using the local dev market snapshot**: for a
+    fixed ship, `build_multi_stop_routes`'s top result's ROI declines steadily as budget
+    rises, then goes fully flat (byte-for-byte identical route) once real stock/demand/
+    cargo capacity is saturated - 96 SCU ship plateaus above ~2.5M aUEC at 80.5% ROI, 384
+    SCU above ~5M at 55.5%. Explicitly ruled out `max_commodities` (the per-leg 3-slot
+    cap) as a contributing cause by re-running with 6 and 10 - identical results, since
+    the winning routes never used more than 2 commodities per leg anyway.
+
+    **But the two screenshots' specific inversion was a different, real bug**: rank_edges
+    (`bot/uex/multi_stop_routes.py`) only ever ranked candidate terminals at "unlimited
+    budget" + "exactly the caller's requested budget" (or just unlimited, when no budget
+    was given). Confirmed on real data that once a checkpoint budget is large enough that
+    every edge's own allocation is already capped by real stock/demand rather than by
+    that budget, its ranking becomes IDENTICAL to the unlimited one - measured 20/20
+    top-20 overlap between the 10M-budget ranking and the unlimited ranking, vs only 4/20
+    at 5M. This permanently excludes any edge that only ranks well at a MODERATE budget,
+    even when it leads to a strictly better route: budget=5,000,000 found a chain with
+    BOTH higher profit and higher ROI (3.03M profit, 79.8% ROI) than budget=10,000,000 or
+    no budget at all (2.86M profit, 32.6% ROI) against the identical market snapshot -
+    proof this was a search defect, not real economics, since a bigger budget should
+    never make the best ACHIEVABLE profit go down.
+
+    **Fix has two parts, because the first alone wasn't enough**: (1) rank candidate
+    edges at a spread of budget checkpoints (0.1x/0.25x/0.5x/1.0x of a ceiling) instead of
+    just two fixed points - with a real budget, the ceiling is that budget; with none, a
+    data-derived ceiling from the dominant top edges' own unlimited-budget saturation
+    investment. (2) A separate profit-per-aUEC-invested ("efficiency") ranking, always
+    included regardless of budget. Part (2) was necessary because part (1) alone has a
+    self-referential blind spot for the no-budget case: fractions of "however much the
+    CURRENTLY-DOMINANT edges can absorb" still favor those same edges in smaller
+    quantities (their economics scale linearly), so they're never actually excluded by any
+    fraction of their own derived ceiling - confirmed by a regression test that failed
+    against the checkpoint-only fix (a tiny-but-highly-efficient synthetic chain stayed
+    invisible at every checkpoint) and only passed once the scale-invariant efficiency
+    ranking was added. After both fixes, profit at the top result is now correctly
+    monotonically increasing with budget on the real snapshot (2M < 5M < 10M < unlimited),
+    and ROI declines smoothly instead of dipping and recovering - a diminishing-returns
+    chart built on top of this search would now be showing a real economic curve, not a
+    search artifact.
+
+    Verified with 2 new synthetic regression tests (21-decoy-edge constructions mirroring
+    the existing `test_a_real_budget_ranking_keeps_an_affordable_chain_from_being_crowded_
+    out` pattern), both confirmed to fail against the pre-fix code and pass with the fix.
+    Real-data verification, not just synthetic: re-ran the exact budget sweep against the
+    local dev snapshot before and after - top-result profit went from non-monotonic
+    (unlimited budget's 2.86M was WORSE than 5M's 3.03M) to monotonically increasing
+    (2M < 5M < 10M < unlimited), exactly matching the mechanism found. Known tradeoff:
+    `/multi-stop-route` now takes noticeably longer (~4-5.5s measured on real data vs
+    faster before) since candidate ranking now runs up to 5 passes instead of 1-2 - left
+    as-is since the command is already deferred/offloaded to a worker thread and the
+    correctness gain (recommendations that are no longer sometimes strictly worse than
+    achievable) was judged worth it; revisit if this becomes a real user complaint.
+    324 tests passing.
+57. **`/diminishing-returns` (new command, follow-up to entry 56) - charts a ship's
+    multi-stop route ROI against starting budget, and found one more real gap in entry
+    56's own fix while building it.** `bot/uex/multi_stop_routes.py` gained
+    `sweep_budget_curve()` (geometric budget sweep - 3x growth, up to 12 checkpoints,
+    starting at 5,000 aUEC - with early exit once two consecutive checkpoints return the
+    byte-for-byte identical best chain) and `find_diminishing_returns_budget()` (the
+    smallest swept budget whose result already matches the largest one). `bot/uex/
+    charts.py` gained `render_budget_curve_chart()` (ROI-only y-axis, log-scale budget
+    x-axis, matching the house dark-theme dataviz style - profit/investment deliberately
+    left off the chart itself since they're on a wildly different scale than a
+    percentage; shown as embed text fields for the first/last swept points instead). The
+    new `/diminishing-returns` command (`bot/cogs/prices.py`) mirrors `/multi-stop-route`'s
+    own ship/market-row/capital-access resolution, offloads the sweep to a worker thread
+    (it calls `build_multi_stop_routes` up to a dozen times), and sends a status message
+    first since a full sweep can take up to a minute.
+
+    **Found while smoke-testing against real data, before shipping**: entry 56's fix
+    reduces but does not fully eliminate its own failure mode - real collected data
+    showed a 96 SCU ship's swept profit going from 1,036,624 at a 3,645,000 budget DOWN
+    to 961,983 at 10,935,000, because each `sweep_budget_curve` call to
+    `build_multi_stop_routes` ranks candidates independently for its OWN specific budget,
+    and the fraction checkpoints at one budget can still occasionally miss a combination
+    that a smaller budget's own fractions happened to find - entry 56's fix narrowed this
+    gap considerably (confirmed: it no longer reproduces for the specific 2M/5M/10M/
+    unlimited checkpoints from that entry's own investigation) but a sweep spanning many
+    more, closer-together checkpoints found a case it still doesn't fully close. Since a
+    bigger starting budget can never truly make the best ACHIEVABLE profit go down (you
+    can always choose not to spend the extra capital), `sweep_budget_curve` now applies
+    `_enforce_monotonic_profit` as a final pass: whenever a point's raw search result is
+    worse than an earlier, smaller budget's already-found result, it reports that earlier
+    result's profit/investment/ROI/stops for the larger budget instead - not hiding the
+    residual heuristic imperfection, but reflecting the economic fact that whatever a
+    smaller budget already achieves remains achievable at any larger one too. Verified
+    with a regression test using a monkeypatched `build_multi_stop_routes` (deterministic
+    hand-picked profits per budget, including a real dip) rather than trying to
+    synthetically reconstruct the exact real-data conditions that produced one - confirmed
+    to fail without `_enforce_monotonic_profit` and pass with it. Re-ran the real-data
+    smoke test after the fix: both ship sizes now show correctly monotonic profit curves.
+
+    7 new tests (sweep plateau/early-exit/max-points behavior, `find_diminishing_returns_
+    budget` correctness, the monotonic-enforcement regression, and one cog-level test
+    confirming the command sends a chart embed with a plateau note). Command-surface
+    limits checked (name 19/32, all descriptions under 100 chars) and confirmed live:
+    `Synced 60 commands` (was 59) with no errors. 331 tests passing.
+58. **Centralized Route Presentation (roadmap item) - new `bot/uex/route_presentation.py`,
+    the single home for the warning/confidence/chunking logic that had been independently
+    copy-pasted (with small, silently drifting differences) across `/best-route`,
+    `/top-routes`, `/mixed-routes`, `/multi-stop-route`, and `/intelligence-brief`.** The
+    roadmap entry named this exact failure mode: "this is why repeated audits kept
+    finding a fix applied to one command and not another." Auditing all five commands
+    side by side (not prompted by an external review this time) confirmed it: `/top-routes`
+    and `/best-route`'s own UEX-routes branch had NO cross-system warning at all, despite
+    `/best-route`'s fallback branch and `/multi-stop-route`'s per-leg lines both having
+    one; `/intelligence-brief`'s route recommendations had no terminal-health warnings, no
+    limiting-factor explanation (Load-Limiting Explanations, entry 54, never reached this
+    caller), no confidence rating, and - the most serious gap - ZERO Discord embed-size
+    protection at all, the exact "silently drops everything, sends nothing, interaction
+    looks stuck" class of bug every other route command had already been bitten by and
+    fixed (A08 and its many follow-ups).
+
+    New shared functions, each replacing 2-4 near-duplicate call sites: `chunk_lines`/
+    `add_chunked_fields` (moved from `bot/cogs/prices.py`, which now just re-exports them
+    under their historical `_chunk_lines`/`_add_chunked_fields` names so existing
+    monkeypatch-based tests keep working unchanged), `side_health_warnings`,
+    `cargo_item_warnings` (risk + limiting-factors + buy/sell market status, per cargo
+    item), `cargo_item_line`, `cargo_confidences`/`worst_confidence`, `capital_access_note`,
+    `approximation_note`, and `travel_warning` - the trickiest one, since the three
+    existing call sites genuinely differed by whether a real UEX distance/GM figure was
+    already shown elsewhere for that route, not by which command it was: unified into one
+    `has_real_distance: bool` parameter (True for `/best-route`'s UEX-routes branch,
+    `/top-routes`, and `/multi-stop-route`'s per-leg lines, which all pull real distance
+    data; False for `/best-route`'s self-derived fallback, `/mixed-routes`, and
+    `/intelligence-brief`, none of which have any distance figure at all) rather than
+    forcing every caller into identical wording. `/multi-stop-route`'s existing wording
+    ("crosses systems") was kept as the `has_real_distance=True` canonical text per
+    explicit user direction to treat its presentation as the reference, since the user
+    called out being satisfied with how it looks; the other four commands' behavior moved
+    to match its logic, not just its words.
+
+    Deliberate behavior changes, not just deduplication: `/best-route`'s primary branch
+    and `/top-routes` now show a cross-system warning where they previously showed
+    nothing; `/intelligence-brief` now shows terminal-health warnings, per-item limiting-
+    factor and market-status lines, a confidence rating, and (via `add_chunked_fields`) a
+    "N more omitted" disclosure instead of an unprotected field loop; `/intelligence-
+    brief`'s old three-way `_format_cross_system_note` (with a distinct "star-system data
+    incomplete" message) was folded into the shared two-way `travel_warning`, losing that
+    specific wording in exchange for one tested code path instead of a fourth bespoke one.
+
+    Verification: full test suite (333 -> 353 passing) plus new coverage specifically for
+    what changed - `tests/test_route_presentation.py` (16 tests directly against the new
+    module: cargo-item warnings, prefix handling, confidence reduction, every
+    `travel_warning` branch including the "never print None as a system name" guard,
+    capital-access/approximation wording); `tests/test_intelligence.py`'s old
+    `_format_cross_system_note` tests moved onto `travel_warning` directly;
+    `tests/test_trends_embed_budget.py` gained a cross-system regression test for
+    `/top-routes`; `tests/test_route_send_shape.py` gained one for `/best-route`'s
+    primary branch (seeded via `db.upsert_terminal_reference`, since that branch reads
+    real terminal references, not a mock); `tests/test_intelligence_brief_routes.py`
+    gained two - one confirming limiting-factor/confidence text now appears, one forcing
+    `add_chunked_fields` to reject a route deterministically and confirming the command
+    discloses the omission instead of crashing or silently dropping it. All three
+    modified cogs (`prices.py`, `trends.py`, `intelligence_brief.py`) confirmed to load
+    cleanly via a local dry-run (`bot.load_extension` without a gateway connection) with
+    no command-surface limit violations across all 11 of their commands - a full stop-Pi/
+    local-run/restart-Pi cycle was deliberately skipped this round since no command name,
+    option, or description actually changed (only internal logic), unlike every schema-
+    or interaction-shape-changing round before it.
+59. **Evidence-Level Labels (roadmap item) - /best-route and /top-routes now always show
+    an explicit Stock/Demand evidence line, instead of silently rendering nothing for a
+    missing figure.** Before this: a route with a live `scu_origin`/`scu_destination`
+    figure of `0` (confirmed empty) and one with `None` (never reported) looked visually
+    IDENTICAL - both just showed nothing, since the display code only ever added a stock
+    line `if scu is not None`. User picked the broadest of three offered scopes for this
+    roadmap item, explicitly including a real "inferred trend" fallback (wiring
+    `/terminal-history`'s existing time-weighted historical-availability analysis into
+    every route recommendation, not just its own standalone command) rather than just the
+    narrower "fix the conflation" bug alone.
+
+    **Four evidence tiers** (`bot/uex/supply_demand.py`'s new `EvidenceLevel`/
+    `classify_supply_evidence`, `bot/uex/route_presentation.py`'s new
+    `format_evidence_note`): "current" (a live figure, terminal health fresh/recent),
+    "aging" (a live figure, but health limited/stale/unknown - a REAL number, just not a
+    fresh one), "inferred" (no live figure, but ≥`MIN_HISTORY_HOURS` of collected
+    observation history to estimate historical supply/demand availability from, via the
+    same `analyze_terminal_market_history` `/terminal-history` already uses for one pair
+    at a time), "unknown" (no live figure and no usable history - genuinely nothing,
+    which must never render as if it meant a confirmed zero). Deliberately distinct from
+    `RouteConfidence`'s existing blended 0-100 score (`bot/uex/route_confidence.py`) -
+    that answers "how much should I trust this route overall," this answers "where did
+    THIS specific number come from."
+
+    **New bulk DB method** `get_terminal_market_observations_by_ids` (`bot/db/
+    database.py`) - the many-pairs-at-once counterpart to `get_terminal_market_history`'s
+    single-pair, name-based lookup, mirroring `get_route_market_signals_by_ids`'s
+    existing bulk-then-filter shape (validate ids, one query across all requested
+    commodity/terminal id sets, filter back down to only the exact pairs asked for -
+    fixed the DB layer's job, not a scan-everything-then-discard approach). `Prices.
+    _history_by_pair` (`bot/cogs/prices.py`) is the shared bulk-fetch-then-reduce helper
+    both `/best-route` branches use for their single commodity; `/top-routes`
+    (`trends.py`) does the equivalent inline in `_send_ranked_routes` since it spans
+    multiple commodities across its ranked routes.
+
+    **Real bug caught by the end-to-end smoke test, not a synthetic one**: the first
+    version passed `observed_until=datetime.now(timezone.utc).isoformat()` (an
+    offset-AWARE ISO string) into `analyze_terminal_market_history`, which parses
+    `terminal_market_observations.observed_at` - always a naive UTC string, since it's
+    written via SQLite's own `datetime('now')` - and raised `TypeError: can't compare
+    offset-naive and offset-aware datetimes` the instant a route with real observation
+    history was exercised end-to-end. Every purely-synthetic unit test for
+    `classify_supply_evidence` itself passed regardless, since they call
+    `analyze_terminal_market_history` directly with matched-format fixtures - only the
+    cog-level test (real command callback, real bulk-fetched observation rows, real
+    "now") reached the actual mismatch. Fixed by using
+    `datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")` (a naive-looking string in
+    SQLite's own format) instead of `.isoformat()`. Generalizes past this one fix: a
+    pure-function test with matched-format fixtures cannot catch a caller supplying the
+    WRONG format in the first place - only a test exercising the real caller path proves
+    the two sides of an interface actually agree on their string shape.
+
+    **Deliberately scoped to `/best-route` and `/top-routes` only** - `/mixed-routes`,
+    `/multi-stop-route`, and `/intelligence-brief`'s cargo items always carry a live
+    `scu_buy`/`scu_sell` figure by construction (`allocate_pair_cargo` requires one to
+    build a route at all), so the "inferred"/"unknown" tiers can't structurally occur
+    there; their existing `side_health_warnings`/`format_limiting_factors` display
+    already covers what a live-but-degraded number needs. Extending the SAME tiering
+    there anyway was considered and rejected as redundant signal stacking (health
+    warning + limiting factor + market status + a fourth evidence tag, all describing
+    overlapping territory) rather than a genuine gap, unlike the two commands that
+    actually got it.
+
+    **Verification**: 353 -> 367 tests passing. New coverage: `tests/test_intelligence.py`
+    gained 8 pure `classify_supply_evidence` tests (including the confirmed-zero-vs-
+    unknown distinction, the demand-vs-supply percentage split, and the too-short-history
+    edge case) plus 2 for the new bulk DB method (grouping, pair-filtering, and the
+    empty/invalid-id-list case); `tests/test_route_presentation.py` gained 3
+    `format_evidence_note` tests; `tests/test_trends_embed_budget.py` and
+    `tests/test_route_send_shape.py` each gained one full end-to-end test proving a
+    confirmed-zero, a genuinely-unknown, and (for the DB-backed `/best-route` test) a
+    real inferred-from-history figure all render as visibly different text in the actual
+    sent embed - not just that the pure classifier returns different tiers in isolation.
+    Existing fake-DB fixtures across three other test files needed the new
+    `get_terminal_market_observations_by_ids` mock added (an `AttributeError` on the
+    fake DB object, not a real behavior break) - the same "every fake DB stub needs the
+    new method too" mechanical update `get_route_market_signals_by_ids` and
+    `get_terminal_data_health_by_ids` each needed when they were added. Cross-checked
+    against real collected data (`data/uexbot.sqlite3`) via a throwaway smoke script
+    (not committed, per the `diagnose.py` convention) - confirmed the DB queries run
+    correctly at realistic row volumes and (this is what caught the naive/aware bug
+    above) that the code path actually used by a real command, not just its
+    unit-tested pieces, produces sensible output. All modified cogs confirmed to load
+    cleanly with no command-surface violations (no command name/option/description
+    changed, only internal logic).
+
+60. **Fix 5 defects found by a 3-auditor, cross-reviewed audit of Centralized Route
+    Presentation and Evidence-Level Labels (entries 58-59).** Unlike every prior audit
+    round in this project's history, this one ran BEFORE any implementation was
+    authorized: three independently-scoped auditors (state/persistence, external
+    operations/delivery, route correctness/presentation) each investigated the exact
+    `d2c28d6..5b347aa` commit range, wrote their own reproductions against real code and
+    a real temp/production-copy SQLite database, then a second adversarial reviewer
+    independently tried to disprove each confirmed finding before anything was accepted.
+    All 5 unique defects (one root cause found independently by two auditors, deduped)
+    survived that challenge. Only then was a fix pass authorized. Full findings and
+    reproduction detail live in the audit report already delivered to the user; this
+    entry documents what was actually implemented.
+
+    **Wall-clock anchor instead of the collector's own `last_seen` (the most serious
+    finding)** - `Prices._history_by_pair` (`bot/cogs/prices.py`) and
+    `Trends._send_ranked_routes` (`bot/cogs/trends.py`) both fed
+    `datetime.now(timezone.utc)` into `analyze_terminal_market_history` as
+    `observed_until`, instead of `terminal_market_state.last_seen` the way the
+    pre-existing, unmodified `/terminal-history` command already correctly does. Any gap
+    since the collector actually last confirmed a pair (bot downtime, a stalled
+    collector loop, a pair briefly missing from a UEX response) was silently counted as
+    continued, confirmed observation - reproduced as a pair with 2 real hours of
+    coverage rendering "historically available ~100% of the time (960h observed)," and
+    on real collected data, an audit cross-reviewer found 2 real pairs where this
+    currently flips a route from correctly "unknown" to falsely "inferred." Fixed by
+    anchoring per-pair to `get_route_market_signals_by_ids`' `last_seen` column (already
+    fetched in `trends.py` for confidence scoring - now reused rather than re-fetched;
+    newly fetched in `prices.py`'s `_history_by_pair`, which previously had no need for
+    `terminal_market_state` at all), falling back to the last recorded observation's own
+    timestamp (zero fabricated extension) on the rare case the state row is missing.
+    `bot/cogs/prices.py` no longer imports `datetime`/`timezone` at all as a result -
+    that import existed solely for this wall-clock line.
+
+    **A single observation was sufficient for "inferred," with no corroboration
+    required** - `TerminalMarketHistory.enough_history` (`bot/uex/supply_demand.py`)
+    checked only elapsed hours, never `state_changes`, so one recorded reading
+    extrapolated across the entire elapsed window (even the corrected last_seen-anchored
+    window) rendered a confident-looking percentage from a single point in time. On real
+    collected data, ~15% of tracked pairs (independently measured at 361 and 388 of
+    2,595 by the original auditor and the cross-reviewer) would show ≥90% "historical
+    availability" built mostly from extrapolation with zero real corroboration. Fixed
+    with a new `MIN_STATE_CHANGES = 1` constant, required alongside `MIN_HISTORY_HOURS`
+    in `enough_history` - at least one real recorded transition, not just time having
+    passed since a single snapshot. This also affects (correctly) `/terminal-history`
+    itself, which shares the same `enough_history` property and had the identical latent
+    gap, just never audited directly since that command wasn't in the audited commit
+    range.
+
+    **Evidence-Level "Demand" line ignored the sell-side no-demand status inversion** -
+    `classify_supply_evidence` (`bot/uex/supply_demand.py`) checked only `scu is not
+    None` for the demand side, never consulting UEX's status code 7 ("Maximum Inventory,
+    No Demand" - the same inversion `has_sell_side_demand` already exists for elsewhere
+    in this codebase). A route with `scu_sell=500, status_sell=7` rendered `Demand: **500
+    SCU** (verify before departure)` in the same embed that separately, correctly showed
+    `sell side: Maximum Inventory (No Demand)` - a direct self-contradiction. Fixed by
+    adding a `status_sell` parameter, consulted ONLY for `side="demand"`: when status
+    confirms code 7, the effective quantity used for tiering becomes a real confirmed
+    `0`, not the raw (misleading) reported figure. Any other status, including
+    unknown/`None`, never overrides a live figure - code 7 is the only authoritative
+    zero-demand signal UEX documents, not merely a missing one. All 4 call sites (both
+    `/best-route` branches, `/top-routes`) already had the relevant status value on hand
+    for other purposes (`resolve_status_label`/`has_sell_side_demand` calls nearby), so
+    no new data fetch was needed.
+
+    **`/intelligence-brief`'s combined 3-embed send had no aggregate size guard** - found
+    independently by two of the three auditors, both cross-review-confirmed. The
+    command's `await interaction.followup.send(embeds=embeds)` (unguarded since before
+    this audit's range) predates `b991fac`, but that commit grew `_routes_embed`'s
+    content enough (measured ~1320 chars/3 fields pre-range to ~4300-4900+ chars/6
+    fields post-range in equivalent fixtures) to make the combined-across-all-3-embeds
+    6000-char total - which `add_chunked_fields` has no visibility into, since it only
+    budgets the ONE embed it's called on - newly, easily reachable. Worse: this
+    project's own `PROJECT_CONTEXT.md` entry 58 and `ROADMAP.md` explicitly (and
+    incorrectly) claimed this command went from "zero Discord embed-size protection" to
+    fully fixed; it only closed the per-embed half of that gap. Fixed by wrapping the
+    final send in the same try/except `discord.HTTPException` + plain-text fallback
+    pattern `/mixed-routes` already established, via a new local
+    `_embed_to_plain_text(embed)` helper (title + description + fields + footer,
+    generic across all 3 embed shapes this command builds - not shared into
+    `route_presentation.py`, since no other command currently needs it and this
+    codebase's own convention is not to add abstractions beyond what's needed).
+
+    **`travel_warning(has_real_distance=True)` was a hardcoded per-branch constant, not a
+    per-route check** - `/best-route`'s primary (UEX-routes) branch and `/top-routes`
+    both passed `has_real_distance=True` unconditionally for every route in the branch,
+    even though each route's own `distance` field can independently be `None`. A route
+    with `distance=None` got neither a real distance figure (already correctly gated on
+    `is not None` for display) NOR a travel-time disclaimer - silently indistinguishable
+    from a route where distance genuinely doesn't matter. Fixed by computing
+    `has_real_distance` from that route's own `distance`/`r.distance` value at the point
+    of the call, in both files. Real-world trigger frequency stays unconfirmed - UEX
+    documents `commodities_routes.distance` as non-nullable, and no live UEX credentials
+    were available to check whether that holds in practice (this codebase has
+    precedent of similar "documented non-null" fields, `scu_origin`/`scu_destination`,
+    being null in real data) - the fix is defensive/correct regardless of how often it
+    fires live.
+
+    **Verification**: 367 -> 375 tests passing. New coverage: `tests/test_intelligence.py`
+    gained 4 pure tests (single-observation-insufficient, demand-side status-override,
+    demand-side trusts non-7 status, supply-side never consults status_sell);
+    `tests/test_route_send_shape.py` gained 2 real-DB end-to-end tests (last_seen-vs-
+    wall-clock anchor divergence, missing-distance disclosure) and had 1 existing
+    fixture (`test_best_route_fallback_branch_shows_evidence_levels_for_missing_stock_
+    and_demand`) updated to add a matching `terminal_market_state` row and a second
+    observation - its original single-observation-no-state-row fixture only produced
+    "inferred" via the wall-clock bug this round fixed, so it needed a genuinely
+    realistic setup to keep testing what it was meant to; `tests/test_trends_embed_
+    budget.py` gained 1 missing-distance test; `tests/test_intelligence_brief_routes.py`
+    gained 1 end-to-end fallback test using the same `_EmbedTooLargeFollowup`-style
+    pattern `test_route_send_shape.py` already established for `/multi-stop-route`'s
+    fallback. Every new/changed test was run against the pre-fix source first (via a
+    scoped `git stash` of only the 4 production files, tests left in place) and
+    confirmed to fail for the claimed reason - not a broken fixture or unrelated error -
+    including one striking real number: the wall-clock anchor test's pre-fix failure
+    showed "58610h observed" (6.7 years) for a pair with 2 real confirmed hours. No
+    command name/option/description changed; all four modified modules re-verified to
+    parse cleanly.
+
+61. **Blueprint Search and Crafting Planner (`/blueprint-search`, `/blueprint-list`) ported
+    from the aiv2 experiment - the first feature built in `aiv2` and brought here.**
+    `aiv2` (`cghath/aiv2`, a full clone of this bot at `734b637` plus an AI chat layer)
+    is where new features get built first; this entry ports its blueprint feature without
+    any of the AI code (`bot/ai/`, `bot/cogs/ai_chat.py`, and the one aiv2 test that
+    exercised the AI tool were deliberately left behind). Every aiv2 command is
+    registered `/ai-<name>`; production has no prefix, so `ai-` was stripped on the way
+    over.
+
+    **What players get**: `/blueprint-search blueprint:<name> [craft_quantity]` shows
+    which contracts award a crafting blueprint (typo-tolerant, drop chance where the
+    Star Citizen Wiki API has it) plus the crafting recipe scaled to `craft_quantity`
+    (1-10000), with *Configure crafting*, *Add to shopping list*, and *Mine <ore>*
+    buttons. `/blueprint-list` opens the player's private thread holding one combined
+    shopping list. Full player-facing wording is in `PATCH_NOTES.md` (new in this same
+    change).
+
+    **New external dependency**: the Star Citizen Wiki API (`api.star-citizen.wiki`),
+    unauthenticated and volunteer-run, so `bot/wiki_api.py` is kept separate from
+    `UexClient` on purpose (different etiquette, no shared cache/rate-limit rules). It
+    fails closed - a partial download, missing pagination metadata, or a mix of game
+    versions is rejected rather than shown as a plausible-looking snapshot. Its
+    `User-Agent` was changed from aiv2's copy (which named the AI bot and its repo) to
+    identify this bot and this repo.
+
+    **Files**: new `bot/wiki_api.py`, `bot/uex/blueprints.py` and
+    `bot/uex/blueprint_crafting.py` (pure logic), `bot/cogs/blueprints.py` (registered in
+    `INITIAL_COGS`) and `bot/cogs/blueprint_planner.py` (the crafting-config/shopping-list
+    views the cog imports - not a separate cog). `bot/cogs/help.py` gained a Blueprints
+    category. `bot/cogs/mining_locations.py` had `build_where_to_mine_embed(ore)`
+    extracted from `/where-to-mine` (the *Mine <ore>* buttons need it) - a pure refactor,
+    the slash command's behaviour is unchanged.
+
+    **Database (additive only)**: five new tables - `blueprint_snapshot_state`,
+    `blueprint_missions`, `blueprint_pool_entries`, `blueprint_shopping_entries`,
+    `blueprint_shopping_threads` - plus their indexes, and twelve `Database` methods.
+    The snapshot is replaced wholesale in one transaction (never patched in place), and
+    an empty replacement is refused outright, so a bad sync can't wipe a good snapshot.
+    Nothing here uses `INSERT ... SELECT ... ON CONFLICT` (this project's SQLite rejects
+    it - see the ship-preference migration note above).
+
+    **Pi footprint**: about 9.2k rows in total (784 missions + 8,450 pool entries), well
+    under 1 MB. The snapshot refreshes every 12 hours (the API caches for 12 hours
+    itself); the first `/blueprint-search` after a start triggers one full sync, roughly
+    9 requests.
+
+    **Outside-audit follow-up (2026-09-21)**: three findings were confirmed and fixed. (1)
+    `CraftConfigView` capped its children at four INCLUDING the Add button, so at most three
+    selectors were ever shown and any others were silently dropped - Discord allows four
+    selects plus a button row. It now pages selectors four at a time behind Previous/Next
+    buttons, required material choices first (a plan can't be built without them), so every
+    control is reachable. Measured first: the fixture plus 12 randomly sampled real blueprints
+    needed at most three, so this is latent rather than live, but a bigger recipe would have
+    lost controls with no message. (2) `ShoppingService.open` and the Refresh/Clear buttons had
+    no error handling after deferring, so a Discord permission or HTTP failure left the player
+    at "the application did not respond"; each now replies, and Clear distinguishes "nothing
+    was changed" from "cleared, but I couldn't update the message". (3) Stale references to
+    the removed AI tool in `blueprints.py` comments. Two other audit findings were not defects
+    in this change: the deploy script defaulting to `TestBranch` (the features only ship once
+    merged there), and `bot/main.py` requesting `message_content` while the README says no
+    privileged intents (both already true on `TestBranch`; untouched here).
+
+    **Verification**: 712 -> 852 tests (140 ported: `test_blueprints*.py`,
+    `test_blueprint_crafting*.py`, `test_blueprint_planner.py`,
+    `test_blueprint_shopping_db.py`, `test_wiki_api.py`, plus four fixtures in
+    `tests/fixtures/`, which did not exist before). `ruff --select F` clean (three
+    unused imports in the ported tests fixed). All 23 cogs load with no failures and the
+    command surface goes 65 -> 67 with no name/description length violations, checked by
+    loading every cog offline against a throwaway database - deliberately without
+    logging in, since the local `.env` holds a real bot token and a second live gateway
+    session would race the Pi. Both commands still need a real run in Discord.
+
+62. **`/refinery-advisor` ranks in-system refineries first, shows every one of them, and
+    judges a multi-ore haul by the systems where every ore is mined - ported from the aiv2
+    experiment.** User-reported real case: Quantainium's highest-yield refinery is in Nyx,
+    but Quantainium is only mined in Stanton, so a pure yield-bonus ranking could send a
+    player planning a multi-system flight for cargo they could only have picked up
+    elsewhere. Also confirmed on real data that the flat top-5 cut dropped real in-system
+    refineries (Quantainium has 6 in Stanton, Corundum 11).
+
+    **What changed**: a refinery's own star system is compared against the systems the
+    ore(s) are mined in (the same `ids_star_systems` data `/where-to-mine` reads, not a
+    second lookup). In-system refineries sort first, ties broken by yield bonus then name.
+    Nothing is ever excluded - an out-of-system refinery is still a real option once the ore
+    is in the hold - so it stays visible, marked with a warning sign, with the reason spelled
+    out once in the footer rather than per line. `select_terminals_to_show` displays every
+    in-system refinery (capped at `MAX_IN_SYSTEM_TERMINALS = 12` so a pathological ore can't
+    flood the embed), fills to `MAX_TERMINALS = 5`, and always keeps the best out-of-system
+    option visible; the footer says "Showing N of M" when it trims. A failed star-system
+    lookup degrades to the original yield-only ordering instead of breaking the command.
+
+    **Multi-ore hauls** (`combine_mining_systems`): judging against the union of every ore's
+    systems let a refinery near ore B pass unflagged for ore A, so the intersection is used
+    whenever it is non-empty and the footer says so. When the ores share no system it falls
+    back to the union and states that no single mining trip covers the haul. An ore with no
+    mining-location data can't narrow anything (unknown is not "mined nowhere") and is named
+    in the note. One ore behaves exactly as before, with no note.
+
+    **Files**: `bot/uex/refinery.py` (`rank_refinery_terminals` gained `limit=None` and
+    `mining_star_systems`, plus `HaulSystems`, `combine_mining_systems`,
+    `select_terminals_to_show`), `bot/cogs/refinery.py`, and `bot/uex/mining_locations.py`
+    (`_names_for_ids` made public as `names_for_ids`, no other reference to the old name
+    existed). aiv2 additionally extracted `build_refinery_advisor_embed` from the command so
+    its AI chat tool could reuse it; nothing here would consume that, so the behaviour was
+    ported inline into the existing command body instead. Known gap left on purpose: no
+    awareness of the player's current system.
+
+    **Verification**: 21 new tests in `tests/test_refinery.py` (ranking, trimming, haul
+    combination, and the command end to end through `refinery_advisor.callback`, including
+    the failed-lookup and single-ore cases). The ported command body differs from aiv2's
+    only by that missing extraction and comment wording.
+
+63. **`/top-routes`, `/routes-from` and `/route-on-the-way` rank by the profit the player can
+    actually earn - ported from the aiv2 experiment.** UEX's `profit` field is computed at
+    unlimited cargo and budget, so a route can outrank another purely because of a basis no
+    player has. Fixture numbers modeled on real data: Waste is listed at 54,500,000 aUEC
+    (250,000 SCU, a 58,000,000 aUEC investment) ahead of Corundum at 1,385,120 aUEC
+    (787 SCU), but a 1,440 SCU ship with a 2,000,000 aUEC budget realizes 313,920 from Waste
+    and 1,333,333 from Corundum - over 4x more, the reverse of UEX's order.
+
+    **What changed**: `rank_by_achievable_profit` (`bot/uex/trends.py`) re-sorts candidates
+    by `estimate_route_cargo`'s `run_profit` for the player's ship cargo and/or budget, with
+    `price_roi` as the tie-breaker. It is called in `Trends._send_ranked_routes`
+    (`bot/cogs/trends.py`) after the auto-load/system filters and BEFORE the per-commodity
+    dedupe and the display truncation - the ordering matters twice over: dedupe keeps the
+    first route per commodity, so ranking after it would keep UEX's pick rather than the
+    player's; and ranking after truncation could drop the better route before it was ever
+    seen. All three commands share that method, so one call covers them. It is a no-op until
+    a ship or a budget is known (nothing meaningful to re-rank by without either), and a route
+    whose cargo estimate can't be computed ranks last rather than being dropped.
+
+    **What was deliberately not ported**: aiv2 bundled this into a refactor of the method
+    into `build_ranked_route_messages` plus an AI-only `get_top_routes_snapshot`; neither has
+    a consumer here, so only the ranking call was ported into the existing structure. The same
+    aiv2 diff also adds a footer note ("only N routes currently qualify") that is a separate
+    player-visible change nobody asked for here - left out and flagged instead.
+
+    **Verification**: 3 pure tests ported from aiv2 (`tests/test_trends.py`) plus 3 new tests
+    that drive `_send_ranked_routes` end to end (`tests/test_trends_embed_budget.py`), since
+    the pure tests can't prove the caller passes the right arguments in the right place:
+    the order flips with a ship and budget, is unchanged without them, and holds when the
+    display size is 1. Both behavioural tests were run against the pre-fix cog and failed for
+    the stated reason (Waste first, and Waste as the only route shown). aiv2's Corundum
+    figure in its own comments (~1.1M, and a 1,333,323 typo) did not match what
+    `estimate_route_cargo` returns for the fixture; the comments here use the computed value.
+
+64. **`/top-routes`, `/routes-from` and `/route-on-the-way` footers say how many routes
+    qualify when it is fewer than the list shows - ported from the aiv2 experiment.** With
+    `auto-load-only`, a system filter, or suppression removing candidates, these commands
+    could return far fewer than their usual 10 routes with nothing to distinguish "nothing
+    else qualifies" from a fault. `Trends._send_ranked_routes` now captures
+    `qualifying_count = len(entries)` after the filters and the one-per-commodity dedupe but
+    BEFORE truncation to `display_limit`, and appends a footer sentence when it is lower.
+    Counting after the dedupe matters: a second route for an already-listed commodity is not
+    one the player will see. The note is part of the intro embed's footer, built before any
+    field is added, so it counts toward the embed budget like the rest of the footer.
+
+    **Deliberate differences from aiv2's version**: `display_limit` is a fixed constant here
+    (`TOP_SCORED_ROUTES_KEEP` / `TOP_IN_STOCK_ROUTES_KEEP`, both 10) and none of the three
+    commands lets the player choose a count, so aiv2's wording "(requested up to N)" implied
+    a request nobody made; it reads "(this list shows up to N)" here. aiv2 also produced
+    "only 1 route currently qualify"; the singular now reads "qualifies".
+
+    **Verification**: 5 tests through `_send_ranked_routes` in
+    `tests/test_trends_embed_budget.py` (fewer qualify, singular grammar, silent when the
+    list is full or was truncated, counted after the dedupe, footer within Discord's
+    2048-character limit with every other footer part present). Four of the five fail against
+    the pre-change cog; the fifth is a regression guard that passes either way by design.
+
+65. **`/best-route` warns when a route would use ALL the stock/demand on record and suggests
+    a `Hedge:` commodity for the leftover hold - ported from the aiv2 experiment.** When
+    `estimate_route_cargo` reports `limited_by == "stock"`, the plan is to buy out the entire
+    quantity UEX currently shows; if that figure is slightly stale, or someone else buys or
+    sells into it first, the player arrives to less than planned and a half-empty hold.
+    `limited_by` of "ship" or "budget" is the opposite case - the player's own limit already
+    leaves headroom - so nothing is shown.
+
+    **What changed**: `stock_headroom_warning` (`bot/uex/route_presentation.py`) returns the
+    warning only for a stock-limited estimate, and `find_hedge_cargo`
+    (`bot/uex/mixed_routes.py`) finds a commodity (or two) to fill the leftover capacity at
+    the SAME origin/destination pair - the anchored counterpart to `build_mixed_routes`'
+    whole-market search, with `min_commodities=1` because the anchor is accounted for
+    separately and the anchor commodity itself is excluded. Both `/best-route` cargo sites
+    (`bot/cogs/prices.py`: the UEX-routes branch and the fallback price-row pairing) call
+    them. The market rows come from `get_mixed_route_market_rows()`, loaded lazily on the
+    first stock-limited route only, so ordinary calls pay nothing.
+
+    **Two `ai-` traps hit while porting**: `stock_headroom_warning`'s default command name is
+    `/ai-mixed-routes` in aiv2's source, so a verbatim copy would tell production players to
+    run a command that doesn't exist here (caught by calling it, not by reading a normalised
+    diff - the normalisation had hidden it). And aiv2's "command name is overridable" test
+    reads as self-contradictory once `ai-` is stripped mechanically (`in warning` and
+    `not in warning` for the same string), so it was rewritten with a neutral override name.
+
+    **What was deliberately not ported**: aiv2's `build_mixed_routes` also gained
+    `origin_terminal_id`/`destination_terminal_id` pinning in the same diff - that is a new
+    slash-command capability, tracked separately.
+
+    **Verification**: 3 headroom tests and 5 `find_hedge_cargo` tests ported, plus 3 end-to-end
+    `/best-route` tests from aiv2 (primary branch only) and 2 added here for the fallback
+    branch, which aiv2 never exercised - `/best-route` has two independent cargo sites, so a
+    test that reaches one proves nothing about the other. The fallback hedge test also asserts
+    every embed stays within Discord's 6000-character limit. The three behavioural end-to-end
+    tests fail against the pre-change cog.
+
+66. **Route-tracking hedge reports - a buy-side shortfall in a tracking thread suggests one hedge
+    commodity, with Report buttons that feed the outcome back like a tracked leg - ported from
+    the aiv2 experiment.** Builds on entry 65: `find_hedge_cargo` is the same search, called
+    reactively once a shortfall has actually happened rather than warned about in advance.
+
+    **What it does**: `RouteProgression.handle_leg_outcome` (`bot/cogs/route_progression.py`)
+    calls `_suggest_shortfall_hedge` after a buy-leg "missing"/"less" outcome. It reads the
+    thread's paired sell leg fresh from `route_progression_legs` (so it works after a restart),
+    runs `find_hedge_cargo(max_commodities=1)` for the freed-up cargo space, stores the
+    suggestion, and posts it with a `HedgeReportView`. The Report button opens a
+    `HedgeReportModal` (SCU, optional price); `_record_hedge_report` maps that single figure to
+    matched/less/more/missing, writes the market update, and suppresses a confirmed-empty side.
+    When the anchor route's paired sell leg is prompted, `_post_pending_hedge_sell_prompt`
+    asks about the hedge's sale too, only if its buy side was confirmed. Only a buy-side
+    shortfall gets a suggestion - a sell-side one means demand ran short, not stock.
+
+    **Storage**: new table `route_progression_hedges` plus six `Database` methods, additive
+    only. Deliberately separate from `route_progression_legs`: a hedge was never part of the
+    route the player asked to track, has no claimed `leg_index`, and must never touch the
+    idempotency machinery (`claim_route_progression_advance`, the per-leg markers) that makes
+    the tracked route's own sequence retry-safe. `record_hedge_report_market_update` and
+    `suppress_hedge_market_side` are their own copies of the tracked-leg writes for the same
+    reason - in particular the suppression one must never reuse the tracked-leg version with
+    the anchor's `destination_leg_index`, which would mark the ANCHOR leg's
+    `suppression_applied_at` for a suppression that is really about the hedge.
+
+    **Three defects in aiv2's version, fixed here rather than ported** (worth telling the aiv2
+    chat): (1) `_record_hedge_report` marked the side reported BEFORE its market write, so one
+    transient failure in that write - a database lock, say - left the side permanently
+    "already reported" with the player's data never recorded, and every retry just said so.
+    It now checks for a prior report first, writes the market update and any suppression,
+    and marks the side reported LAST; both writes are idempotent upserts, so a retry repeats
+    them harmlessly. The general rule: a "done" marker must not be set before the work it
+    claims is done - the mirror image of the recovery-flag rule, where a "the risky step has
+    begun" marker must be set BEFORE that step.
+    (2) `HedgeReportView.message` was never assigned after `channel.send`, so
+    `disable_in_background` skipped its edit every time and the Report button never
+    disabled, despite its own docstring saying it does - production's other views assign
+    `view.message = await thread.send(...)`. (3) `disable_in_background` caught only
+    `discord.HTTPException`, the exact narrowing the 2026-09-13 audit already widened for
+    `LegOutcomeView` because it runs after the report is recorded.
+
+    **Known limitations, not new**: the buttons are ordinary (non-persistent) views, so they
+    stop responding after a bot restart just as the tracked-leg buttons do; a hedge suggestion
+    is one commodity, not several. Timing checked against a copy of the real local snapshot
+    (2,595 rows): a hedge search takes about 4 ms, so it does not need moving off the event
+    loop.
+
+    **Verification**: 13 tests ported from aiv2 plus 7 new ones - a retry after a failed
+    market write, a repeat report never rewriting market data, both views being given their
+    message, `disable_in_background` never raising, and the modal's input validation
+    (inf/nan/negative/non-numeric rejected with nothing written; a valid report recorded and a
+    repeat refused), which aiv2 never tested. Four of those fail against aiv2's original code
+    for the stated reasons; the repeat-report test is a regression guard for the reordering
+    and passes either way.
+
+67. **`/mixed-routes` origin/destination pinning and `max-legs` on both multi-stop commands -
+    new slash options, built from capabilities aiv2 only exposed to its AI tool.** aiv2's
+    `build_mixed_routes(origin_terminal_id=..., destination_terminal_id=...)` and
+    `build_multi_stop_routes(max_legs=...)` had no slash command in aiv2 either (its own
+    docstring says "no slash command exposes this"), so unlike entries 61-66 this is a product
+    decision, made with the user: both multi-stop commands get `max-legs` (3 default, 4 opt-in),
+    and `/mixed-routes` gets both `origin` and `destination`.
+
+    **Pinning**: the two ids narrow `build_mixed_routes`' candidate (origin, destination)
+    pairs after the shared safety filters and BEFORE cargo allocation and the `limit` cut, so the
+    result is the true top five among pinned loads rather than the pinned subset of an
+    already-truncated global top five (the "filter before truncating" convention), and the
+    expensive allocation is skipped for pairs about to be discarded. The command resolves each
+    name with `resolve_terminal_id_by_name` (the same resolver and wording as
+    `/route-from-multi`'s `location`, with the same terminal autocomplete) before any slow work,
+    never silently falls back to an unpinned search on a bad name, names the pin in the empty
+    result message, and discloses it in the footer.
+
+    **`max-legs`, and a defect measured before shipping**: aiv2's own docstring says the deeper
+    search "hasn't been measured against real data." It was, on a copy of the real local
+    snapshot (2,595 rows), and two things came out. Time: 4 legs takes 4-10 s against 1.6-10 s for
+    3, acceptable since the search already runs in a worker thread. Correctness: with a 2,000,000
+    aUEC budget a 576 SCU ship's best chain was 2,347,495 at 4 legs but 2,360,888 at 3 (1,440 SCU:
+    3,328,622 vs 3,338,672) - allowing more legs made the answer WORSE, which cannot be true of an
+    exact search, because every 3-leg chain is also a valid 4-leg chain. The deeper walk spends
+    `MAX_CHAINS_EXPLORED` before reaching every shorter chain. Same family as the budget-sweep
+    monotonicity fix: enforce the invariant instead of trusting the heuristic. The search became
+    the private `_search_multi_stop_routes(max_legs=...)`, and the public
+    `build_multi_stop_routes` merges the default-depth results in whenever a deeper request is
+    made, so asking for more legs can never come back worse. Re-measured with the guard on the
+    same snapshot: both regressed cases now tie the 3-leg result exactly, no case is worse, and
+    the no-budget cases find 16-22% more profit (24 SCU: 587,616 vs 482,012; 1,440 SCU: 6,338,320
+    vs 5,444,760), while budget-limited cases tie. The cost is that a 4-leg request runs two searches, about twice as long
+    (6-16 s). The default depth still runs exactly one search, unchanged.
+
+    **Other notes**: `max-legs` is a two-choice option (3, 4), not a free number, so an
+    unmeasured depth like 5 cannot be requested. `/mixed-routes` also took aiv2's description
+    change ("hedges against one item's stock or demand running short"). Tracking a 4-hop chain
+    creates more tracked legs than a 3-hop one; there is no per-route leg cap in
+    `route_progression`, only a cap on how many routes one message offers. Not deployed.
+
+    **Verification**: 4 pin tests ported from aiv2 plus 4 new tests for the depth option and its
+    guard (a 4-leg chain only a deeper search finds; the default unchanged; the never-worse
+    guard and the single-search default, both with hand-picked results standing in for the
+    real-data cutoff, which would be guesswork to reproduce synthetically), and 7 tests through
+    the real commands: pin by origin, by destination, by both, an unresolvable terminal named,
+    an empty pinned result naming the pin, `max-legs` reaching the search from both multi-stop
+    commands, and a real 4-leg chain rendered within Discord's 6000-character limit. Six of
+    those seven fail if the commands stop passing the new arguments through; the seventh
+    (terminal lookup, which happens before the search) passes either way by design.
+
+68. **Stock-limited warnings and same-pair hedges on the ranked route lists (`/top-routes`,
+    `/routes-from`, `/route-on-the-way`) - the coverage gap left after entries 65-66.** The user's
+    ask was "hedge protection on all routes that would benefit," so the first step was a survey of
+    every route-producing command. Already covered: `/best-route`'s main branch (entry 65),
+    route-tracking threads (entry 66, reactive), and `/mixed-routes`, both multi-stop commands
+    and `/intelligence-brief`, which are multi-commodity by construction (their allocator already
+    fills spare hold space). The gap was the three ranked lists, which share one send path,
+    `Trends._send_ranked_routes`, and showed the same stock-limited numbers with no warning and no
+    hedge. `/best-route`'s fallback branch (UEX has no precomputed routes) is deliberately left out:
+    it sends ONE shared embed with every route as a field and has no per-route messages or Track
+    button, so it would need a restructure first.
+
+    **One rule, one home**: `route_presentation.hedge_room(cargo, ship_cargo_scu=..., budget=...)`
+    is now the single definition of when a hedge is warranted (only a `stock`-limited haul leaves
+    anything idle, and only if spare cargo space and, when a budget is set, spare money remain),
+    returning `None` so callers can skip the market lookup entirely. `/best-route`'s two hedge
+    sites were rewritten to call it (behaviour unchanged - its existing hedge tests still pass) instead
+    of leaving a third hand-copied version of the same conditions. The lists call it from a
+    pre-pass in `_send_ranked_routes` that loads `get_mixed_route_market_rows()` at most once and
+    only if some shown route needs it, passes the remaining budget to `find_hedge_cargo`, and is
+    wrapped so a failure there costs the player the hedge lines and never their routes.
+    `_route_cargo_estimate` is the one place a list route's cargo is estimated, so the field
+    builder and the pre-pass can never disagree about which routes are stock-limited. Each list
+    route is its own embed, so the added lines don't touch the combined-embed budget.
+
+    **What real data says, before this was called done**: on a copy of the local snapshot (2,595
+    rows, 58 commodities with a profitable route), only about one warned route in five has a
+    same-pair hedge - 576 SCU ship: 6 of 32; 1,440 SCU: 9 of 39; 96 SCU: 3 of 17 - and the count
+    of routes with ANY other commodity trading at the pair equalled the hedges shown in every case,
+    so the scarcity is the data (most terminal pairs have one profitable commodity), not a bug.
+    The top 10 routes for a 576 SCU ship: 6 stock-limited, 1 hedged. Cost: 10 routes in about
+    100 ms including one 45 ms market load. The PATCH_NOTES entry says plainly that the warning
+    will appear far more often than the hedge line. The follow-up that addresses the scarcity is an
+    on-demand "Backup route" button (a load from the same origin that keeps the original
+    commodity), prototyped at 11 of 32 for the same ship - a separate PR.
+
+    **Verification**: 8 unit tests for `hedge_room` (including a real `estimate_route_cargo`
+    result where rounding leaves a fraction of a cent "spare" on a budget-limited haul) and 10
+    end-to-end tests through `_send_ranked_routes` against a real `Database` (plus the real
+    `/top-routes` callback): warns and hedges at the same pair, never suggests the anchor itself,
+    ship- and budget-limited routes get nothing and never load the market, one market load for
+    several routes, a budget caps the hedge quantity, a lookup failure still sends every route.
+    Mutation-checked: 7 deliberate breakages, all caught - but two were MISSED on the first
+    pass, which exposed weak tests rather than weak code (the fixture never put the anchor
+    commodity on record at the pair, so "the anchor may not be its own hedge" was untestable;
+    the `limited_by` check was redundant for every case tested except the rounding one), and
+    both tests were strengthened until the mutations failed. Not deployed.
+
+69. **The Backup route button - a private plan B for stock-limited routes that keeps the commodity the
+    player may already hold (the second half of entry 68's answer to "hedge protection on all
+    routes that would benefit").** Entry 68 measured that a same-pair hedge exists for only about one
+    warned route in five, so the user asked for something better than a warning: a button, not
+    another command; the alternative should KEEP the original commodity in case it is already
+    bought; and when nothing can be found, say so and tell the player to continue as planned.
+
+    **What was checked before designing**: `RouteTrackingView` is a plain `discord.ui.View(timeout=900)`
+    with plain `Button`s in row 0, no owner check, not persistent (buttons die after 15 minutes or a
+    restart), and it is only created when the tracking cog is loaded and the terminal ids are known -
+    so `bot.discord_ui.add_backup_button` creates a bare view when there is none and puts the button
+    in row 1. `/best-route`'s fallback branch is out of scope: it sends ONE shared embed with no
+    per-route messages and no view. The `/mixed-routes` embed is built inline in the command, so it
+    could not be reused; the answer is a compact embed built from the shared presentation helpers.
+    The button is owner-only through the same `interaction_check` pattern the marketplace and
+    inventory views use (Track has none, but this answer depends on the requester's ship, budget and
+    filters). The search runs in a worker thread on freshly read market rows.
+
+    **The search (`bot/uex/backup_routes.py`)** answers three separate questions, each `None` unless it
+    is clearly better: (1) SAME trip, fuller hold - the held commodity plus up to two others at the
+    same terminals, when they add profit; (2) a DIFFERENT destination for the held commodity, only
+    when at least `MIN_DETOUR_GAIN_PCT` (10%) better than not detouring, because travel time is in no
+    profit figure here; (3) "if you haven't bought it yet" - the best mixed load from that origin
+    without it, only when 10% better than every option that keeps it. Rather than asking "have you
+    bought it?", the message shows the sections that apply, and when only (3) exists it adds an
+    explicit "Already bought X? Nothing I can find beats continuing to Y as planned" so a player who
+    holds the commodity always gets an answer for their own situation.
+
+    **Two design flaws found by the tests I wrote, in my own first version**: it needed stock still on
+    record at the origin for the original commodity - but a player who bought the whole stock leaves
+    the origin at 0, so the commodity being kept vanished exactly when it mattered (and, with no row,
+    it told them the route "no longer looks profitable"). Fixed by modelling the anchor as cargo the
+    player HOLDS (`anchor_scu` bought at `anchor_buy_price`, the price the list showed), reading only
+    the destination side from the market rows, charging the full cost of any units a destination
+    cannot absorb, and reporting an unpriceable original route honestly as "no demand" versus "I
+    don't have a current price". `eligible_market_rows` was extracted from `build_pair_opportunities`
+    (behaviour unchanged) so the anchor destinations honour exactly the same system/auto-load/dock
+    filters. The list passes its own ship, budget and filters into the button's context.
+
+    **What real data says** (a copy of the local snapshot, 576 SCU ship, the 32 best routes that hit
+    the stock-limited warning): 15 have something to offer (6 fuller hold, 3 different destination,
+    9 "if you haven't bought yet" - overlapping) and 17 correctly say nothing beats the plan;
+    emptying the origin's stock of the held commodity changed a keep-the-commodity answer in 0 of
+    32; a press takes about 20 ms (38 ms worst). The earlier prototype figure of 11 of 32 was before
+    the 10% margin (different destinations dropped from 5 to 3).
+
+    **Verification**: 18 unit tests for the search and message (including a 150-market random
+    invariant: whatever keeps the commodity earns at least what continuing would, and dropping it is
+    only offered when clearly better), 14 tests through the real ranked-list send path and the real
+    button callback (layout beside Track, owner-only, off-loop thread, failure handling, no-data
+    and bought-everything cases, filters carried through), and the `/best-route` main-branch test
+    now asserts the button and its context. Mutation-checked: 22 deliberate breakages, all caught.
+    Not deployed.
+
+70. **Outside audit of entries 68-69 (routing hedge/backup work), commit `8f9be8e`: three
+    confirmed findings, all fixed with tests.** (1) `/routes-from` and `/route-on-the-way` did
+    real DB work (terminal-name resolution, then trading preferences) before ever acknowledging
+    the interaction - `_send_ranked_routes` deferred first, but only AFTER both commands' own
+    lookups had already run, risking Discord's ~3s initial-response deadline the same way the
+    earlier `/set-trading-preferences` fix addressed (CLAUDE.local.md's "Established
+    conventions"). Fixed by deferring as the literal first line of each command and routing
+    every response after that through
+    `interaction.followup`, never `interaction.response`; `_send_ranked_routes` gained an
+    `already_deferred` flag (default False, so `/top-routes` - which has no pre-defer DB work -
+    keeps its own unconditional defer unchanged) rather than an `is_done()` check, since the
+    latter would have required updating every mocked `interaction.response` across several test
+    files that construct it as a bare `SimpleNamespace(defer=AsyncMock())` with no `is_done`
+    method. The regression test for "does it defer before the DB call" needed the two test
+    files' `_FakeResponse.defer()`/`send_message()` to actually raise on a second call (matching
+    real discord.py's `InteractionResponded`) - the original no-op mock let a forgotten
+    `already_deferred=True` (a real double-defer) pass silently, since nothing observed call
+    order or repetition.
+    (2) `bot.uex.backup_routes._gain_pct` divides by its reference profit - safe when the
+    reference is a real positive figure, but `BackupLoad`'s own accounting charges the FULL cost
+    of everything a player holds even when a destination's demand can't absorb all of it
+    (`anchor_unsold_scu`), so `baseline_profit` (and `best_keeping_anchor_profit`, which folds it
+    in via `x or 0.0` - itself truthy for any nonzero negative) can be genuinely negative: enough
+    of a held commodity goes unsold that continuing as planned is already a loss. Dividing by
+    that negative reference inverts or explodes the percentage's sign, and one call site's
+    literal `+` prefix (rather than a `:+` format spec) turned a negative result into literally
+    "+-215%". Fixed with one shared `_profit_comparison(candidate, reference, subject)` used by
+    all three comparison lines: a percentage only when the reference is a real positive profit,
+    "breaks even" wording for an exactly-zero reference (also fixing a smaller pre-existing bug
+    where `if baseline:`/`if reference:`/`if keeping:` silently dropped the comparison line
+    entirely for a legitimate zero rather than showing one), "turns a loss into" when the
+    candidate is profitable, and "avoids N aUEC of the loss" when both are still losses.
+    (3) `/best-route`'s two hedge-lookup call sites called `get_mixed_route_market_rows()` (a DB
+    read) and `find_hedge_cargo()` with no try/except, unlike `/top-routes`'/`/routes-from`'s
+    shared pre-pass (entry 68), which already wraps this exact fetch - a failure there would
+    abort the whole deferred command with no further response, and this bot has no global
+    app-command error handler. Fixed with an identical try/except around each site (both the
+    UEX-routes primary branch and the raw-price-row fallback), logging and continuing without a
+    hedge line rather than losing the route (the `stock_headroom_warning` text and, on the
+    primary branch, the Backup route button are both computed before the try block, so neither
+    is affected by a failure inside it).
+    Also fixed, called out by the audit as lower-severity cleanup: a trailing blank line at the
+    end of `bot/discord_ui.py` and `tests/test_route_presentation.py` (`git diff --check`).
+    **Deliberately not done this round**, per the audit's own priority ranking (only the three
+    findings above were called "should be fixed" before calling the work polished): an explicit
+    "searching current market data" message on `/mixed-routes`/`/multi-stop-route`/
+    `/route-from-multi`/the ranked route commands (`/diminishing-returns` already has one), and
+    visually disabling the Backup route button after its 15-minute timeout (the established
+    `disable_in_background` pattern from `LegOutcomeView`/`HedgeReportView` would need the
+    button's view to capture `view.message`, which it doesn't yet).
+
+71. **The Backup route button (entries 69-70) removed after live Discord testing - not deployed
+    for long enough to reach a real player, so this is a design reversal, not an incident.**
+    Entries 69-70 above are left as written, per this file's own convention of appending a new
+    dated note rather than editing history away, but nothing in the tree still uses them. During
+    smoke testing on `TestBranch` (never on the Pi), the user judged the button itself not
+    useful enough to keep: it answers "what should I do about my ship's spare capacity," which
+    turned out to be a less pressing question than the one the user actually had in mind -
+    "when a player REPORTS a shortfall at the destination, help them find another buyer for the
+    cargo that didn't sell." That reactive, destination-side case has no coverage at all today
+    (`_suggest_shortfall_hedge`, entry 66, only fires for a BUY-side shortfall at the origin,
+    deliberately: "a sell-side 'less'/'missing' means demand ran short, not stock ... a
+    different problem"). The next PR builds that sell-side counterpart instead, reusing
+    `bot/uex/backup_routes.py`'s search (a player holding unsold cargo and looking for a
+    different destination is exactly `find_backup_routes`' `other_destination` case) - so the
+    module and its tests were kept in the revert rather than deleted, orphaned until that PR
+    wires them into `route_progression.py`. Reverted: the `BackupRouteButton`/`add_backup_button`
+    UI in `bot/discord_ui.py`, its attachment in `/best-route`'s primary branch and the three
+    ranked-list commands (`bot/cogs/prices.py`, `bot/cogs/trends.py`), and
+    `stock_headroom_warning`'s `has_backup_button` parameter (`bot/uex/route_presentation.py`) -
+    back to pointing at `/mixed-routes` unconditionally, as it did before entry 69. The hedge/
+    warning work from entry 68 and the three real correctness fixes from entry 70 (defer timing,
+    the malformed-percentage fix, isolating `/best-route`'s hedge lookup) are untouched - none of
+    those were specific to the button, and entry 70's fixes (1) and (3) apply to code that is
+    still live. Done as a `git revert` of the button's merge commit against the current tip,
+    resolving conflicts against entry 70's later changes to the same files by hand (see the
+    revert's own PR description for exactly which lines were kept vs dropped) rather than
+    reconstructing the pre-button files from scratch - lower risk of silently losing one of
+    entry 70's fixes in the process. The button
+    was never its own slash command, only a message component attached to existing route
+    messages, so the command surface is unaffected - still 67 commands, unchanged from before
+    entry 69.
+
+    One real bug slipped through the conflict resolution: `git revert` reverts a file's
+    WHOLE diff, not just the parts meant to go - `bot/uex/mixed_routes.py`'s
+    `eligible_market_rows` extraction (also from the button PR) auto-merged away along with
+    everything else in that file, even though the plan was explicitly to keep it (comment
+    at the time: "harmless, still needed by backup_routes.py"). The keep-decision was made
+    for `backup_routes.py` and its test file as whole-file conflicts (`git checkout --ours`),
+    but `mixed_routes.py` had no textual conflict at all, so its revert applied silently and
+    was never re-examined - `python -c "import bot.uex.backup_routes"` raised `ImportError:
+    cannot import name 'eligible_market_rows'` the moment it was actually checked. Fixed by
+    re-adding the extraction (`build_pair_opportunities` calling `eligible_market_rows`
+    rather than inlining the filter). Full suite re-run after that fix: 989 passed, `ruff
+    --select F` clean. Lesson: when a revert is deliberately keeping only PART of what a
+    commit touched in some files, every OTHER file the same commit touched needs the same
+    "did this take something I meant to keep with it" check - a clean auto-merge is not
+    evidence the file's end state is what was intended, only that git found no textual
+    overlap to flag.
+72. **The reactive hedge the user actually wanted (entry 71's own closing note) lives on the
+    SELL side, and reuses find_backup_routes' other_destination case with a deliberate
+    origin=destination trick.** `_suggest_shortfall_hedge` (entry 66) only ever fired for a
+    BUY-side shortfall, filling cargo space that just opened up at the SAME origin/destination
+    pair via `find_hedge_cargo`. The new `_suggest_sell_shortfall_reroute`
+    (`bot/cogs/route_progression.py`) fires for a SELL-side shortfall instead: the player is
+    left physically holding the unsold remainder, so the question is "where else can I sell
+    this," not "what else can fill my hold." Reuses
+    `bot.uex.backup_routes.find_backup_routes` - the same search kept unchanged through
+    entry 71's removal specifically for this - called with the CURRENT terminal passed as
+    BOTH `origin_terminal_id` and `destination_terminal_id`. That is not an approximation of
+    the real inputs, it is load-bearing: `find_backup_routes`' `anchor_destinations` already
+    excludes `terminal_id == origin_terminal_id`, so passing the same terminal for both
+    correctly rules out "sell the rest right back here" as its own candidate, and its
+    `baseline`/`fuller_hold` both come back unpriced (there is no "continue as planned" once
+    a shortfall already happened) - which in turn means `_clearly_better` compares any
+    candidate against a `0` reference, so any profitable reroute qualifies rather than
+    needing to clear `MIN_DETOUR_GAIN_PCT` over a real baseline. `ship_capacity_scu` is
+    deliberately capped to exactly the shortfall amount (not the player's real ship), which
+    has the side effect of zeroing `fuller_hold`'s and `without_anchor`'s search space too -
+    exactly right, since only `other_destination` is shown (a design choice, not a
+    limitation: `without_anchor` reads as "abandon this cargo," which is not actionable for a
+    player who already owns it and needs to do something with it). `anchor_buy_price` comes
+    from the paired BUY leg's `actual_price` if reported, else its `quoted_price` - read fresh
+    from `route_progression_legs`, same pattern as `_suggest_shortfall_hedge`'s own
+    `paired_sell` lookup. Deliberately NOT tracked with a button or a `route_progression_hedges`
+    row, unlike the buy-side hedge: that table's confirmation flow piggybacks onto the anchor
+    route's own NEXT leg, and a sell-side reroute has no such next leg to attach a
+    confirmation to - the tracked route already ends at (or continues past) this shortfall.
+    Plain suggestion only, matching `_suggest_shortfall_hedge`'s own best-effort/non-critical-
+    path guarantee (wrapped in try/except, logged not raised, never touches leg persistence,
+    market update, suppression, or next-leg advance). Same session, also fixed: both
+    shortfall-hedge paths now say so explicitly when no complementary commodity/buyer is
+    found, instead of silently sending nothing - a player who just reported a shortfall
+    deserves to know the search ran and came up empty, not to wonder if the report registered.
+    This closes the gap entry 71 identified: the button (removed) answered "what should I do
+    with my ship's spare capacity" pre-trip; this answers "I'm stuck holding cargo, help me
+    sell it," which is what the user described as their original intent for backups/hedges.
+73. **Entry 72's sell-side reroute called find_backup_routes synchronously on the event loop -
+    the exact bug class entries 45/46 already found and fixed for /mixed-routes and
+    /multi-stop-route, missed here because this call site is new, not one of the ones those
+    entries touched.** `find_backup_routes` always computes `without_anchor` internally
+    (`build_mixed_routes` over the FULL market snapshot) regardless of whether the caller
+    reads that field - entry 72's caller never does, but the function has no way to skip the
+    work for a caller that doesn't need it. Caught by an outside audit, not a live incident:
+    `_suggest_sell_shortfall_reroute` (`bot/cogs/route_progression.py`) called
+    `find_backup_routes` directly in the coroutine handling a leg-outcome report, which would
+    run that search on the bot's one asyncio event loop thread on a dense enough market
+    snapshot, delaying every other interaction and background poller for as long as it takes -
+    matching entries 45/46's own measured ~15s reproduction case almost exactly, just via a
+    different entry point into the same underlying cost. Fixed identically to those entries:
+    `await asyncio.to_thread(find_backup_routes, ...)`. Regression test follows entries 45/46's
+    own pattern exactly - monkeypatch the module-level name to record
+    `threading.current_thread()` and assert it isn't `threading.main_thread()`, not a timing
+    check, which entry 45 already found can pass by accident from unrelated awaits earlier in
+    the same handler. Generalizes past this one fix: entry 45's own lesson ("every OTHER
+    caller of a helper, not just the one a report named") applies transitively too - a NEW
+    caller added after that lesson was written can still reintroduce the exact bug the lesson
+    was about, because the lesson's own audit only covers callers that existed at the time it
+    was written. Any future new call site for `find_backup_routes`,
+    `build_mixed_routes`/`build_multi_stop_routes`, or `allocate_pair_cargo` needs this same
+    check before merging, not just the callers already known to need it.
+74. **`/command-usage` (owner-only) exists to inform trimming the command surface for
+    new-user friendliness, not as a general-purpose analytics feature - and the write/read
+    split it landed on came from a genuine mid-build design change, not the first draft.**
+    First version recorded usage as one aggregated row per command
+    (`command_usage_stats(command_name, total_count, owner_count, ...)`), with the write path
+    (`UexBot.on_app_command_completion`, dispatched by discord.py after every slash command
+    that completes WITHOUT raising - confirmed empirically via
+    `inspect.getsource(CommandTree._call)`, not assumed) deciding at write time whether the
+    caller was the owner (`await self.is_owner(interaction.user)`) and bucketing the count
+    accordingly. Once the user asked to also track which users use which commands, that
+    per-command aggregate had nowhere to put per-user data without becoming an unbounded
+    per-invocation log - the exact thing the schema comment was written to avoid. Redesigned
+    around `command_usage_by_user(command_name, user_id, use_count, last_used_at)`, still one
+    row per (command, user) pair, not per invocation - the write path
+    (`Database.record_command_usage`) now just increments a raw `user_id` with no ownership
+    concept at all, and owner-exclusion moved entirely to the read side
+    (`Database.get_command_usage_stats(owner_ids: set[int])`), which GROUPs by command and
+    computes total/owner/real counts, `last_used_excluding_owner_at`, and
+    `distinct_real_users` (how many different non-owner users have ever run it - the clearest
+    single "is anyone actually using this" signal) in one query. `owner_ids` is a set, not a
+    single id, because `commands.Bot.is_owner()` populates EITHER `owner_id` (single) or
+    `owner_ids` (a set, for a team-owned Discord application) depending on which applies -
+    confirmed by reading discord.py's own `is_owner()` source rather than assuming a single
+    id is always available. The general lesson: when a feature request changes what
+    granularity a write path needs to preserve, check whether an aggregate-at-write-time
+    design can even represent the new requirement before extending it - here it couldn't,
+    and moving the aggregation to read time (GROUP BY over the raw per-user rows) turned out
+    simpler than maintaining two synchronized counters ever would have been. `/command-usage`
+    itself lives in `bot/cogs/diagnostics.py` (alongside `/test-dm`, the only other
+    owner/implementation-facing command) and is listed in `help.py`'s `HIDDEN_COMMANDS` next
+    to the pre-existing `marketplace-index-status` - "implementation health checks rather
+    than normal player tools," per that set's own comment - so it doesn't add noise to
+    `/intro` for a first-time user, which is the entire point of building it.
+75. **First command-surface trim (of the new-user-friendliness push entry 74 exists to
+    inform): `/my-ship` removed - but only after checking it wasn't a clean duplicate.** A
+    background survey ranked `/my-ship` as "medium-high confidence, shows strictly less than
+    /my-trading-preferences" - checking the actual code before deleting anything (this
+    project's own "verify empirically, don't infer" convention) found that claim wrong:
+    `format_trading_preferences` printed only the bare saved ship NAME, while `/my-ship`
+    additionally re-resolved it live against UEX's current vehicle list to show real SCU
+    cargo capacity, plus a specific "couldn't be matched, maybe renamed" note when a saved
+    ship no longer resolves. Removing it outright would have been a real regression, not a
+    dedup. Fixed by absorbing that value into `/my-trading-preferences` first, then deleting
+    `/my-ship` for real: `format_trading_preferences` (`bot/uex/trading_preferences.py`)
+    gained an optional `ship_detail: str | None` parameter appended to the ship line - kept
+    the function itself pure/no-I/O per its own docstring, with the live UEX lookup done by
+    the caller and passed in as already-resolved text, never fetched inside the formatter.
+    `/my-trading-preferences` (`bot/cogs/trading_preferences.py`) only defers and hits
+    `get_vehicles()` when a ship is actually saved (mirroring `/my-ship`'s own conditional
+    lookup, not paying for a network call when there's nothing to resolve), and treats a
+    `UexApiError` during that lookup the same way `/my-ship` did - degrade to the bare name
+    rather than fail the whole command. `/set-trading-preferences`' own confirmation message
+    still calls `format_trading_preferences` without `ship_detail` (no live re-lookup
+    immediately after having just resolved/set the ship - redundant work). Generalizes past
+    this one command: a survey or audit's "looks redundant" call is a starting hypothesis to
+    verify against the actual code, not a finding to act on directly - the smaller, cheaper
+    check (read `/my-ship`'s ~20 lines) caught a real information loss before it shipped.
+76. **`/command-usage` (entry 74) grew a per-command drill-down showing real users by name,
+    specifically so the owner can reach out to them for feedback - a genuinely different need
+    than the aggregate counts alone answered.** `command_usage_by_user` gained a `username`
+    column (`ALTER TABLE ... ADD COLUMN username TEXT NOT NULL DEFAULT ''`, plus the matching
+    `CREATE TABLE` in `SCHEMA` for a fresh DB - this table already held real accumulating
+    production data on the Pi by the time this landed, so the additive-only migration
+    convention mattered here for real, not just in theory), refreshed on EVERY write
+    (`record_command_usage`'s `ON CONFLICT DO UPDATE SET username = excluded.username`), not
+    set once - the point is recognizing who to reach out to RIGHT NOW, and a stale name from
+    whenever they first used a command would actively work against that. Stores
+    `interaction.user.display_name` (guild nickname, falling back to global display name/
+    username outside a guild - discord.py's own `User`/`Member.display_name` already handles
+    that distinction), not the raw immutable username, since display name is what the owner
+    would actually recognize someone by. New `Database.get_command_users(command_name,
+    owner_ids)` - same owner-exclusion pattern as `get_command_usage_stats`, ranked by
+    `use_count` - backs a new optional `command` parameter on `/command-usage`
+    (autocompleted from `tracked_command_autocomplete`, which only suggests commands with at
+    least one recorded invocation, not the full live command list, since suggesting a
+    zero-usage command would just send the owner to an empty drill-down). The per-user list
+    embeds real `<@user_id>` Discord mentions alongside the display name - safe specifically
+    because the report is ephemeral and owner-only, so the mentioned user's client never
+    renders the message and never gets pinged by it; this makes the report directly
+    actionable (click through to DM) rather than just informational.
+77. **Entry 76's own mention didn't actually render - caught the same day, live, by the
+    user actually clicking it.** The per-user drill-down wrapped its whole body in a
+    ` ```code block``` ` (matching the aggregate report's own formatting), but Discord does
+    not parse `<@user_id>` mention syntax inside one - it printed as literal text
+    (`<@323346922112811008>`), not a clickable mention, silently defeating the entire
+    point of embedding it (click through to that user, no manual ID lookup). Also
+    surfaced in the same screenshot: a genuinely correct "(unknown name)" for a row that
+    predates this session's own username-tracking deploy (entry 76) - that part was
+    working as designed, not a bug, but the message didn't say why, leaving it
+    indistinguishable from a real failure. Fixed by dropping the code block for the
+    per-user list specifically (the aggregate report keeps its own, since that one has no
+    mentions to protect and benefits from monospace column alignment) and expanding the
+    unknown-name fallback to explain itself ("hasn't used this command since usernames
+    started being tracked") instead of leaving the owner to guess. Generalizes: Discord
+    does not parse ANY markup (mentions, bold, links) inside a code block - any future
+    message that needs both a code block's alignment AND a clickable mention has to pick
+    one or split the two into separate lines/sections, not assume both work together.
+
+78. **`/ingame-item-finder` (which shops sell a weapon/armor/ammo/other item, closest to a
+    given location first) needed almost no new plumbing - three pieces of existing infra
+    covered item resolution and location handling outright.** `item_name_autocomplete`/
+    `find_item_id_by_name` (Marketplace's own item matcher, `bot/uex/marketplace.py`) and
+    `terminal_name_autocomplete`/`resolve_terminal_id_by_name` (the same location-anchoring
+    `/routes-from` already uses) were imported directly into the new cog rather than
+    reimplemented - confirmed via `/categories?type=item`'s docs that `/items` has no
+    name-search parameter of its own (only `id_category`/`id_company`/`uuid`/`size`), so
+    reusing the already-warm, already-tested full-catalog matcher was the only sane option
+    anyway. No new DB table or config was needed either: `/items_prices` (UEX's own
+    documented +1 day cache TTL, added to `UexClient._ENDPOINT_CACHE_TTL`) is read live
+    through `UexClient`'s existing in-memory cache, the same shape `/price` already uses for
+    `/commodities_prices` - a genuinely new *kind* of data (shop inventory, not commodity
+    trading) still didn't need a new persistence layer, since nothing about it needs to
+    accumulate history the way the `intelligence.py` collectors do. The one piece that
+    needed real design thought: `/terminals_distances` has no batch form (one live call per
+    origin/destination pair), so ranking N candidate shops by distance means N live calls -
+    batched via `asyncio.gather` in groups of 8 (matching `get_item_catalog`'s own per-
+    category batch size, for consistency more than necessity) and short-circuited entirely
+    when the player's own location is itself one of the candidate shops (distance is
+    trivially 0, no call needed). A failed/unpriceable distance lookup (a transient error,
+    or a genuinely cross-system pair) sorts LAST, never first or as a fabricated 0 - the
+    same "never let unknown look like the best case" principle entry 55's terminal-health
+    status field and entry 62's demand-status-code override both already established for
+    unrelated fields; worth checking for the same pattern whenever a new ranked list mixes
+    measured and possibly-missing values.
+79. **UEX terminal names consistently follow a "Vendor - Place" convention - useful for
+    display, confirmed empirically rather than assumed. A monospace-table display built on
+    top of that split went through two more live-caught bugs before landing on plain text.**
+    Live testing of `/ingame-item-finder` surfaced two related complaints: the shown terminal
+    name gave no way to navigate (e.g. "Green Imperial Housing Exchange" for what players
+    actually call Grim Hex), and two different vendors at the same place looked identical
+    since only the raw terminal name was shown. Splitting `terminal_name` on the LAST `" - "`
+    (`split_place_and_vendor`, `bot/uex/item_finder.py`) gives a `(place, vendor)` pair -
+    verified against a real `/items_prices` pull before shipping (22 live Boomtube Rocket
+    listings): 18/22 identical either way, the 4 that differ are all improvements ("GrimHEX"
+    vs. the formal station name, "Checkmate" vs. "Checkmate Station"). The one exception with
+    no `" - "` separator at all ("Equipment Contested Zone Checkmate") falls back to the
+    structured `city_name`/`outpost_name`/`space_station_name` field instead of showing the
+    whole raw terminal name - still current, still correct.
+
+    The DISPLAY of that split went through two more live-caught bugs, both instructive. First
+    attempt: a fixed-width monospace table (place, vendor, price, distance) inside a Discord
+    code block, one column set at 15/17 chars. Real live data broke this immediately - four
+    genuinely different Nyx terminals ("People's Service Station Alpha/Delta/Theta/Lambda")
+    all truncated to the identical "People's Servi…", making them indistinguishable; worse,
+    Discord has no hover/tooltip mechanism for message content at all (no JS runs in a
+    message/embed), so there was no way to recover the cut-off text either. Second attempt:
+    size columns dynamically to the longest real name in each result set instead of a fixed
+    width (`PLACE_COL_MAX_WIDTH`/`VENDOR_COL_MAX_WIDTH`, capped generously) - this fixed the
+    collision, but widening the columns made rows wide enough that Discord WRAPS them inside
+    an embed field instead of scrolling horizontally, confirmed live via screenshot ("looks
+    terrible now"). The "a code block scrolls, it doesn't wrap" assumption both of these
+    attempts were built on was simply wrong. Final design, and the one actually live: no
+    table at all - `format_item_listing_line` renders plain proportional text,
+    `"**Place** (Vendor) — Price aUEC · Distance"`, one line per shop. Plain text has neither
+    failure mode a fixed-width table has: it never collapses two different names to the same
+    displayed text, and a long name just wraps like an ordinary sentence instead of
+    misaligning a column - the entire class of bug a monospace table is exposed to simply
+    doesn't apply. `build_item_listing_table`/`format_item_listing_header`/
+    `format_item_listing_row` and the column-width constants from the second attempt were
+    deleted outright once superseded, not kept around deprecated. Two generalizable lessons:
+    (1) verify a rendering assumption (does this actually scroll? does it actually wrap?)
+    against the real client before designing around it, the same "verify empirically" rule
+    this file already applies to UEX API fields; (2) reusing the underlying `(place, vendor)`
+    split for any future feature that displays a UEX terminal name is still worth it - it's
+    the DISPLAY LAYOUT choice that needed two more tries, not the data underneath it.
+
+80. **Most of the `/items` catalog isn't actually sold anywhere - an autocomplete built
+    straight off it suggests dead ends most of the time.** Live testing flagged
+    `/ingame-item-finder`'s `item` autocomplete as feeling "pointlessly bloated," showing
+    names a player couldn't actually pick and buy. Confirmed empirically before designing a
+    fix (same "verify against real data" rule as entry 79 and the scanner table above): of
+    7,769 distinct catalogued item names, only 2,829 ever appear in UEX's own
+    `/items_prices_all` - the rest (cosmetics, ship paint, and similar) have zero real shop
+    listings, so autocompleting them just guaranteed a "No shop currently lists X for sale"
+    reply the instant one was picked. `/items_prices_all` itself was a new discovery this
+    session - unlike `/items_prices` (requires `id_item`/`id_terminal`/`id_category` filters,
+    one call per item), it returns every item-price row across every terminal unfiltered in
+    one call, documented 12h Cache TTL matching UEX's own hourly update cadence. New
+    `UexClient.get_items_prices_all()` backs a new `sold_item_name_autocomplete`
+    (`bot/cogs/item_finder.py`), scoped to items with at least one real price row.
+    Deliberately does NOT fall back to the full catalog the way Marketplace's
+    `traded_item_autocomplete` does (`bot/cogs/marketplace.py`) - that fallback exists for a
+    documented reason (a gap in the BOT's OWN activity-tracking table, not the item's real
+    availability), and that reasoning doesn't transfer here: an item missing from
+    `/items_prices_all` means it's genuinely not sold anywhere right now, so surfacing it
+    would just reintroduce the exact dead-end complaint being fixed. Generalizes past this
+    one command: when an autocomplete or suggestion list is built from a full reference
+    catalog, check whether every catalogued entry is actually a valid choice for what the
+    command does - a catalog can be a superset of "real options" for reasons (cosmetics,
+    unreleased items, discontinued items) that have nothing to do with gaps in the bot's own
+    data collection.
+
+81. **`/where-to-buy-ship` (every in-game terminal that sells or rents one ship, aUEC prices
+    cheapest first) was shaped almost entirely by how little ship-shop data there really is.
+    It has no location option and no distance sort, unlike `/ingame-item-finder`.** It reads
+    UEX's per-ship `/vehicles_purchases_prices` and `/vehicles_rentals_prices` (both keyed on
+    `id_vehicle`, fetched concurrently, 12h `_ENDPOINT_CACHE_TTL` per UEX's own docs) and pure
+    helpers in `bot/uex/ship_shops.py` rank each list cheapest first. Rows with a missing or
+    non-positive price are dropped, never shown as 0, and a fixed tie-break keeps equal prices
+    in a stable order. The embed has one "Buy" field with the star system on each line, then
+    one "Rent — <system>" field per star system. Lines reuse entry 79's
+    `split_place_and_vendor` unchanged, in the same plain-text shape as `/ingame-item-finder`:
+    `**Place** (Vendor) — Price aUEC · System · updated <t:…:R>`. For three-part terminal
+    names the middle segment lands with the vendor (`**Lorville** (New Deal - Teasa
+    Spaceport)`), which usefully names the spaceport. The relative timestamp is there because
+    `price_buy`/`price_rent` are documented as `// last`, the most recent datarunner report,
+    and real rows are often weeks old. In-game aUEC only, never pledge-store prices.
+
+    Live facts checked against real UEX data (2026-09-25) before writing this up:
+    - **Only 7 terminals sell ships**, across 4 vendor brands: New Deal (Crusader Showroom in
+      Orison, Teasa Spaceport in Lorville), Astro Armada (Area 18), Buy and Fly (Ruin
+      Station, Checkmate, Orbituary) and Teach's Ship Shop (Levski).
+    - **174 of `/vehicles`' 282 ships can be bought.** 109 of those are sold at exactly one
+      terminal (median 1, max 7 for the ATLS and ATLS GEO). With one shop for most ships,
+      "closest first" answers nothing, so there is no `location` option or distance sort:
+      the user's call when scoping, and price plus system is what the embed shows instead.
+    - **Rentals are the wide side:** 46 ships are rentable across 32 terminals (Vantage
+      Rentals 17, Traveler Rentals 13, Regal Luxury Rentals 1, Teach's Rentals 1), up to 32
+      locations for one ship (Salvation; MOLE 29, Cutlass Black and Prospector 28). That
+      spread is why rentals are grouped per star system. The largest real outputs are about
+      3,260 chars, well under Discord's 6,000 total, but the embed still goes through
+      `add_chunked_fields` all-or-nothing (footer set before the loop, per the earlier
+      footer-budget lesson), falling back to plain text rather than a partial embed.
+    - **Every rentable ship is also buyable**, so the rental-only path is covered by tests
+      only; no live ship reaches it today.
+    - **108 ships have nothing listed at all**, e.g. the Idris-P. Those get one plain message
+      ("UEX has no in-game purchase or rental location on record for **Idris-P**"). If only
+      one of the two fetches fails, that section says it couldn't load, even when the other
+      section is empty, so "couldn't check" never reads as "nothing on record."
+    - **4 of 339 rental rows arrive with no star system** (`star_system_name` null,
+      `id_star_system` 0): MOTH at terminals 814, 559 and 773, and Aurora Mk II at 150, even
+      though other rows at those same terminals carry one. `terminal_ids_missing_star_system`
+      collects just those ids and the cog looks them up through the existing
+      `Database.get_terminal_star_system` (the `terminal_reference` cache). The row's own
+      system always wins; a failed (`sqlite3.Error`) or empty lookup leaves the row in an
+      "Unknown system" group shown last, never guessed and never dropped.
+
+    **Autocomplete only offers ships with at least one buy or rent row** - entry 80's PR #50
+    lesson applied up front instead of after live complaints: suggesting all 282 ships would
+    guarantee a dead-end reply for the 108 with nothing listed. It's built from
+    `/vehicles_purchases_prices_all` and `/vehicles_rentals_prices_all`, matched on
+    `id_vehicle`, not names. Those two endpoints return only short terminal names ("New Deal
+    Lorville", not "New Deal - Teasa Spaceport - Lorville"), so they feed the autocomplete and
+    nothing on screen. If one `_all` call fails the other's ships are still offered; if both,
+    or `/vehicles` itself, fail it offers no suggestions rather than an error.
+
+    **Rental prices are labelled as a 1-day rate.** UEX documents `price_rent` only as `float
+    // last`, with no duration. Evidence behind the label, recorded in
+    `bot/uex/ship_shops.py`'s `RENTAL_RATE_NOTE` comment: UEX's own terminal rent tabs label
+    the figure "UEC / Day", and Cornerstone's per-duration listings match it at the 1-day
+    price only. The 3/7/30-day prices differ from it, and not by one fixed discount (it varies
+    per ship), so no multi-day price is derived. Live data agrees: the cheapest rent is 1.5% to
+    2.8% of the cheapest buy price across all 46 rentable ships (median 2.5%; Cutlass Black
+    50,274 vs 2,010,960), the scale of a single day, not a month. Each rent line says
+    "aUEC / day", and the caveat "Rental prices are the 1-day rate; longer rentals are
+    discounted in-game" appears once in the embed description (and the plain-text fallback),
+    not repeated on up to 32 lines.
+
+    Known leftovers: "Sabre Raven EX" is two `/vehicles` ids (290 and 291) and `resolve_ship`
+    picks the first, harmless today since neither is sold or rented. It's deliberately
+    standalone rather than wired into `/ship-parts-finder` (the user's choice when scoping,
+    over a "where to buy" section inside the parts thread); the two only share `/intro`'s
+    "🚀 Ship & Cargo" category. Every message
+    is sent with `AllowedMentions.none()`, since ship names and whatever the user typed are
+    echoed back verbatim.
+
+82. **An outside audit of `370e232..d8a0bc2` found a missing migration and unbounded
+    autocomplete latency.** (a) P1: `ship_parts_shopping_entries`' first shape (commit
+    `370e232`) had no `port_name` column; #55 added it to the table's `CREATE TABLE IF NOT
+    EXISTS`, which never upgrades an existing table, so any database created by `370e232`
+    alone would fail every lock-in with "no column named port_name". Production was never
+    exposed: the Pi jumped from `1b3fad9` straight to `4be1b26` (which already had the new
+    shape), and a live lock-in afterward succeeded. The only old-shape table was the local
+    dev DB's, dropped by hand at the time. Still fixed properly:
+    `_migrate_ship_parts_entries_port_name` rebuilds the table when `port_name` is missing
+    (the same detect-and-rebuild pattern as `_migrate_negotiation_message_seen_scope`).
+    Old rows have no record of their physical slot, so they keep their part under the
+    placeholder slot `unknown_slot` rather than being dropped or guessed. The regression
+    test builds the exact `370e232` table and reproduces the audit's error when the
+    migration call is removed. The lesson: a fix that changes an existing table's shape in
+    `SCHEMA` needs a migration even when "nothing deployed has the old shape yet", because
+    that is easy to be wrong about, and a migration costs little. (b) P2: `/where-to-buy-ship`'s
+    and `/ingame-item-finder`'s autocompletes caught `UexApiError` but had no time limit.
+    `UexClient` allows a 15s timeout with retries, and Discord drops an autocomplete answer
+    after about 3s, so a cold cache quietly produced no suggestions. New
+    `bot/autocomplete.py` `gather_within()` stops waiting after 2.5s but deliberately does
+    not cancel the slow fetches, so they finish and fill the 12h cache for the next
+    keystroke. Both cogs also pre-load those caches in `cog_load`, so the first user after a
+    restart isn't the one who pays for the cold fetch. Other autocompletes in the bot
+    (e.g. `ship_name_autocomplete`, `terminal_name_autocomplete`) weren't in the audit's
+    scope and still wait without a limit.
+
+83. **`/ship-parts-finder`'s comparison text was rebuilt from mockups, and making it
+    readable exposed that most of what it listed was wrong for the slot.** The owner's
+    verdict on the old text was "looks terrible": each part was one line of raw wiki field names
+    (`max_health: 72000 · decay_ratio: 0.25`), with values every option shared repeated on
+    every line. The owner picked layout "A" from mockups against real shield data and asked
+    for the same treatment per category. New `bot/uex/ship_part_display.py` (pure):
+    - A heading names the slot (`Shield Generators · Shield Generator Left (S1)`, or just
+      `Radar (S1)` when the port name only repeats the category), then an "All options:"
+      line for any stat every part shares.
+    - Each part gets three lines: name · grade · class · maker, then price · shop ·
+      distance, then labeled stats that differ. `part_stats` has one handler per category
+      (weapon, shield, quantum drive, mount, missile rack, radar, power plant, cooler). A
+      shape it doesn't know gets no stats, never a field dump.
+    - Whole parts are shown up to a 1,400-char budget, stopping at the first that doesn't fit
+      (closest-first order kept), plus "+ N more in the dropdown below". The selected part is
+      always shown. Real Avenger Titan messages land at 1,500-1,600 chars.
+    - The shop is "Place (Vendor)" like `/ingame-item-finder`, or "Vendor at Place" when the
+      place already ends in parentheses (`Ship Weapons at Pyro Gateway (Stanton)`).
+
+    **Weapons were unreachable, and are now their own category.** The wiki types every gun
+    hardpoint as `Turret`, and UEX's "Turrets" category is gimbal/spinal mounts, so there was
+    no way to shop for a gun. A Turret port whose `compatible_types` include `WeaponGun`
+    (`ShipPort.accepts_guns`, stored as a new `ship_parts_reference.accepts_guns` column) is
+    now offered under both UEX "Guns" (shown as "Weapons") and "Turrets" (shown as "Gun
+    Mounts"), separately (the owner's call). UEX category names stay the stored keys, so
+    saved entries don't change; `category_label` is display only. Life support was dropped on
+    the owner's call: almost none are sold, and the wiki has no stats to compare.
+
+    **Prices come from UEX's `/items_prices_all`, not the wiki's embedded copy.** That copy
+    was missing for many parts UEX really lists (Stronghold, 7CA 'Nargun', Durango all showed
+    "price unknown"). `cheapest_listing_by_item` picks each part's cheapest shop row, and full
+    terminal names come from `terminal_reference`. Candidates are now priced, located and
+    sorted closest-first before being cut to 15. Previously the cut came first and silently
+    dropped the closest shops (the "filter before truncating" lesson again).
+
+    **UEX's catalog `size` is wrong often enough that it no longer decides fit.** Checked
+    every sold part against the wiki's own size (2026-09-25):
+    - Missile racks: 18 of 19 listed as "6", including the MSD-322, which is really S3. The
+      Avenger Titan's S3 rack slots showed nothing at all.
+    - Guns: 7 of 86 wrong (AD4B Ballistic Gatling listed S1, really S4; Revenant Gatling
+      listed S4, really S3).
+    - Shields: 6 of 41 wrong (GUARD listed S1, but its 72,000 HP is S3-class).
+    - Power plants: 4 of 41 wrong (FullForce Pro listed S1, really S3).
+    - Gun mounts: 9 of 19 wrong, several with no UEX size at all, so never offered.
+    - Coolers: 1 of 52 wrong. Radar: 6 of 56 wrong. Quantum drives: 0 of 44.
+
+    `part_fits_port` uses the wiki's size, with UEX's only as a fallback when the wiki has
+    none (it reports 0 for a few, e.g. IonWave). Missile racks never fall back
+    (`WIKI_SIZE_ONLY_CATEGORIES`). `candidate_items_for_port` now filters by category only.
+    `candidates_for_port` loads wiki detail in closest-first order, a batch at a time, until
+    the limit is filled, so a slot doesn't cost a detail call per sold part in its category.
+    Details (and misses) are cached 24h.
+
+    **Radars mostly had no wiki detail, because UEX's uuid for them doesn't exist on the
+    wiki.** The same name does resolve, so `WikiApiClient.find_item_detail_by_name` is the
+    fallback. It takes a single exact, case-insensitive match only, the same rule as
+    `get_vehicle_ports`, because `filter[name]` matches substrings. A name with several exact
+    matches returns None rather than a guess.
+
+    **Size alone offered other ships' own turrets.** An S4 Avenger nose was offered the
+    "Reliant Toshima Turret" and the "Drake Buccaneer Spinal Mount". Wiki items carry
+    `required_tags` (`MISC_Reliant_Base`), and a ship carries `port_tags`
+    (`AEGS_Avenger_Base`, via new `WikiApiClient.get_vehicle_loadout`, stored space-separated
+    in a new `ship_parts_reference.port_tags` column). `tags_allow` applies the game's own
+    rule: every required tag must be present.
+
+    That rule then hid the generic VariPuck S4 too. UEX's uuid for "VariPuck S4 Gimbal
+    Mount" is the wiki's Polaris-only variant, one of six wiki items with that exact name
+    (generic, Polaris, M80, Wolf, Intrepid, Stinger). So a part that fails the tag check gets
+    every same-named variant (`find_item_variants_by_name`; the list rows are full records),
+    and `pick_fitting_variant` swaps in an unrestricted one, else one this ship's tags allow.
+    That also replaces the wrong variant's stats.
+
+    **Some ships had no slots at all, because of name mismatches.** The wiki names some ships
+    with their maker ("MISC Reliant Tana", "MISC Freelancer") where UEX's `name` doesn't.
+    `_wiki_ports` retries with UEX's `name_full`, which recovers 21 of the 88 UEX ships the
+    wiki didn't match by name. Most of the other 67 are concept ships or special editions the
+    wiki's game data doesn't have.
+
+    **After deploy:** existing `ship_parts_reference` rows get `accepts_guns=0` and
+    `port_tags=''` from the ALTERs until the startup/daily refresh rewrites them. Until then
+    there's no Weapons category, and ship-specific parts are hidden (never wrongly offered).
+    Still not in `PATCH_NOTES.md` or the Trading Console artifact, per the owner: the finder
+    isn't announced until they say it's ready.
+
+84. **Per-category extra stats for `/ship-parts-finder`, picked by the owner from mockups.**
+    After entry 83's layout A shipped, each category was mocked up with live Avenger Titan
+    data twice, as it was and with extra wiki stats, and the owner picked one per
+    category. `part_stats` (`bot/uex/ship_part_display.py`) now adds:
+    - Weapons: alpha (damage per shot, later labelled "alpha" on request), fire rate and projectile speed (`vehicle_weapon.
+      damage.alpha_total`, `rpm`, `ammunition.speed`). Burst DPS alone hid that the M6A
+      Cannon hits 615 per shot at 100 rpm while the AD4B Gatling hits 84 at 900 rpm.
+    - Radar: cooldown (lifted into the header when every option shares it), EM
+      signature and component HP.
+    - Power plants: EM signature and component HP. Coolers: IR and EM signature (coolers
+      are the main IR source) and component HP.
+    - Shields: EM signature, reserve pool regen rate, and the delay before regen restarts
+      after a hit (`shield.regen_delay.damage`).
+    - Quantum drives: EM signature. Fuel use was dropped, since it's 0.005 SCU/Gm on every
+      S1 drive.
+
+    Signature is `emission.em_max` / `emission.ir`, and component HP is
+    `durability.health`. A zero signature is shown (worth seeing), a missing one isn't.
+    Gun mounts and missile racks stay as they were: component HP was the only extra
+    available, and it's the same 200 HP on every rack. Real messages still land at
+    1,450-1,650 chars.
+
+85. **`/ship-parts-finder` pages its list and ranks each category by its key stat.** Live
+    feedback on a Perseus quantum-drive list: only 7 of 12 parts fit in one message, and
+    the rest were only reachable through the dropdown. It was worse than it looked: each
+    slot was also capped at 15 parts, so in the biggest slots (about 25 sold S2 guns, 19 S1
+    coolers) some parts weren't in the dropdown either. The owner picked page buttons from
+    mockups, over two columns (phones stack them), one-liners for the overflow, or one
+    long embed. Worries raised when choosing: a slot too big for any single page, and the
+    dropdown's 25-option limit.
+    - **Pages** (`paginate_parts`, `bot/uex/ship_part_display.py`): whole parts in ranked
+      order, at most 6 per page (`PAGE_SIZE`). A page also stops early if the next part
+      would pass the 1,350-char list budget. Room for the one "Selected" note is reserved
+      on every page, so picking a part never reflows the pages. Previous/Next sit beside
+      "Lock in selected part", with "Page N of M" under the list. The 15-part cap
+      (`MAX_CANDIDATES_SHOWN`) is gone. Every fitting part is on some page.
+    - **Dropdown per page**: `_PartSelect` holds only the current page's parts, so it can't
+      hit Discord's 25-option limit however big the slot. A picked part stays picked across
+      pages. The "Selected so far" line keeps naming it, and it's only marked (✅) on its
+      own page.
+    - **Ranking** (`ranking_stat`): highest first by quantum speed (drive speed), power
+      generation, cooling, shield HP, DPS (burst), radar aim assist range, gun mount max
+      gun size held (then mount count), and missile size (then count). Ties go to the
+      closer shop, then the cheaper one. A part with no wiki detail ranks last. The header
+      says "N parts, best <stat> first". This replaces closest-first, which the owner had
+      accepted before paging made nothing get cut off.
+    - **All details load up front now**, since ranking needs every part's stat. Cold first
+      loads measured 0.2-4.7s per category (Perseus and Avenger Titan, live), then 0s from
+      the 24h cache. To keep a full cache small on the Pi, `DETAIL_CACHE_MAX` went 500 to
+      1,000 and cached details are stripped of fields nothing reads (`_slim_detail`:
+      images, descriptions, shop lists, variants...).
+
+    Measured live: the largest page was 1,521 chars (Discord's limit is 2,000). The Titan's
+    S1 coolers show all 19, where the cap had hidden 4.
+
+86. **Guns inside turrets, locked weapon ports, and tag checks in both directions.** Live
+    report on the Perseus: "Turret Remote Top (S3)" offered only Gun Mounts (a generic
+    VariPuck, labelled "Holds 1× S1-S13 gun"), with no way to buy guns for it. The wiki's
+    game data showed three separate gaps:
+    - **The guns sit inside the turret.** The ship's slot is the "Remote Turret" housing
+      (`compatible_types` Turret only), and its two S3 gun hardpoints
+      (`hardpoint_gimbal_left`/`_right`) live in that item's own `ports`. New
+      `child_gun_ports` (`bot/uex/ship_parts.py`) reads them from the stock item's wiki
+      detail. The cog's `_with_child_gun_ports` adds them when a ship is opened, from the
+      cached detail, not in the daily refresh (that would be a wiki call per turret across
+      all 282 ships). They're named `<turret port>/<gun port>` so a saved entry stays tied
+      to that exact slot, and shown as "Turret Remote Top · Gimbal Left (S3)". A gun slot
+      whose `compatible_types` also list Turret offers Gun Mounts too. The Perseus now
+      offers 4 gun slots with the 18 real S3 guns.
+    - **Locked ports.** The wiki's `editable` flag (from the game data) is false for the
+      Perseus's remote turret housings and for the PDCs' own guns. A weapon or turret port
+      the player can't change is no longer shopped under either category. Other component
+      types don't read the flag yet, to limit the change to what the report showed. The
+      owner wasn't sure these guns can really be changed in-game. The finder follows the
+      game data's flag, which marks them editable.
+    - **Port-side tag requirements.** Only the part's `required_tags` were checked against
+      the ship. A port's own `required_tags` must also all be in the part's `tags`: the
+      Perseus turret slot requires `RSI_Perseus_Remote_Turret_Top`, a PDC slot requires
+      `PDC`. PDC slots now offer only the Pepperbox, not ordinary gimbals. A part with no
+      wiki detail can't show its tags, so it doesn't fit a tag-gated port.
+    - **The S1-S13 label**: twelve wiki items are named "VariPuck S3 Gimbal Mount", and
+      `pick_fitting_variant` took the first unrestricted one, `Mount_Gimbal_S3_AllSizes`.
+      It now prefers the shortest class name, i.e. the plain `Mount_Gimbal_S3`.
+
+    Three new `ship_parts_reference` columns: `editable`, `required_tags` and
+    `equipped_uuid`. Old rows default to editable, no tags and no stock item until the
+    startup refresh rewrites them, which is the same behavior as before this change.
+
+    Same round: "the list is missing the S5 Attrition laser repeater" (Constellation
+    Andromeda) turned out to be page 2. At 875 DPS in the game data it's the lowest of the
+    7, and page 1 holds 6. The page line now says how many more are waiting ("Page 1 of 2 ·
+    1 more on the next page").
+
+87. **Every background loop now survives any single failure.** The 2026-09-25 full-project
+    audit (`docs/audits/2026-09-25-full-project-audit.md`, finding REL-3) found nine
+    `@tasks.loop` bodies where a DB call or a data-shaping step sat outside any
+    `try/except`, or was only covered by `except UexApiError`. discord.py restarts a loop
+    only after a narrow set of network errors. So a `sqlite3.OperationalError` ("database
+    is locked" past the 30s busy timeout) or a `TypeError` from an odd UEX row stopped that
+    loop until the next restart, with nothing visible to players. This is the same
+    incident as the earlier `snapshot_item_activity` fix. That fix, and
+    `retry_pending_route_progression_actions`'s guard, were applied per loop and never
+    swept across the rest.
+    - **Loops fixed**:
+      - `poll_alerts`, `poll_stock_alerts`, `post_scheduled_digests`,
+        `poll_marketplace_alerts`, `poll_negotiation_messages`, `poll_scanner`,
+        `poll_abandoned_threads`
+      - `snapshot_fuel_prices`: its final DB write was the only unguarded step among the
+        four collectors.
+      - `refresh_trending`: not in the audit's list, found by grepping every
+        `@tasks.loop`.
+    - **Already fully guarded, left alone**: blueprints, the other three collectors,
+      marketplace, personal inventory, the retry loop, and the ship parts refresh.
+    - **Two layers.**
+      - An outer guard: the loop's body moved into a `_..._once()` helper (or the list
+        fetch got its own try), and anything escaping it is logged and retried next cycle.
+      - A per-item guard around each alert, keyword group, user, negotiation, watcher,
+        guild or stale thread. Without it, one row that fails every time would abort the
+        whole cycle at that row and starve everything queued after it, forever.
+      - The negotiation checkpoint still only advances on success, so a failed negotiation
+        is retried rather than lost.
+    - **Tests**: `tests/test_background_loop_guards.py` starts each real loop with a failure
+      injected into its first step and asserts `not loop.failed()`. It also has three
+      one-bad-item-doesn't-block-the-next cases (price alerts, negotiation users, scanner
+      watchers). All 12 fail against the pre-fix code.
+    - **Out of scope, still open in the audit**: delivery failures still recorded as
+      success in three alert paths (REL-7), and a partial `/top-routes` refresh replacing
+      the good snapshot (REL-5). This change keeps each loop alive; it doesn't change what
+      a cycle does with a failed delivery or a half-failed fetch.
+
+88. **Ship Parts Finder: wiki outages aren't cached as misses, and a stale load can't
+    overwrite a newer pick.** Audit findings REL-1, REL-2 and MSG-3, fixed together since
+    the finder is in live testing.
+    - **REL-1, outage cached as "no detail" for 24h.** `_item_detail_cached` caught every
+      `WikiApiError` as "the wiki has no such part" and cached that for
+      `DETAIL_CACHE_SECONDS` (24h). A brief outage therefore left every part loaded during
+      it with no stats and fitted by UEX's catalog size for a day. That size is wrong for
+      18/19 missile racks (entry 83), so racks vanished ("No currently-sold missile
+      racks"), and turret gun slots vanished too.
+      - The catch can't simply be dropped, because the wiki also raises for real misses. A
+        404 for a UEX uuid it doesn't know is how most radars reach the by-name fallback.
+      - So `bot/wiki_api.py` gained `WikiUnavailableError(WikiApiError)`, raised only when
+        `_get_json` runs out of retries (network errors, 429s, 5xx). Following the "classify
+        by type, not message text" lesson, it's the structural marker for "didn't answer" as
+        opposed to a definite answer.
+      - A lookup where either the uuid or the name path went unanswered, and nothing was
+        found, isn't cached. It goes in `_wiki_outages` and is skipped for
+        `WIKI_OUTAGE_RETRY_SECONDS` (5 min), then asked again, so browsing during an outage
+        doesn't wait ~96s per part every time. It raises `WikiUnavailableError`, which the
+        callers' existing `gather(return_exceptions=True)` already treats as "no detail".
+      - Real misses are still cached for 24h, as before.
+      - The player is told. `candidates_for_port` returns a `PartCandidates` (a list
+        subclass, so every caller and test still sees a list) carrying `wiki_unavailable`,
+        the count of the slot's sold parts the wiki didn't answer for, counted before the
+        fit filter drops them. The command counts turrets whose gun slots are missing for
+        the same reason (`turret_gun_lookups_unanswered`). The browser shows a ⚠️ line for
+        either.
+      - Those lines come out of the page's list budget (`LIST_BUDGET_CHARS` minus the notes)
+        rather than being added on top. Measured worst case, 30 long-named guns with both
+        notes: 1,675 chars. Before the budget change it was 1,981, too close to Discord's
+        2,000.
+    - **REL-2, a stale load overwrote a newer pick.** `show_category`/`_load_candidates` set
+      the category and port, then awaited the slow `candidates_for_port`, and applied its
+      result unconditionally.
+      - The race: pick Power Plants (cold, slow), then Quantum Drives (cached). The power
+        plants landed under the Quantum Drives heading, and "Lock in" saved one as the
+        ship's quantum drive.
+      - Fix: a `_load_seq` counter, bumped on every category or slot pick. A load whose
+        number is no longer current drops its result and doesn't touch the message, since
+        the newer pick's interaction updates it.
+      - A second hole in the same flow: `show_slot` left the previous slot's parts, and
+        their dropdown, live during the load. One could be picked and locked in under the
+        new slot. `_load_candidates` now clears the list the moment a load starts.
+    - **MSG-3.** PATCH_NOTES 2.12, the module docstring and the Trading Console (v14) all
+      said "the closest shop". Each part is actually shown at its cheapest shop, with that
+      shop's distance; closest-first ordering was replaced by stat ranking in entry 85.
+      All three now say so. Older entries here are history and stay as written.
+    - Tests: two in `tests/test_wiki_api.py` (exhausted retries raise the subclass; a 404
+      raises plain `WikiApiError`, not retried). Eight in `tests/test_ship_parts_finder.py`
+      (outage retried rather than cached, real miss still cached, the count, the notes, the
+      turret count, the 2,000-char worst case, the stale-load race, and clearing the list
+      on a slot switch). The race and slot tests fail on the pre-fix code on behaviour
+      alone.
+
+89. **Background notifications are marked done only once they're settled.** Audit findings
+    REL-4 and REL-7.
+    - **The bug**: several alert paths caught a failed send, logged it, and marked the
+      notification done anyway, which is the gap the negotiation-alert fix closed
+      earlier. Never applied to:
+      - price alerts, which were deactivated before delivery was even tried, so a failed
+        channel post plus a failed DM used the alert up;
+      - marketplace alerts, which marked the listing seen after a failed DM;
+      - the scanner, which marked the deal seen after a failed channel post and, against
+        the "any channel post can 403, fall back to DM" convention, had no DM fallback;
+      - stock alerts, not in the audit's list and found by checking every caller, which
+        saved "in stock" state for a terminal before its notification went out.
+    - **The mirror problem (REL-4)**: negotiation alerts already retried a failed DM,
+      but retried everything. A message over Discord's 2,000-char limit (UEX allows
+      65,535) or a DM to a user with closed DMs failed identically every 5 minutes,
+      forever: a lost notification plus an endless stream of refused DMs, the pattern
+      that can get a bot flagged.
+    - **The shape**: new `bot/delivery.py` gives every send one of three outcomes.
+      - `DELIVERED`.
+      - `RETRY`: 5xx, 429, network error. Leave it pending.
+      - `UNDELIVERABLE`: any other 4xx (closed DMs 403/50007, missing channel
+        permissions, unknown user, too long). Settle it and stop.
+      - `Delivery.settled` means anything but RETRY.
+      - `send_dm` and `send_to_channel_or_dm` do the sending. The latter is delivered if
+        either path works, RETRY if either failed only temporarily, and UNDELIVERABLE
+        only if neither can work.
+      - Callers mark done only when settled:
+        - A price alert is deactivated once settled.
+        - A stock alert terminal's state is saved only once its restock notice is
+          settled, so an unsent one is detected as a restock again next poll.
+        - A marketplace listing or scanner deal is marked seen once settled. After a
+          RETRY or an UNDELIVERABLE, that alert or watcher stops for the cycle rather
+          than failing on every remaining item.
+      - Negotiation DMs go through `fit_message`, which trims the body and adds a
+        "read the rest on UEX" note. Once one is UNDELIVERABLE, the rest of that
+        negotiation's new messages are marked seen without another refused send.
+    - **Accepted trade-off**: deactivating or marking seen after the send means a DB
+      failure between the two can repeat a notification next poll. A duplicate beats a
+      silently lost one.
+    - **Deliberately left alone**: `personal_inventory.py`'s status DMs. They report an
+      action that has already happened, and the job's own state is the record, so
+      there's no "seen" state for a failed DM to advance wrongly; `/inventory-resolve-
+      floor` resends the floor prompt.
+    - **Tests**: `tests/test_alert_delivery.py`, 13 tests. 8 fail on the pre-fix cogs; the
+      other 5 test the new module itself, plus two behaviours the old code already had
+      right. Existing negotiation-test fakes now return `Delivery` values instead of bools.
+
+90. **Marketplace quality uses the real 0-1000 scale, movers show their own currency, and
+    the scanner can be turned off.** Audit findings MSG-1, MSG-2 and UX-3.
+    - **MSG-1.** UEX documents a listing's `quality` as 0-100, but real listings use the
+      game's 0-1000 (the "trust the data" convention in CLAUDE.md). Yet
+      `/marketplace-search`'s and `/marketplace-alert-add`'s option descriptions, the
+      search footer, and `parse_listing_quality`'s docstring all said 0-100. An alert with
+      no max quality showed "0-100" in three places: the add confirmation and both
+      `/alert-list` views.
+      - So a player typing "at least 80" meant high quality, but matched almost every
+        listing.
+      - The three range displays now share `format_quality_range` (`bot/uex/marketplace.py`),
+        and an unset max shows `QUALITY_MAX` (1000).
+      - The four options take `app_commands.Range[float, 0, 1000]`, so out-of-scale input is
+        refused by Discord itself.
+      - Checked read-only on the Pi first: the one live alert with quality bounds is 0-0,
+        so no stored alert changes meaning.
+    - **MSG-2.** `compute_marketplace_movers` dropped the row's `currency` (UEX's
+      `/marketplace_trends` sends UEC, WIF or MGS per row), and `/marketplace-movers`
+      printed "UEC" for all of them. `MarketplaceMoverEntry` now carries `currency`
+      (default UEC, like the other Marketplace parsers), and the command shows it.
+    - **UX-3.** There was no way to stop the deal scanner: no command, no DB delete.
+      - New `Database.clear_scanner_channel`, reached from a **Turn off** button on
+        `/scanner-status`'s reply (`ScannerOffView`). It's a button rather than a new
+        command, to keep the command list short for new players.
+      - The button only works for the player who ran the command, and it greys itself
+        out on timeout (the "dead buttons look live" finding, UX-7, for this one view).
+      - Seen-deal rows are kept, so turning the scanner back on doesn't re-send deals
+        already shown.
+      - `/set-scanner-channel`'s reply now points at the button.
+    - PATCH_NOTES 2.13 covers these, plus PR #66's delivery fixes, which had no player-facing
+      note yet. Tests: `tests/test_marketplace_labels_and_scanner_off.py` (8).
+
+91. **Route commands say the real reason nothing, or no cargo math, came back.** Audit
+    findings UX-2 and MSG-4, plus MSG-7 in passing.
+    - **UX-2.** A saved `/set-trading-preferences` filter (auto-load-only, system,
+      space-only, capital-ship access) that ruled out every route read as "No ... found right
+      now". `/top-routes`' auto-load branch even said "try again once more route data has
+      been collected", with no hint that the player's own saved setting was the cause.
+      - Each command now records which filters came from saved preferences, not its own
+        options, before filling them in. That's a plain boolean or label per filter, captured
+        before the `if x is None: x = prefs[...]` fallback.
+      - The empty-result message then appends `saved_filters_hint(saved_filter_labels(...))`
+        (`bot/uex/trading_preferences.py`), which names those settings and how to override
+        or change them.
+      - Where it applies: `/best-route` (both branches) and `_send_ranked_routes`
+        (`/top-routes`, `/routes-from`, `/route-on-the-way`) name only the filter that
+        emptied that stage. `/mixed-routes`, `/multi-stop-route`, `/route-from-multi` and
+        `/diminishing-returns` name every saved filter that's active, since any of them can
+        be the cause.
+      - Capital-ship access counts as "saved" only when the preference is on and the ship
+        wouldn't already require it.
+      - A filter passed on the command itself gets no hint, since the player knows they set
+        it.
+    - **MSG-4.** Three different cases all fell through to `ship_vehicle = None`, then to
+      "set a default ship with /set-default-ship", in both the footer and the per-route
+      "Cargo: unknown" line:
+      - no ship at all;
+      - a saved or typed ship that no longer resolves;
+      - UEX's vehicle list failing to load.
+      - New `missing_ship_note` / `missing_ship_cargo_line` (`bot/uex/route_presentation.py`)
+        tell them apart, using a new `ship_lookup_failed` flag set in each command's
+        `get_vehicles()` except branch.
+      - The "resolved, but no cargo capacity on record" case already had its own wording.
+      - `/intelligence-brief`'s vague "ship cargo capacity unavailable" now uses the same note.
+    - **MSG-7.** `/mixed-routes`' empty message said "with auto-load at the origin", but it
+      checks both ends (see CLAUDE.md's autoload convention). It now says "at both ends".
+    - Tests: `tests/test_route_messages.py` (8): the helpers, `/top-routes`' saved-vs-explicit
+      auto-load cases, the unmatched-ship and UEX-down footers, `/best-route`'s saved system,
+      and `/mixed-routes` naming two saved filters.
+
+92. **Two things that grew on the Pi without limit are now bounded.** Audit findings REL-9
+    and REL-10, in line with the standing "keep the Pi lean" preference.
+    - **REL-9, UEX response cache.** `UexClient._cache` only replaced an entry when the
+      same key was requested again, and never removed one. High-variety keys, such as
+      terminal-distance pairs from the item finder, ship parts and multi-stop, plus
+      `marketplace_listings?id=` lookups and per-item prices, accumulated until the next
+      restart. Frequent deploys were masking it. New `_store_cached`:
+      - sweeps expired entries every `_CACHE_SWEEP_EVERY` (200) writes;
+      - caps the cache at `_CACHE_MAX_ENTRIES` (5,000), dropping the least recently
+        written first (a rewrite moves its key to the end).
+    - **REL-10, `liquidity_score_snapshots`.** Measured read-only on the Pi on 2026-09-29:
+      445,518 rows over 37 days (~12k/day), in an 80 MB database.
+      - Both readers did a full `SCAN`: `get_liquidity_movers` filters by time only, and
+        `get_liquidity_history` by name `COLLATE NOCASE` plus time.
+      - `idx_liquidity_snapshots_item_time` exactly duplicated the primary key.
+      - Fix: the schema now drops that index and adds `idx_liquidity_snapshots_hour`
+        `(recorded_hour)` and `idx_liquidity_snapshots_name_hour`
+        `(item_name COLLATE NOCASE, recorded_hour)`. The COLLATE has to match the query's
+        for SQLite to use the index. Both `EXPLAIN QUERY PLAN`s now show them.
+      - New `prune_liquidity_snapshots`, run after each hourly write, keeps
+        `LIQUIDITY_SNAPSHOT_RETENTION_DAYS` = 14. That's twice the longest window anything
+        reads (`/liquidity-trends`' 7 days), and the full history survives in the PC's
+        archived deploy backups.
+    - **A rehearsal on a copy of the Pi's real database changed the design.**
+      - The first version pruned with one `DELETE`. On the copy, that removed 278k rows in
+        8.2s on this PC, and the Pi is several times slower: close to the 30s
+        `busy_timeout`, so other writers, players' commands included, could fail with
+        "database is locked".
+      - It now deletes in `LIQUIDITY_PRUNE_BATCH_ROWS` (5,000) batches, each its own
+        transaction (~0.22s each on the PC), with at most `LIQUIDITY_PRUNE_MAX_BATCHES`
+        (20) per call.
+      - The same copy drained its backlog over three hourly runs (100k, 100k, 73k) to
+        167k rows.
+      - Index creation took 1.1s. Movers went 0.053s to 0.024s and history 0.054s to
+        0.010s, measured on the PC.
+      - SQLite reuses freed pages, so the file stops growing but doesn't shrink without a
+        `VACUUM`. That's deliberately not run: it rewrites the whole file and locks the
+        database while it does.
+    - **Not changed**: the other observation tables. They record changes only, so their
+      growth is bounded by how often the market changes, not by time.
+    - Tests: `tests/test_pi_growth.py` (5): the cache sweep, the cap and its ordering,
+      14-day retention, the batch cap, and both indexes being used with the duplicate gone.
+
+93. **Charts draw off the event loop, and every UEX-backed autocomplete is time-limited.**
+    Audit findings REL-14 and REL-12.
+    - **REL-14.** `/liquidity-trends`, `/marketplace-history`, `/commodity-history` and
+      `/diminishing-returns` drew their chart with pyplot directly in the command
+      coroutine. The bot has one asyncio event loop, so every other command and poller
+      waited while matplotlib rendered.
+      - The four `render_*` calls now go through `await asyncio.to_thread(...)`.
+      - `bot/uex/charts.py` builds each chart on `matplotlib.figure.Figure` instead of
+        pyplot. pyplot keeps a global registry of open figures that isn't thread-safe, so
+        two charts drawn in worker threads at once could corrupt each other. A plain
+        `Figure` isn't registered anywhere, so there's nothing to close and nothing shared.
+    - **REL-12.** PR #59's time limit (`bot/autocomplete.py`) only reached
+      `/ingame-item-finder` and `/where-to-buy-ship`. Five autocompletes still awaited UEX
+      with the client's full 15s timeout plus retries, well past Discord's ~3s deadline, so
+      a cold cache meant no suggestions and nothing logged.
+      - Affected: `ship_name_autocomplete` (`ships.py`, shared by several commands),
+        `commodity_name_autocomplete` (`prices.py`), `mineable_commodity_autocomplete`
+        (`mining_locations.py`), `raw_commodity_autocomplete` (`refinery.py`) and
+        `category_autocomplete` (`marketplace.py`).
+      - New `fetch_within(aw)` wraps `gather_within` for the common one-fetch case. It
+        returns the result, or `None` on a `UexApiError` or past the budget; anything
+        else is a real bug and is raised. The slow fetch keeps running and warms the
+        cache, as before.
+      - Checked every other autocomplete in `bot/cogs/`: the rest read the DB or an
+        already-warm in-memory catalog, not UEX.
+    - Tests: `tests/test_responsiveness.py` (20). Charts module has no pyplot; eight
+      charts drawn from four threads at once are all valid PNGs; `/liquidity-trends` and
+      `/diminishing-returns` render in a non-main thread (the first fails if the
+      `to_thread` is removed). Each of the five autocompletes is checked for a normal
+      answer, a slow UEX (empty, under budget) and UEX down (empty), plus `fetch_within`
+      re-raising a non-UEX exception.
+
+94. **`/ship-parts-finder` gets a ↻ Refresh button that keeps working after the browser
+    closes.** Reported live with a screenshot: after a while, the browser's dropdowns
+    answered "didn't respond in time", and a returning player had no idea how to carry on.
+    Audit REL-13's `PartsBrowserView` part and UX-7.
+    - **Two causes.** The view's `timeout=600` stopped it listening after 10 idle minutes,
+      with nothing on the message saying so. Every restart (several a day while deploying)
+      also dropped it, since only the saved list's `ShipPartsShoppingView` is persistent.
+    - **Options weighed with the user:** expire visibly; a longer timeout; a "Browse
+      parts" button on the saved list; making every control restart-proof; or one
+      restart-proof Refresh button. The user picked the Refresh button: it covers both
+      causes for one special button, leaves the view's tricky paging and stale-load code
+      alone, and is the building block if every control is ever made restart-proof later.
+    - **How it works.**
+      - The ship id, location terminal id and current category ride in the button's
+        custom_id (`ship-parts-browse:refresh:<vehicle>:<terminal>:<category>`, dropping
+        the category if it would pass Discord's 100 characters).
+      - `RefreshBrowserButton`, a `discord.ui.DynamicItem`, is registered once in
+        `cog_load` (`bot.add_dynamic_items`) and handles every click, live view or not.
+      - `refresh_browser` defers, rebuilds a fresh view via `_build_browser` (now shared
+        with the command) and edits the same message.
+      - The view comes back on the same category. `restore_category` reloads its parts,
+        or asks for the slot again on a multi-slot category. Page, slot and an unlocked
+        pick are not kept. If the reload fails, it reopens with no category and a ⚠️ note.
+      - Any unexpected error still answers the player: discord.py only logs a dynamic
+        item's exceptions, which would leave "thinking..." forever.
+    - **Idle expiry is visible.** `on_timeout` greys out everything except Refresh and
+      swaps the message's last line to "Closed after 30 minutes idle. Tap ↻ Refresh...".
+      The idle timeout went from 10 to 30 minutes (`BROWSER_IDLE_SECONDS`) at the user's
+      request; the note's wording is built from that constant.
+      A restart never runs `on_timeout`, so every browser message ends with "Buttons not
+      responding? Tap ↻ Refresh." Both lines count against `LIST_BUDGET_CHARS`.
+    - **A discord.py trap that shaped the design.** In 2.7, `ViewStore.remove_view` pops
+      every `DynamicItem` pattern the view contained from the bot-wide registry. Putting
+      the real `RefreshBrowserButton` inside the live view would have made the FIRST
+      browser to time out or be replaced silently kill Refresh on every message, including
+      old ones after a restart. Reproduced against a real `ViewStore`. The live view
+      instead carries `_RefreshStub`, a plain button with the same custom_id and
+      `is_dispatchable()` returning False, so the view store never tracks it.
+    - **Replacing a live view.** `ShipPartsFinder._browsers` maps message id to its live
+      view. A refresh stops the old one BEFORE editing: `remove_view` also pops
+      `_synced_message_views[message_id]`, so stopping it afterwards would drop the new
+      view's registration. `on_timeout` does nothing unless its view is still the one in
+      `_browsers`, so a replaced view can't overwrite the new browser.
+    - **Not covered:** browser messages posted before this deploy have no Refresh button;
+      rerunning the command replaces them. REL-13's other two stuck states (a failed
+      command after its defer, and the browse message after an unexpected exception) are
+      still open.
+    - Tests: `tests/test_ship_parts_refresh.py` (17), plus the 2,000-character check in
+      `tests/test_ship_parts_finder.py` now also measures the idle-closed footer. The store
+      test fails if the stub is swapped for a real `DynamicItem`, checked directly.
+
+95. **The ship-slot reference refresh asks the wiki only about ships that are due, and no
+    longer wipes saved slots on an empty answer.** Audit finding REL-11.
+    - **Measured on the Pi on 2026-09-29, read-only.**
+      - Every start re-read every ship: about 383 `GET /api/vehicles` wiki requests in
+        15 seconds (04:45:20 to 04:45:35), roughly 25 a second.
+      - That morning's three deploy restarts made 1,149 of them in 6 hours.
+      - 201 ships had saved slots (2,273 rows).
+      - Cause: `refresh_reference` was a `tasks.loop(hours=24)`, which runs immediately
+        on every start, and nothing recorded when a ship was last read.
+    - **A second defect.** `_wiki_ports` returns `[]` for a ship the wiki has no exact
+      match for. That's normal for concept ships, but it also happens on a brief name
+      mismatch. `replace_ship_parts_reference(id, name, [])` then deleted that ship's
+      saved slots.
+    - **Fix.**
+      - New table `ship_parts_reference_status` (`id_vehicle` primary key,
+        `refreshed_at`, `port_count`) records every ship the wiki was asked about. That
+        includes ships with no slots, which have no reference rows to date them.
+      - The loop now runs hourly (`REFERENCE_CHECK_HOURS`) and asks only about ships not
+        refreshed in `REFERENCE_REFRESH_HOURS` (24). A restart costs nothing, and a crawl
+        a restart interrupted resumes where it stopped.
+      - `WIKI_CRAWL_SPACING_SECONDS` (1.0) between ships.
+      - An empty answer keeps the saved slots, with a logged warning. So does a definite
+        error: a 404, an identity mismatch, or data that can't be parsed. Both still mark
+        the ship refreshed, so a ship the wiki doesn't have is asked about daily, not
+        hourly.
+      - `WikiUnavailableError` (the wiki didn't answer at all) leaves the ship due. After
+        `WIKI_CRAWL_MAX_OUTAGES` (5) in a row, the crawl stops until the next hourly check,
+        instead of trying every ship during an outage. One answered ship resets the count.
+      - An unexpected failure, such as a locked database, also leaves the ship due.
+    - **After deploy.** The status table starts empty, so the first run reads every ship
+      once, about 5-8 minutes at one ship a second. That is deliberately not seeded from
+      the existing rows, since those carry no timestamp. All ships then come due together
+      roughly a day later, and are read at the same spaced pace.
+    - **Not changed:** `_ports_for_vehicle` still falls back to a live wiki lookup for a
+      ship with no saved rows, and turret gun slots are still read when a ship is opened
+      (entry 86).
+    - Tests: `tests/test_ship_parts_reference_refresh.py` (12). The "restart asks only
+      about due ships", "empty answer keeps saved slots" and spacing tests each fail
+      against the old behaviour, checked by reintroducing it.
+
+96. **Ship Parts Finder's fitting-variant lookups go a batch at a time, and an outage there
+    is no longer silent.** Audit finding REL-15.
+    - **The burst.** `_swap_in_fitting_variants` looks up every wiki item sharing a
+      part's shop name, for each part that fails the tag check (entry 86). On a
+      tag-restricted slot, such as a PDC slot or a remote turret, that's most of the
+      category: up to ~86 lookups. They all went out in one `asyncio.gather`, while every
+      other wiki fetch in the cog goes `DETAIL_BATCH_SIZE` (8) at a time.
+    - **Found while fixing it: the REL-1 gap, one function over.** `_variants_cached`
+      turned any `WikiApiError`, including `WikiUnavailableError`, into "no variants"
+      without recording it. During an outage:
+      - the part failed the tag check and was dropped, so the slot silently listed fewer
+        parts;
+      - the browser's ⚠️ "wiki didn't respond" note didn't count it;
+      - every browse fired all the lookups again, each with its full retries.
+    - **Fix.**
+      - Lookups are batched by `DETAIL_BATCH_SIZE` and deduplicated by shop name, since
+        several parts can share one.
+      - `_variants_cached` handles outages like `_item_detail_cached`: an unanswered
+        lookup is recorded and raises `WikiUnavailableError`, and that name is skipped
+        for `WIKI_OUTAGE_RETRY_SECONDS`. A definite error (e.g. an identity mismatch) is
+        cached like any other answer.
+      - The shared bookkeeping moved into `_record_wiki_outage`, used by both lookups.
+      - A part whose variant lookup went unanswered is marked `_detail_unanswered`, so
+        `PartCandidates.wiki_unavailable`, and the note built from it, counts it. It is
+        still left out of the list, since its fit can't be confirmed.
+    - Tests: `tests/test_ship_parts_variant_lookups.py` (5): peak concurrency equals the
+      batch size across 86 lookups, one lookup per shared name, the outage flag plus its
+      5-minute skip and recovery, caching of a definite error, and the end-to-end note
+      count. All 5 fail against the old code. The dedupe test needed its fake to yield
+      like a real request: with an instant fake, the old code's cache absorbed the
+      duplicates by accident.
+
+97. **A partial trending/top-routes refresh no longer replaces a good snapshot silently.**
+    Audit finding REL-5.
+    - **What happened.** `Trends.refresh_trending` (every 45 minutes) fetches prices, then
+      routes, for each tradeable commodity. It skipped any commodity whose fetch failed,
+      but still replaced all three caches (`_trending`, `_top_scored_routes`,
+      `_top_in_stock_routes`) and stamped them "refreshed" now. A UEX blip mid-refresh
+      made `/trending`, `/top-routes`, `/routes-from` and `/route-on-the-way` silently
+      incomplete for the next 45 minutes. An empty `/commodities` answer would have wiped
+      all three.
+    - **Scope correction.** The audit also named `/movers`, but it fetches
+      `/commodities_prices_all` live and never reads these caches. The daily digest's
+      "Most Actively Traded" does read `_trending` (via `get_trending_snapshot`), so it
+      benefits from the keep-previous rule, but it shows no partial note.
+    - **Fix.**
+      - The loop now records a `RefreshGap(missing, attempted)` per cache
+        (`bot/uex/trends.py`). A failed price fetch, or unexpected data, counts against
+        all three caches; a failed route fetch only against the two route lists.
+      - `should_replace_snapshot` decides whether to use the result. A refresh missing
+        more than `REFRESH_MAX_FAILED_SHARE` (10%; a full refresh covers 159 commodities,
+        measured on the Pi, so about 16) keeps the previous snapshot while that
+        one is more complete and younger than `REFRESH_KEEP_PREVIOUS_MAX_AGE` (2 hours).
+      - Past 2 hours, the fresher partial one is used: fresh prices for most commodities
+        beat hours-old stock figures for all of them.
+      - The first refresh after a start is always used. An empty commodity list
+        (`attempted == 0`) counts as a fully failed refresh.
+      - A kept snapshot keeps its own older timestamp, so "refreshed" stays true. It's
+        logged as a warning.
+    - **What players see.** Any partial snapshot in use adds "partial refresh: N of M
+      commodities couldn't be fetched" to the `/trending` and route-command footers. The
+      route commands' empty results add "Some routes may be missing: the last refresh
+      couldn't fetch N of M commodities.", so "nothing found" isn't read as "nothing
+      exists". The route footer is set before the field loop, so
+      `add_chunked_fields`' size check already includes the note.
+    - **`Trends` class attributes.** The gap attributes also exist at class level (a
+      `RefreshGap` is immutable). Many tests build `Trends.__new__(Trends)` by hand, and a
+      snapshot set without a refresh then counts as complete.
+    - Tests: `tests/test_partial_refresh.py` (17):
+      - the replace/keep policy, including the 2-hour give-way and the empty list;
+      - the note texts;
+      - the real `_refresh_trending_once` against a fake UEX, covering a clean refresh,
+        a 30% blip keeping the snapshot, a 5% gap recorded, route-only failures, the
+        first refresh, an empty list, and the 2-hour give-way;
+      - the `/trending` and `/top-routes` footers, and the auto-load empty-result hint.
+
+      Forcing the decision back to always-replace fails the keep-previous tests.
+
+98. **A `/ship-parts-finder` browse can no longer outlast Discord's 15-minute interaction
+    window on a hanging wiki.** Audit finding REL-6.
+    - **How long it could take.** `WikiApiClient` gives each request a 30s timeout and 3
+      attempts with 2s/4s backoff, so about 96s per lookup when the wiki hangs. A detail
+      miss makes two lookups in a row (uuid, then name). `_attach_details` runs batches of
+      8 one after another. A cold category of 40-86 parts could therefore take 16-35
+      minutes. The deferred component interaction's token lasts 15, so the final edit
+      failed and the list never appeared.
+    - **Fix.**
+      - `candidates_for_port` takes `time_budget`, defaulting to `LOAD_TIME_BUDGET_SECONDS`
+        (45). Both callers are interactive: the category/slot load and the ↻ Refresh
+        rebuild. `None` means no limit.
+      - The three batched steps (`_attach_distances`, `_attach_details`,
+        `_swap_in_fitting_variants`) run each batch through a new `_gather_until`, which
+        takes zero-argument callables, so a batch reached after the deadline is never
+        started at all.
+      - Within the deadline, `_gather_until` uses `bot/autocomplete.py`'s `gather_within`:
+        a lookup still running when time is up returns `TimeoutError` but is not
+        cancelled. It finishes in the background and fills `_detail_cache`, so the next
+        browse is fast.
+      - `gather_within`'s docs and log line are now generic.
+    - **What the player gets.** A timed-out detail or variant lookup counts as
+      `_detail_unanswered`, like an outage, so the existing ⚠️ note counts it. It is not
+      recorded in `_wiki_outages`, since it may still succeed.
+      - The part is still listed from UEX's own data, as before for any unanswered part.
+        The note now says "...so they may be missing or listed without their stats", which
+        describes both outcomes.
+      - A distance lookup cut off by the deadline shows as unknown.
+    - **Why 45 seconds.** A healthy cold load measured 0.2-4.7s (entry 85). 45s bounds the
+      hanging-wiki case far inside the 15-minute token, and short enough that a player isn't
+      left waiting minutes.
+    - Tests: `tests/test_ship_parts_load_deadline.py` (7):
+      - partial results within the budget, and the cache filled by the cut-off lookups;
+      - no batch starting after the deadline;
+      - slow distances coming back unknown;
+      - no budget waiting for everything, and a normal load being unaffected;
+      - the interactive default, and that the browser doesn't opt out.
+
+      Making `_gather_until` ignore the deadline fails the four time-bound tests.
+
+99. **Price and stock alerts only accept real commodities, respond before saving, and a
+    restock check sends one message.** Audit findings UX-5 and UX-1, and REL-8 for these two
+    commands.
+    - **UX-5.** `/alert-add` and `/stock-alert-add` saved whatever commodity text was typed.
+      The pollers ask UEX for that exact name, so a typo got no rows back, and the alert
+      silently never fired.
+      - New `resolve_tradeable_commodity` (`bot/uex/trading.py`) uses the same rule as
+        `resolve_ship`: an exact case-insensitive match first, else a unique substring
+        match, scoped to tradeable commodities (the ones `commodity_name_autocomplete`
+        offers). The canonical name is saved, which also normalizes case for the pollers'
+        grouping.
+      - An unresolved name is refused by `unknown_commodity_message`, with up to three
+        `suggest_commodity_names`: the ambiguous substring matches, else `difflib`'s
+        nearest spellings.
+      - If UEX's commodity list can't load, the alert isn't saved and the player is told to
+        try again.
+      - Checked read-only on the Pi first: no live alert had an unmatchable name (0 active
+        price alerts, 2 stock alerts, both valid), so no cleanup was needed.
+    - **REL-8 (these two commands).** Both wrote to the DB before responding. A slow DB or
+      UEX lookup could pass Discord's 3-second window, and a retrying player got a
+      duplicate. Both now defer first. `/stock-alert-add` defers at the reply's own
+      visibility, so a personal alert's error replies stay private too. The rest of REL-8's
+      list is still open.
+    - **UX-1.** `detect_restocks` treats every terminal an alert has never seen as a
+      restock, deliberately, so a new watch reports stock right away. But each one was its
+      own ping, and on a first check that meant every stocked terminal: a flood for a
+      common commodity.
+      - New `format_restock_message` (`bot/uex/stock_alerts.py`) makes one message per
+        alert per check: cheapest first, up to `RESTOCK_MESSAGE_MAX_TERMINALS` (10) lines,
+        then "…and N more".
+      - Per-line cargo fit shows only when a ship is known; otherwise the "set
+        /set-default-ship" hint appears once.
+      - A single restock keeps the old wording.
+      - Delivery tracking is per message now: if it isn't settled, none of that check's
+        terminals are recorded, so all are retried together.
+    - Tests: `tests/test_alert_add_and_restock.py` (15):
+      - the resolver and its suggestions;
+      - both commands' defer-then-look-up-then-save order, the canonical name, typo
+        refusal, the UEX-down refusal, and private replies for personal alerts;
+      - the combined message: order, "and N more", fit per line vs. hint once, and under
+        1,900 chars with 40 long names;
+      - the poller sending one message for five terminals, with none recorded when it
+        fails.
+
+      All 7 command/poller tests fail against the old cogs.
+
+100. **Every command that writes to the DB now responds first.** Audit finding REL-8, the
+     rest of it (entry 99 covered `/alert-add` and `/stock-alert-add`).
+     - **The risk.** A write can wait on a lock for up to the 30s `busy_timeout`, far past
+       Discord's 3-second window to respond. The player sees "did not respond" and runs
+       the command again. That creates a duplicate row (trade log, Marketplace alert), and
+       for `/inventory-remove` it removes the quantity twice.
+     - **Found by sweeping, not just the audit's list.** An AST scan of every slash command
+       and UI callback in `bot/cogs/`, checking whether its first `await` is a response,
+       found the audit's eight plus five more writes:
+       - the audit's eight: `/trade-log-add`, `/marketplace-alert-add`,
+         `/inventory-set-minimum`, `/inventory-remove`, `/inventory-confirm-sale`, the
+         link-account modal, `/set-scanner-channel` and `/set-digest-channel`;
+       - the five more: `/unlink-uex-account`, `/digest-disable`, the "off" path of
+         `/negotiation-alerts`, `/clear-default-ship` and `/clear-trading-preferences`.
+
+       Reads before a reply were left alone: with WAL on, a read never waits on a writer.
+       The UI callbacks' first awaits are in-memory claims or owner checks.
+     - **Fix.** Each of the 13 now defers ephemerally as its first statement and replies
+       through `interaction.followup.send`.
+       - The modal uses `defer(ephemeral=True, thinking=True)`: for a modal submit,
+         discord.py only makes a private "thinking" reply with `thinking=True`.
+       - `/negotiation-alerts` already deferred on its "on" path; that later defer was
+         removed, since a second one raises `InteractionResponded`.
+     - Tests: `tests/test_defer_before_db_writes.py` (13) runs each handler against a DB
+       fake that records whether the defer had already happened when it was first
+       touched. A direct `response.send_message` fails the test. All 13 fail against the
+       old cogs. Three existing tests that read the reply from `response.send_message`
+       now read the followup.
+
+101. **Listing ids where players need them, and plain-text lists that always send.** Audit
+     findings UX-4, UX-13, MSG-9 and MSG-10.
+     - **UX-4.** `/marketplace-listing` and `/marketplace-delete-listing` take a listing id,
+       and their option descriptions say it's shown in `/marketplace-search` - it wasn't.
+       - `/my-favorites` printed the favourite row's own `id`, and `/my-negotiations` the
+         negotiation's. No command accepts either, and negotiation-alert DMs don't show
+         the negotiation id.
+       - All three now show the listing's id: search as "· listing #N" on each result plus a
+         footer pointer, and the two lists as "Listing #N — ...".
+     - **UX-13.** A sweep for plain-text `"\n".join(lines)` sends found four with no length
+       guard: `/my-favorites`, `/my-negotiations`, `/trade-log` and `/uex-trades`. Over
+       Discord's 2,000 characters a send is refused outright, so the command failed.
+       `/trade-log`'s `limit` was also unbounded.
+       - New `fit_lines` (`bot/delivery.py`, beside `fit_message`) keeps whole lines, counts
+         the rest as "…and N more.", and always keeps a footer line.
+       - All four use it now, and `/trade-log`'s `limit` is `Range[int, 1, 50]`.
+       - The other joined-list sends already guard themselves: `/alert-list` truncates,
+         the blueprint list slices to 1,900, and `/command-usage` pages.
+     - **MSG-9.** `/uex-trades` printed UEX's `date_added` unix timestamp raw. It's now a
+       Discord `<t:N:f>` timestamp, shown in each viewer's own time zone.
+     - **MSG-10.** `/uex-trades` told the player their key "may be invalid or expired" for
+       any UEX failure, an outage included. It now uses `describe_uex_api_error`, which
+       only suggests re-linking for a `UexAuthError`. That was the only such message in
+       the account and trade cogs.
+     - Tests: `tests/test_listing_ids.py` (3) and `tests/test_long_lists.py` (8). All 8
+       command tests fail against the old cogs; only the 3 pure `fit_lines` tests pass
+       there.
+
+102. **Every failed command, button and form now answers; one private thread per player; a
+     safe `Retry-After`.** Audit findings REL-13 (the rest of it), REL-16 and REL-17.
+     - **REL-13.** There was no command-tree or view error handler anywhere, and discord.py's
+       defaults only log. A command that raised after deferring stayed on "thinking..."
+       forever, and a failing button or form showed Discord's "interaction failed" with
+       nothing saying what to do next.
+       - New in `bot/discord_ui.py`: `tell_player_it_failed`, `on_app_command_error`
+         (registered in `UexBot.__init__` with `tree.error`), and `BotView`/`BotModal` base
+         classes whose `on_error` answers. All 25 views and 7 modals now use them, and a test
+         walks every subclass so a new one can't be left on the plain base.
+       - A missing permission now names the permission and the command ("You need the Manage
+         Server permission to use `/set-digest-channel`."). Digest's own
+         `cog_app_command_error` is gone: discord.py calls the tree handler after any cog
+         handler, so both would have replied. A test checks no cog adds one back.
+       - Not covered, on purpose: autocomplete errors never reach the tree handler
+         (discord.py swallows them; the autocompletes already time-limit themselves), and
+         dynamic items aren't views - Ship Parts Finder's ↻ Refresh, the only one, already
+         catches its own failures.
+       - Ship Parts Finder: a failed part load, whatever the exception, now keeps the browser,
+         clears the old parts from the message and says "Pick it again to retry". Before, a
+         non-UEX, non-wiki failure left the old parts on screen after the view had dropped
+         them, and a UEX or wiki failure replaced the whole browser with a bare error line.
+         Failing to post the browser in the player's thread now says so too.
+     - **REL-16.** Ship Parts Finder's and the blueprint planner's thread services take a
+       per-(player, server) `asyncio.Lock` around get-or-create, so two quick calls can't each
+       create a private thread and orphan one.
+     - **REL-17.**
+       - `retry_after_seconds` (`bot/uex/client.py`) reads `Retry-After` as seconds or an HTTP
+         date (a past date means now), falls back to `2**attempt` for anything else, and caps
+         at 60 s, UEX's per-minute window. `float()` raised `ValueError` on a date, which none
+         of the UEX-only excepts catch.
+       - The 25-option slot menu: measured on the Pi's saved slots for all 201 ships, the most
+         in one category is 12 (the Fury MX's missile racks), and turret gun slots add only a
+         few (the Corsair has 8 gun slots). It can't be hit today, so rather than paging the
+         menu, the browser now says so if a category ever passes 25.
+     - Tests: `tests/test_failed_interactions.py` (26). Each fix was undone one at a time, and
+       its test failed every time.
+
+103. **Expired buttons and menus grey out.** Audit finding UX-7. A view's controls stop
+     working when it times out, but they looked as usable as before, and a click just showed
+     Discord's "This interaction failed". Only the scanner's Turn off button and the Ship
+     Parts Finder browser greyed out. The two marketplace confirmations and the alert
+     remover disabled their buttons in memory but never edited the message, so they still
+     looked live.
+     - `BotView` (`bot/discord_ui.py`) now greys out every control on its message when it
+       times out (`on_timeout` -> `grey_out`). Editing that message needs something that still
+       reaches it, so it tries, in order:
+       1. the freshest click whose answer updated the message (`message_update` or
+          `deferred_message_update`) - a click answered with a new reply or "thinking..." has
+          a different message as its reply, so it's skipped;
+       2. `origin`, the interaction that sent the view with `response.send_message` or
+          `edit_message`;
+       3. `message`, the sent message (`followup.send(..., wait=True)` - without `wait`,
+          discord.py returns nothing);
+       4. for a public message only, a plain channel edit of the same message.
+     - The first three use interaction tokens, which last 15 minutes and are the only way to
+       edit an ephemeral message. Clicks are remembered in `BotView.interaction_check`, so a
+       subclass that overrides it calls `super()` first; the six that do were updated.
+     - Every timed view's send site now sets `origin` or `message` (15 sites, including all
+       four route commands' Track buttons). The blueprint Configure crafting menu (ephemeral)
+       drops from 15 to 10 idle minutes, so its token still works when it times out.
+     - A view that hands its message to another view must `stop()` first, or its timeout
+       would put its greyed-out buttons back over the new ones. `SetMinimumPricesView` was the
+       one case: it turns into the authorize screen, or clears its buttons.
+     - The scanner's own `on_timeout` is gone (the base class does the same), and the
+       marketplace confirmations' timeouts now call `super()`. The Ship Parts Finder browser
+       keeps its own, which adds a Refresh note.
+     - Not verified live: that the channel-edit fallback can edit a public message sent as an
+       interaction followup once its token has expired. The Track buttons on route results
+       (public, 15 minutes) depend on it. If it can't, those buttons simply stay as they were
+       before this change.
+     - Tests: `tests/test_expired_views.py` (11), with `tests/bot_views.py` listing every
+       BotView subclass. Each change was undone one at a time (12 in all), and its test
+       failed every time.
+
+104. **The saved risk tolerance now filters routes.** Audit finding UX-9. It was stored and
+     shown but did nothing, labelled "(not yet enforced)" everywhere (entry 52's deliberate
+     "store now, filter later"). On the Pi, 5 players had it set to High and 1 to Medium -
+     that one expected illegal goods to be left out, and they weren't.
+     - What each level leaves out is what its choice has always said:
+       - Low: illegal, explosive, volatile (quantum or over time) and buggy goods, i.e.
+         every flag in `RISK_FLAG_KEYS`.
+       - Medium: illegal and buggy goods.
+       - High, or none set: nothing.
+     - On the Pi's data, all 205 commodities have their flags collected; of the 125 traded,
+       Low leaves out 12 and Medium 11 (18 illegal, 2 explosive, 3 volatile, 0 buggy).
+     - New in `bot/uex/commodity_risk.py`: `RISK_TOLERANCE_EXCLUDES`, `RISK_TOLERANCE_SKIPS`,
+       `outside_risk_tolerance` and `within_risk_tolerance` (market rows carry their own
+       commodity's flags from `get_mixed_route_market_rows`' join). A commodity with no
+       collected flags is kept: routes already warn its risk is unknown.
+     - Where it applies, always from the saved preference (there's no per-command option):
+       - `/top-routes`, `/routes-from`, `/route-on-the-way` (`_send_ranked_routes`): after
+         the system filter, on the full pool, before ranking and truncation.
+       - `/mixed-routes`, `/multi-stop-route`, `/route-from-multi`,
+         `/diminishing-returns`: the whole market pool, before any search.
+       - Every "Hedge:" suggestion, since a hedge is a different commodity: `/best-route`
+         (both branches), the ranked lists, and a tracking thread's buy-side shortfall
+         hedge (which reads the thread owner's current preference). A sell-side reroute
+         keeps the same commodity, so it isn't filtered.
+     - `/best-route` names its commodity, so it's never filtered out. When that commodity is
+       outside the tolerance, the embed says so under its risk warning.
+     - An empty result says the tolerance is why (`risk_tolerance_hint`), with its own
+       wording: `saved_filters_hint` says "set that option on this command", and risk
+       tolerance has no such option.
+     - Not changed: `/intelligence-brief` reads no saved preferences at all (only the
+       default ship), so it doesn't apply this one either.
+     - Tests: `tests/test_risk_tolerance.py` (26). Each change was undone one at a time (13 in
+       all, including each of the four mixed-cargo pools separately), and its test failed
+       every time.
+
+105. **One delivery choice for all three alert types, and each says how often it fires.** Audit
+     finding UX-12, decided with the user on 2026-09-30.
+     - Before: price alerts (`/alert-add`) only posted in the channel they were set in;
+       marketplace alerts only DMed; restock alerts had a `scope` option defaulting to the
+       channel. On the Pi: 0 active price alerts, 2 restock alerts (both in-channel), 2
+       marketplace alerts.
+     - All three add commands now share one `delivery` option (`bot/delivery.py`:
+       `DELIVERY_CHOICES`): "DM me (default)" or "Post in this channel and ping me". It's
+       stored in each table's `scope` column ('personal' / 'global'), which restock alerts
+       already had. Restock's own `scope` option is renamed to `delivery` to match.
+     - `price_alerts` and `marketplace_alerts` gain `scope` (plus `guild_id`/`channel_id` on
+       marketplace alerts). The column defaults keep existing alerts where they were: old
+       price alerts are 'global', old marketplace alerts 'personal'. Restock alerts were
+       already stored with their scope.
+     - `send_alert` delivers any alert: a channel post with a ping (falling back to a DM), or
+       a DM starting "Your ...". Each alert's message now starts with its own name ("price
+       alert #3 ..."), so both forms read naturally.
+     - A DM alert's add replies are private; a channel alert's are public, as restock's
+       already were. Every reply passes `ephemeral=` itself: only the first followup after an
+       ephemeral defer inherits it.
+     - How often each fires is unchanged - the user agreed each fits its event: a price
+       crossing a target fires once (repeating would ping every poll while the price stays
+       there), while restocks and new listings are separate events. It's now said
+       everywhere: each add confirmation, each `/alert-list` section heading, and next to
+       every alert where it arrives (DM or the channel).
+     - Tests: `tests/test_alert_delivery_choice.py` (11). Each change was undone one at a time
+       (9 in all), and its test failed every time. Three existing tests were updated for the
+       new default and wording.
+
+106. **Inventory commands offer a list instead of a raw number; linking checks the key.** Audit
+     findings UX-10 and UX-11.
+     - **UX-10.** Six inventory commands took a number the player had to copy out of
+       /inventory or an old DM first. Each now autocompletes (`bot/cogs/personal_inventory.py`):
+       - `/inventory-set-minimum`, `/inventory-remove`, `/inventory-post-now`: the player's
+         own stacks (`inventory_stack_autocomplete`), e.g. "#12 Laranite · q650 · ×32 (8
+         listed) · Area18" - enough to tell two stacks of one item apart.
+       - `/inventory-confirm-sale`: only jobs waiting on a sale confirmation;
+         `/inventory-cancel-post`: scheduled, listed or unconfirmed jobs;
+         `/inventory-resolve-floor`: only listed jobs paused at their floor (`auto_relist`
+         off) - `_job_autocomplete` with one filter per command.
+       - Typing a number still works, and matches the stack or job number itself, not a
+         quantity like the 32 in "×32".
+     - **UX-11.**
+       - `/link-uex-account` saved any key unchecked, so a wrong one "linked" and only failed
+         later, in whichever command used it first. The form now asks UEX first
+         (`UexClient.get_user_profile`, GET `/user` with the player's key): a key UEX rejects
+         (`UexAuthError`) isn't saved; an accepted one is confirmed with the UEX username it
+         belongs to. If UEX is down, the key is saved with a note that it wasn't checked -
+         an outage isn't the key's fault, and MSG-10 (entry 101) already says so plainly if
+         it's later rejected.
+       - Linking also puts a player on `/leaderboard`, which shows their verified sell
+         revenue to anyone in the server, and nothing said so. The link confirmation and
+         `/uex-account-status` now do (`LEADERBOARD_NOTE`), with how to come off it.
+     - Tests: `tests/test_inventory_pickers_and_key_check.py` (15). Each change was undone
+       one at a time (11 in all), and its test failed every time.
+
+107. **Route commands answer in one message, a page per route.** Audit finding UX-6.
+     - Seven route commands (`/top-routes`, `/routes-from`, `/route-on-the-way`, `/best-route`,
+       `/mixed-routes`, `/multi-stop-route`, `/route-from-multi`) posted an intro and then a
+       public message per route, up to 11 for one `/top-routes`, with the Track buttons on
+       the last. Each now sends one message (`send_route_pages` in `bot/route_pages.py`):
+       the intro as text above one route's embed, ◀ ▶ to page, and **Track this route** for
+       the route showing. `/best-route`'s collected-data branch already sent one embed and
+       is unchanged.
+     - Two options were weighed with the user: a saved "only me" setting that made results
+       private, and this. They chose this because it "lets other people see what the bot
+       does while also cutting down on clutter".
+     - Only whoever ran the command can page, since the routes were worked out for their
+       ship, budget and saved settings. Anyone else gets a private note to run it
+       themselves. Anyone can still track the route showing, and now every route can be
+       tracked, not just the first five (`RouteTrackingView` and `MAX_TRACKABLE_ROUTES` are
+       gone).
+     - The message shows one route's embed at a time, never all of them. Several embeds in
+       one message share Discord's combined 6,000-character limit, which left
+       `/multi-stop-route` stuck on "thinking..." before (entry 36).
+     - A route too long for an embed becomes plain-text pages marked "part 1 of 2"
+       (`text_pages`), so no line is dropped. If Discord refuses a page's embed anyway, on
+       the first send or a page turn, that page is shown as its text.
+     - The buttons still close after 15 idle minutes. The message then greys them out and
+       says so (`BotView.grey_out` now takes message fields, for the note). A single route
+       that can't be tracked is sent with no buttons at all.
+     - Tests: `tests/test_route_pages.py` (9). `tests/route_results.py` reads the new message
+       back for the ten command test files updated to it. Each change was undone one at a
+       time (13 in all), and its test failed every time.
+
+108. **Saved preferences: the right commands named, every footer disclosing them.** Audit
+     findings MSG-5, MSG-6 and MSG-8, plus the last case of UX-14.
+     - **MSG-6.** The `/set-trading-preferences` option descriptions and
+       `/my-trading-preferences` named the wrong commands. Budget said four commands (seven
+       read it), space-only and capital-ship access said two (five), and auto-load-only and
+       system said "all 4 route commands" (eight or nine).
+       - The truth is now one table, `PREFERENCE_READERS` in `bot/uex/trading_preferences.py`.
+         The descriptions are worded from it by `preference_scope`, e.g. "every route
+         command except /route-on-the-way".
+       - `tests/test_preference_scope.py` reads each route command's code (its callback plus
+         the cog methods it calls) and checks every `prefs["..."]` read against the table,
+         so neither can drift again.
+     - **MSG-6, second half.** `/intelligence-brief` read no saved preferences at all. Its
+       personalized routes now apply the saved budget, space-only, capital-ship access,
+       auto-load-only, system and risk tolerance. Its own budget and space-only options
+       still win (space-only now defaults to unset, not off, so a saved one can apply). An
+       empty result names the saved filters, pointing to `/set-trading-preferences`
+       (`saved_filters_hint(..., can_override=False)`, since the brief has no options for
+       most of them).
+     - **MSG-8.** `/mixed-routes`, `/multi-stop-route` and `/route-from-multi` never said a
+       saved auto-load, system or risk filter shaped their results; the others did.
+       - Every route command's footer now has the same line from
+         `describe_active_preferences`, now "Filters: ..." rather than "Active
+         preferences: ...", since a filter set on the command itself isn't a preference.
+       - Filters that came from saved preferences are marked "(saved)", e.g. "Filters:
+         auto-load-only (saved), system: Stanton (saved), risk tolerance: low (saved)".
+         Capital-ship access and risk tolerance have no per-command option, so they're
+         always saved.
+       - The mixed-cargo commands share `_filters_note` in `bot/cogs/prices.py`. Their
+         "surface terminals excluded" fragment is gone, since the Filters line says
+         space-only. "Capital access confirmed at ..." stays: it's a fact about the routes,
+         and a ship can need it without the preference. `/diminishing-returns` now shows it
+         too.
+     - **MSG-5.** `/my-trading-preferences` said the default ship "couldn't be matched ...
+       maybe renamed" when UEX's ship list simply didn't load. An outage now says so.
+       UX-14's other cases were fixed with MSG-4 (entry 91).
+     - Tests: `tests/test_preference_scope.py` (5), and the `/top-routes` footer test now
+       checks the "(saved)" marks. Each change was undone one at a time (14 in all), and its
+       test failed every time.
+
+109. **Four labels made true: "nearby", "live", lock-in prices, and the README.** Audit
+     findings MSG-11 to MSG-14; the user chose each fix's direction.
+     - **MSG-11, the sell-shortfall reroute's "nearby" (PATCH_NOTES 2.8).** It suggested the
+       best-paying buyer anywhere, within the tracked route's own filters only.
+       - It now only suggests a buyer in the current terminal's star system, within
+         `MAX_REROUTE_DISTANCE_GM` (25) by UEX's `/terminals_distances`, and says how far
+         ("(12 Gm away)"). A buyer UEX has no distance for isn't claimed as nearby.
+       - 25 Gm was measured live on 2026-09-30, from three terminals to the 72 that buy
+         Processed Food. Terminals around one planet sit 3-6 Gm apart, the neighbouring
+         planet's stations 14-24 Gm, and the far side of Stanton 28-78 Gm. So 25 Gm reaches
+         the next planet over and no further.
+       - Same system is required because UEX's distance is a straight line that ignores
+         jump points: Levski (Nyx) reads as 56 Gm from ARC-L3 (Stanton).
+       - `reroute_buyer_ids` (`bot/uex/backup_routes.py`) lists the same-system buyers,
+         best-paying first. Only the first `MAX_REROUTE_DISTANCE_LOOKUPS` (24) get a
+         distance lookup, one live call each. `find_backup_routes` takes `destination_ids`
+         to search only those in reach.
+       - The batched distance lookup is now `fetch_terminal_distances` in
+         `bot/uex/client.py`, shared with `/ingame-item-finder`. Ship Parts Finder keeps its
+         own copy, which has a load deadline.
+     - **MSG-12, `/refinery-advisor`.** Its footer said sell prices were "live from UEX"
+       (cached 30 min) and yields were "collected periodically".
+       - It now says "Refinery yield bonuses updated every 24h · sell prices updated every
+         30 min". Both are read from the real settings: `REFERENCE_SNAPSHOT_HOURS`, and the
+         new `cache_interval_text`, which reads the client's own cache table.
+       - Failures used to read as missing data. Now a failed sell-price lookup says "UEX
+         didn't answer" instead of "No current sell price data". A failed methods lookup
+         shows a note instead of dropping the section, and a failed star-system lookup says
+         the ranking is by yield bonus alone.
+     - **MSG-13, the ship-parts list.** Prices were saved at lock-in and "Refresh list" only
+       redrew them. Every redraw now re-prices each part from the same cached
+       `/items_prices_all` rows the browser uses (one call, cached 12h). Each line shows the
+       cheapest shop and price right now, "(was X aUEC at lock-in)" if it moved, or "no shop
+       sells it right now". If UEX doesn't answer, the list shows lock-in prices, labelled
+       as such. `list_price_text` in `bot/uex/ship_part_display.py` words it. The saved
+       lock-in price is never overwritten, so the "was" stays meaningful.
+     - **MSG-14, README.**
+       - It said no privileged intents were needed, while `bot/main.py` asked for Message
+         Content. Nothing reads other people's messages (the one `thread.history` call only
+         reads the bot's own embeds, which a bot always sees), so the intent was removed.
+         That's also least privilege, and removes a way startup could fail on a fresh
+         bot.
+       - The invite permissions now include Attach Files and the three thread permissions
+         that route tracking and the shopping lists need.
+       - The ideas list dropped two things since built (Marketplace search,
+         `/refinery-advisor`) and notes fuel prices are already collected.
+       - The project layout said `/help`; the command is `/intro`. The layout now lists
+         every cog and its commands, and a test fails if a command is added or removed
+         without updating it.
+     - Tests: `tests/test_honest_labels.py` (12). The five existing reroute tests got star
+       systems and a UEX distance fake. Each change was undone one at a time (15 in all),
+       and its test failed every time.
+
+110. **Three route commands folded into their parents (70 commands to 67).** Audit finding
+     UX-8: nine commands suggested routes, a lot to choose from for a new player.
+     - Six of them were three searches, each with a location-pinned twin. The twins are now
+       options on their parent. Nothing was lost: each twin filtered the same results.
+       - `/routes-from location:` became `/top-routes origin:`.
+       - `/route-on-the-way origin: destination:` became `/top-routes origin: destination:`.
+         With both ends set, the system filter is skipped, as before, since nothing is left
+         for it to restrict.
+       - `/route-from-multi location:` became `/multi-stop-route origin:`. Diffing the two
+         callbacks showed the location lookup and `start_terminal_id` were the only
+         differences.
+       - The option names match what `/mixed-routes` already used (`origin`,
+         `destination`). `/top-routes destination:` on its own, "routes ending here", is
+         new, since it cost nothing.
+     - Command usage on the Pi (tracked since 2026-09-22): `/multi-stop-route` 16,
+       `/top-routes` 4, `/route-from-multi` 2, `/best-route` 1, the rest 0.
+     - Options weighed with the user:
+       - One `/routes` command with a "kind" choice was rejected: Discord shows every
+         option at once, so `strict`, `max-legs` and `space-only` would all appear
+         together.
+       - Only tidying `/intro` was the other alternative.
+       - `/diminishing-returns` stays as it is, at the user's choice.
+     - `/top-routes` now defers before any work, and its "still gathering" reply is a
+       followup. Before, it read preferences before deferring.
+     - `/command-usage` already lists commands no longer in the tree under "Retired", so
+       the three keep their history.
+     - `ROUTE_COMMANDS`/`PREFERENCE_READERS` (entry 108) now list six commands, so the saved
+       system reaches "every route command", and space-only "every route command except
+       /best-route and /top-routes".
+     - Tests: the three twins' tests now call `/top-routes` or `/multi-stop-route` with the
+       same options, and `tests/test_route_folds.py` (3) covers what's new. The README layout
+       test from entry 109 caught the stale layout lines. Each change was undone one at a time
+       (8 in all), and its test failed every time.
+
+111. **P3 wording: units, ROI, "just now", the Sellability Rating, shop names, errors, the
+     /price footer, admin visibility.** Audit findings MSG-15 to MSG-20, UX-17, UX-18.
+     - **MSG-15.** Two route lines printed distances as "GM"; everything else says "Gm"
+       (gigametres). Now all say Gm.
+     - **MSG-16.** Checked live against `/commodities_routes` on 2026-09-30: UEX's
+       `price_margin` is profit ÷ sell price, and `price_roi` is profit ÷ buy price.
+       - `/best-route`'s main branch shows both, correctly labelled.
+       - Its fallback branch printed an unlabelled "(Z%)" from a property called
+         `margin_pct` that computed profit ÷ buy price, i.e. ROI. Renamed `roi_pct`
+         (`bot/uex/trading.py`), and the line now says "(ROI Z%)".
+     - **MSG-17.** The digest's data-freshness line said "just now ago".
+     - **MSG-18.** Players see the "Sellability Rating" everywhere: `/intro`, the digest,
+       the rating lines themselves. But `/liquidity-rank`'s and `/liquidity-trends`'
+       titles and messages said "Liquidity", and so did the digest's freshness label.
+       Those now say Sellability Rating. The command names stay, to avoid renaming
+       commands people know.
+     - **MSG-19.** The three shop commands (`/ingame-item-finder`, `/where-to-buy-ship`,
+       `/ship-parts-finder`) each formatted "Place (Vendor)" themselves. Only the parts
+       finder wrote "Ship Weapons at Pyro Gateway (Stanton)" instead of stacking two
+       brackets. One helper now does it for all three: `place_and_vendor_text` in
+       `bot/uex/item_finder.py`.
+     - **MSG-20.** Ship Parts Finder's slot lookup failure showed the raw exception text.
+       It now says the wiki didn't answer (`WikiUnavailableError`), or that the wiki
+       doesn't list usable slots for that ship. PR #83 had already fixed the category-load
+       message.
+     - **UX-17.** `/set-digest-channel`, `/digest-disable` and `/command-usage` now carry
+       `default_permissions(manage_guild=True)`, so Discord hides them from members
+       without Manage Server. The existing permission and owner checks still run.
+       `/digest-now` stays open to everyone, at the user's choice.
+     - **UX-18.** `/price`'s footer explained every marker on every reply. It now builds
+       the lines first and explains only what's shown ("est. buying", "holds ~N SCU
+       already", sell-side status labels). It's still set before the fields, so the
+       6,000-character budget counts it, and it says "updated every 30 min" (entry 109).
+     - **UX-19.** Its README half (`/help`) was fixed in entry 109. `/intro` stays public,
+       at the user's choice.
+     - Tests: `tests/test_p3_wording.py` (6), a ROI assertion on the `/best-route` fallback
+       test, and updated `/price` footer tests. Each change was undone one at a time (13 in
+       all), and its test failed every time.
+
+112. **The default ship is set in one place, and no message names a missing command.**
+     Audit findings UX-15 and MSG-21.
+     - **UX-15.** The default ship could be set two ways: `/set-default-ship` and
+       `/set-trading-preferences ship:`, both writing `user_trading_preferences.ship_name`.
+       `/set-default-ship`'s description named only `/best-route`, though every route
+       command and stock alerts read the ship. The user chose to fold the two ship commands
+       into preferences (67 -> 65 commands, 26 -> 25 cogs):
+       - `bot/cogs/ships.py` is no longer a cog. It keeps `ship_name_autocomplete`, which
+         every command with a `ship` option imports.
+       - The `ship` autocomplete on `/set-trading-preferences` now offers "No default ship
+         (clear it)" first (value `none`, like the system option's "Any"). That clears only
+         the ship and never asks UEX. Setting a ship confirms its cargo capacity, as
+         `/set-default-ship` did.
+       - Every hint that said "set a default ship with /set-default-ship" now names
+         `/set-trading-preferences` (route commands, `/intelligence-brief`, stock alerts,
+         the shared helpers in `bot/uex/route_presentation.py` and `bot/uex/stock_alerts.py`).
+       - The `set_default_ship`/`clear_default_ship` DB methods stay; tests and the
+         migration docstring use them.
+     - **MSG-21.** Descriptions and dev docs had drifted. `tests/test_ship_setting_fold.py`
+       now parses every module under `bot/` and fails if any string the bot can send (not
+       docstrings, not the two API clients' endpoint paths) names a `/command` that
+       doesn't exist. Its first run found a stale `/set-default-ship` in the SQL comments
+       inside `SCHEMA`.
+       - `/set-trading-preferences` and `/my-trading-preferences` now say they cover the
+         default ship and budget, not just route filters. `/intro`'s "Ship & Cargo"
+         category, which said "Save a ship once" but held only the two ship-shopping
+         commands, is now "Ships".
+       - CLAUDE.local.md said 18 cogs and 31 tables; there are 25 and 47. Its cog list
+         now covers route tracking, blueprints, the refinery and mining lookups and the
+         three shop finders, and its table list is regrouped to cover every table in
+         `SCHEMA`. It also listed `bot/uex/price_outliers.py` as if it were here; that
+         module exists only in aiv2 so far (it's on the aiv2 -> production list in
+         AI_BOT_HANDOFF.md).
+     - Tests: `tests/test_ship_setting_fold.py` (5), plus updated hint assertions. Each
+       change was undone one at a time (6 in all), and its test failed every time.
+
+113. **A wrong trade-log entry can be removed, and a batch takes a custom price per stack.**
+     Audit findings UX-16 and UX-20.
+     - **UX-16.** `/trade-log-add` had no autocomplete and nothing could fix a mistyped
+       entry.
+       - `commodity` and `terminal` now autocomplete, using `/price`'s and the route
+         commands' own autocompletes.
+       - `/trade-log` now has a "Select a trade to remove" menu under its list, the
+         shared `AlertRemovePickerView` (as `/alert-remove`). Picking one deletes it
+         (`Database.delete_trade_log_entry`, keyed on user id as well as entry id) and
+         redraws the list without it. There's no separate edit: remove, then log it again,
+         as the user chose.
+     - **REL-8, one more.** That menu's select callback wrote to the DB before answering
+       Discord. Entry 100's sweep had treated UI callbacks as in-memory, but this one's
+       first await is `remove_callback`'s delete. It now defers first and edits the
+       message with `edit_original_response`, which also covers `/alert-remove`.
+     - **UX-20.** Picking "Enter a custom price..." on an `/inventory-sell` batch of more
+       than one stack refused and said to re-run the command with a single stack; an
+       absolute price doesn't carry across different items. It now opens
+       `StackPricesModal`, one input per stack labelled with the stack's id and name,
+       five per form (Discord's limit).
+       - A form saves only if every price in it is a whole number at or above that
+         stack's minimum. Otherwise the message lists what's wrong and nothing from that
+         form is kept.
+       - A button under the preview opens the next five ("Set prices for stacks 6-7 of
+         7"), or reopens the prices, prefilled, to change one ("Change custom prices").
+         Before, a changed price meant starting over.
+       - Authorize refuses a custom batch until every stack has a price, and shows the
+         button. Picking another strategy drops the custom prices.
+       - The per-stack prices go into each job's existing `custom_price` column; the DB
+         already checked each against its stack's minimum. `CustomPriceModal` is now
+         only `/inventory-post-now`'s.
+     - Tests: `tests/test_trade_log_and_stack_prices.py` (7), plus two inventory tests
+       moved to the per-stack prices. Each change was undone one at a time (12 in all),
+       and its test failed every time.
 
 ## Where to look for what
 
-Five docs, deliberately scoped so they don't duplicate each other:
+Six docs, deliberately scoped so they don't duplicate each other:
 
 | Doc | Answers |
 |---|---|
@@ -644,11 +4056,16 @@ Five docs, deliberately scoped so they don't duplicate each other:
 | `CONTRIBUTING.md` | *How* to work on this codebase - required patterns, pre-flight checklist |
 | `PROJECT_CONTEXT.md` (this doc) | *What happened and why* - history, hard-won API knowledge, current state |
 | `ROADMAP.md` | *What's next* - completed features and the backlog of ideas |
+| `AI_BOT_HANDOFF.md` | *What still needs porting* to the separate AI-bot project - a live checklist, not history |
 
 Standalone troubleshooting write-ups have been folded into `CONTRIBUTING.md` rather than kept
 as separate files - point-in-time incident logs drift out of date and end up contradicting the
 maintained guidance. If you debug something worth remembering, add it to `CONTRIBUTING.md`
 (mechanics and prevention) or here (history and context), not a new log file.
+`AI_BOT_HANDOFF.md` is a deliberate exception to that rule, not a violation of it: it isn't a
+record of what happened in THIS codebase (that's what this file is for), it's a live sync
+queue against a DIFFERENT one - entries get checked off and eventually deleted once ported,
+rather than accumulating as permanent history the way an incident log would.
 
 ## How the scanner's matching logic evolved (read before touching `bot/uex/scanner.py`)
 
@@ -837,12 +4254,17 @@ guessed at.
   *and* `operation` together) - not fixed, see the API-facts note above for detail.
 - `Local-model-handoff` remains available as a backup, but current development happens on
   `TestBranch`.
-- **`scripts/deploy_and_backup.sh`/`scripts/revert_last_deploy.sh` need a real-Pi run**
-  (timeline entry 27). Logic is verified against a fake git repo with stubbed
-  `sudo`/`systemctl`, but not against the actual `uex-trade-bot.service` unit or a real
-  `data/uexbot.sqlite3` - confirm on the next Pi deploy that `sudo systemctl` doesn't
-  prompt for a password non-interactively (would hang the script) and that the detected
-  `DATABASE_PATH` matches what's actually in the Pi's `.env`.
+- **`scripts/deploy_and_backup.sh` had its first real-Pi run on 2026-09-06** (deploying
+  `bcf9631` → `3ec9e9c`, see entry 51's staging note) - confirmed passwordless
+  `sudo systemctl stop`/`start` works non-interactively, the plain `data/uexbot.sqlite3`
+  default path is correct, the explicit-refspec fetch handles the Pi's main-only
+  auto-fetch quirk, and the post-deploy service came up clean (18 cogs, 56 commands
+  synced, no errors). **`scripts/revert_last_deploy.sh` still hasn't had a real-Pi run**
+  (timeline entry 27) - its logic is verified against a fake git repo with stubbed
+  `sudo`/`systemctl`/`cp`/`git` (most recently entries 49-51's harness rounds), but never
+  against the actual `uex-trade-bot.service` unit or a real `data/uexbot.sqlite3`. Exercise
+  it for real the next time a Pi deploy needs undoing, rather than assuming the harness
+  coverage transfers completely.
 - **Liquidity rating** is deliberately an indicator, not a predicted percentage chance of
   sale. It is bounded to 0-100 so users can interpret it at a glance. The history/movers view
   needs at least two hourly Marketplace snapshots before it can show a comparison.
@@ -907,13 +4329,60 @@ guessed at.
   after three hours; hourly liquidity and Marketplace data warn after two. The rating-shift
   queries request four gainers and four losers independently so one direction cannot crowd
   out the other, and the fields are separated to stay below Discord's 1,024-character limit.
-- **Current staging state (2026-08-27)**: `TestBranch` is deployed and running live on the
+- **Current staging state (2026-09-06)**: `TestBranch` is deployed and running live on the
   Pi (`uex-trade-bot.service`, host `arkwatcher`) - it is no longer just a local-validation
   branch. Local (PC) and the Pi's databases have been fully merged at least twice now; the
   established practice is to back up both sides before any such merge and pull the Pi's
   backup down to the PC afterward, so nothing valuable lives only on the Pi's disk. The full
-  suite has 209 passing tests. Re-check live service and branch state rather than assuming
-  this point-in-time operational note is still current.
+  suite has 331 passing tests (see entries 45-57). Multiple separate threads so far, kept
+  distinct rather than conflated into one round/gap count: the original audit-fix chain
+  (entries 45-51 - 15 original findings plus 20 more gaps across five follow-up rounds,
+  four external and one self-directed, all fixed), the trading-preferences feature chain
+  (entries 52-55 - Saved Trading Preferences, default-ship consolidation, load-limiting
+  explanations, and a first review round against all three that found 4 more P2 gaps,
+  also fixed), a documentation-only addition to `CONTRIBUTING.md` (written in a separate
+  session, not by this one - reviewed for soundness, no code implications), and a
+  user-initiated investigation into `/multi-stop-route`'s budget/ROI relationship
+  (entries 56-57 - a real candidate-selection bug found and fixed, then a follow-up
+  `/diminishing-returns` command whose own development found one more gap in that same
+  fix). The Pi was brought up to `f3fa649` (entry 55's commit) via
+  `scripts/deploy_and_backup.sh` on 2026-09-06 - the `CONTRIBUTING.md` commit
+  (`5082f3e`, docs-only, no deploy needed) and entries 56-57 (not yet committed as of
+  this writing) have NOT been
+  deployed, so the Pi is currently one commit behind `origin/TestBranch` (the docs-only
+  one) plus however many entries 56-57 add once committed. Re-check git log on the Pi
+  before assuming either point is still
+  true, since it will drift the moment another round of fixes or features is committed
+  without a matching deploy. The audit-fix chain alone has now run FIVE review rounds past
+  the original audit, each finding real gaps in the round before it (5, then 2, then 9,
+  then 3, then 1) - there is no established pattern of the count trending to zero, so
+  don't assume round N+1 won't find anything just because round N's count was small (the
+  9-then-3 dip already looked like convergence before the next round showed it wasn't a
+  trend, just variance). The newer trading-preferences chain is only one round in (4
+  gaps) - too early to draw any trend conclusion from, but the audit-fix chain's own
+  history argues against assuming a second round would find nothing. Re-check live
+  service and branch state rather than assuming this point-in-time
+  operational note is still current.
+- **Current staging state, updated (2026-09-13)**: the entry above was flagged stale by a
+  third-party audit review (of `165d20d..f8886a6`) that explicitly called out its 331-test
+  count and 2026-09-06 snapshot as out of date - confirmed correct, and left as its own
+  historical record above rather than rewritten in place, since this file's own convention
+  is to append a new dated note rather than edit history away. Since that snapshot: the
+  full suite has grown to 656 passing tests; `TestBranch` is at `2343465` (a 4-defect audit
+  fix round - sell/buy demand filtering, broadened route-progression exception handling,
+  Discord field-size guards extended to `/refinery-advisor` and `/where-to-mine`, and
+  refinery-yields coverage tracking - see `ROADMAP.md`'s corresponding entries), and this
+  commit is confirmed deployed and running live on the Pi (`uex-trade-bot.service`,
+  20 cogs, 65 commands synced, verified via `journalctl` with no errors). GitHub Actions CI
+  (`.github/workflows/tests.yml`) was already running on every push/PR, but had actually
+  been failing silently for at least the last several TestBranch commits (a handful of
+  pre-existing unused-import/unused-variable `ruff --select F` findings in test files,
+  unrelated to any of those commits' own changes) precisely because nothing required it to
+  pass - fixed, and `TestBranch` now has branch protection requiring the `pytest` check
+  before merge, closing the audit's "add CI as a required merge gate" recommendation. As
+  always: re-check `git log`/`systemctl status uex-trade-bot`/the Actions tab before
+  assuming any of this stays true indefinitely - this is a point-in-time note, not a live
+  dashboard.
 - The data collectors in `bot/cogs/intelligence.py` only pay off once they've been running a
   while - most of the `ROADMAP.md` intelligence backlog depends on accumulated history, so
   those features will look broken/empty if built and tested against a fresh database.

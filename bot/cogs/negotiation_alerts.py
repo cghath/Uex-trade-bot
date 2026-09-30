@@ -14,6 +14,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
+from bot.delivery import Delivery, fit_message, send_dm
 from bot.uex.exceptions import UexApiError
 from bot.uex.marketplace import marketplace_item_link, parse_uex_number
 
@@ -41,19 +42,22 @@ class NegotiationAlerts(commands.Cog):
     )
     @app_commands.describe(enabled="Turn negotiation-message DMs on or off")
     async def negotiation_alerts(self, interaction: discord.Interaction, enabled: bool) -> None:
+        # Deferred before any DB write: a write can wait on a lock past Discord's
+        # 3-second window, and a player who sees "did not respond" retries into a
+        # duplicate (audit REL-8).
+        await interaction.response.defer(ephemeral=True)
         if not enabled:
             await self.bot.db.set_negotiation_alerts_enabled(interaction.user.id, False)
-            await interaction.response.send_message("Negotiation-message DMs are now **off**.", ephemeral=True)
+            await interaction.followup.send("Negotiation-message DMs are now **off**.", ephemeral=True)
             return
 
         secret_key = await self.bot.db.get_user_secret_key(interaction.user.id)
         if not secret_key:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "Link your UEX account first with `/link-uex-account`, then enable this.", ephemeral=True
             )
             return
 
-        await interaction.response.defer(ephemeral=True)
         # Enabling and successfully baselining are not the same thing - if the seed can't
         # even fetch a negotiation list (e.g. an invalid secret key), the feature must not
         # turn on with an empty baseline, or the first successful poll later floods every
@@ -100,7 +104,7 @@ class NegotiationAlerts(commands.Cog):
             for row in messages:
                 message_id = _as_int(row.get("id"))
                 if message_id is not None:
-                    await self.bot.db.mark_negotiation_message_seen(message_id)
+                    await self.bot.db.mark_negotiation_message_seen(user_id, message_id)
             await self.bot.db.set_negotiation_last_modified(
                 user_id, id_negotiation, _as_int(negotiation.get("date_modified")) or 0
             )
@@ -108,35 +112,55 @@ class NegotiationAlerts(commands.Cog):
 
     @tasks.loop(minutes=POLL_INTERVAL_MINUTES)
     async def poll_negotiation_messages(self) -> None:
-        user_ids = await self.bot.db.list_negotiation_alert_user_ids()
-        if not user_ids:
+        # Nothing may escape a tasks.loop body: it only restarts itself after a narrow set
+        # of network errors, so anything else would stop this poller until a restart.
+        try:
+            user_ids = await self.bot.db.list_negotiation_alert_user_ids()
+        except Exception:
+            logger.exception("Negotiation alert poll couldn't list users; retrying next cycle")
             return
         for user_id in user_ids:
-            secret_key = await self.bot.db.get_user_secret_key(user_id)
-            if not secret_key:
-                continue  # unlinked since enabling; nothing to poll until relinked
+            # Per user, so one user's failure can't block everyone polled after them.
             try:
-                negotiations = await self.bot.uex.get_marketplace_negotiations(secret_key=secret_key)
-            except UexApiError as exc:
-                logger.warning("Failed to poll negotiations for user %s: %s", user_id, exc)
+                await self._poll_user_negotiations(user_id)
+            except Exception:
+                logger.exception("Negotiation alert poll failed for user %s this cycle", user_id)
+
+    async def _poll_user_negotiations(self, user_id: int) -> None:
+        secret_key = await self.bot.db.get_user_secret_key(user_id)
+        if not secret_key:
+            return  # unlinked since enabling; nothing to poll until relinked
+        try:
+            negotiations = await self.bot.uex.get_marketplace_negotiations(secret_key=secret_key)
+        except UexApiError as exc:
+            logger.warning("Failed to poll negotiations for user %s: %s", user_id, exc)
+            return
+        last_modified = await self.bot.db.get_negotiation_last_modified(user_id)
+        for negotiation in negotiations:
+            id_negotiation = _as_int(negotiation.get("id"))
+            date_modified = _as_int(negotiation.get("date_modified"))
+            if id_negotiation is None or date_modified is None:
                 continue
-            last_modified = await self.bot.db.get_negotiation_last_modified(user_id)
-            for negotiation in negotiations:
-                id_negotiation = _as_int(negotiation.get("id"))
-                date_modified = _as_int(negotiation.get("date_modified"))
-                if id_negotiation is None or date_modified is None:
-                    continue
-                if date_modified <= last_modified.get(id_negotiation, 0):
-                    continue
+            if date_modified <= last_modified.get(id_negotiation, 0):
+                continue
+            # Per negotiation; the checkpoint only advances on success, so a failure
+            # here is retried next cycle rather than lost.
+            try:
                 if await self._check_negotiation(user_id, secret_key, negotiation, id_negotiation):
                     await self.bot.db.set_negotiation_last_modified(user_id, id_negotiation, date_modified)
+            except Exception:
+                logger.exception("Negotiation %s failed for user %s this cycle", id_negotiation, user_id)
 
     async def _check_negotiation(
         self, user_id: int, secret_key: str, negotiation: dict[str, Any], id_negotiation: int
     ) -> bool:
         """Returns False, without advancing the caller's checkpoint, when the messages fetch
-        itself failed - otherwise a transient error would look identical to "nothing new
-        happened" and whatever arrived right around the failure would never be checked again."""
+        itself failed OR when any message that needed delivering wasn't actually delivered -
+        otherwise a transient error (or a transient DM failure) would look identical to
+        "nothing new happened," the checkpoint would advance to this negotiation's current
+        date_modified anyway, and - since the poller skips a negotiation whose date_modified
+        hasn't advanced past the checkpoint - the undelivered message would never be looked
+        at again unless the negotiation happens to get further, unrelated activity later."""
         is_advertiser = bool(negotiation.get("is_listing_advertiser"))
         own_username = negotiation.get("advertiser_username") if is_advertiser else negotiation.get("client_username")
         try:
@@ -151,6 +175,10 @@ class NegotiationAlerts(commands.Cog):
         # means one extra lookup by id_listing, not one per message in this negotiation.
         id_item: int | None = None
         id_item_resolved = False
+        all_delivered = True
+        # Set once Discord refuses a DM to this user outright (DMs closed, unknown user):
+        # the rest of this negotiation's new messages would be refused the same way.
+        unreachable = False
         for row in sorted(messages, key=lambda r: _as_int(r.get("date_added")) or 0):
             message_id = _as_int(row.get("id"))
             text = row.get("message")
@@ -159,18 +187,32 @@ class NegotiationAlerts(commands.Cog):
             # messages are never worth a DM - only the other party's real chat text is.
             if message_id is None or not text or sender == own_username:
                 continue
-            if await self.bot.db.is_negotiation_message_seen(message_id):
+            if await self.bot.db.is_negotiation_message_seen(user_id, message_id):
+                continue
+            if unreachable:
+                await self.bot.db.mark_negotiation_message_seen(user_id, message_id)
                 continue
             if not id_item_resolved:
                 id_item = await self._resolve_listing_item_id(negotiation.get("id_listing"))
                 id_item_resolved = True
             listing_name = marketplace_item_link(negotiation.get("listing_title") or "a listing", id_item)
-            await self._notify_user(
+            # UEX allows messages up to 65,535 chars; Discord refuses a DM over 2,000
+            # outright, so a long one is trimmed rather than never arriving (audit REL-4).
+            outcome = await self._notify_user(
                 user_id,
-                f"New negotiation message on **{listing_name}** from **{sender}**: {text}",
+                fit_message(f"New negotiation message on **{listing_name}** from **{sender}**: ", str(text)),
             )
-            await self.bot.db.mark_negotiation_message_seen(message_id)
-        return True
+            # A temporary failure (a Discord outage) leaves the message unseen so the next
+            # 5-minute poll retries it. A DM Discord refuses outright (DMs closed, unknown
+            # user) would be refused on every retry too - re-sending it every 5 minutes
+            # forever is exactly the pattern that gets a bot flagged - so that one is marked
+            # seen, as is anything else new in this negotiation this cycle.
+            if outcome.settled:
+                await self.bot.db.mark_negotiation_message_seen(user_id, message_id)
+                unreachable = outcome is Delivery.UNDELIVERABLE
+            else:
+                all_delivered = False
+        return all_delivered
 
     async def _resolve_listing_item_id(self, id_listing: Any) -> int | None:
         """UEX's negotiations don't carry id_item directly - resolve it from the listing.
@@ -185,12 +227,8 @@ class NegotiationAlerts(commands.Cog):
             return None
         return rows[0].get("id_item") if rows else None
 
-    async def _notify_user(self, user_id: int, message: str) -> None:
-        try:
-            user = self.bot.get_user(user_id) or await self.bot.fetch_user(user_id)
-            await user.send(message)
-        except (discord.HTTPException, AttributeError):
-            logger.warning("Could not DM negotiation alert to user %s", user_id)
+    async def _notify_user(self, user_id: int, message: str) -> Delivery:
+        return await send_dm(self.bot, user_id, label="negotiation alert", content=message)
 
     @poll_negotiation_messages.before_loop
     async def before_poll_negotiation_messages(self) -> None:

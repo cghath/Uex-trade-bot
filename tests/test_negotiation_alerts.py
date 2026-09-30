@@ -3,6 +3,7 @@ enable -> seed -> poll -> notify cycle against a faked UEX API."""
 from __future__ import annotations
 
 import asyncio
+from unittest.mock import AsyncMock
 
 from cryptography.fernet import Fernet
 import discord
@@ -10,6 +11,7 @@ from discord.ext import commands
 import httpx
 
 from bot.cogs.negotiation_alerts import NegotiationAlerts
+from bot.delivery import Delivery
 from bot.db.database import Database
 from bot.main import INITIAL_COGS
 from bot.uex.client import UexClient
@@ -163,11 +165,26 @@ def test_negotiation_message_seen_is_deduplicated(tmp_path):
     async def run():
         db = _make_db(tmp_path)
         await db.init()
-        assert await db.is_negotiation_message_seen(9001) is False
-        await db.mark_negotiation_message_seen(9001)
-        assert await db.is_negotiation_message_seen(9001) is True
-        await db.mark_negotiation_message_seen(9001)  # must not raise on a duplicate mark
-        assert await db.is_negotiation_message_seen(9001) is True
+        assert await db.is_negotiation_message_seen(1, 9001) is False
+        await db.mark_negotiation_message_seen(1, 9001)
+        assert await db.is_negotiation_message_seen(1, 9001) is True
+        await db.mark_negotiation_message_seen(1, 9001)  # must not raise on a duplicate mark
+        assert await db.is_negotiation_message_seen(1, 9001) is True
+
+    asyncio.run(run())
+
+
+def test_negotiation_message_seen_is_scoped_per_user(tmp_path):
+    """A06: a bare message_id primary key made one user's seen-state (from their own
+    baseline seed or delivered notification) silently suppress a DIFFERENT user's still-
+    pending notification for the exact same message - e.g. two different Discord users each
+    independently watching the same negotiation from opposite sides."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await db.mark_negotiation_message_seen(1, 9001)
+        assert await db.is_negotiation_message_seen(1, 9001) is True
+        assert await db.is_negotiation_message_seen(2, 9001) is False
 
     asyncio.run(run())
 
@@ -226,8 +243,9 @@ def test_enable_seeds_baseline_then_only_new_messages_from_the_other_party_notif
         cog = NegotiationAlerts.__new__(NegotiationAlerts)
         cog.bot = bot
 
-        async def _fake_notify(target_user_id: int, message: str) -> None:
+        async def _fake_notify(target_user_id: int, message: str) -> Delivery:
             sent_dms.append((target_user_id, message))
+            return Delivery.DELIVERED
 
         cog._notify_user = _fake_notify
 
@@ -237,8 +255,8 @@ def test_enable_seeds_baseline_then_only_new_messages_from_the_other_party_notif
             seeded = await cog._seed_baseline(user_id, "sk_test")
             assert seeded == 1
             assert sent_dms == []
-            assert await db.is_negotiation_message_seen(1) is True
-            assert await db.is_negotiation_message_seen(2) is True
+            assert await db.is_negotiation_message_seen(user_id, 1) is True
+            assert await db.is_negotiation_message_seen(user_id, 2) is True
 
             # A poll cycle later, UEX reports date_modified advanced and a third message
             # exists. Only that new, other-party message should trigger a DM.
@@ -303,8 +321,9 @@ def test_new_message_notification_links_the_item_via_the_listing_lookup(tmp_path
         cog = NegotiationAlerts.__new__(NegotiationAlerts)
         cog.bot = bot
 
-        async def _fake_notify(target_user_id: int, message: str) -> None:
+        async def _fake_notify(target_user_id: int, message: str) -> Delivery:
             sent_dms.append((target_user_id, message))
+            return Delivery.DELIVERED
 
         cog._notify_user = _fake_notify
 
@@ -356,9 +375,15 @@ def test_a_failed_messages_fetch_does_not_advance_the_checkpoint_and_is_retried(
         await client._client.aclose()
         client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
 
+        from types import SimpleNamespace as NS
+
         bot = type("FakeBot", (), {})()
         bot.db = db
         bot.uex = client
+        # A working recipient - this test is only about the messages-fetch failure gating
+        # the checkpoint, not delivery success/failure, so delivery must actually succeed
+        # here or the checkpoint-advance assertion below would be exercising the wrong gate.
+        bot.get_user = lambda _: NS(send=AsyncMock())
         cog = NegotiationAlerts.__new__(NegotiationAlerts)
         cog.bot = bot
 
@@ -371,5 +396,110 @@ def test_a_failed_messages_fetch_does_not_advance_the_checkpoint_and_is_retried(
             assert (await db.get_negotiation_last_modified(user_id))[77] == 2000
         finally:
             await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_failed_dm_does_not_advance_the_poll_checkpoint(tmp_path):
+    """Follow-up review finding: A07's fix made _notify_user's caller only mark a message
+    seen on successful delivery, but _check_negotiation still returned True unconditionally
+    - so poll_negotiation_messages advanced this negotiation's date_modified checkpoint
+    regardless of whether delivery actually succeeded. Since the poller skips a negotiation
+    whose date_modified hasn't advanced past the checkpoint, that meant a failed-delivery
+    message was never retried on the NEXT poll either (the negotiation looks "already
+    caught up" even though the one message that mattered was never delivered) - only some
+    later, unrelated negotiation activity bumping date_modified further would surface it
+    again. This exercises two real poll cycles (not _check_negotiation directly, which
+    bypasses the checkpoint gate entirely) with the first delivery failing and the second
+    succeeding."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        user_id = 1
+        await db.set_user_secret_key(user_id, "sk_test")
+        await db.set_negotiation_alerts_enabled(user_id, True)
+        negotiation = dict(
+            id=7, id_listing=999, date_modified=100,
+            is_listing_advertiser=1, advertiser_username="Alice", client_username="Bob",
+        )
+        uex = type("FakeUex", (), {})()
+        uex.get_marketplace_negotiations = AsyncMock(return_value=[negotiation])
+        uex.get_marketplace_negotiations_messages = AsyncMock(return_value=[
+            dict(id=42, date_added=99, message="Interested", user_username="Bob")
+        ])
+        uex.get_marketplace_listings = AsyncMock(return_value=[])
+        cog = NegotiationAlerts.__new__(NegotiationAlerts)
+        cog.bot = type("FakeBot", (), {})()
+        cog.bot.db = db
+        cog.bot.uex = uex
+        cog._notify_user = AsyncMock(side_effect=[Delivery.RETRY, Delivery.DELIVERED])
+
+        await cog.poll_negotiation_messages.coro(cog)
+        await cog.poll_negotiation_messages.coro(cog)
+
+        assert cog._notify_user.await_count == 2, (
+            cog._notify_user.await_count, await db.get_negotiation_last_modified(user_id)
+        )
+        assert await db.is_negotiation_message_seen(user_id, 42) is True
+
+    asyncio.run(run())
+
+
+def test_failed_dm_delivery_is_retried_not_permanently_discarded(tmp_path):
+    """A07: _notify_user catches Discord HTTP failures (DMs closed, a transient outage),
+    but the caller previously marked the message seen regardless of whether it actually
+    reached the user - permanently discarding a notification the moment send() raised,
+    with no way for it to ever go out. A failed delivery must leave the message unseen so
+    the next poll cycle retries it."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        negotiation = {
+            "id": 7, "id_listing": 999, "date_modified": 100,
+            "is_listing_advertiser": 1, "advertiser_username": "Alice", "client_username": "Bob",
+        }
+        message = {"id": 42, "date_added": 99, "message": "Interested", "user_username": "Bob"}
+        from types import SimpleNamespace
+
+        failure = discord.HTTPException(
+            SimpleNamespace(status=503, reason="Service Unavailable"), {"message": "Temporary failure"}
+        )
+
+        class _FailThenSucceedUser:
+            def __init__(self):
+                self.send_calls = 0
+
+            async def send(self, message):
+                self.send_calls += 1
+                if self.send_calls == 1:
+                    raise failure
+
+        user = _FailThenSucceedUser()
+        uex = type("FakeUex", (), {})()
+
+        async def get_messages(**kwargs):
+            return [message]
+
+        async def get_listings(**kwargs):
+            return []
+
+        uex.get_marketplace_negotiations_messages = get_messages
+        uex.get_marketplace_listings = get_listings
+        bot = type("FakeBot", (), {})()
+        bot.db = db
+        bot.uex = uex
+        bot.get_user = lambda _: user
+        cog = NegotiationAlerts.__new__(NegotiationAlerts)
+        cog.bot = bot
+
+        # First attempt: delivery fails - the message must stay unseen.
+        await cog._check_negotiation(1, "fake", negotiation, 7)
+        assert user.send_calls == 1
+        assert await db.is_negotiation_message_seen(1, 42) is False
+
+        # A later poll cycle retries the same still-unseen message and this time succeeds.
+        await cog._check_negotiation(1, "fake", negotiation, 7)
+        assert user.send_calls == 2
+        assert await db.is_negotiation_message_seen(1, 42) is True
 
     asyncio.run(run())

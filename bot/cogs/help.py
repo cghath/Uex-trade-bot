@@ -14,17 +14,22 @@ from discord.ext import commands
 # Display order + grouping. A command name not listed here still appears, under "Other".
 # These remain available as slash commands but are implementation health checks rather than
 # normal player tools, so they do not add noise to /intro.
-HIDDEN_COMMANDS = {"marketplace-index-status"}
+HIDDEN_COMMANDS = {"marketplace-index-status", "command-usage"}
 
 CATEGORIES: list[tuple[str, str, list[str]]] = [
     ("💰 Prices & Routes", "Terminal prices, profitable hauls, and ranked live routes.", [
-        "price", "best-route", "mixed-routes", "multi-stop-route", "top-routes", "terminal-history",
+        "price", "best-route", "top-routes", "mixed-routes", "multi-stop-route",
+        "terminal-history", "diminishing-returns",
+        "refinery-advisor", "where-to-mine", "ingame-item-finder",
     ]),
     ("📊 Commodity Trends", "Trade volume, price movement, and commodity price charts.", [
         "trending", "movers", "commodity-history",
     ]),
-    ("🚀 Ship & Cargo", "Save a ship once to calculate cargo limits and per-run profit.", [
-        "set-default-ship", "clear-default-ship", "my-ship",
+    ("🚀 Ships", "Where to buy a ship, and the parts that fit it.", [
+        "ship-parts-finder", "where-to-buy-ship",
+    ]),
+    ("⚙️ Trading Preferences", "Save your default ship, budget and route filters once, instead of every call.", [
+        "set-trading-preferences", "clear-trading-preferences", "my-trading-preferences",
     ]),
     ("🔔 Alerts & Notifications", "Price targets, Marketplace matches, restocks, and DM delivery checks.", [
         "alert-add", "stock-alert-add", "marketplace-alert-add",
@@ -42,6 +47,9 @@ CATEGORIES: list[tuple[str, str, list[str]]] = [
         "inventory", "inventory-add", "inventory-set-minimum", "inventory-remove",
         "inventory-sell", "inventory-post-now",
         "inventory-confirm-sale", "inventory-cancel-post", "inventory-resolve-floor",
+    ]),
+    ("🧩 Blueprints", "Find blueprint contracts, configure crafting materials, and keep a private combined list.", [
+        "blueprint-search", "blueprint-list",
     ]),
     ("🔥 Sellability Ratings", "The bot's own 0-100 sellability score (not UEX's raw activity numbers) — rankings and history for all items, plus quality-matched raw-material deal scans.", [
         "liquidity-rank", "liquidity-trends", "scan-now", "scanner-status", "set-scanner-channel",

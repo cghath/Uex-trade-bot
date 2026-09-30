@@ -43,7 +43,14 @@ rollback_on_failure() {
     git checkout "$OLD_COMMIT" || echo "Could not check out $OLD_COMMIT - repo may be in a partial state, fix manually." >&2
     sudo systemctl start "$SERVICE_NAME" || echo "Could not restart $SERVICE_NAME - check it manually." >&2
 }
-trap rollback_on_failure ERR
+# EXIT, not ERR: bash's ERR trap does not fire for an explicit `exit N` (only for a
+# command that itself fails under `set -e`) - the missing-pip branch below calls `exit 1`
+# directly, which an ERR-only trap silently let bypass this rollback entirely, leaving the
+# service stopped with no recovery attempted. EXIT fires unconditionally on every script
+# termination (a failing command under set -e, an explicit exit, or normal completion), so
+# rollback_on_failure's own DEPLOY_SUCCEEDED/SERVICE_STOPPED guards are what keep it a
+# no-op on the success path, not the trap type.
+trap rollback_on_failure EXIT
 
 echo "Stopping $SERVICE_NAME (so the DB backup is quiesced, not mid-write)..."
 sudo systemctl stop "$SERVICE_NAME"
@@ -75,7 +82,18 @@ git merge --ff-only "origin/$BRANCH"
 
 if ! git diff --quiet "$OLD_COMMIT" HEAD -- requirements.txt requirements-dev.txt; then
     echo "requirements*.txt changed - reinstalling dependencies..."
-    .venv/bin/pip install -r requirements.txt
+    # Local dev clones use .venv; the Pi's own clone uses venv (no dot) - check both
+    # rather than hardcoding one, so this doesn't silently fail on whichever machine
+    # doesn't match.
+    if [ -x ".venv/bin/pip" ]; then
+        VENV_PIP=".venv/bin/pip"
+    elif [ -x "venv/bin/pip" ]; then
+        VENV_PIP="venv/bin/pip"
+    else
+        echo "Could not find a virtualenv's pip at .venv/bin/pip or venv/bin/pip - aborting." >&2
+        exit 1
+    fi
+    "$VENV_PIP" install -r requirements.txt
 fi
 
 echo "Starting $SERVICE_NAME..."

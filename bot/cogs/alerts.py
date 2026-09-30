@@ -12,8 +12,19 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from bot.cogs.prices import commodity_name_autocomplete
+from bot.delivery import (
+    DELIVERY_CHOICES,
+    DELIVERY_DESCRIPTION,
+    Delivery,
+    delivery_label,
+    delivery_note,
+    delivery_scope,
+    send_alert,
+)
 from bot.discord_ui import send_alert_remove_picker
-from bot.uex.exceptions import UexApiError
+from bot.uex.exceptions import UexApiError, describe_uex_api_error
+from bot.uex.marketplace import format_quality_range
+from bot.uex.trading import resolve_tradeable_commodity, unknown_commodity_message
 
 logger = logging.getLogger("uexbot.alerts")
 
@@ -29,6 +40,11 @@ DIRECTION_CHOICES = [
 ]
 
 
+def _where(alert: dict) -> str:
+    """Where an alert arrives, as plain text: a menu option can't render a channel mention."""
+    return "DM" if delivery_label(alert) == "DM" else "channel"
+
+
 class Alerts(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
@@ -42,8 +58,9 @@ class Alerts(commands.Cog):
         commodity="Commodity name, e.g. 'Gold'",
         direction="Whether to watch the sell price or the buy price",
         target_price="Target price in aUEC/unit",
+        delivery=DELIVERY_DESCRIPTION,
     )
-    @app_commands.choices(direction=DIRECTION_CHOICES)
+    @app_commands.choices(direction=DIRECTION_CHOICES, delivery=DELIVERY_CHOICES)
     @app_commands.autocomplete(commodity=commodity_name_autocomplete)
     async def alert_add(
         self,
@@ -51,19 +68,43 @@ class Alerts(commands.Cog):
         commodity: str,
         direction: app_commands.Choice[str],
         target_price: float,
+        delivery: app_commands.Choice[str] | None = None,
     ) -> None:
+        scope = delivery_scope(delivery)
+        # Deferred before the UEX lookup and the DB write: either can outlast Discord's
+        # 3-second window, and a player who sees "did not respond" retries and makes a
+        # duplicate alert (audit REL-8). A DM alert's replies stay private.
+        private = scope == "personal"
+        await interaction.response.defer(ephemeral=private)
+        try:
+            commodities = await self.bot.uex.get_commodities()
+        except UexApiError as exc:
+            await interaction.followup.send(
+                f"Couldn't check the commodity name against UEX right now, so no alert was set. "
+                f"Try again in a minute. ({describe_uex_api_error(exc)})",
+                ephemeral=private,
+            )
+            return
+        resolved = resolve_tradeable_commodity(commodities, commodity)
+        if resolved is None:
+            await interaction.followup.send(unknown_commodity_message(commodities, commodity), ephemeral=private)
+            return
+        name = resolved["name"]
         alert_id = await self.bot.db.add_price_alert(
             guild_id=interaction.guild_id,
             channel_id=interaction.channel_id,
             user_id=interaction.user.id,
-            commodity_name=commodity,
+            commodity_name=name,
             direction=direction.value,
             target_price=target_price,
+            scope=scope,
         )
         readable = "sells for at least" if direction.value == "sell_at_least" else "can be bought for at most"
-        await interaction.response.send_message(
-            f"Alert #{alert_id} set: I'll ping you here when **{commodity}** {readable} "
-            f"**{target_price:.2f} aUEC/unit**. (checked every {POLL_INTERVAL_MINUTES} min)"
+        await interaction.followup.send(
+            f"Alert #{alert_id} set: {delivery_note(scope)} when **{name}** {readable} "
+            f"**{target_price:.2f} aUEC/unit** (checked every {POLL_INTERVAL_MINUTES} min). It fires once, "
+            "then switches off.",
+            ephemeral=private,
         )
 
     @app_commands.command(name="alert-list", description="List all your active alerts (price, restock, and marketplace).")
@@ -77,19 +118,20 @@ class Alerts(commands.Cog):
             return
 
         sections: list[str] = []
+        # Each section says how often its alerts fire, and each line where it arrives (UX-12).
         if price_alerts:
             lines = []
             for a in price_alerts:
                 readable = "sell >=" if a["direction"] == "sell_at_least" else "buy <="
-                lines.append(f"#{a['id']} — {a['commodity_name']} {readable} {a['target_price']:.2f}")
-            sections.append("**Price alerts**\n" + "\n".join(lines))
+                lines.append(f"#{a['id']} — {a['commodity_name']} {readable} {a['target_price']:.2f}"
+                             f" · {delivery_label(a)}")
+            sections.append("**Price alerts** (each fires once, then switches off)\n" + "\n".join(lines))
         if stock_alerts:
             lines = []
             for a in stock_alerts:
                 ship_note = f" · ship: {a['ship_query']}" if a.get("ship_query") else ""
-                scope_note = " · personal (DM)" if a.get("scope") == "personal" else " · global (channel)"
-                lines.append(f"#{a['id']} — {a['commodity_name']}{ship_note}{scope_note}")
-            sections.append("**Stock (restock) alerts**\n" + "\n".join(lines))
+                lines.append(f"#{a['id']} — {a['commodity_name']}{ship_note} · {delivery_label(a)}")
+            sections.append("**Restock alerts** (fire on every restock)\n" + "\n".join(lines))
         if marketplace_alerts:
             lines = []
             for a in marketplace_alerts:
@@ -97,11 +139,10 @@ class Alerts(commands.Cog):
                 min_q, max_q = a.get("min_quality"), a.get("max_quality")
                 quality_note = ""
                 if min_q is not None or max_q is not None:
-                    lo = f"{min_q:.0f}" if min_q is not None else "0"
-                    hi = f"{max_q:.0f}" if max_q is not None else "100"
-                    quality_note = f" · quality {lo}-{hi}"
-                lines.append(f"#{a['id']} — {a['operation']} listings matching '{a['keyword']}'{price_note}{quality_note}")
-            sections.append("**Marketplace alerts**\n" + "\n".join(lines))
+                    quality_note = f" · quality {format_quality_range(min_q, max_q)}"
+                lines.append(f"#{a['id']} — {a['operation']} listings matching '{a['keyword']}'{price_note}"
+                             f"{quality_note} · {delivery_label(a)}")
+            sections.append("**Marketplace alerts** (fire on every new matching listing)\n" + "\n".join(lines))
 
         message = "\n\n".join(sections)
         if len(message) > ALERT_LIST_MAX_CHARS:
@@ -130,29 +171,25 @@ class Alerts(commands.Cog):
             picker_items.append({
                 "id": f"price:{a['id']}",
                 "label": f"#{a['id']} {a['commodity_name']} (price)",
-                "description": readable + f"{a['target_price']:.2f}",
+                "description": readable + f"{a['target_price']:.2f} · {_where(a)}",
             })
         for a in stock_alerts:
             picker_items.append({
                 "id": f"stock:{a['id']}",
                 "label": f"#{a['id']} {a['commodity_name']} (restock)",
-                "description": (
-                    ("personal · " if a.get("scope") == "personal" else "global · ")
-                    + (f"ship: {a['ship_query']}" if a.get("ship_query") else "no ship set")
-                ),
+                "description": (f"ship: {a['ship_query']}" if a.get("ship_query") else "no ship set")
+                + f" · {_where(a)}",
             })
         for a in marketplace_alerts:
             price_note = f" @ {a['target_price']:,.0f}" if a["target_price"] is not None else ""
             min_q, max_q = a.get("min_quality"), a.get("max_quality")
             quality_note = ""
             if min_q is not None or max_q is not None:
-                lo = f"{min_q:.0f}" if min_q is not None else "0"
-                hi = f"{max_q:.0f}" if max_q is not None else "100"
-                quality_note = f" · quality {lo}-{hi}"
+                quality_note = f" · quality {format_quality_range(min_q, max_q)}"
             picker_items.append({
                 "id": f"marketplace:{a['id']}",
                 "label": f"#{a['id']} {a['keyword']} (marketplace)",
-                "description": f"{a['operation']} listings{price_note}{quality_note}",
+                "description": f"{a['operation']} listings{price_note}{quality_note} · {_where(a)}",
             })
 
         async def _remove(picker_interaction: discord.Interaction, composite_id: str) -> str:
@@ -179,6 +216,15 @@ class Alerts(commands.Cog):
 
     @tasks.loop(minutes=POLL_INTERVAL_MINUTES)
     async def poll_alerts(self) -> None:
+        # Nothing may escape a tasks.loop body: it only restarts itself after a narrow set
+        # of network errors, so anything else (a locked database, an odd UEX row) would
+        # stop this poller until the bot restarts.
+        try:
+            await self._poll_alerts_once()
+        except Exception:
+            logger.exception("Price alert poll failed; retrying next cycle")
+
+    async def _poll_alerts_once(self) -> None:
         alerts = await self.bot.db.list_active_alerts()
         if not alerts:
             return
@@ -196,9 +242,13 @@ class Alerts(commands.Cog):
             if not rows:
                 continue
 
-            best_sell = max((r.get("price_sell") or 0 for r in rows), default=0)
-            best_buy_candidates = [r.get("price_buy") or 0 for r in rows if (r.get("price_buy") or 0) > 0]
-            best_buy = min(best_buy_candidates) if best_buy_candidates else None
+            try:
+                best_sell = max((r.get("price_sell") or 0 for r in rows), default=0)
+                best_buy_candidates = [r.get("price_buy") or 0 for r in rows if (r.get("price_buy") or 0) > 0]
+                best_buy = min(best_buy_candidates) if best_buy_candidates else None
+            except (AttributeError, TypeError) as exc:
+                logger.warning("Skipping price alerts for %s: unexpected price rows (%s)", commodity_name, exc)
+                continue
 
             for alert in commodity_alerts:
                 triggered = False
@@ -211,33 +261,21 @@ class Alerts(commands.Cog):
                     detail = f"best buy price is now **{best_buy:.2f} aUEC/unit**"
 
                 if triggered:
-                    await self._fire_alert(alert, detail)
+                    try:
+                        await self._fire_alert(alert, detail)
+                    except Exception:
+                        logger.exception("Failed to fire price alert #%s", alert["id"])
 
     async def _fire_alert(self, alert: dict, detail: str) -> None:
-        await self.bot.db.deactivate_alert(alert["id"])
-        message = f"<@{alert['user_id']}> price alert #{alert['id']} triggered for **{alert['commodity_name']}**: {detail}"
-
-        channel = self.bot.get_channel(alert["channel_id"])
-        if channel is not None:
-            try:
-                await channel.send(message)
-                return
-            except discord.HTTPException as exc:
-                # Channel resolved fine but the bot can't post there (e.g. 403/50013
-                # Missing Permissions) - fall through to the DM fallback below instead
-                # of silently dropping the notification.
-                logger.warning(
-                    "Failed to post alert #%s to channel %s (%s) - falling back to DM.",
-                    alert["id"], alert["channel_id"], exc,
-                )
-        try:
-            user = await self.bot.fetch_user(alert["user_id"])
-            await user.send(message)
-        except discord.HTTPException as exc:
-            logger.warning(
-                "Failed to deliver alert #%s (DM failed, and channel post either failed "
-                "or wasn't attempted): %s", alert["id"], exc,
-            )
+        """One-shot: deactivated once the alert is settled - delivered, or refused outright
+        by Discord (see bot/delivery.py). A temporary failure leaves it active, so the next
+        poll tries again instead of the alert being used up without ever arriving."""
+        body = f"price alert #{alert['id']} triggered for **{alert['commodity_name']}**: {detail}"
+        outcome = await send_alert(self.bot, alert, body, label=f"price alert #{alert['id']}")
+        if outcome.settled:
+            await self.bot.db.deactivate_alert(alert["id"])
+        if outcome is Delivery.UNDELIVERABLE:
+            logger.warning("Price alert #%s couldn't reach its owner by channel or DM; deactivated", alert["id"])
 
     @poll_alerts.before_loop
     async def before_poll_alerts(self) -> None:

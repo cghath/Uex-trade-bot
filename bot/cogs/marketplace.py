@@ -17,10 +17,14 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
+from bot.autocomplete import fetch_within
+from bot.delivery import fit_lines
+from bot.discord_ui import BotModal, BotView
 from bot.uex.charts import render_price_history_chart
 from bot.uex.exceptions import UexApiError, describe_uex_api_error
 from bot.uex.inventory import extract_listing_id
 from bot.uex.marketplace import (
+    QUALITY_MAX,
     MarketplaceAverageEntry,
     compute_marketplace_movers,
     exclude_sold_out,
@@ -61,6 +65,20 @@ TYPE_CHOICES = [
     app_commands.Choice(name="Contract", value="contract"),
 ]
 DEFAULT_LANGUAGE = "en_US"
+
+# UEX's own accepted `unit` values for POST /marketplace_advertise, scoped by listing
+# type - confirmed against docs/UEX_API_2.0_reference.md's "Unit Reference" table, not
+# guessed. `unit` used to be a free-text modal field with only a suggestive placeholder
+# ("e.g. unit, scu, crate, hour, day, contract") - a real listing failed live with
+# `invalid_unit` because the player typed "3" (a quantity, not a unit). Scoping
+# suggestions to the already-chosen `type` (unit_autocomplete below) is the same fix
+# category_autocomplete already applies to `category` just below.
+UNITS_BY_TYPE = {
+    "item": ["box", "crate", "cscu", "dozen", "hundred", "pack", "pair", "scu", "set", "stack", "thousand", "unit"],
+    "service": ["contract", "cycle", "day", "event", "expedition", "gm", "hour", "minute", "mission", "month",
+                "operation", "route", "run", "service", "session", "shift", "trip", "week"],
+    "contract": ["contract", "mission"],
+}
 
 # Verified against live /marketplace_prices_history data: quality_tier is a 0-7 bucket of the
 # 0-1000 `quality` field, NOT evenly spaced - see bot/uex/client.py:get_marketplace_prices_history.
@@ -112,16 +130,25 @@ async def category_autocomplete(interaction: discord.Interaction, current: str) 
     # The category list depends on which `type` the user already picked in this same
     # command invocation - fall back to "item" if they haven't gotten to that field yet.
     chosen_type = getattr(interaction.namespace, "type", None) or "item"
-    try:
-        categories = await interaction.client.uex.get_categories(type=chosen_type)
-    except UexApiError:
+    categories = await fetch_within(interaction.client.uex.get_categories(type=chosen_type))
+    if categories is None:
         return []
     current_lower = current.lower()
     matches = [c for c in categories if current_lower in (c.get("name") or "").lower()][:25]
     return [app_commands.Choice(name=(c.get("name") or "")[:100], value=c.get("id")) for c in matches]
 
 
-class ConfirmListingView(discord.ui.View):
+async def unit_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
+    # Same "read the already-chosen sibling option, fall back to 'item'" pattern as
+    # category_autocomplete above - UEX's valid unit values depend on `type`.
+    chosen_type = getattr(interaction.namespace, "type", None) or "item"
+    units = UNITS_BY_TYPE.get(chosen_type, UNITS_BY_TYPE["item"])
+    current_lower = current.lower()
+    matches = [u for u in units if current_lower in u][:25]
+    return [app_commands.Choice(name=u, value=u) for u in matches]
+
+
+class ConfirmListingView(BotView):
     """Confirm/cancel gate in front of the real POST - times out safely if ignored."""
 
     def __init__(self, bot: commands.Bot, secret_key: str, payload: dict, author_id: int) -> None:
@@ -133,6 +160,7 @@ class ConfirmListingView(discord.ui.View):
         self.resolved = False
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        await super().interaction_check(interaction)
         if interaction.user.id != self.author_id:
             await interaction.response.send_message("Only the person who started this listing can confirm it.", ephemeral=True)
             return False
@@ -140,11 +168,21 @@ class ConfirmListingView(discord.ui.View):
 
     async def on_timeout(self) -> None:
         self.resolved = True
-        for item in self.children:
-            item.disabled = True
+        await super().on_timeout()
 
     @discord.ui.button(label="Post listing", style=discord.ButtonStyle.green)
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        # Two already-dispatched callbacks (a double-click, or Discord redelivering the
+        # interaction) can both reach here before either's `edit_message` round-trip
+        # disables the button on Discord's side - the disabled-button UI update alone is
+        # not a lock. Checking `resolved` here and only then setting it is: asyncio is
+        # single-threaded and nothing awaits between the check and the set, so the second
+        # callback to run this line always sees the first one's write.
+        if self.resolved:
+            await interaction.response.send_message(
+                "This listing confirmation was already resolved.", ephemeral=True
+            )
+            return
         self.resolved = True
         for item in self.children:
             item.disabled = True
@@ -164,6 +202,11 @@ class ConfirmListingView(discord.ui.View):
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.grey)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if self.resolved:
+            await interaction.response.send_message(
+                "This listing confirmation was already resolved.", ephemeral=True
+            )
+            return
         self.resolved = True
         for item in self.children:
             item.disabled = True
@@ -171,7 +214,7 @@ class ConfirmListingView(discord.ui.View):
         await interaction.followup.send("Cancelled - nothing was posted.", ephemeral=True)
 
 
-class ConfirmDeleteListingView(discord.ui.View):
+class ConfirmDeleteListingView(BotView):
     """Confirm/cancel gate in front of a real DELETE against a public UEX listing - the
     original single-command version had no recovery from a mistyped listing_id."""
 
@@ -181,19 +224,31 @@ class ConfirmDeleteListingView(discord.ui.View):
         self.listing_id = listing_id
         self.secret_key = secret_key
         self.author_id = author_id
+        self.resolved = False
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        await super().interaction_check(interaction)
         if interaction.user.id != self.author_id:
             await interaction.response.send_message("Only the person who started this deletion can confirm it.", ephemeral=True)
             return False
         return True
 
     async def on_timeout(self) -> None:
-        for item in self.children:
-            item.disabled = True
+        self.resolved = True
+        await super().on_timeout()
 
     @discord.ui.button(label="Delete listing", style=discord.ButtonStyle.red)
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        # Same check-then-set race guard as ConfirmListingView.confirm - two already-
+        # dispatched callbacks (a double-click, or Discord redelivering the interaction)
+        # could otherwise both reach the real DELETE below before either's edit_message
+        # round-trip disables the button on Discord's side.
+        if self.resolved:
+            await interaction.response.send_message(
+                "This deletion was already resolved.", ephemeral=True
+            )
+            return
+        self.resolved = True
         for item in self.children:
             item.disabled = True
         await interaction.response.edit_message(view=self)
@@ -253,18 +308,21 @@ class ConfirmDeleteListingView(discord.ui.View):
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.grey)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if self.resolved:
+            await interaction.response.send_message(
+                "This deletion was already resolved.", ephemeral=True
+            )
+            return
+        self.resolved = True
         for item in self.children:
             item.disabled = True
         await interaction.response.edit_message(view=self)
         await interaction.followup.send("Cancelled - nothing was deleted.", ephemeral=True)
 
 
-class ListingDetailsModal(discord.ui.Modal, title="Marketplace listing details"):
+class ListingDetailsModal(BotModal, title="Marketplace listing details"):
     listing_title = discord.ui.TextInput(label="Title", max_length=140, required=True)
     price = discord.ui.TextInput(label="Price (whole number)", max_length=12, required=True)
-    unit = discord.ui.TextInput(
-        label="Unit", placeholder="e.g. unit, scu, crate, hour, day, contract", max_length=32, required=True
-    )
     description = discord.ui.TextInput(label="Description", style=discord.TextStyle.paragraph, max_length=2000, required=True)
 
     def __init__(self, bot: commands.Bot, base_payload: dict) -> None:
@@ -294,7 +352,6 @@ class ListingDetailsModal(discord.ui.Modal, title="Marketplace listing details")
             {
                 "title": str(self.listing_title.value),
                 "price": price_value,
-                "unit": str(self.unit.value),
                 "description": str(self.description.value),
                 "language": DEFAULT_LANGUAGE,
             }
@@ -313,6 +370,7 @@ class ListingDetailsModal(discord.ui.Modal, title="Marketplace listing details")
 
         view = ConfirmListingView(self.bot, secret_key=secret_key, payload=payload, author_id=interaction.user.id)
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        view.origin = interaction
 
 
 class Marketplace(commands.Cog):
@@ -338,7 +396,16 @@ class Marketplace(commands.Cog):
         activity = extract_item_activity(rows)
         if not activity:
             return
-        await self.bot.db.upsert_marketplace_item_activity(activity)
+        try:
+            await self.bot.db.upsert_marketplace_item_activity(activity)
+        except Exception:
+            # A transient DB error (e.g. sqlite3.OperationalError: database is locked from
+            # another collector writing at the same moment) must not escape this
+            # coroutine - tasks.loop's own auto-reconnect only covers a specific set of
+            # network exceptions, not arbitrary ones, so anything else raised here
+            # permanently stops this loop until the bot is restarted. Skipping this cycle
+            # and letting the next scheduled run retry is far safer than that.
+            logger.exception("Failed to store marketplace item activity snapshot")
 
         # Second half of the snapshot: keep the per-tier "sub-item" stats table current
         # from the bulk averages dump. Each averages row is one (item, quality_tier,
@@ -362,15 +429,23 @@ class Marketplace(commands.Cog):
             average_rows = []
         tier_stats = extract_tier_stats(average_rows)
         if tier_stats:
-            await self.bot.db.upsert_marketplace_tier_stats(tier_stats)
+            try:
+                await self.bot.db.upsert_marketplace_tier_stats(tier_stats)
+            except Exception:
+                logger.exception("Failed to store marketplace tier stats")
 
-        total = await self.bot.db.count_marketplace_item_activity()
-        tier_combos, tier_items = await self.bot.db.count_marketplace_tier_stats()
-        logger.info(
-            "Marketplace item activity snapshot: %d items updated, %d total tracked, "
-            "%d tier combos across %d quality-bearing items",
-            len(activity), total, tier_combos, tier_items,
-        )
+        try:
+            total = await self.bot.db.count_marketplace_item_activity()
+            tier_combos, tier_items = await self.bot.db.count_marketplace_tier_stats()
+            logger.info(
+                "Marketplace item activity snapshot: %d items updated, %d total tracked, "
+                "%d tier combos across %d quality-bearing items",
+                len(activity), total, tier_combos, tier_items,
+            )
+        except Exception:
+            # Purely a logging summary - a DB error here must never take down the loop
+            # after the actual writes above already succeeded.
+            logger.exception("Failed to log marketplace item activity snapshot summary")
 
     @snapshot_item_activity.before_loop
     async def before_snapshot_item_activity(self) -> None:
@@ -408,8 +483,8 @@ class Marketplace(commands.Cog):
     @app_commands.describe(
         query="Item name or keyword",
         operation="Filter to buy or sell listings",
-        min_quality="Optional: only listings with quality at least this (seller-set, UEX's 0-100 scale)",
-        max_quality="Optional: only listings with quality at most this (seller-set, UEX's 0-100 scale)",
+        min_quality="Optional: only listings with quality at least this, 0-1000 (seller-set)",
+        max_quality="Optional: only listings with quality at most this, 0-1000 (seller-set)",
     )
     @app_commands.choices(operation=OPERATION_CHOICES)
     @app_commands.autocomplete(query=traded_item_autocomplete)
@@ -418,8 +493,8 @@ class Marketplace(commands.Cog):
         interaction: discord.Interaction,
         query: str,
         operation: app_commands.Choice[str] | None = None,
-        min_quality: float | None = None,
-        max_quality: float | None = None,
+        min_quality: app_commands.Range[float, 0, QUALITY_MAX] | None = None,
+        max_quality: app_commands.Range[float, 0, QUALITY_MAX] | None = None,
     ) -> None:
         await interaction.response.defer()
 
@@ -461,14 +536,18 @@ class Marketplace(commands.Cog):
             quality = parse_listing_quality(listing.get("quality"))
             quality_text = f" · quality {quality:.0f}" if quality is not None else ""
             price_text = f"{listing.get('operation', '?').title()} · {price:,.0f} {currency}" if price is not None else "Price n/a"
+            # The id /marketplace-listing and /marketplace-delete-listing take, which their
+            # own descriptions say is found here - it wasn't shown (audit UX-4).
+            if listing.get("id") is not None:
+                price_text += f" · listing #{listing['id']}"
             embed.add_field(
                 name=listing.get("title", "Untitled listing")[:256],
                 value=price_text + f"\nby {seller} · {location}{stock_text}{quality_text}",
                 inline=False,
             )
-        footer = "UEX Marketplace · player-to-player listings"
+        footer = "UEX Marketplace · player-to-player listings · /marketplace-listing <id> for details"
         if min_quality is not None or max_quality is not None:
-            footer += " · quality filter applied (0-100 scale, only listings the seller set a quality on)"
+            footer += " · quality filter applied (0-1000 scale, only listings the seller set a quality on)"
         embed.set_footer(text=footer)
         await interaction.followup.send(embed=embed)
 
@@ -525,7 +604,7 @@ class Marketplace(commands.Cog):
                 name="Trending up",
                 value="\n".join(
                     f"**{marketplace_item_link(m.item_name, m.id_item)}** +{m.pct_change:.1f}% "
-                    f"({m.current_avg_sell:,.0f} UEC)" for m in gainers
+                    f"({m.current_avg_sell:,.0f} {m.currency})" for m in gainers
                 ),
                 inline=False,
             )
@@ -534,7 +613,7 @@ class Marketplace(commands.Cog):
                 name="Trending down",
                 value="\n".join(
                     f"**{marketplace_item_link(m.item_name, m.id_item)}** {m.pct_change:.1f}% "
-                    f"({m.current_avg_sell:,.0f} UEC)" for m in losers
+                    f"({m.current_avg_sell:,.0f} {m.currency})" for m in losers
                 ),
                 inline=False,
             )
@@ -688,7 +767,9 @@ class Marketplace(commands.Cog):
 
         history_rows = reshape_marketplace_history_rows(rows)
         tier_label = quality_tier.name if quality_tier else "all qualities"
-        chart = render_price_history_chart(
+        # Off the event loop: drawing a chart is CPU-bound (audit REL-14).
+        chart = await asyncio.to_thread(
+            render_price_history_chart,
             commodity_name=item, terminal_name=f"UEX Marketplace ({tier_label})", history_rows=history_rows
         )
         if chart is None:
@@ -730,8 +811,13 @@ class Marketplace(commands.Cog):
             price_text = f"{price:,.0f} {f.get('currency', 'UEC')}" if price is not None else "price n/a"
             title = f.get("title") or f.get("listing_title") or "Untitled listing"
             sold_note = " (sold out)" if f.get("is_sold_out") else ""
-            lines.append(f"#{f.get('id')} — **{marketplace_item_link(title, id_item)}** · {price_text}{sold_note}")
-        await interaction.followup.send("\n".join(lines))
+            # id_listing, not the favourite row's own id: that one no command accepts, while
+            # /marketplace-listing takes this (audit UX-4).
+            lines.append(f"Listing #{f.get('id_listing')} — **{marketplace_item_link(title, id_item)}** · "
+                         f"{price_text}{sold_note}")
+        await interaction.followup.send(
+            fit_lines(lines, footer="-# `/marketplace-listing <id>` shows a listing's full details.")
+        )
 
     @app_commands.command(name="my-negotiations", description="Your own active UEX Marketplace deals.")
     async def my_negotiations(self, interaction: discord.Interaction) -> None:
@@ -760,11 +846,13 @@ class Marketplace(commands.Cog):
             price = parse_uex_number(n.get("price"))
             price_text = f"{price:,.0f}" if price is not None else "?"
             title = marketplace_item_link(n.get("listing_title", "Untitled"), id_item)
+            # The listing's id, as in /my-favorites: the negotiation's own id isn't taken by any
+            # command or shown in negotiation alerts (audit UX-4).
             lines.append(
-                f"#{n.get('id')} {role} — {title} · "
+                f"Listing #{n.get('id_listing')} {role} — {title} · "
                 f"{price_text} {n.get('currency', 'UEC')} · {status}"
             )
-        await interaction.followup.send("\n".join(lines))
+        await interaction.followup.send(fit_lines(lines))
 
     async def _resolve_id_item(self, id_listing: Any) -> int | None:
         """UEX's negotiations/favorites don't carry id_item directly - resolve it from the
@@ -784,10 +872,11 @@ class Marketplace(commands.Cog):
         type="What kind of listing this is",
         category="Listing category",
         currency="Currency for the price",
+        unit="What one unit of price is measured in - options depend on the type you picked",
         item="Optional: link this listing to a specific catalog item",
     )
     @app_commands.choices(operation=OPERATION_CHOICES, type=TYPE_CHOICES, currency=CURRENCY_CHOICES)
-    @app_commands.autocomplete(category=category_autocomplete, item=traded_item_autocomplete)
+    @app_commands.autocomplete(category=category_autocomplete, unit=unit_autocomplete, item=traded_item_autocomplete)
     async def marketplace_post(
         self,
         interaction: discord.Interaction,
@@ -795,6 +884,7 @@ class Marketplace(commands.Cog):
         type: app_commands.Choice[str],
         category: int,
         currency: app_commands.Choice[str],
+        unit: str,
         item: str | None = None,
     ) -> None:
         secret_key = await self.bot.db.get_user_secret_key(interaction.user.id)
@@ -805,11 +895,31 @@ class Marketplace(commands.Cog):
             )
             return
 
+        valid_units = UNITS_BY_TYPE.get(type.value, UNITS_BY_TYPE["item"])
+        if unit not in valid_units:
+            await interaction.response.send_message(
+                f"'{unit}' isn't a valid unit for a **{type.name}** listing - pick one from the autocomplete "
+                f"list. Valid options: {', '.join(valid_units)}.",
+                ephemeral=True,
+            )
+            return
+
         base_payload = {
             "operation": operation.value,
             "type": type.value,
             "id_category": category,
             "currency": currency.value,
+            "unit": unit,
+            # POST /marketplace_advertise's own is_production field ("1 for production, 0
+            # for sandbox") was never set here, unlike bot/uex/inventory.py's
+            # build_inventory_listing_payload (used by /inventory-sell and
+            # /inventory-post-now), which already hardcodes 1. UEX raises no
+            # missing_is_production error - it's optional, so an omitted value silently
+            # defaults to something, and every real listing this command created still
+            # got back a normal id_listing and a "Listing posted" confirmation - it just
+            # never showed up anywhere real (not even in review), because it was never
+            # marked as a production listing in the first place.
+            "is_production": 1,
         }
 
         if item:
@@ -916,7 +1026,7 @@ class Marketplace(commands.Cog):
         )
         embed.set_footer(text=f"Listing #{listing_id}")
         view = ConfirmDeleteListingView(self.bot, listing_id, secret_key, interaction.user.id)
-        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+        view.message = await interaction.followup.send(embed=embed, view=view, ephemeral=True, wait=True)
 
 
 async def setup(bot: commands.Bot) -> None:

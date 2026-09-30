@@ -37,8 +37,155 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
   limits, cargo centers, refuel/repair availability, and player-owned or monitored locations.
 - [x] **Commodity Risk Labels**: Mark illegal, volatile, explosive, known-buggy, and other
   operationally relevant commodity traits in route recommendations.
-- [ ] **Refinery Advisor**: Compare refinery yield bonuses, processing choices, and current
-  refined-material sale value for mining runs.
+- [x] **Refinery Advisor**: Shipped 2026-09-12. `/refinery-advisor ore-1 [ore-2] [ore-3]` -
+  up to three raw/refinable commodities at once, since a mined rock/asteroid usually yields
+  more than one, autocompleted from live `/commodities` filtered to `is_raw` and
+  `is_refinable`. For each requested ore: ranks refinery terminals by yield bonus (reading
+  the already-collected `refinery_yield_observations` - see UEX Data Collection Foundation
+  above - via a new `get_latest_refinery_yields_for_commodity`, which selects only the most
+  recent `recorded_day`'s rows per commodity, not just the highest yield_bonus across all
+  history); lists only the high-yield refining methods (`rating_yield == 3` of UEX's 9
+  `/refineries_methods`, cheapest then fastest); and shows the refined commodity's current
+  best sell price/terminal (live `/commodities_prices`, resolved via `id_parent` - the
+  field UEX uses to link a raw commodity to its refined counterpart). For 2-3 ores, ranks
+  terminals by the SUM of whatever of the requested ores each has yield data for (a
+  terminal missing data for one ore is still ranked on its smaller sum, not excluded
+  outright, so a genuinely best single stop for a partial match still surfaces) - a
+  deliberate additive approximation, not weighted by how much of each ore was actually
+  mined, since this command doesn't ask for quantities. Deliberately excludes UEX's
+  `/refineries_capacities` endpoint: despite its docs claiming "yield bonus percentage,"
+  real values observed live (397, 4845, 181924, ...) are clearly not percentages, so its
+  actual meaning is unverified and it isn't used rather than guessed at (matches this
+  project's "verify empirically, don't infer from names" convention - see
+  `commodities_status`/`marketplace_listings.quality` in `CONTRIBUTING.md`). No new DB
+  table or background collector: refining methods are fetched live per call (client-side
+  cached 24h, matching UEX's own patch-cycle cadence) rather than persisted, since the
+  list is small (9 rows) and stable. 17 new tests (pure resolve/rank/filter logic, a
+  latest-recorded-day DB round trip seeded with a stale higher-yield row to prove the
+  query actually filters by date rather than sorting all history, and five end-to-end
+  command tests including the multi-ore combined-ranking and duplicate-ore dedup cases).
+  Verified locally: `Loaded extension bot.cogs.refinery` and `Synced 64 commands` (63 to
+  64, exactly the one new command) with no `CommandSyncFailure`.
+
+  **Follow-up (2026-09-12)**: fixed an inconsistency the user spotted live in Discord -
+  `/refineries_yields`' own `terminal_name` field embeds a system suffix for some
+  terminals (gateway terminals disambiguating same-named gateways across systems, e.g. two
+  different "Nyx Gateway" terminals, one in Pyro and one in Stanton) but never for others
+  (e.g. "Refinement Center - Levski"), so the embed showed the system for exactly one
+  recommended terminal out of five with no way to tell why. Fixed by storing the
+  separately-reported, structured `star_system_name` field (new nullable column on
+  `refinery_yield_observations`, additive migration) and always appending it in
+  `display_terminal_name()` (`bot/uex/refinery.py`) - skipped only when that exact system
+  name is already substring-present in the terminal's own name, so a gateway terminal
+  doesn't read "Nyx Gateway (Stanton) (Stanton)". 4 new tests, including one that
+  reproduces the exact reported case (a gateway terminal alongside a plain one in the same
+  ranked list). Full suite (612 tests) and a local bot start reverified clean, confirming
+  the new column's `ALTER TABLE` migration applies cleanly against an already-existing
+  database.
+- [x] **Where to Mine**: Shipped 2026-09-12. `/where-to-mine ore` - one raw/mineable
+  commodity, autocompleted from live `/commodities` filtered to `is_raw` only (NOT
+  `is_refinable`, unlike `/refinery-advisor` - a hand-mined material with no refinery
+  pathway, e.g. Jaclium, is just as relevant to "where do I find this" as anything that
+  gets refined). Shows the star system(s), planet(s), moon(s), and named mining-related
+  POIs (asteroid belts/rings, via UEX's `/poi` and its `is_mining_related` flag) a
+  commodity's own `ids_star_systems`/`ids_planets`/`ids_moons`/`ids_poi` fields resolve
+  to, using three new reference-list client methods (`get_star_systems`/`get_planets`/
+  `get_moons`, cached 24h like `get_poi`). Originally scoped as part of a broader "mining-
+  route planner" idea; deliberately narrowed to a single-location lookup instead, per
+  direct user correction - a real mining run sticks to one site, not a multi-stop route
+  the way trading does. Deliberately does not rank or recommend one location over
+  another when a commodity has several: UEX has no per-site richness/abundance data at
+  all, and live-checked, the real mining-related POI set is only 7 rows total with none
+  decommissioned, so even the one real differentiating signal available
+  (`is_landable`/`has_quantum_marker`/`is_decommissioned`) doesn't actually distinguish
+  anything in practice - a plain list is the honest answer, not a fabricated "best spot."
+  Confirmed live that Jaclium and Diamond (Raw) both have every location field empty in
+  UEX's own data (not a bug here) - per the user, Jaclium's real source is a distinct
+  gameplay loop ("Hathor"), not a minable deposit at all, which UEX has no way to flag;
+  the command's generic "no location data available" message is left as-is rather than
+  hardcoding a game fact the bot can't verify against any UEX field. 13 new tests (pure
+  resolve/describe logic, including a stale/unknown reference id being silently dropped
+  rather than shown as a fabricated name, and end-to-end command tests). Verified
+  locally: `Loaded extension bot.cogs.mining_locations` and `Synced 65 commands` (64 to
+  65) with no `CommandSyncFailure`.
+
+  **Follow-up same day**: added a per-ore mining difficulty rating to the same command's
+  embed (`bot/uex/mining_difficulty.py`) - the one place in this entire bot that uses
+  static, externally-sourced game constants instead of live UEX data or a collected
+  observation, and disclosed as such in both the module's own docstring and the command's
+  footer whenever it's shown. Sourced from SC DataHub's data-mined per-ore stats (resistance,
+  instability, optimal charge window, explosion multiplier - https://sc-datahub.com/tools/
+  mining/ores), which UEX has no equivalent of anywhere in its API (confirmed by grepping
+  the full endpoint reference for mass/resistance/instability/charge before starting this -
+  zero matches). Went through three narrower framings first, each confirmed unbuildable
+  before landing here: a per-mineral crew-size recommendation (crew size is a ship
+  attribute, not a mineral one - the same MOLE needs the same crew regardless of what it's
+  mining), a specific-rock laser-count recommendation (a rock's real mass/resistance/
+  instability is randomized per-instance in live gameplay, not knowable in advance by any
+  external database), before arriving at a general per-mineral difficulty baseline, which
+  the game genuinely does have as a fixed design constant. The rating combines only two of
+  the source's four stats - instability and resistance - taking whichever rates worse
+  (not an average, since either dimension alone can make a rock genuinely hard); optimal
+  charge window is shown as a side note only, un-ranked, alongside explosion multiplier
+  being left out of the feature entirely, since both carry negative values in the source
+  with no documented sign convention the way resistance's does ("high resistance requiring
+  high-power lasers," directly supporting a simple higher-is-harder reading) - folding them
+  into a score would be guessing, not simplifying. Tier cutoffs (instability: 0-100 low,
+  200-400 medium, 550+ high; resistance: <=0.30 low, 0.50-0.65 medium, 0.95 high) land on
+  the real gaps in the actual per-ore values, not an arbitrary even split. Difficulty and
+  location data are deliberately independent lookups - confirmed via a dedicated test that
+  Diamond (no location data in UEX at all) still shows its difficulty rating, and Jaclium
+  (whose real source, per the user, is a distinct gameplay loop rather than a minable
+  deposit) shows a difficulty rating with no location fields, rather than one gap
+  suppressing the other. 16 new tests (the difficulty table's own resolve/tier logic
+  including the take-the-worse-not-the-average case, `describe_mining_locations` wiring,
+  and end-to-end command field-format checks). Simulated against real UEX data before
+  shipping: Quantainium (Raw) - High (resistance 0.95, instability 1000); Iron (Ore) - Low
+  (resistance -0.4, instability 50), with a full real location list including Aaron Halo;
+  Jaclium (Ore) - Medium difficulty shown alongside "no location data available" (superseded
+  by the follow-up immediately below, which gives Jaclium a real location after all).
+
+  **Second follow-up, same day**: added a "richest known concentration" ranking
+  (`bot/uex/mining_hotspots.py`) - a THIRD static, externally-sourced reference table in this
+  bot, after refining methods' rating labels and the difficulty table above, this time from a
+  different community site (SCMINER, https://scminer.rocks/data/ore-by-location as of
+  2026-09) that publishes a real per-location concentration percentage for every ore, not
+  just presence/absence the way UEX's own `ids_poi`/`ids_moons` linkage does. Kept as its own
+  module (not folded into the difficulty table) since it's sourced from a different site with
+  its own independent staleness risk. Surfaces every location tied at an ore's own real
+  maximum concentration, whatever that count happens to be. Two ores (Savrilium, Torite) have
+  one standout 100% location (Breaker Stations' Large Geode) against 2-29% everywhere else for
+  either ore. Directly fills the gap the location-lookup shipped with earlier the same day:
+  Jaclium's only listed spot is Hathor Caves (19%, FPS hand-mining) - independently
+  confirming, from a completely different source than the user's own correction, that
+  Jaclium's real acquisition path is the Hathor gameplay loop rather than a standard rock/
+  asteroid deposit. Diamond and Cobalt have no entry, matching UEX's own total lack of
+  location data for both - two independent sources agreeing there's a real gap, not a
+  lookup bug on either side. 6 new tests (the hotspot table's own lookup logic including
+  the Jaclium/Hathor Caves case, and `describe_mining_locations`/command wiring). Simulated
+  against real UEX data before shipping: Savrilium (Ore)'s hotspot (Breaker Stations, 100%)
+  cross-checks cleanly against UEX's own POI list for the same commodity, which separately
+  and independently lists "OV Breaker Stations (Nyx)" as a real site - two unrelated sources
+  agreeing this location is real, without either one telling the other about it.
+
+  **Same-day correction**: the first shipped version of this table capped every ore at 3
+  example locations, preferring named POIs over bare moon names when several tied - caught
+  the same day when the user tested `/where-to-mine Quantainium (Raw)` live in Discord and
+  noticed real locations they knew about (Cellin, Wala) were missing. Quantainium's real
+  source data ties ALL 14 known locations at 2% - the cap was silently showing 1-2 of them.
+  Fixing Quantainium alone wasn't enough; the user asked whether the same problem existed for
+  other ores, which prompted a full re-audit of all 26 entries against the original source
+  data. Ten more ores turned out to be under-capturing their own real tied-max group by
+  varying amounts (Agricium, Aslarite, Titanium: 3 shown of 7 real; Bexalite, Borase, Gold: 2
+  of 9; Ouratite: 3 of 4; Riccite: 2 of 5; Taranite: 3 of 4; Stileron: 1 of a complete 6-way
+  tie). A twelfth inconsistency was found in the same pass, the opposite direction: Copper
+  listed Clio/Euterpe (40%) alongside Hurston's real max (44%) even though 40 isn't tied with
+  44 at all - fixed by removing the non-tied entries rather than adding more. The fixed cap
+  looked tidy but was hiding or padding real, verifiable per-ore data; the table now shows
+  exactly what the source shows for every ore, no fixed-size cap in either direction. 4 new
+  tests added covering a large tied group (Bexalite, 9-way), a complete tie (Stileron, 6-way),
+  and the corrected non-tie exclusion (Copper). Full suite (608 tests) and a local bot start
+  reverified clean after the fix.
 - [ ] **Fuel-Aware Profit**: Estimate fuel costs and show route profit after fuel for the
   user's selected ship.
 - [ ] **Marketplace Depth Analytics**: Extend sellability with buy-to-sell ratios, listing-price
@@ -46,4 +193,1325 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
 
 - [ ] **Volatility Alerts**: Notify users of sudden price swings in specific commodities.
 - [ ] **Quality Premium Analysis**: Data visualization of how much extra UEC is paid for higher quality tiers.
-- [ ] **User Dashboard**: A summary of the user's current "Portfolio" (linked accounts, current holdings, and active listings).
+
+### Personalization & Workflow
+
+- [x] **Saved Trading Preferences**: Shipped 2026-09-06. `/set-trading-preferences`,
+  `/clear-trading-preferences`, `/my-trading-preferences` store per-user defaults for
+  space-only terminals, capital-ship access, auto-loading, preferred system, and risk
+  tolerance (risk tolerance was stored/shown only at first, a deliberate scoping choice;
+  enforced since 2026-09-30, PROJECT_CONTEXT.md entry 104). Applied automatically by `/best-route`, `/top-routes`, `/mixed-routes`, and
+  `/multi-stop-route` whenever their matching option is left unset; space-only/
+  capital-ship-access only affect the latter two today. Default ship (`/set-default-ship`)
+  was folded into the same `user_trading_preferences` row rather than kept in its own
+  table, per user direction, and the command itself was folded into
+  `/set-trading-preferences ship:` on 2026-09-30 (entry 112) - see `PROJECT_CONTEXT.md` entries 52-53 for the full design
+  history, the real SQLite migration bug found and fixed along the way, and the known
+  gap (space-only/capital-access filtering doesn't exist yet for `/best-route`/
+  `/top-routes` - bundled into Centralized Route Presentation below instead).
+- [ ] **Personalized `/intelligence-brief` Entry Point** *(complexity: Medium - dependency
+  now satisfied, Saved Trading Preferences shipped above)*: Answer "what should I do right
+  now?" using the user's
+  saved ship, available budget, preferred systems, and safety settings to surface a
+  handful of good options with buttons/links into the relevant commands, instead of
+  requiring the user to already know which command to run.
+- [ ] **Unified Inventory & Selling Workflow** *(complexity: High)*: One private view
+  covering what you own, what's listed, open negotiations, completed sales, and items
+  needing attention, with suggested prices and Sellability Ratings explained inline and
+  clear controls for minimum prices, relisting, and pausing automation. Supersedes the
+  earlier "User Dashboard" idea - negotiations aren't currently linked to
+  `personal_inventory`/`marketplace_post_jobs` by anything but `id_listing`, so this
+  needs real design work, not just a bigger embed.
+
+### Recommendation Trust & Transparency
+
+- [x] **Load-Limiting Explanations**: Shipped 2026-09-06. Every `/mixed-routes`/
+  `/multi-stop-route` cargo item now states which constraint capped its quantity - stock,
+  demand, cargo space, or budget (approximate-allocation disclosure already existed
+  separately via `route.is_exact`). Turned out to be less "just surface what's already
+  computed" than expected: `_exact_allocate`'s aggregate totals give an exact answer, but
+  `_greedy_fill`'s sequential, never-revisited processing needed each item's own local
+  remaining capacity/budget at pick time, not the final totals - see
+  `PROJECT_CONTEXT.md` entry 54 for the real misattribution bug this distinction caught
+  before it shipped.
+
+  **Follow-up (2026-09-12), user-initiated**: the "limited by demand" label named the
+  constraint but never the actual number behind it - a user asked how to see the
+  destination's real buying capacity for a leg's cargo, the same question that led to
+  `/price`'s buying-capacity figure earlier the same day. `cargo_item_warnings()`
+  (`bot/uex/route_presentation.py`) now appends the destination's real confirmed capacity
+  - reusing `effective_sell_scu()`, the identical `/price` helper (status-code-7 override
+  included) - whenever "demand" is actually among an item's limiting factors, e.g.
+  "Gold: limited by demand (destination will take ~250 SCU)". Scoped to demand-limited
+  items only: showing the destination's ceiling when stock or cargo space capped the
+  quantity instead would name an irrelevant, non-binding number. Landing the fix in this
+  shared helper (not one command's own code) means `/mixed-routes`, `/multi-stop-route`,
+  and `/intelligence-brief` all get the same wording at once, consistent with why this
+  module exists in the first place. 3 new tests (the capacity appearing when demand
+  limits, staying absent when a different factor does, and the status-7 override
+  suppressing it the same way `/price`'s does). Full suite (631 tests) and a clean local
+  bot start reverified.
+- [x] **`/diminishing-returns` chart**: Shipped 2026-09-06, user-initiated (not originally
+  on this list). Sweeps a ship's starting budget geometrically against `/multi-stop-route`
+  and charts ROI vs. budget, marking where more capital stops changing the recommendation
+  at all - real stock/demand/cargo capacity, not a code limit. Building it surfaced one
+  more real gap in the candidate-selection fix below (`PROJECT_CONTEXT.md` entries 56-57).
+- [x] **Evidence-Level Labels**: Shipped 2026-09-07. `/best-route` and `/top-routes` now
+  show an explicit Stock/Demand evidence line for every route instead of silently
+  omitting a missing figure - four tiers (`bot/uex/supply_demand.py`'s
+  `classify_supply_evidence`/`EvidenceLevel`): "current" (live, fresh-reported),
+  "aging" (live, but the terminal's data health is degraded), "inferred" (no live figure,
+  but ≥24h of collected observation history to estimate historical availability from -
+  a new integration of `/terminal-history`'s existing time-weighted analysis into every
+  route recommendation, not just its own standalone command), and "unknown" (genuinely no
+  information - never rendered as if it meant a confirmed zero). User picked the fullest
+  of three offered scopes, including the inferred-trend fallback specifically. See
+  `PROJECT_CONTEXT.md` entry 59 for the full design, the real bug the smoke-test caught
+  (a naive/aware datetime mismatch), and verification detail. `/mixed-routes`,
+  `/multi-stop-route`, and `/intelligence-brief` weren't extended with the same tiering -
+  their cargo items always carry a live stock/demand figure by construction (the
+  allocator requires one to build a route at all), so "inferred"/"unknown" don't apply
+  there; their existing health-warning/limiting-factor display already covers what those
+  commands need.
+- [x] **Recommendation Outcome Tracking, Phase 1 (local-only)**: Shipped 2026-09-08. A
+  "Track this route" button on each route recommendation opens a private Discord
+  **thread** (not a channel - guilds cap out at 500 channels total, threads have no such
+  limit) scoped to that user, reposts the exact route breakdown the button was attached
+  to, then walks each leg one at a time. Every route now sends as its own message with
+  its own button directly beneath it, not bundled into one shared embed with every
+  button at the end - the first version of `/best-route` (and, once tracking was added,
+  `/top-routes` and `/mixed-routes`) had exactly that bundled-buttons shape and needed
+  the same per-route-message restructuring live testing caught immediately. Each leg
+  reports one of three outcomes: matched the quote (one tap), less than quoted (actual
+  SCU, or `is_missing` derived from a report of exactly 0), or more than quoted (actual
+  SCU, plus "drained it" - a confident exact write - vs. "my hold/their demand capped
+  me, more was there" - a floor-only correction, never written back as if it were the
+  true exact figure). A 4th "Abandon route" button (confirm/cancel gate, same pattern as
+  `ConfirmDeleteListingView`) lets a user stop tracking early; the thread also
+  auto-archives after 48h of inactivity either way.
+
+  Confirmed reports write into the *same* `terminal_market_state`/
+  `terminal_market_observations` tables the intelligence collector already writes
+  (`record_terminal_market_snapshot`'s new `source` column tags a player report so it's
+  never silently blended with UEX's own vetted figures) - understood as a temporary
+  correction, not a permanent fix, since there's no fixed/knowable in-game restock rate
+  to reason about instead (checked: no CIG-documented restock mechanic more recent than a
+  2013 design doc marked "subject to change"; UEX's API exposes no restock-rate field).
+
+  The loop closes: `bot/uex/route_confidence.py`'s `compute_route_confidence` now takes a
+  `track_record_modifier` (a bounded +/-10, from real matched-vs-total leg outcomes per
+  `(id_commodity, id_terminal, side)`, neutral below a 3-report minimum) - wired into
+  `/best-route` and `/top-routes`, which call it directly. `/mixed-routes` and
+  `/multi-stop-route` go through the shared `cargo_confidences` helper instead (a larger
+  interface change - see the backlog item below) and don't have the modifier yet.
+
+  Live-tested and fixed along the way: clicking "Less"/"More" used to claim the leg
+  (locking every button) the instant the button was clicked, before its modal was ever
+  submitted - cancelling out of that modal left the leg permanently stuck showing
+  "already reported" with no outcome ever recorded, since nothing had actually
+  committed. Fixed by moving the claim to the real commit point (the modal's `on_submit`,
+  or the drained/capacity-limited follow-up buttons) - `less()`/`more()` now only check
+  whether the leg is resolved, never set it.
+
+  Tracking is wired into `/best-route`, `/top-routes`, `/mixed-routes`, and
+  `/multi-stop-route` (the latter two flatten a multi-commodity leg into one buy + one
+  sell progression-leg per commodity, all buys before all sells - matching how a player
+  actually executes it). `/intelligence-brief`'s mixed-route recommendations aren't
+  wired in.
+
+- [x] **Show the reported outcome inline on the leg's own message**: Shipped 2026-09-10,
+  from a real user screenshot: a reported leg's message went straight to disabled
+  buttons with the original "Quoted: ..." text still showing and no visible sign of what
+  was actually reported. `describe_leg_outcome` (`bot/uex/route_progression.py`, pure
+  text formatting) now renders a short "**Reported:** ..." line per outcome (matched /
+  less / missing / more-exact / more-floor / abandoned), and every commit point
+  (`LegOutcomeView.matched`, the "less" modal, `MoreOutcomeFollowupView`'s drained/
+  capacity-limited buttons, `AbandonConfirmView.confirm`) appends it under the existing
+  "Quoted: ..." line via a new `_embed_with_outcome` helper, rather than replacing it -
+  so the same message keeps showing both what was quoted and what happened. Sets up the
+  Phase 2 UEX-submission button below to have a natural home (next to this line) once
+  it's built.
+  - Extend `track_record_modifier` to `/mixed-routes`, `/multi-stop-route`, and
+    `/intelligence-brief` - these all go through `cargo_confidences`
+    (`bot/uex/route_presentation.py`), which would need a per-item track-record lookup
+    threaded through, not just one scalar the way `compute_route_confidence`'s direct
+    callers take it.
+  - Batch a multi-commodity leg's reporting into one modal ("report all 3 commodities for
+    this stop") instead of one commodity/side at a time - a 3-hop, 3-commodity
+    `/multi-stop-route` chain currently means up to 18 individual leg-report steps.
+  - A "Leg 3 of 8"-style progress indicator on longer chains.
+  - Persistent views (`custom_id`-based, reconstructed from `route_snapshot` on startup)
+    so a bot restart mid-flow doesn't break in-flight leg-outcome buttons until the 48h
+    poller sweeps the thread - a real, disclosed gap today, not a silent one.
+  - **Phase 2, deferred**: optionally submit a confirmed report to UEX's own
+    `POST /data_submit` (real endpoint, confirmed in `docs/UEX_API_2.0_reference.md`), via
+    a button next to the "Reported: ..." line the leg's message now shows (see above) -
+    user-requested placement, not yet built. Must be explicit per-report opt-in, never
+    automatic - authenticated as the individual player (their linked secret key, same
+    plumbing as `account.py`). Checked-research
+    findings: UEX shows no visible reputation score/tier (only a raw-volume "most active"
+    leaderboard), but their Terms of Use warn that repeatedly submitting improper reports
+    risks a temporary account lock, with no accuracy threshold disclosed. Report
+    validation is mostly automated (an approval bot approves/declines, escalating only
+    ambiguous cases to human moderators). Build and test entirely against
+    `is_production=0` (a real UEX sandbox flag) before ever sending `is_production=1`.
+    Also respect submission-specific limits beyond the general 120 req/min cap: 500
+    rows/call max, 1000 reports/30 min, and a 5-minute block on resubmitting the same
+    item+location.
+
+- [x] **Show Investment consistently across all route commands**: Shipped 2026-09-08.
+  `/mixed-routes` and `/multi-stop-route` already showed `Investment: **X** · Revenue:
+  **Y aUEC**` per route/leg; `/best-route` and `/top-routes` only ever showed total `Run
+  profit`, never the aUEC actually needed to buy the cargo for that profit - a real gap
+  for anyone weighing whether they can afford a haul at all, not just how profitable it
+  is once they can. `CargoEstimate` (`bot/uex/ships.py`) now carries an `investment`
+  field (`price_origin * max_scu`, via a new optional `price_origin` parameter on
+  `estimate_route_cargo` - `None` when omitted, so any caller that predates this change
+  keeps working unchanged) surfaced in both commands' cargo line, matching the other
+  two's existing wording. Noticed while designing `/routes-from` below.
+- [x] **`/routes-from`**: Shipped 2026-09-08. Best trade routes starting from wherever
+  the player currently is - a `location` option (terminal name, with autocomplete off
+  the local `terminal_reference` cache, no live UEX call) rather than `/best-route`'s
+  commodity anchor or `/top-routes`' unanchored global ranking. Deliberately not its own
+  ranking engine: filters the SAME background-refreshed candidate pool `/top-routes`
+  already maintains (comprehensive across every commodity UEX has route data for, not
+  truncated) down to routes whose origin matches the resolved terminal, then hands that
+  filtered list to the exact same shared `_send_ranked_routes` `/top-routes` uses - so it
+  gets evidence-level labels, health warnings, `track_record_modifier` confidence
+  calibration, and tracking buttons for free, no new presentation logic. Location
+  resolution (`Database.resolve_terminal_id_by_name`) uses the same tiered exact-then-
+  unique-substring match as `find_item_id_by_name` - never guesses between two candidate
+  terminals.
+- [x] **Rank `/top-routes`/`/routes-from` by profit, not UEX's own score**: Shipped
+  2026-09-08. Checked UEX's own API docs while reviewing `/routes-from`'s output:
+  `score: int // UEX score level, higher is better` is the ENTIRE published definition -
+  no formula, no breakdown of what it weighs, nothing else anywhere in the reference. A
+  fully opaque black box with no way to explain to a player why one route outranked
+  another. `select_available_routes`/`select_in_stock_routes`/`rank_top_scored_routes`
+  (`bot/uex/trends.py`) now sort by UEX's own `profit` figure (already trusted directly
+  by `/best-route`'s own primary-branch ranking) with `price_roi` as a tie-breaker,
+  instead of `score` - transparent, already-displayed figures a player can verify
+  themselves. `ScoredRouteEntry.score` is now optional and no longer required for a route
+  to qualify (previously a route missing only a UEX score was silently excluded
+  entirely). The "UEX score" display line was initially replaced with a raw
+  `Profit: **X aUEC**` line - see the very next entry for why that line was removed
+  again almost immediately.
+- [x] **Remove the confusing duplicate "Profit" line from `/top-routes`/`/routes-from`**:
+  Shipped 2026-09-08, same day as the ranking change above. A real user screenshot caught
+  it: the `Profit: **X aUEC**` line added to disclose the new ranking basis (previous
+  entry) is UEX's own route-level `profit` figure - computed off the FULL stock/demand
+  volume, not scaled to any ship - shown right next to the already-existing, correctly
+  ship-scaled `Run profit: **Y aUEC** for this haul` line. On a real route this was a
+  ~17x gap (5,136,000 vs. 308,160) with nothing telling the two numbers apart, easy to
+  misread as "my real profit is 5.1M." `/best-route` never had this problem - it only
+  ever shows PER-UNIT profit up top, never a second lump-sum figure. Fixed by dropping
+  the raw `r.profit` line entirely (`bot/cogs/trends.py:_build_route_field`) - the
+  ranking basis is already disclosed in the command's footer text
+  ("Ranked by profit (ROI% as a tie-breaker)"), so the per-route body doesn't also need
+  to show the literal value. Per-unit margin and the ship-scaled run profit are
+  unaffected.
+- [x] **Clarify `/multi-stop-route`/`/mixed-routes` descriptions mention the ROI
+  tie-breaker**: Shipped 2026-09-08. Both commands were already ranking by
+  `(profit, roi_pct)` from their very first commits (`bot/uex/multi_stop_routes.py`/
+  `bot/uex/mixed_routes.py`'s own `routes.sort(...)` calls) - unrelated to the
+  `/top-routes` UEX-score fix above, which never applied to either of them. But their
+  embed descriptions only said "ranked by total profit"/"ranked by estimated haul
+  profit", which reads as ROI playing no part - a user seeing a real route's footer say
+  only "ranked by total profit" reasonably asked whether ROI was actually used. Reworded
+  to match `/top-routes`' existing wording exactly: "ranked by profit (ROI% as a
+  tie-breaker)". Disclosure only, no ranking behavior changed.
+- [x] **`/route-from-multi`**: Shipped 2026-09-08. `/route-from-multi`, multi-stop
+  routing's counterpart to `/routes-from` - chains of 2-3 profitable hops anchored to a
+  `location` option (same terminal-name autocomplete/resolution as `/routes-from`)
+  instead of `/multi-stop-route`'s unconstrained "search from anywhere" candidate
+  selection. Unlike `/routes-from` (which filters an already-computed background pool),
+  multi-stop chains have no such cache - this runs a live, thread-offloaded
+  `build_multi_stop_routes` call per request, same as `/multi-stop-route` itself, now
+  with a new `start_terminal_id` parameter. Restricting the search to one origin needed
+  more than just overriding which terminal the DFS starts from: the candidate-terminal
+  window that bounds the whole search is built from globally profit-ranked edges, so a
+  single-hop-only version of "force the anchor's own opportunities into that window"
+  still let an unrelated, more-profitable cluster of edges elsewhere in the market
+  crowd out the anchor's genuine 2nd/3rd-leg terminals, silently truncating an anchored
+  search's real reach and sometimes returning nothing at all. Fixed with a bounded BFS
+  (real `opportunities` edges only, capped at `MAX_LEGS` hops) from the anchor,
+  force-adding every terminal actually reachable from it regardless of global ranking -
+  caught by a test built specifically to crowd out a valid 2-leg anchor chain with 25
+  higher-profit decoy edges elsewhere. `terminal_name_autocomplete` moved from
+  `trends.py` to `prices.py` (trends.py already imports several things FROM prices.py,
+  so the reverse direction would have been a circular import) - `/routes-from`'s own
+  autocomplete wiring updated to import it from its new home, no behavior change.
+  `/multi-stop-route`'s ~200-line per-route embed/warnings/tracking-view/fallback
+  sending logic extracted into a shared `_send_multi_stop_routes` helper both commands
+  call, rather than duplicating it a third time (the ship/prefs/capital-access setup
+  block above IS still duplicated across `/mixed-routes`, `/multi-stop-route`,
+  `/diminishing-returns`, and now this command - matching that pre-existing, not-yet-
+  centralized convention rather than doing a larger unrelated refactor).
+- [x] **`/route-on-the-way`**: Shipped 2026-09-10. User-requested: "find a route from
+  where you are to where you are going" - if a profitable haul happens to line up with a
+  trip you're already making, this surfaces it. Named to avoid confusion with the rest of
+  the `route(s)-from*` family sitting right next to it in `/intro` - `/routes-from` fixes
+  only the origin (destination stays open), `/route-from-multi` fixes only the origin
+  across a multi-leg chain; this is the one that fixes BOTH ends of a single leg to
+  terminals the player names. Considered `/route-from-to` (more literal, less distinctive
+  next to the other two) before settling on the chosen name. Single-leg only, not
+  multi-stop, by deliberate scope decision - a fixed-destination multi-stop search would
+  need `build_multi_stop_routes`' DFS to require the chain's LAST leg land at a specific
+  terminal, which it isn't built to do today (only a fixed start); left as a possible
+  follow-up rather than folded into this command's first version. Reuses the exact same
+  reuse pattern as `/routes-from`: filters the SAME background-refreshed candidate pool
+  `/top-routes` maintains, now requiring both `origin_terminal_id` AND
+  `destination_terminal_id` to match the two resolved terminals - no new ranking logic, no
+  extra UEX calls, gets evidence-level labels/health warnings/confidence/tracking buttons
+  for free via the shared `_send_ranked_routes`. Direction-specific (checks
+  origin -> destination only, matching how the player actually phrased the question) -
+  swap the two options to check the reverse leg. No `system` option (both endpoints are
+  already fixed to specific terminals, so a star-system filter would be redundant) -
+  the only option dropped relative to `/routes-from`'s set. A `budget` option was added
+  the same day, user-requested - see the very next entry.
+- [x] **`/route-on-the-way` budget option**: Shipped 2026-09-10. `estimate_route_cargo`
+  (`bot/uex/ships.py`), the shared cargo-math helper every single-commodity route command
+  (`/best-route`, `/top-routes`, `/routes-from`, `/route-on-the-way`) already calls, never
+  had a budget concept at all - only ship-cargo-capacity and real stock/demand ever capped
+  the estimate, unlike `/mixed-routes`/`/multi-stop-route`'s separate allocator. Added an
+  optional `budget` parameter: when given (and a known `price_origin` to divide it by), it
+  becomes a third candidate cap alongside ship capacity and stock - `limited_by` can now
+  also read `"budget"`. Only `/route-on-the-way` passes a real value; the other three
+  callers are unaffected (`budget=None` by default, identical behavior to before). Tie-
+  break priority generalized from the existing ship-vs-stock rule (ship wins ties, more
+  actionable than real-world stock) to three-way: `ship` > `budget` > `stock` - a player
+  can bring a bigger ship or more capital, but can't make more stock exist. The budget
+  itself is disclosed in the command's footer (`· budget 1,000 aUEC`, matching
+  `/mixed-routes`' existing footer wording exactly) and, when it's the binding constraint,
+  in the route's own Cargo line ("limited by your budget, not cargo space") - showing the
+  cap without also disclosing what it evaluated to would leave the player unable to tell
+  whether it actually did anything.
+- [x] **Saved default budget**: Shipped 2026-09-10, user-requested as a follow-up polish
+  to the entry above - budget was the one route-filter field `/mixed-routes`,
+  `/multi-stop-route`, `/route-from-multi`, and `/route-on-the-way` all take but
+  `/set-trading-preferences` had no way to save a default for, unlike ship/space-only/
+  auto-load-only/system/risk-tolerance. `user_trading_preferences` gained a `budget REAL`
+  column (additive `ALTER TABLE`, matching this table's existing no-migration-framework
+  convention), `DEFAULT_TRADING_PREFERENCES`/`get_trading_preferences`/
+  `set_trading_preferences` all extended the same way `ship_name` was - the existing
+  atomic `INSERT ... ON CONFLICT DO UPDATE` in `set_trading_preferences` needed no
+  structural change at all, since its `DO UPDATE SET` clause and column list are already
+  built from `DEFAULT_TRADING_PREFERENCES`'s own keys generically. All four budget-taking
+  commands now do `if budget is None: budget = prefs["budget"]`, the identical fallback
+  shape already used for `space_only`/`auto_load_only`/`system` in each of them - so a
+  saved budget applies automatically and an explicit `budget:` option on any one call
+  still overrides it, matching how every other saved preference already behaves.
+  `format_trading_preferences` shows the saved default (or "None set"); no dedicated
+  clear-budget command was added (`/clear-trading-preferences` already resets the whole
+  row, matching how every field except ship, which predates this table, already works).
+- [x] **Three defects from a post-implementation audit of `f664a53`**: Shipped
+  2026-09-11.
+  - **Mixed/multi-stop player reports used the wrong side's market quantity**:
+    `MixedCargoItem.available_scu` (`bot/uex/mixed_routes.py`) is
+    `min(source.scu_buy, destination.scu_sell)` - the pair-wide minimum, needed for
+    the allocator's own quantity math. `bot/cogs/prices.py`'s `/mixed-routes` and
+    `/multi-stop-route` flattening both used that SAME pair-minimum as `market_scu`
+    for BOTH the buy leg and the sell leg - correct only when the two sides happen
+    to match, and silently wrong whenever real stock and demand differ (confirmed:
+    origin `scu_buy=95`, destination `scu_sell=80` - a "matched" BUY report wrote
+    `scu_buy=80`, understating the origin's real stock by 15 SCU; the reverse
+    asymmetry corrupts the sell side identically). This was a regression in the
+    PREVIOUS session's own fix for "allocation became terminal stock" (`quantity_scu`
+    vs. `market_scu`) - splitting those two apart was correct, but `market_scu` was
+    then given the round-trip cap instead of each side's own real figure. Fixed by
+    reading `item.source["scu_buy"]`/`item.destination["scu_sell"]` directly (both
+    guaranteed real floats for any item that survived `allocate_pair_cargo`'s greedy
+    loop, which already required `float()`-ing them to compute its own stock/demand
+    caps) instead of `item.available_scu`, at all 4 call sites (buy/sell ×
+    `/mixed-routes`/`/multi-stop-route`).
+  - **A post-acknowledgement persistence failure could strand a route leg forever**:
+    every leg-outcome commit point (`LegOutcomeView.matched`, the "less" modal,
+    `MoreOutcomeFollowupView`'s drained/capacity-limited buttons,
+    `AbandonConfirmView.confirm`) claims the leg and acknowledges the Discord
+    interaction FIRST, then calls `handle_leg_outcome`/`abandon_thread` - by design,
+    since the pre-ack failure path already releases the claim on an ack failure (see
+    `release_claim`'s own docstring). But nothing covered a failure AFTER the ack: a
+    transient DB lock, or the next-leg prompt's `thread.send` hitting a Discord
+    hiccup, left the leg's buttons already disabled with nothing durable behind it -
+    no error surfaced (this bot has no global app-command error handler), and the
+    thread was stuck until the 48h abandonment poller. Fixed with
+    `RouteProgression._record_leg_outcome_durably`/`_abandon_thread_durably` -
+    thin retry wrappers (3 attempts, 2s apart) around `handle_leg_outcome`/
+    `abandon_thread`, which every commit point now calls instead of the raw method.
+    Safe to retry the whole call because every step inside it is idempotent (the
+    outcome/market-state writes are upserts, the thread-status update is a plain
+    UPDATE) - not a durable-queue redesign (this phase's views still aren't
+    persistent across a bot restart; see the module's own docstring), just enough
+    that a single transient blip no longer stalls a thread outright. One accepted
+    edge case: if a retry's own leg-prompt send actually reached Discord but the
+    success response was lost, the next leg's prompt can post twice (a harmless
+    duplicate, working button pair) - preferred over not retrying at all. After all
+    attempts are exhausted, the failure is logged and the thread gets a plain-text
+    notice rather than being left silently stuck with no signal at all.
+  - **The budget sweep could stop before a higher-budget route became worthwhile**:
+    `sweep_budget_curve`'s early-stop heuristic (`bot/uex/multi_stop_routes.py`)
+    treated a repeated best-chain signature as proof of real saturation once the
+    swept budget could afford ONE unit of the priciest known buy opportunity - but a
+    pricier chain can keep improving for several more geometric steps once it
+    affords MULTIPLE units of it, still well within real stock/demand and cargo
+    capacity (confirmed: a synthetic pricier chain ties a cheap chain's profit the
+    instant its own one-unit price is affordable, satisfying the old floor, then
+    goes on to beat it substantially at the very next geometric budget step).
+    `/diminishing-returns` could tell a player more capital wouldn't help when it
+    genuinely would have. Fixed by requiring the swept budget to afford filling the
+    ship's ENTIRE cargo hold with the priciest known opportunity before trusting a
+    repeated signature (`affordability_floor = max(known_buy_prices) *
+    ship_capacity_scu`) - no larger budget could ever need more than a full hold of
+    any single opportunity, so past that point real stock/demand/capacity is what's
+    actually binding, not budget. A market with an expensive enough opportunity can
+    still exhaust every sweep point without ever reaching this floor - the curve
+    just keeps climbing instead of falsely declaring a plateau, matching this
+    function's existing "deliberately capped at max_points, not run unbounded"
+    design.
+
+  One more risk the same audit flagged explicitly as UNCONFIRMED (lower-confidence,
+  not counted as a defect) is deliberately left open rather than guessed at:
+  `/route-on-the-way` resolves both terminal names and reads trading preferences
+  before its first `defer()`/response (same pre-existing shape as `/routes-from`,
+  unlike `/route-from-multi`, which already defers first) - a real timing gap under a
+  slow/locked local DB, but not measured, and fixing it means threading an
+  "already deferred" flag through the shared `_send_ranked_routes` helper all three
+  commands share.
+
+  The audit's OTHER flagged risk - whether a player-confirmed report should be
+  allowed to extend `terminal_market_state.last_seen`/history "freshness" the same
+  way a real UEX poll does - got talked through and decided: **keep current
+  behavior.** UEX's own commodity data is itself aggregated from individual players
+  submitting reports through UEX's platform (this codebase already tracks how many -
+  `buy_report_count`/`sell_report_count`, from UEX's `price_buy_users_rows`/
+  `scu_buy_users_rows` fields) - so "UEX-sourced" isn't some independently-verified
+  ground truth next to "player-sourced," it's the same kind of evidence funneled
+  through a different pipe. A bot-tracked report is a real, first-hand, structured
+  observation and is fine to let advance freshness the same way. The thing that
+  actually needs "don't over-trust one report" protection - displayed route
+  confidence - already has it: `track_record_modifier` stays at 0 until 3+ reports
+  accumulate for that `(commodity, terminal, side)`.
+
+- [ ] **Discuss: `buy_report_count`/`sell_report_count` go stale after a player
+  correction** *(needs a decision before building)*. Working through the freshness
+  question above surfaced a real, adjacent gap that's NOT yet decided or fixed.
+  **The mechanism:** `record_player_report_market_update` can only ever touch
+  `price_buy`/`price_sell`/`scu_buy`/`scu_sell`/`status_buy`/`status_sell`
+  (`Database._PLAYER_REPORT_OPTIONAL_COLUMNS`) - it deliberately never writes
+  `buy_report_count`/`sell_report_count`, since a bot report has no UEX-style count
+  of its own to give them. So after a correction, the stored count still reflects
+  whatever UEX last reported (say, 8 community submissions), even though the price/
+  stock figure it now sits next to came from exactly ONE bot-tracked observation.
+  **Where it bites:** `compute_route_confidence` (`bot/uex/route_confidence.py`)
+  reads that count directly - `report_depth = 25 * min(reports / 10, 1.0)`, up to a
+  quarter of the whole confidence score. Traced every consumer: `/top-routes`,
+  `/routes-from`, `/route-on-the-way` (via `_send_ranked_routes`'s `market_signals`),
+  and `/mixed-routes`, `/multi-stop-route`, `/route-from-multi`, `/intelligence-brief`
+  (via `cargo_confidences`) all read the stored, player-report-mutable column - 7
+  commands, genuinely affected. `/best-route` is NOT affected - both its branches
+  read report counts straight from a fresh UEX API response for that call
+  (`live_signals`), never the local table. Net effect: after a correction, those 7
+  commands can show inflated confidence - crediting "8 corroborating reports" for a
+  figure that's really backed by one.
+  - **Option A - leave it as-is.** Simplest, zero risk of a new distortion. Con: a
+    corrected pair keeps looking more corroborated than it is, for however long
+    until the next real UEX poll happens to overwrite that pair again (unbounded -
+    could be minutes, could be the rest of the day).
+  - **Option B - reset the touched side's count to 1 whenever a player report
+    changes it.** Honest about how thin the evidence actually is right after a
+    correction. Con: could swing a route's confidence down sharply the instant
+    someone does the RIGHT thing and corrects a stale figure - punishing the
+    correction, not rewarding it - and the drop is itself temporary (reverts on the
+    next UEX poll), so it may just be trading one kind of temporary distortion for
+    another.
+  - **Option C - track UEX-sourced and player-sourced report counts as two separate
+    numbers**, and have `compute_route_confidence` weigh them explicitly instead of
+    conflating into one column. Most honest long-term, and matches how `source`
+    already distinguishes the two everywhere else in this table. Con: real schema/
+    formula surface area - a new column, a new scoring term, more to test - not a
+    small follow-up.
+  Needs a decision on which of these (or something else) before any code changes -
+  logged here so the reasoning survives to the next discussion instead of getting
+  re-derived from scratch.
+- [x] **Suppression window for confirmed-empty pairs**: Shipped 2026-09-11,
+  user-requested - route recommendations were suggesting the exact same terminal a
+  player had just reported empty, with no cooldown before UEX's own next poll
+  happened to overwrite the correction (unbounded - could be minutes or most of a
+  day). Before picking a duration, mined this bot's own collected
+  `terminal_market_observations` history for real empty-to-restocked transition gaps
+  rather than guessing: local dev DB (13 buy-side transitions) gave a ~28h median,
+  the Pi's full production history (29 transitions) gave ~18h - both solidly in
+  "many hours," ruling out anything in the minutes-to-2h range. A separately
+  pasted community "tick rate" document claimed 15min-3h full-refill times by
+  commodity tier, but didn't hold up when checked - its own cited source (NOVA
+  Intergalactic's real wiki page) contains no such numbers, and UEX's own API
+  reference has zero restock-rate fields, matching what an earlier session already
+  established. Landed on **3 hours** as a deliberate middle point between the
+  empirical measurement and the unverifiable-but-not-nothing community claim, and
+  **hard-exclude** (a suppressed pair simply doesn't appear, matching how
+  auto-load-only/system filters already behave) over showing it with a warning.
+  `terminal_market_state` gained `buy_suppressed_until`/`sell_suppressed_until`
+  (additive `ALTER TABLE`, one column per side since a pair's two sides deplete and
+  recover independently) - set by `Database.suppress_terminal_market_side` whenever
+  `bot/uex/route_progression.py`'s new `update_confirms_depletion` says a leg
+  outcome means the side is CONFIRMED empty (a `missing` report, or a `more`
+  outcome drained to nothing with `precision='exact'` - NOT a positive `less`
+  partial, and NOT a `more`+`floor` report, which means there was MORE there, the
+  opposite signal). Consumed two different ways depending on how each route family
+  already reads market data: `/mixed-routes`/`/multi-stop-route`/`/route-from-multi`
+  (and `/intelligence-brief`, which shares the same market-row source) get it for
+  free - `get_mixed_route_market_rows()` now masks a suppressed side's `scu_buy`/
+  `scu_sell` to 0 in the SQL itself, and the allocator (`allocate_pair_cargo`)
+  already treats zero stock/demand as "skip this side" exactly like a genuinely
+  empty terminal, so no new filtering code was needed in `bot/uex/mixed_routes.py`
+  or `multi_stop_routes.py` at all. `/top-routes`, `/routes-from`, and
+  `/route-on-the-way` needed an explicit filter instead (`_send_ranked_routes`
+  reads live UEX-scored candidates, not this table, for their price/stock display) -
+  added as a new bulk lookup (`get_suppressed_sides_by_ids`) applied on the FULL
+  candidate pool, BEFORE `display_limit` truncation - not after, matching this
+  codebase's own hard-learned "filter before truncating" rule (a regression test
+  specifically proves this: 3 candidates, `display_limit=2`, the highest-ranked one
+  suppressed - a truncate-then-filter bug would show only 1 route instead of the 2
+  that should still qualify). `/best-route` was deliberately left out of this pass -
+  its live-UEX-data shape doesn't share a natural cross-reference point with the
+  other six commands' either, and would need its own separate design; logged as a
+  known gap rather than silently left inconsistent.
+- [x] **Durable recovery + conflicting-report guard for the post-ack retry wrapper**:
+  Shipped 2026-09-11, from a follow-up audit of the suppression-window commit above.
+  Two confirmed findings against `_record_leg_outcome_durably`/
+  `_abandon_thread_durably` (`bot/cogs/route_progression.py`), both in the same
+  post-ack retry mechanism that commit introduced:
+  1. Exhausting all `POST_ACK_RETRY_ATTEMPTS` left no durable recovery state - the
+     leg stayed claimed (buttons disabled, nothing recorded or recorded-but-stuck)
+     until the 48h abandonment poller eventually swept the whole thread. Fixed with
+     a new `route_progression_pending_actions` table (additive) queued on
+     exhaustion via `queue_route_progression_leg_recovery`/
+     `queue_route_progression_abandon_recovery`, and a new
+     `retry_pending_route_progression_actions` poller (15 min, matching this
+     codebase's other short-interval background loops) that finishes the action
+     later. Each queued row is fully self-contained (every field
+     `handle_leg_outcome`/`abandon_thread` need, including `market_scu`, which
+     previously lived nowhere outside `RouteLegInput`) - deliberately never
+     dependent on `RouteProgression._active_legs`, so recovery still completes
+     even across a bot restart that wiped that in-memory cache. A stale queued
+     action for a thread whose status is no longer `in_progress` (resolved some
+     other way in the meantime) is discarded rather than replayed.
+  2. `record_route_progression_leg_outcome`'s `UPDATE` had no guard against a
+     leg that was already reported - two reports for the same leg (a genuinely
+     duplicate live prompt from a retried `handle_leg_outcome`, or the retry
+     itself) could silently overwrite each other, and a retry could re-post the
+     next leg's prompt a second time. Fixed two ways: the `UPDATE` now requires
+     `outcome IS NULL`, so only the first report for a leg ever commits (returns
+     whether it actually wrote); and a new `advanced_to_index` column on
+     `route_progression_threads` plus `claim_route_progression_advance` (an
+     atomic conditional `UPDATE`, same check-then-set shape as this codebase's
+     other claim guards) makes posting a leg's prompt - or sending the
+     completion message - a true one-time action regardless of how many times
+     `handle_leg_outcome` runs for it. `handle_leg_outcome` distinguishes a
+     losing duplicate (different outcome/values than what's stored - rejected,
+     with a channel notice, no market-state write) from a legitimate retry of
+     the exact report that already won (same values - proceeds to finish
+     whatever step didn't complete last time, since the market-state re-merge
+     and the advance-claim are both safe to repeat).
+  Eight pre-existing `test_handle_leg_outcome_*` tests had to start seeding a
+  real thread/leg row first (`_create_thread_for_leg`), since they'd previously
+  called `handle_leg_outcome` against a `thread_id`/`leg_index` with no
+  corresponding DB row at all - harmless before this fix (nothing checked for a
+  row to exist), but the new `outcome IS NULL` guard needs a real row to match
+  against. All 9 new regression tests were verified to fail against the
+  pre-fix source via `git stash`.
+- [x] **Four failure-path defects in the durable recovery mechanism above**: Shipped
+  2026-09-11, from a full coordinated audit of the commit directly above (two
+  independent auditor agents plus the coordinator, cross-confirmed). The
+  recovery design was correct for the happy path but not yet durable end-to-end
+  - all four findings are in what happens when the operation a claim guards, or
+  recovery itself, fails partway:
+  1. `claim_route_progression_advance`/`advanced_to_index` was committed BEFORE
+     the Discord send (`_post_leg_prompt`) or the completion status write
+     (`handle_leg_outcome`'s final-leg branch) it was meant to guard - a
+     definite failure there left the claim durably marking an action as done
+     that never happened, so a retry saw the index as already claimed and
+     silently returned without redoing the send/write. Could strand a newly
+     tracked route with no first prompt, an acknowledged leg with no next
+     prompt, or a fully reported route stuck `in_progress` forever. Fixed with
+     a new `release_route_progression_advance_claim` (an atomic conditional
+     `UPDATE` reverting the index back down, only if nothing has since moved
+     it further) called on definite failure at both sites, so a retry's own
+     claim attempt can win again instead of finding a false no-op.
+     `start_tracking`'s own first-prompt send is now wrapped the same way and
+     tells the user via followup if it fails, instead of letting the exception
+     escape the button callback silently.
+  2. The recovery poller converted an unresolvable Discord channel to `None`
+     and still called `handle_leg_outcome` for it - the outcome got recorded,
+     but the next-leg prompt was silently skipped (the existing
+     `isinstance(channel, discord.Thread)` gate), and the poller then deleted
+     the only durable row telling a future tick to deliver that prompt,
+     permanently stranding the route. Fixed by requiring a real, reachable
+     `discord.Thread` before running a *non-final* leg's recovery at all -
+     leaving the row queued (and its attempt counted) for the next tick
+     instead. Completion doesn't need this same guard: the route's own
+     final-leg branch already tolerates a missing channel (only the optional
+     closing message/archive is skipped), so that path is unchanged.
+  3. A transient `aiosqlite.OperationalError` (e.g. a lock beyond the busy
+     timeout) escaping the recovery loop's body - from loading pending
+     actions, a per-row thread lookup, stale-row deletion, or even the
+     failure-accounting call itself - permanently killed the
+     `retry_pending_route_progression_actions` `tasks.loop`, since SQLite
+     errors aren't in `discord.ext.tasks.Loop`'s own network/timeout reconnect
+     set; every future queued recovery would then sit untouched until the
+     bot/cog restarted. Fixed with cycle-level containment around the initial
+     fetch (log and return, letting the next scheduled tick run) plus per-row
+     containment around everything else, including the failure-accounting
+     write itself, so one bad row can't take down the rest of the cycle either.
+  4. A failed recovery-queue insert (`queue_route_progression_leg_recovery`/
+     `queue_route_progression_abandon_recovery`) was logged and swallowed, but
+     the user was still unconditionally told the action "has been queued...
+     no further action is needed" - exactly during the kind of database outage
+     that makes the queue necessary in the first place, silently losing the
+     report/abandon with no trace in either `route_progression_legs` or the
+     pending-actions table. Fixed by tracking whether the insert actually
+     succeeded and branching the channel notice on it - a failed queue write
+     now tells the user to report again or contact an admin, never claims
+     automatic recovery is in progress.
+  Added 9 new regression tests (a DB round-trip for the new release method,
+  one per claim-release site, the channel-unavailable recovery gap plus a
+  non-regression guard proving a final leg still completes without a
+  reachable channel exactly as before, the two recovery-loop containment
+  cases, and one false-notice case each for the leg-outcome and abandon
+  queues) - 8 of 9 verified to fail against the pre-fix source via `git
+  stash` (the final-leg guard test passes on both sides by design, since it
+  pins existing behavior the fix must not break).
+- [x] **`/price` Buying Capacity**: Shipped 2026-09-12, user-initiated. Each entry in
+  "Best places to SELL" now shows how much SCU that terminal is currently buying from you
+  (UEX's `scu_sell` field), not just the price. Confirmed first that UEX has no fixed/max
+  capacity field for trading volume anywhere in its API (only a refinery-specific
+  `capacity` percentage, and `/terminals`' `max_container_size`, which is a physical
+  cargo-box size limit, not a trade-volume cap) - `scu_sell` and its `_max`/`_avg` variants
+  over day/week/month are all just observed snapshots, never a designed ceiling, so the
+  footer now says so explicitly rather than implying a hard number. Reuses the same
+  UEX status-code-7 ("Maximum Inventory, No Demand") override this codebase's Evidence-
+  Level Labels already established for `classify_supply_evidence`, extracted into a new
+  standalone `effective_sell_scu()` helper (`bot/uex/supply_demand.py`) both now call -
+  without it, a terminal whose status label already says "Maximum Inventory (No Demand)"
+  could still show a stale positive SCU figure right next to it, directly contradicting
+  itself (the same buy/sell status inversion this project has hit more than once). Scoped
+  to the sell side only, on direct user preference - stock-available-to-buy (`scu_buy`) on
+  the buy side was considered and deliberately left out.
+
+  **Same-day follow-up**: user asked for a freshness indicator next to the new SCU figure
+  (the base UEX price/scu data can go stale between whenever a player last reported that
+  terminal), then asked to condense it into a colored dot instead of spelled-out text to
+  cut down on line clutter, and explicitly said not to limit it to a 3-color traffic
+  light if the real data supported more categories. `classify_terminal_health` already
+  produces exactly 5 real statuses (fresh/recent/limited/stale/unknown), so
+  `freshness_emoji()` (`bot/uex/data_health.py`) maps each to its own dot (🟢🟡🟠🔴⚪)
+  rather than collapsing "limited coverage" and "no TTL metadata at all" into one bucket
+  - those are different KINDS of caution, not just different degrees of the same one. A
+  `FRESHNESS_LEGEND` constant explains the dots once, appended to `/price`'s footer,
+  rather than repeating the explanation on every line. Unlike the pre-existing
+  `format_health_note` (silent for good data, only speaks up for warnings),
+  `freshness_emoji` is always present. 5 new tests covering the dot-per-status mapping
+  (built from the same real `record_terminal_data_health_snapshot` fixtures the
+  pre-existing `classify_terminal_health` tests use), the unknown-dot fallback for
+  missing/absent health data, and a no-duplicate-warning check. Full suite (623 tests)
+  reverified clean.
+
+  **Second same-day follow-up**: a live screenshot showed the dot appearing on only ONE
+  row out of ten (the single sell entry that happened to have a real SCU figure) - every
+  other row, on both the Sell and Buy sides, had nothing at all, since the first version
+  tied the dot's placement to whether a capacity figure was shown rather than showing it
+  per terminal unconditionally. Fixed by decoupling them entirely: every listed terminal
+  in both "Best places to SELL" and "Best places to BUY" now gets its own freshness dot
+  regardless of whether an SCU figure is shown next to it, and the old warning-only
+  `format_health_note` display in this command was removed outright (the dot already
+  covers everything it warned about, plus the healthy cases it stayed silent for).
+  Separately, the same screenshot's "Out Stock" sell-side status labels prompted a
+  factual question: confirmed from this codebase's own prior verification
+  (`scripts/dump_status_codes.py` against the live endpoint, see `bot/uex/trends.py`) that
+  sell-side status is backwards from how it reads in plain English - "Out of Stock" there
+  describes the TERMINAL's own empty warehouse, meaning it wants to buy from you, while
+  "Maximum" means it's full and not buying. `/top-routes` already had a
+  `SELL_SIDE_STATUS_CLARIFIER` footer note for exactly this, defined locally in
+  `bot/cogs/trends.py` - moved to `bot/uex/supply_demand.py` (alongside the
+  `SELL_SIDE_NO_DEMAND_CODE` constant embodying the same inversion) so `/price` could
+  reuse the identical wording without one cog importing from another (`trends.py` already
+  imports from `prices.py`, so the reverse direction would have been circular). 1 new test
+  proving the dot now shows on a Buy-side entry, plus the existing no-demand test extended
+  to confirm its dot still shows even when the SCU figure itself is suppressed. Full suite
+  (624 tests) and a clean local bot start (both cogs still load with no import errors)
+  reverified.
+
+  **Third same-day follow-up**: cosmetic request to move the dot to the left of each
+  terminal name instead of trailing at the end, so it reads as a left-aligned status
+  column. While confirming this, a user question ("how much time has actually passed when
+  it says fresh?") surfaced a real information gap: UEX's own commodity-data TTL is a
+  fixed 15 days for every terminal (confirmed against all 114 real tracked commodity
+  terminals in the local dataset, not just inferred), and "fresh" only means "somewhere in
+  the first half of that 15-day window" - a terminal updated 0 days ago and one updated 7
+  days ago both show the identical 🟢 dot, with no way to tell them apart. Added
+  `freshness_label()` (`bot/uex/data_health.py`), which pairs the dot with the real
+  `last_update_days` figure UEX already reports (e.g. "🟢 0d" vs "🟢 7d") - the exact
+  number was already being collected, just never surfaced for anything but the stale case
+  before now. Falls back to the bare dot only when no real age is known at all (the
+  "unknown" case). 3 new tests (the 0d/7d pair proving both classify as the same "fresh"
+  status but now show visibly different labels, and the bare-dot fallback). Full suite
+  (626 tests) and a clean local bot start reverified. A pure cosmetic tweak
+  followed immediately after (parenthesized the day figure - "🟢 0d" to "🟢 (0d)" - per
+  direct user preference).
+
+  **Fourth same-day follow-up**: a live screenshot showed the exact buying-amount figure
+  (`scu_sell`) on only one of five "Best places to SELL" entries - the other four all
+  showed "Out Stock" (correctly, per the sell-side inversion above) with no number at all.
+  Checked the real live data for those exact terminals rather than guessing: UEX reports
+  `scu_sell: 0` for all four - there's genuinely no recorded "amount actually bought"
+  figure for them, not a bug in this bot's display logic. UEX does separately report
+  `scu_sell_stock` for all four though (505/871/253/124/161 SCU) - a DIFFERENT figure (the
+  terminal's own on-hand inventory of the commodity, not a buying amount) that runs
+  opposite in meaning to `scu_sell`: more on-hand stock generally means closer to full and
+  less eager to buy, the same sell-side inversion `SELL_SIDE_STATUS_CLARIFIER` already
+  covers for status labels. Added a fallback - shown only when the real `scu_sell` figure
+  is absent, worded distinctly ("holds ~505 SCU already") so it's never mistaken for the
+  real buying figure - plus a footer clause explaining what it actually means. 3 new tests
+  (the fallback firing when only stock data exists, the real buying figure taking priority
+  over the fallback when both exist, and the pre-existing "nothing reported at all" case
+  extended to also assert the fallback text doesn't appear). Full suite (628 tests) and a
+  clean local bot start reverified.
+
+  **Fifth same-day follow-up**: user asked whether the "holds ~N already" fallback could
+  be turned into an actual estimated buying number by subtracting from a "confirmed max
+  capacity" - checked first and confirmed UEX has no such field anywhere (only observed
+  snapshots, never a designed ceiling). Then found the real thing that WAS usable: UEX's
+  `/commodities_prices_history` endpoint tracks `scu_sell_stock` over time per (terminal,
+  commodity) pair, and querying it live showed the historical peak is often meaningfully
+  higher than the current live reading (confirmed on real data: HUR-L3's peak was 1,049
+  SCU against a live 505; TDD's was 895 against a live 253). `estimate_sell_capacity_from_
+  history()` (`bot/uex/supply_demand.py`) estimates room to spare as
+  `historical_peak - current_stock`, returning `None` when the terminal is already at or
+  above its own recorded high (falls back to the plain stock figure in that case, not a
+  fabricated number). Also tracks and surfaces the AGE of the specific record the peak
+  came from (not just the latest record's age - the two can differ significantly, and did
+  on real data: TDD's peak reading turned out to be 14 days old even though its most
+  recent history entry was newer) alongside the estimate, since a quiet terminal's
+  all-time high can itself be based on old data. Explicitly worded "est." and never
+  "buying," with its own footer clause, so it's never mistaken for a confirmed figure.
+  Considered and declined building a dedicated collector to gather this ourselves: UEX's
+  own history endpoint turned out to be a change-log (5-11 sparse rows spanning 5-17 days
+  in the real terminals checked), not a dense hourly series despite the "hourly update"
+  label - a quiet terminal's data genuinely hasn't changed recently, so polling more often
+  ourselves would just re-record the same stale value UEX already retains, not surface
+  new information; duplicating an archive UEX already maintains would only add Pi storage
+  and maintenance for a thin benefit (insurance against UEX someday truncating its own
+  history). 9 new tests (5 pure-logic for the estimation helper - the real 895-vs-253 case,
+  the at-or-above-peak no-estimate case, missing current-stock/empty-history guards, and
+  the peak-record's-own-age calculation - plus 2 end-to-end `/price` cases and updates to
+  the pre-existing fallback tests for the new history-fetch step). Verified against real
+  live UEX data end-to-end (not just the test suite) before shipping: `/price Medical
+  Supplies` correctly showed the real confirmed figure for one terminal, a genuine
+  estimate with its peak's age for a second, and the plain stock fallback for terminals
+  already at their own historical high. Full suite (638 tests) and a clean local bot start
+  reverified.
+
+### Route Economics Depth
+
+- [ ] **Fuel-Aware Profit**: Estimate fuel costs and show route profit after fuel for the
+  user's selected ship.
+- [ ] **Travel-Aware Ranking** *(complexity: High, needs scoping)*: Offer estimated
+  profit-per-minute alongside total profit, with transparent travel/loading assumptions,
+  visible uncertainty, and total-profit ranking always still available. The real
+  complexity is the travel-time model itself - Star Citizen quantum travel isn't
+  `distance / speed` (spool-up, interdiction, calibration) - so this needs a deliberate
+  decision on how seriously to model it before it gets an estimate.
+
+### Platform & Reliability
+
+- [ ] **State-Table Cleanup Sweep** *(complexity: Low-Medium)*: Audit DB tables that
+  accumulate rows with no built-in pressure-release mechanism, and add bounded, time-based
+  cleanup wherever one's missing - the same problem `scripts/sync_pi_backups.sh` already
+  fixed for Pi backup snapshots (52 accumulated, 1.7GB, before that script existed), just
+  not yet checked for elsewhere. First concrete candidate: `/ship-parts-finder`
+  (personal-shopping-list command, built and registered, not yet deployed to production)
+  needs its session-state table (`ship_parts_shopping_entries`) so its Discord Select-menu
+  selections survive a bot restart -
+  "no automatic cleanup yet" was a deliberate v1 choice, deferred on purpose rather than
+  solved, specifically flagged here so it doesn't quietly become another unbounded table
+  nobody notices until it's a pile.
+- [ ] **Collector Health Dashboard** *(complexity: Medium)*: Show each background
+  collector's last successful run, consecutive failure count, and next attempt; retry
+  transient database failures with a bounded delay; notify when failures persist.
+  Mechanical instrumentation across the existing `tasks.loop` collectors rather than new
+  design.
+- [x] **Centralized Route Presentation**: Shipped 2026-09-07. New `bot/uex/
+  route_presentation.py` is now the single home for the warning/confidence/chunking
+  logic `/best-route`, `/top-routes`, `/mixed-routes`, `/multi-stop-route`, and
+  `/intelligence-brief` each used to maintain their own copy of. Closed real gaps found
+  by auditing all five side by side: `/top-routes` and `/best-route`'s primary branch had
+  no cross-system warning at all; `/intelligence-brief` had no terminal-health warnings,
+  no limiting-factor explanation, no confidence rating, and zero Discord embed-size
+  protection. See `PROJECT_CONTEXT.md` entry 58 for the full design (in particular how
+  `travel_warning`'s `has_real_distance` parameter unifies three previously-divergent
+  cross-system wordings) and verification detail. Landed just ahead of Evidence-Level
+  Labels below, specifically so that lands once through this shared module instead of
+  four times.
+- [x] **Third-Party Audit Fix Round (165d20d..f8886a6)**: Shipped 2026-09-13. A solo
+  third-party audit of the range covering Centralized Route Presentation, Evidence-Level
+  Labels, and the `/price` buying-capacity/freshness work returned "Conditional pass for
+  TestBranch; hold promotion to `main`" with 6 findings. Every finding was independently
+  re-verified against current code (not trusted blindly) before fixing; 4 of the 6 were
+  fixed now, 2 deferred as needing more careful, deliberate design given their narrower
+  race windows and higher complexity:
+  - **Fixed - P1, sell/buy filtering inconsistency**: `best_sell_locations`/
+    `best_buy_locations` (`bot/uex/trading.py`) filtered only on positive price, not on
+    UEX's own status confirming zero real demand/stock (sell-side code 7, "Maximum
+    Inventory, No Demand"; the buy side's own analogous code 1, "Out of Stock (Empty)") -
+    so `/price`, `/best-route`'s fallback branch, and `/refinery-advisor` (all three share
+    these two helpers) could recommend a terminal explicitly not buying, or claim to sell
+    you stock a terminal doesn't have. The buy-side half needed its own empirical check
+    first: UEX's static API doc example shows a contradicting illustrative row
+    (`scu_buy=529` at `status_buy=1`), but querying live production data across 6
+    commodities found 100% correlation - every real `status_buy==1` row has `scu_buy==0`
+    - so the live data was trusted over the doc example, per this project's own established
+    convention. New `BUY_SIDE_OUT_OF_STOCK_CODE` in `bot/uex/supply_demand.py`, 3 new
+    tests in `test_trading.py`, and 2 pre-existing test fixtures corrected where they'd
+    used `status_buy=1`/`status_sell=1` as incidental placeholders alongside a real
+    positive SCU figure - harmless before this fix, incompatible with it.
+  - **Fixed - P2, exception-handling breadth**: The audit named one call site
+    (`_post_leg_prompt`) where a durable claim-release-on-failure guard caught only
+    `discord.HTTPException`, so a timeout or other non-Discord transport failure would
+    consume the claim without releasing it, permanently stranding a route-tracking leg.
+    Grepping the rest of `bot/cogs/route_progression.py` found the identical shape at 5
+    more call sites, not just the one named - broadened all 6 to `except Exception:`
+    (`ActualAmountModal.on_submit`'s "less" flow, both `MoreOutcomeFollowupView` buttons,
+    `LegOutcomeView.matched`, `AbandonConfirmView.confirm`, and `_post_leg_prompt` itself).
+    The other 4 `except discord.HTTPException:` sites in the same file were checked and
+    left as-is - best-effort UI-update/notification patterns with no claim state to
+    release. Added a non-`discord.HTTPException` regression test (a plain `RuntimeError`
+    or `asyncio.TimeoutError`) alongside each pre-existing HTTPException-only test, to
+    prove the broadened catch actually covers the failure mode the audit described, not
+    just a wider type signature that happens to still pass the old tests.
+  - **Fixed - P2/P3, `/price` field-size guard**: `/price`'s "Best places to SELL"/"BUY"
+    fields used a plain `embed.add_field()` call, unlike every sibling route command,
+    leaving it unprotected against Discord's 1024-char per-field or 6000-char combined
+    embed limits. Routed both through the shared `add_chunked_fields`
+    (`bot/uex/route_presentation.py`) guard, moving `embed.set_footer()` to before the
+    fields are added (this codebase's established ordering, so the guard's `len(embed)`
+    budget check already includes the real footer) and appending a short "omitted -
+    message size limit" footer note on the rare oversized case rather than crashing.
+  - **Fixed - P2/P3 risk, refinery yields coverage guard**: UEX's `/refineries_yields` is
+    documented as capped at 500 rows with no pagination offered - `refresh_reference_data`
+    (`bot/cogs/intelligence.py`) had no guard for a response silently landing at that cap,
+    which would be indistinguishable from a genuinely complete dataset. Added
+    `REFINERY_YIELDS_ROW_CAP` and a warning log when the response count reaches it (today's
+    real count is 215, nowhere close, but nothing previously would have noticed if that
+    changed).
+  - **Deferred, not started**: (1) an atomic `status='in_progress'` guard on route-
+    progression outcome/completion/advance writes (`bot/db/database.py`'s
+    `claim_route_progression_advance`, `record_route_progression_leg_outcome`,
+    `set_route_progression_thread_status` currently have none), so a simultaneous
+    abandon/recovery/outcome race could resurrect an abandoned route; (2) a provisioning/
+    reconciliation step for `start_tracking`'s partial-failure gaps (a DB or message-send
+    failure between thread creation and the first leg prompt can leave an orphaned thread
+    or a prompt-less `in_progress` route). Both flagged as real but needing more careful,
+    deliberate design and testing given their narrower race windows, rather than a quick
+    pass alongside the four fixes above.
+  - 8 new/updated tests beyond the exception-handling regression tests above (3 for the
+    P1 filter, 1 `/price` test corrected for the new exclusion behavior it now triggers,
+    1 new `/price` oversized-field test, 2 refinery-coverage-guard tests). Full suite (649
+    tests) and a clean local bot start (all 20 cogs, 65 commands synced) reverified.
+- [x] **Third-Party Audit Fix Round, follow-up on the recommendations**: Shipped
+  2026-09-13. A closer read of the same audit's full recommendation list (not just its
+  6-row findings table) found that two of the prior round's fixes were narrower than what
+  was actually asked for - caught by re-checking, not by a second external report:
+  - **Fixed - field-size guard was `/price`-only**: the audit's recommendation named
+    `/refinery-advisor` and `/where-to-mine` too; both still used plain unprotected
+    `embed.add_field()` calls. Routed both through `add_chunked_fields`
+    (`bot/uex/route_presentation.py`), which gained an `inline: bool = False` parameter
+    (defaulting to every existing caller's own behavior) so `/refinery-advisor`'s
+    side-by-side per-ore sell-price fields and `/where-to-mine`'s star-system/planet/moon
+    fields keep their existing layout instead of being forced to stack vertically.
+  - **Fixed - refinery yields: only the "warn at cap" half of the recommendation had
+    shipped.** Added what "persist" actually asked for: `refinery_yield_observations`
+    gained nullable `date_added`/`date_modified` columns for UEX's own per-row timestamps
+    (distinct from `recorded_day`, this bot's own collection day - additive `ALTER TABLE`,
+    matching the existing `star_system_name` migration), and a new
+    `refinery_yield_fetch_log` table records every refresh's raw response row count (not
+    just the ones that happen to trip the 500-row warning), so a future look-back can tell
+    whether a past fetch was already truncated or how response size has trended over time.
+  - **Fixed - mining locations silently dropped unresolved/decommissioned POIs.** A
+    commodity's `ids_poi` referencing an id with no row at all in `/poi`'s current response
+    (UEX's own reference missing something the commodity still claims) was folded into the
+    same silent `continue` as a resolved-but-not-mining-related exclusion (correctly
+    excluded, not a gap). Now tracked separately: `MiningLocationInfo.unresolved_poi_count`
+    surfaces as a footer note, and a resolved-but-`is_decommissioned` POI gets its own
+    "Decommissioned (no longer minable)" field instead of being blended unflagged into
+    "Named mining sites" (would wrongly imply still-minable) or dropped outright (would
+    erase real history). No live decommissioned POI existed to test against organically,
+    so covered with synthetic fixtures instead.
+  - **Fixed - CI existed but wasn't a required merge gate, and had been silently failing.**
+    `.github/workflows/tests.yml` ran on every push/PR already, but `TestBranch` had zero
+    branch protection - confirmed via `gh api`, and separately discovered every one of the
+    last several TestBranch commits had actually been failing CI, unnoticed specifically
+    *because* nothing required it to pass: a handful of pre-existing `ruff --select F`
+    findings in test files (unused imports in `test_marketplace.py`/
+    `test_trading_preferences.py`, an unused local var in `test_route_send_shape.py`),
+    unrelated to any of those commits' own changes. Fixed the lint findings, confirmed a
+    clean CI run, then added branch protection requiring the `pytest` check before merge.
+  - **Deferred to the same careful-design pass as the two originally-deferred P2
+    findings** (atomic `status='in_progress'` guard, `start_tracking` partial-failure
+    reconciliation): `route_progression_pending_actions` has no uniqueness constraint, so
+    a duplicate retry could queue the same leg's recovery twice - same narrow-race-window
+    character as the other two, grouped with them on request rather than fixed ad hoc.
+  - 11 new/updated tests. Full suite (656 tests), a clean CI run, and a clean local bot
+    start (all 20 cogs, 65 commands synced) reverified.
+- [x] **Pi Backup Retention**: Shipped 2026-09-13. `scripts/deploy_and_backup.sh` snapshots
+  the DB before every deploy but never pruned old snapshots - by this point the Pi had
+  accumulated 52 of them (1.7GB) with no cleanup anywhere in the tooling. New
+  `scripts/sync_pi_backups.sh [keep_count]`, run from the PC (git-bash) after every future
+  deploy: archives every not-yet-copied `backups/pi/<snapshot>` down to a local
+  `backups/pi-archive/` first, and only once every one is confirmed present locally does it
+  prune the Pi to its newest `keep_count` (default 2 - `revert_last_deploy.sh` only ever
+  needs the single newest snapshot by default, so 2 leaves one fallback). Must invoke the
+  Windows OpenSSH binaries directly rather than whatever `ssh`/`scp` resolve to on
+  git-bash's own PATH - its bundled Cygwin ssh client silently failed to send its signature
+  packet when negotiating a newer pubkey extension, unrelated to any key/permission
+  problem. First real run archived all 52 existing snapshots to the PC and pruned the Pi to
+  87MB.
+- [x] **Route Progression: Atomic Status Guard**: Shipped 2026-09-13. First of the two
+  originally-deferred P2 audit findings, done as its own careful pass (a test proving the
+  race first, then the fix, then verifying it against the real cog callers) rather than a
+  quick pass alongside other fixes. The defect: `claim_route_progression_advance`,
+  `record_route_progression_leg_outcome`, and `set_route_progression_thread_status`
+  (`bot/db/database.py`) all wrote unconditionally regardless of a thread's current
+  status - a leg-outcome report or a completion racing a concurrent abandonment (or two
+  abandon/complete attempts racing each other) could resurrect an abandoned route, post a
+  next-leg prompt into a closed thread, or let 'completed' silently overwrite 'abandoned'
+  (whichever write committed second, unconditionally winning). Proven first with 3 DB-level
+  tests run against the UNFIXED code (confirmed failing), then fixed by adding
+  `AND status = 'in_progress'` to each write (a `SELECT`-subquery condition for
+  `record_route_progression_leg_outcome`, since its own UPDATE targets the sibling
+  `route_progression_legs` table). `claim_route_progression_advance`'s existing callers
+  needed no changes - both already treat a lost claim as "nothing to do, return quietly,"
+  exactly right for this new reason too. `set_route_progression_thread_status` now returns
+  whether it actually changed anything; `handle_leg_outcome`'s completion branch and
+  `abandon_thread` both now skip their own success messaging/archiving when it returns
+  False, rather than sending a visibly contradictory "Route complete!"/"was abandoned"
+  message on top of whichever action actually won the race. `record_route_progression_leg_
+  outcome`'s own False return needed care to route correctly: it can now fail for two
+  structurally different reasons (this leg already recorded vs. the thread itself no
+  longer in_progress) - naively folding the new reason into the existing "a different
+  report won" branch would have misreported a genuine abandonment race as a duplicate-
+  report conflict, caught before shipping by checking a stored outcome of `None` (which
+  can only mean the status check is what rejected the write, since the UPDATE would have
+  otherwise simply succeeded) as its own branch, checked BEFORE the existing
+  same-report-retry comparison. 9 new/updated tests (3 proving each DB-level race, 3
+  proving the cog-level messaging/silence for each caller, at the same file's usual
+  standard of proving the defect before proving the fix). Full suite (662 tests), a clean
+  local bot start, and a clean CI run reverified.
+- [x] **Route Progression: Startup Rollback**: Shipped 2026-09-13. The second of the two
+  originally-deferred P2 audit findings, same careful-pass discipline as the status guard
+  above - 4 tests proving each partial-failure gap against the UNFIXED `start_tracking`
+  first (all 4 failed as expected: one propagated an uncaught exception with zero error
+  handling, one left an orphaned thread misreported as "couldn't create a thread" even
+  though it genuinely had been, two left an orphaned thread and/or DB row with no cleanup
+  at all), then the fix, then confirming all 6 tests (the 4 gaps plus the pre-existing
+  happy path and the one already-handled failure) pass. The defect: between creating the
+  Discord thread and successfully posting the first leg prompt, `start_tracking`
+  (`bot/cogs/route_progression.py`) has several `await` points (`add_user`, the DB write,
+  two intro messages, the first leg prompt) that can each fail independently - only the
+  very first (`create_thread` itself) had any error handling before this fix. Rewritten as
+  one try block covering every step from `create_thread` through `_post_leg_prompt`, with
+  a single rollback path: if `create_thread` itself never succeeded there's nothing to
+  clean up (and the original, more specific "missing permissions?" hint is kept, since
+  that's the single most common real failure); otherwise, delete the DB row if one was
+  created (new `delete_route_progression_thread` - no FK/cascade exists between
+  `route_progression_threads` and `route_progression_legs`, so both need an explicit
+  delete) and delete the orphaned Discord thread, then tell the user plainly that nothing
+  was left behind and they can just try again. Nothing posted up to any of these failure
+  points is unique or valuable - the recommendation embed the "Track this route" button
+  was attached to is still sitting in the original channel either way - so full rollback
+  was simpler and safer than trying to resume or repair a half-built thread. 6 new tests.
+  Full suite (668 tests), clean lint, and a clean local bot start reverified.
+- [x] **Route Progression: Recovery-Queue Idempotency**: Shipped 2026-09-15. The third and
+  last item grouped into the "careful passes" bucket - but unlike the two above, a
+  thorough walk of every path that could queue two `route_progression_pending_actions`
+  rows for the same leg/thread found none currently reachable: `LegOutcomeView.claim()` is
+  a plain synchronous function with no `await` inside it, so two racing callback
+  invocations (a genuine duplicate prompt, or Discord redelivering the same interaction
+  event) can't interleave between its check and its set - whichever runs first completes
+  the whole thing atomically before the event loop can switch tasks; these Views also
+  aren't Discord-persistent, so a bot restart mid-retry kills the buttons outright rather
+  than enabling an automatic re-trigger; and neither `queue_route_progression_leg_recovery`
+  nor `queue_route_progression_abandon_recovery` is itself wrapped in a retry loop, so an
+  ambiguous outcome on the queue INSERT can't cause a second attempt either. Asked the user
+  whether this changes the priority - added anyway as defense-in-depth against whatever a
+  *future* code change might introduce, given this codebase's own demonstrated taste for
+  defensive completeness even on narrow/unreached windows. Two partial `UNIQUE` indexes on
+  `route_progression_pending_actions` (`(thread_id, leg_index) WHERE action_kind =
+  'leg_outcome'`, `(thread_id) WHERE action_kind = 'abandon'` - two separate indexes, not
+  one combined key, since SQLite treats every NULL as distinct for uniqueness and abandon
+  rows always have `leg_index = NULL`), both queue methods switched to `INSERT OR IGNORE`
+  so a defensively-caught duplicate is a silent no-op (the original row is still valid, so
+  the caller still correctly reports "recovery scheduled") rather than a raised
+  `IntegrityError` the existing try/except would have misreported as "recovery could not
+  be scheduled." 4 new tests. Full suite (671 tests), clean lint, and a clean local bot
+  start reverified. Closes out every item from the original third-party audit review.
+- [x] **Pi Backup Retention: Interrupted-Copy Safety**: Shipped 2026-09-15. A follow-up
+  audit of this session's own work (`f0fcc40..dd8444a`) found a real data-loss risk in
+  `scripts/sync_pi_backups.sh`: its "already archived" check only tested whether
+  `backups/pi-archive/<snapshot>` EXISTED, not whether the copy inside it was actually
+  complete - an `scp -r` that dies partway (a dropped connection) still leaves a partial
+  directory behind, and a later run would treat that partial directory as a verified prior
+  success and go on to authorize pruning the Pi's own real copy, permanently losing the
+  good data and keeping only the broken half-copy. Confirmed with a real reproduction (a
+  fixture harness with `ssh`/`scp` replaced by fake binaries a first run leaves a partial
+  `meta.txt`-only copy, a second run promotes only once the copy is genuinely complete;
+  verified the incomplete run never touches `ARCHIVE_ROOT` or the "remote" Pi's files, and
+  a real run against the live Pi still recognizes its existing complete archives
+  correctly). Fixed two ways together: (1) a backup directory is now only trusted once it
+  has both `meta.txt` and the DB file `meta.txt` itself names - the same completeness
+  check `revert_last_deploy.sh` already applies before trusting a backup, reused here
+  rather than invented fresh; (2) `scp` now lands in a staging directory first, only
+  atomically promoted (`mv` on the same filesystem) to the final archive location once
+  verified complete, so the final path is never observably partial to a later run even if
+  THIS run is interrupted immediately after. Also validated `keep_count` itself (a
+  malformed or `0` value would previously reach the prune command's arithmetic
+  unchecked - `0` specifically would prune every snapshot, including the newest).
+  `SSH_BIN`/`SCP_BIN` env-var overrides added (matching the existing `PI_HOST`/`PI_REPO`
+  pattern) specifically so this could be tested with fixture binaries instead of a real
+  Pi connection.
+- [x] **Route Progression: Honest Startup-Rollback Reporting**: Shipped 2026-09-15. Same
+  follow-up audit as the backup-retention fix above found a real gap in the Startup
+  Rollback fix from two entries up: `start_tracking`'s rollback (`bot/cogs/
+  route_progression.py`) sent "nothing was left behind to get stuck" unconditionally,
+  even when the cleanup it had just attempted - deleting the DB row, deleting the orphaned
+  Discord thread - itself failed. A user acting on that message had no way to know a real
+  orphaned thread or `in_progress` DB row might still exist. Separately, `thread.delete()`
+  was only wrapped in `except discord.HTTPException:`, so a non-HTTPException (a raw
+  transport error) would escape the rollback's own except block entirely - this bot has no
+  global app-command error handler, so that would have left the interaction stuck on
+  "thinking..." forever. Proven first with 3 new tests against the unfixed code (all 3
+  failed: two showed the false-reassurance message going out after a failed thread/DB
+  cleanup, one showed a plain `RuntimeError` from `thread.delete()` propagating out of
+  `start_tracking` uncaught). Fixed by tracking whether the DB delete and the thread delete
+  each actually succeeded and branching the followup message on both flags - the original
+  "nothing was left behind, try again" message only when cleanup genuinely succeeded,
+  otherwise a message naming that cleanup itself didn't fully succeed and pointing the user
+  to an admin rather than an immediate retry (a stuck DB row or Discord thread could still
+  exist, so blindly retrying risks a second, redundant thread on top of the first). Also
+  broadened `except discord.HTTPException:` to `except Exception:` around `thread.delete()`,
+  matching the exception-breadth fix already applied to every other route-progression call
+  site. 3 new tests. Full suite and clean lint reverified.
+- [x] **Route Progression: Ambiguous-Send Reconciliation**: Shipped 2026-09-15. The same
+  follow-up audit's finding #3, done as its own design discussion given the real
+  trade-off involved: `_post_leg_prompt`'s claim-release-on-failure guard (see the
+  exception-breadth fix earlier in this list) released the durable
+  `claim_route_progression_advance` claim for EVERY `thread.send()` failure, including a
+  transport-level timeout where the message may have actually reached Discord and only
+  its confirmation was lost - releasing in that case lets a retry post a genuine
+  duplicate live prompt into the thread. Investigation found the "obvious" fix (just
+  never release on anything but `discord.HTTPException`) is not actually safer: every
+  retry path here (`_record_leg_outcome_durably`'s bounded 3-attempt retry, and the
+  15-minute `retry_pending_route_progression_actions` poller after that, indefinitely)
+  sees an already-held claim as "nothing to do, return quietly" with no error and no log
+  - so a genuinely un-sent message under that naive fix would leave the route silently
+  and permanently stuck at that leg, strictly worse than today's rare, visible,
+  self-healing duplicate. Fixed instead by resolving the ambiguity rather than guessing:
+  on any non-`discord.HTTPException` failure, `_find_sent_leg_prompt` checks the thread's
+  recent message history (author + exact embed title match, unambiguous since a leg's
+  title encodes its leg_index and is only ever posted once per thread) before deciding -
+  confirmed sent: hold the claim, treat as success, and explicitly re-attach the view's
+  buttons via `bot.add_view(view, message_id=...)` (discord.py never got to register them
+  client-side, since that only happens after a successful `.send()` response, which never
+  arrived here); confirmed absent: release the claim exactly like a definite
+  `discord.HTTPException` failure; the check itself fails too (thread unreachable,
+  permissions lost): hold the claim without releasing it (per this project's own
+  "quarantine ambiguous outcomes, never blindly retry" convention - a duplicate is worse
+  to risk than a stall in that doubly-rare case), but log at ERROR specifically so it's
+  discoverable rather than a silent stall like the naive fix would produce everywhere. 3
+  new/rewritten tests covering all three outcomes. Full suite and clean lint reverified.
+- [x] **Route Progression: Recovery-Queue Index Migration Safety**: Shipped 2026-09-15.
+  The same follow-up audit's finding #4, closing out every finding from it. The two
+  partial UNIQUE indexes on `route_progression_pending_actions` (added earlier this
+  session as defense-in-depth, see Recovery-Queue Idempotency above) were created
+  directly in `SCHEMA`, which `init()` runs via `executescript` BEFORE any migration gets
+  a chance to run - a database old enough to have queued a genuine duplicate before this
+  uniqueness guard existed (the old, unguarded `INSERT` this codebase used before that
+  same session's fix) would crash `init()` outright with `sqlite3.IntegrityError`.
+  Confirmed not currently reachable on the live Pi (checked directly), but a real
+  conditional upgrade risk for any database that does carry a legacy duplicate. Fixed by
+  moving both `CREATE UNIQUE INDEX` statements out of `SCHEMA` and issuing them
+  explicitly in `init()` - matching the existing precedent one line above them
+  (`idx_liquidity_scores_id_item`, already deferred past `_run_migrations` for the same
+  reason) - after a new `_migrate_dedupe_route_progression_pending_actions`, which keeps
+  only the highest-`id` (freshest) row per duplicate key and deletes the rest. Not a
+  blind delete: any one surviving row still safely completes the recovery on its own,
+  since `handle_leg_outcome`'s existing conflicting-report guard already tolerates a
+  duplicate being processed after another one already won - so which specific row
+  survives changes nothing about correctness. Reproduced the actual crash first (drop the
+  indexes, insert real duplicates the old code allowed, confirm `init()` raises), then
+  fixed it and confirmed both a no-crash reconciliation down to one row per key AND a
+  live, enforcing index afterward, plus that repeated startups on an already-clean
+  database stay a no-op. 2 new tests. Full suite and clean lint reverified. Closes out
+  every finding from the 2026-09-15 follow-up audit.
+- [x] **Five Carry-Forward Defects from the 2026-09-13 Audit**: Shipped 2026-09-15. The
+  2026-09-15 audit's own "carry-forward" section pointed at five findings from the
+  EARLIER `2026-09-13-executive-audit-f0fcc40.md` (a different, previously-unreviewed
+  document) that its own rerun still reproduced. Each was independently re-verified
+  against current code first (not trusted from either audit's prose alone - several
+  cited line numbers were long stale after this session's own route_progression.py
+  rewrites), then fixed one at a time with the same before/after-fix test discipline as
+  every other item in this list:
+  - **Same-report replay could overwrite newer market data with a stale price**
+    (audit F02). `record_player_report_market_update` (`bot/db/database.py`) always
+    wrote to `terminal_market_state` unconditionally, including on a same-report retry
+    (a delivery-failure retry, or the durable recovery queue picking a leg back up
+    later) - if anything else (a fresh UEX collector snapshot, a different leg touching
+    the same commodity/terminal) had written something newer in the meantime, the
+    replay silently clobbered it with this report's own now-stale values; repeated
+    depletion reports could also keep refreshing the suppression window's expiry to
+    "now" on every replay. Fixed with a new `route_progression_legs.market_update_
+    applied_at` marker, set ATOMICALLY alongside the market-state write itself (same
+    transaction, same commit) so a write that fails never gets falsely marked applied -
+    `handle_leg_outcome` checks it before ever calling the write again, skipping both the
+    market update and the suppression call on a same-report replay once it's already
+    landed once. 1 new end-to-end test (seed a report, let a newer snapshot land, replay
+    the identical report, confirm the newer price survives).
+  - **A cosmetic Discord edit failure could silently skip a durable database write**
+    (audit F04). `LegOutcomeView.disable_in_background` (a purely cosmetic "grey out the
+    parent message's buttons" edit, called by all four of the "less"/"more"/abandon
+    commit flows AFTER their own acknowledgement succeeds but BEFORE the real durable
+    write) caught only `discord.HTTPException` - a non-HTTPException there (a raw
+    transport timeout) escaped uncaught and skipped the durable call entirely, even
+    though the user's own click was already acknowledged and the leg already claimed. A
+    prior pass in this same session had reviewed this exact call site and left it as-is,
+    reasoning "no claim state to release" - correct as far as it went, but missing that
+    letting the exception escape blocks a REQUIRED next step regardless. Fixed by
+    broadening the catch to `except Exception:`, closing all four call sites through the
+    one shared method at once. 2 new tests (one direct, one end-to-end through
+    `AbandonConfirmView.confirm`), both confirmed failing against the unfixed code first.
+  - **A failed-recovery notice told users to retry a button that no longer worked**
+    (audit F03). When BOTH the outcome/abandon write and its durable recovery queuing
+    failed, `_record_leg_outcome_durably`/`_abandon_thread_durably` told the user to
+    "report this leg again" - but the button was already permanently disabled by
+    `claim()`, and neither method had any reference back to the View to undo that.
+    Fixed by having both methods return whether they actually handled it (True if
+    recorded outright or durably queued, False only when neither worked), with every
+    caller releasing the claim AND re-pushing the now-re-enabled view to Discord
+    (`LegOutcomeView.reenable_in_background`, a new mirror of `disable_in_background`)
+    when False - since a disabled component on the real message doesn't dispatch a
+    click at all regardless of this process's own in-memory view state. Deliberately
+    doesn't also try to revert the "Reported: ..."/"Route abandoned." label text back to
+    its original wording (a smaller, more defensible cosmetic imperfection than relying
+    on whether a `discord.Message` object's own `.embeds` has been mutated by an earlier
+    edit - it hasn't, in the real client, but a test double easily could). 4 new tests,
+    one per call site (`LegOutcomeView.matched`, the "less" modal, `MoreOutcomeFollowup
+    View`, `AbandonConfirmView`), since the fix is independently repeated at each one
+    rather than living in one shared function the way the F04 fix does.
+  - **A missing quantity let historical evidence override a confirmed no-demand status**
+    (audit F05). `classify_supply_evidence` (`bot/uex/supply_demand.py`) only consulted
+    UEX's authoritative sell-side status when a live `scu` was ALSO present - a missing
+    quantity paired with status 7 ("Maximum Inventory, No Demand") fell straight through
+    to the historical fallback, producing e.g. "inferred demand, 100% historically
+    available" for a terminal UEX itself already confirms isn't buying at all. Fixed by
+    checking status 7 directly when `scu is None`, independent of `effective_sell_scu`
+    (which deliberately keeps its own existing "no data" vs "confirmed zero" contract for
+    its other caller, `/price`'s capacity estimate). 1 new test, confirmed failing
+    against the unfixed code first.
+  - **A real zero stock reading was treated as missing data** (audit F06). `/price`
+    parsed current stock through `_positive_float`, which discards zero by design (a real
+    zero-priced transaction isn't meaningful) - but current STOCK is a state reading, not
+    a transaction, and a terminal genuinely holding none right now is real, useful
+    information that `estimate_sell_capacity_from_history` already accepts and uses (a
+    real `0.0` still yields the full historical peak as its estimate). The discarded
+    `None` silently suppressed that estimate entirely for every currently-empty terminal.
+    Fixed with a new `_nonnegative_float` (preserves zero, still rejects inf/nan/negative)
+    used only at this one call site - `_positive_float` itself is untouched, since its
+    exclude-zero contract is correct for the quoted-price figures it's used for elsewhere.
+    Found and fixed the identical "0 is falsy" pitfall one branch further down in the same
+    block too (the plain on-hand-stock fallback silently showed nothing for a genuine
+    zero, same as the estimate did) while already reading this exact code. 2 new tests
+    (the estimate branch, and the no-history fallback branch), both confirmed failing
+    against the unfixed code first.
+
+  10 new tests across `tests/test_route_progression.py` (7), `tests/test_intelligence.py`
+  (1), and `tests/test_price_command.py` (2) - every one confirmed failing against the
+  unfixed code first. Full suite and clean lint reverified. Closes out the last open item
+  from either audit this session investigated.
+- [x] **Route Ranking: Reject Negative-Profit Routes**: Shipped 2026-09-15. User-reported,
+  live: `/routes-from` showed a real route ("Quantum Fuel: Admin - Orbituary → Admin -
+  Ruin Station") with Buy 1760.00 > Sell 1600.00 - a genuine money-losing trade - as its
+  7th-ranked recommendation, run profit -92,160 aUEC. Root cause: `select_available_
+  routes`/`select_in_stock_routes` (`bot/uex/trends.py`, which feed `/top-routes`,
+  `/routes-from`, and `/route-on-the-way` - all three share one background-refreshed
+  candidate pool) required UEX's own `profit` field to be PRESENT but never checked it
+  was actually POSITIVE. When too few genuinely profitable routes exist from a given
+  origin to fill a "top N" list, a route UEX itself returns with a negative profit
+  (destination price below origin price) filled a remaining slot instead of the list
+  just being shorter. While tracing the shared candidate pool, found the identical gap,
+  worse, in `/best-route`'s own primary branch (`bot/cogs/prices.py`) - it ranked
+  straight from UEX's routes with no baseline filter at all, not even real stock at the
+  origin. `best_routes` (`bot/uex/trading.py`, `/best-route`'s own fallback branch when
+  UEX has no route data) and `build_pair_opportunities` (`bot/uex/mixed_routes.py`, used
+  by `/mixed-routes`/`/multi-stop-route`) already required a positive margin - this was
+  confirmed to be the one place in the route-ranking family that didn't, not a
+  codebase-wide pattern. Fixed by requiring `profit > 0` (not just present) in both
+  `trends.py` functions, and adding a real baseline filter (real origin stock AND
+  positive profit) to `/best-route`'s primary branch, matching `select_available_
+  routes`'s own bar. 4 new tests (2 in `test_trends.py` for the shared pool, 2 in
+  `test_route_send_shape.py` for `/best-route`'s own branch - one negative-route-
+  excluded case, one all-routes-unprofitable case), every one confirmed failing against
+  the unfixed code first. Full suite and clean lint reverified.
+- [x] **Route Commands: Ship/Budget Messaging Consistency**: Shipped 2026-09-15.
+  User-requested audit: "do all route commands display ship and budget when
+  applicable?" Investigated with a subagent first, then independently re-verified every
+  finding against the actual embed-building code (not trusted from the report alone)
+  before fixing anything. Found and fixed three real inconsistencies:
+  - **`/intelligence-brief` used its `budget` option but never showed it.** Unlike
+    `/mixed-routes`, `/multi-stop-route`, and `/route-on-the-way` - which all cap the
+    cargo estimate by budget AND disclose the figure - `/intelligence-brief` passed
+    `budget` straight into `build_mixed_routes` with no footer line anywhere in
+    `_routes_embed`, so a user had no way to confirm their budget actually applied.
+    Fixed by setting the footer BEFORE the route-field loop (not after), matching this
+    codebase's own footer-before-loop convention (`add_chunked_fields`' budget check
+    measures `len(embed)`, which only includes the footer once it's actually set) - the
+    existing "N more omitted" suffix now appends onto the budget line instead of
+    replacing it.
+  - **A resolved ship was only named when it happened to be the binding constraint.**
+    `/best-route` (both its UEX-routes primary branch and its buy/sell-pairing fallback)
+    and the shared `_send_ranked_routes` (`/top-routes`, `/routes-from`,
+    `/route-on-the-way`) all named the ship ONLY inside a per-route cargo line, and only
+    for a route whose cargo happened to be limited by that ship's hold specifically -
+    not stock- or budget-limited. The exact same ship, used to compute cargo/profit for
+    every route in the response, could go completely unnamed if none of the shown
+    routes hit that one condition (confirmed live in a user screenshot: a route named
+    "Polaris" only because it happened to be ship-limited). `/mixed-routes`,
+    `/multi-stop-route`, and `/intelligence-brief` already named their (required) ship
+    unconditionally up front - this brings the four optional-ship commands to the same
+    standard, in the intro embed's footer rather than buried per-route. Guarded against
+    a resolved vehicle with no recorded SCU figure (would have crashed the new `:,.0f`
+    format) with a distinct "no cargo capacity on record" fallback line.
+  - **`/top-routes` and `/routes-from` never accepted a `budget` option at all** - not
+    even from the saved trading-preference default - despite sharing the exact same
+    `_build_route_field`/`estimate_route_cargo` machinery `/route-on-the-way` already
+    uses for budget capping and disclosure, with a ready-made "limited by your budget"
+    cargo note that simply never got wired up for these two. Added the option (with the
+    same preference fallback as `/mixed-routes`/`/multi-stop-route`/`/route-on-the-way`)
+    to both, reusing `_send_ranked_routes`'s existing `budget` parameter.
+
+  15 new tests across six files (`test_intelligence_brief_routes.py`,
+  `test_route_send_shape.py`, `test_trends_embed_budget.py`, `test_routes_from.py`,
+  `test_route_filter_ordering.py`), the ship-naming and budget-display fixes each
+  confirmed failing against the unfixed code first. Full suite and clean lint
+  reverified.
+- [x] **Five Findings from the 2026-09-15 Follow-Up Audit**: Shipped 2026-09-15.
+  A fresh executive audit of `dd8444a..1e336db` (the prior four commits) found five real
+  defects; every one independently re-verified against current code before trusting the
+  audit's own writeup, per this project's established practice. Four of the five turned
+  out to share one root cause and were designed and fixed together as one connected
+  change; the fifth (backup verification) was independent and fixed separately.
+  - **Backup verification accepted a truncated or sidecar-dropping transfer as
+    complete.** `sync_pi_backups.sh`'s `is_complete_backup` only checked that `meta.txt`
+    and the DB filename it names were PRESENT locally - a `scp -r` that silently
+    truncated the destination file, or dropped just a `-wal`/`-shm` sidecar, still read
+    as "complete" and could authorize pruning the Pi's own good copy. Reproduced with a
+    fixture harness (fake SSH/SCP standing in for the real Pi round trip) before fixing:
+    confirmed the old check exited 0 and archived a 20-byte truncated copy of a 56-byte
+    real file. Fixed by fetching the Pi's real per-file byte sizes in one `find -printf`
+    round trip and checking every local file (main DB and whichever sidecars the Pi
+    actually has for that snapshot) against them - re-verified on EVERY run, not skipped
+    for a dir that already exists locally, since skipping verification for
+    already-copied dirs is exactly what let a stale local copy go on authorizing prunes
+    indefinitely. Verified against three scenarios via the same harness: a truncated DB
+    is now refused, a dropped sidecar is now refused, and a genuinely complete transfer
+    (main DB + a real `-wal` sidecar) is still accepted and still prunes correctly - no
+    pytest coverage for this one (matches this project's standing practice for
+    `deploy_and_backup.sh`/`revert_last_deploy.sh`: verify shell scripts via a throwaway
+    fixture harness, not committed test files).
+  - **The shared root cause behind the other four**: `_record_leg_outcome_durably`'s
+    retry-then-durable-queue wrapper treats `handle_leg_outcome`'s entire multi-step call
+    (record the outcome, write market state, suppress a confirmed-empty side, dispatch
+    the next leg or complete the route) as one all-or-nothing unit, behind a single
+    boolean. That boolean can't distinguish "the report itself never saved" from "the
+    report saved fine but a LATER step keeps failing" - and three of the four defects
+    below are different consequences of that same gap. Considered a heavier redesign
+    (new pending-action kinds, a resume-point field) before settling on smaller, targeted
+    fixes once tracing the actual call sequence showed the existing recovery machinery
+    (post-ack retry, then the durable queue, then the recovery poller) already works
+    correctly once each individual gap is closed - no new schema for the ambiguous-send
+    or partial-failure findings, only for the one that genuinely needed its own marker.
+  - **A held claim was trusted as proof of delivery, even when it was really an
+    unresolved failure.** When a leg prompt's send AND its own history-reconciliation
+    (added earlier this session for the ambiguous-send fix) both failed, `_post_leg_prompt`
+    correctly held its claim and raised - but the very next retry saw that claim already
+    held and just returned normally, with no resend and no exception. Traced the exact
+    consequence: `_record_leg_outcome_durably`'s wrapper read that silent return as
+    success after only 2 attempts, so its own durable-queue safety net never engaged at
+    all - the route stalled `in_progress` forever with nothing recorded anywhere but a
+    log line. Fixed by re-verifying against Discord's own message history every time the
+    claim is already held, not just on the first send failure: found means reattach and
+    finish; confirmed absent means the claim is still validly held, so send now instead
+    of returning; still unresolvable means raise again, so retries keep counting instead
+    of silently "succeeding." 4 new tests plus an end-to-end reproduction through the
+    real durable wrapper (confirms a pending recovery action is now actually queued),
+    every one confirmed failing against the unfixed code first - including one
+    pre-existing test that had (unknowingly) codified the old, buggy behavior as
+    "correct," updated to assert the real fix instead.
+  - **A wrapper reporting "not handled" could still mean the report was already saved.**
+    Once the outcome-persistence step of `handle_leg_outcome` commits, every later step
+    failing (the next-leg prompt, market/suppression writes) still makes every retry of
+    the WHOLE call raise - so if the durable-queue insert also then failed,
+    `_record_leg_outcome_durably` unconditionally told its callers "not handled,"
+    reopening the view. A second, different report through a different button/modal was
+    then rejected by the DB's own conflict guard, permanently abandoning the real,
+    already-saved report's unfinished downstream work with no route left to resume it.
+    Fixed by checking `route_progression_legs` (the actual source of truth) before
+    deciding: an already-saved outcome now returns `True` and leaves the view resolved,
+    with an honest "your report was saved, but..." notice instead of the actively wrong
+    "please report this leg again." 3 new tests, including one driven through the real
+    `LegOutcomeView.matched` button callback (matching the audit's own reproduction
+    style) and a control case proving a genuinely never-saved report still correctly
+    reopens the view exactly as before. Two pre-existing tests needed fixture updates
+    (a missing `get_route_progression_leg` stub on their fake DB objects) to keep
+    working with the new check - not behavior regressions, just exercising a code path
+    they hadn't needed to stub before.
+  - **Suppression shared its retry marker with an unrelated write.**
+    `market_update_applied_at` gated BOTH the market-state write and the separate
+    `suppress_terminal_market_side` call - if suppression alone failed after the market
+    write had already committed and set that marker, no later replay ever retried
+    suppression again, since the marker being set skipped the whole block, suppression
+    included. A depleted terminal could permanently lose its suppression protection.
+    Fixed with its own independent `suppression_applied_at` column on
+    `route_progression_legs`, set atomically inside `suppress_terminal_market_side`'s own
+    transaction the same way the existing market-update marker is - the two writes are
+    now gated and retried completely independently. 1 new test (a "missing" report whose
+    suppression fails once, then succeeds on a same-report replay even though the market
+    update's own marker was already set), confirmed failing against the unfixed gating
+    logic first.
+  - **The legacy duplicate-recovery-queue migration could discard the one payload able
+    to resume a route.** Migrating pre-existing duplicate rows down to one per key
+    (needed before the uniqueness index introduced in the prior audit round could be
+    created) blindly kept the highest `id` - but a duplicate's replay is only useful if
+    it MATCHES what's already committed to `route_progression_legs`; a non-matching
+    replay just gets rejected as a conflict and discarded by the recovery poller, wasting
+    the one chance to finish that leg's unfinished downstream work (the next-leg
+    dispatch or completion step `handle_leg_outcome`'s own same-report fall-through
+    exists to resume). Reproduced the audit's own scenario directly: a `matched` outcome
+    saved without ever advancing, plus legacy duplicate rows (`matched`, then a
+    higher-id `missing`) - the old rule kept `missing` and the route never advanced.
+    Fixed by reconciling in Python against the real committed outcome first (preferring
+    a duplicate that matches it), falling back to the pre-existing highest-id rule only
+    when nothing is committed yet to reconcile against (still correct and still safe for
+    that case - abandon-kind duplicates are unaffected, since there's no
+    conflicting-payload concept for a plain abandon action). 2 new tests - the
+    match-preferred case and a control case proving the highest-id fallback still holds
+    with nothing yet saved - both run against the same pre-existing duplicate-reconciles
+    test harness this session's earlier carry-forward-defects round already built.
+
+  712 project tests passing (10 net new), clean lint, clean local bot start (22 cogs,
+  65 commands). Every fix confirmed failing against the unfixed code first, including
+  temporary narrow reverts of individual pieces of the connected route-progression
+  change to prove each one's own test actually exercises it (not just the combined diff).
+- [ ] **Codebase Consolidation** *(complexity: High, ongoing)*: Beyond route rendering,
+  organize `bot/db/database.py`'s ~30 tables by feature and keep one authoritative
+  description of current behavior. Broader than a single ticket - Centralized Route
+  Presentation above is its first concrete slice; the rest is an ongoing practice rather
+  than a one-time PR.

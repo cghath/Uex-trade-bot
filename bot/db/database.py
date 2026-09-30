@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+import json
 import logging
 from pathlib import Path
 from typing import Any, AsyncIterator
@@ -14,10 +15,20 @@ from typing import Any, AsyncIterator
 import aiosqlite
 from cryptography.fernet import Fernet, InvalidToken
 
+from bot.uex.trading_preferences import DEFAULT_TRADING_PREFERENCES, UNSET
+
 logger = logging.getLogger("uexbot.database")
 
 from bot.uex.marketplace import compute_liquidity_score
 from bot.uex.route_confidence import coalesce_report_count
+from bot.uex.blueprints import BlueprintMission, BlueprintRef, SnapshotState
+
+# How long hourly liquidity snapshots are kept on the bot's own disk: twice the longest
+# window any command reads (/liquidity-trends' 7 days). See update_liquidity_scores.
+LIQUIDITY_SNAPSHOT_RETENTION_DAYS = 14
+# Pruning batch size and per-call cap - see Database.prune_liquidity_snapshots.
+LIQUIDITY_PRUNE_BATCH_ROWS = 5000
+LIQUIDITY_PRUNE_MAX_BATCHES = 20
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS price_alerts (
@@ -30,7 +41,11 @@ CREATE TABLE IF NOT EXISTS price_alerts (
     target_price REAL NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     triggered_at TEXT,
-    active INTEGER NOT NULL DEFAULT 1
+    active INTEGER NOT NULL DEFAULT 1,
+    -- Where it arrives: 'personal' = DM, 'global' = channel_id with a ping. Same values on
+    -- all three alert tables. The default is for rows from before the option existed (all
+    -- channel alerts); new alerts are written with an explicit scope, DM by default.
+    scope TEXT NOT NULL DEFAULT 'global' CHECK (scope IN ('personal', 'global'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_price_alerts_active ON price_alerts (active);
@@ -61,6 +76,39 @@ CREATE TABLE IF NOT EXISTS user_ship_preference (
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Saved route-filtering defaults, applied whenever a route command's matching option is
+-- left unset so a user doesn't have to repeat the same options every call. risk_tolerance
+-- has no per-command option: route commands always apply it (bot/uex/commodity_risk.py's
+-- RISK_TOLERANCE_EXCLUDES). preferred_system/risk_tolerance/ship_name NULL means "no preference
+-- set", not "explicitly disabled". ship_name supersedes the older user_ship_preference
+-- table (kept, but no longer written to, purely as the one-time migration source run in
+-- Database.init() - see _migrate_ship_preference_into_trading_preferences) - the user's
+-- ship shapes route recommendations the same way the other fields here do, so it now
+-- lives in the same per-user row instead of a separate table.
+CREATE TABLE IF NOT EXISTS user_trading_preferences (
+    user_id INTEGER PRIMARY KEY,
+    space_only INTEGER NOT NULL DEFAULT 0,
+    capital_ship_access INTEGER NOT NULL DEFAULT 0,
+    auto_load_only INTEGER NOT NULL DEFAULT 0,
+    preferred_system TEXT,
+    risk_tolerance TEXT,
+    ship_name TEXT,
+    budget REAL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Tracks which users have already had their legacy user_ship_preference row folded into
+-- user_trading_preferences.ship_name, independent of whether user_trading_preferences
+-- still has a row for them or a non-NULL ship. Migrating a user is a one-time event -
+-- without this, clearing the ship (clear_default_ship) or all preferences
+-- (clear_trading_preferences) looked identical to "never migrated yet" to the migration
+-- itself, so the legacy ship reappeared on the very next restart. Never written to by
+-- anything except the migration; never read by anything else.
+CREATE TABLE IF NOT EXISTS ship_preference_migrated (
+    user_id INTEGER PRIMARY KEY,
+    migrated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS marketplace_alerts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
@@ -70,7 +118,11 @@ CREATE TABLE IF NOT EXISTS marketplace_alerts (
     min_quality REAL,
     max_quality REAL,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    active INTEGER NOT NULL DEFAULT 1
+    active INTEGER NOT NULL DEFAULT 1,
+    -- Where it arrives, as on price_alerts. Rows from before the option existed were DMs.
+    scope TEXT NOT NULL DEFAULT 'personal' CHECK (scope IN ('personal', 'global')),
+    guild_id INTEGER,
+    channel_id INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_marketplace_alerts_active ON marketplace_alerts (active);
@@ -106,11 +158,17 @@ CREATE TABLE IF NOT EXISTS negotiation_last_seen (
     PRIMARY KEY (user_id, id_negotiation)
 );
 
--- The actual notify-dedup source of truth. A message only ever needs notifying to its one
--- non-sending party, so a bare message id (not scoped per-user) is unambiguous.
+-- The actual notify-dedup source of truth. Scoped per (user, message): a negotiation can
+-- have two different Discord users each independently watching it (each as the opposite
+-- party, or even the same listing watched by two different accounts), and one user's
+-- baseline-seed or delivered notification for a message must never suppress the OTHER
+-- user's still-pending notification for that same message - a bare message_id primary key
+-- collapsed both into one shared row (see the negotiation_message_seen_scope migration).
 CREATE TABLE IF NOT EXISTS negotiation_message_seen (
-    message_id INTEGER PRIMARY KEY,
-    seen_at TEXT NOT NULL DEFAULT (datetime('now'))
+    user_id INTEGER NOT NULL,
+    message_id INTEGER NOT NULL,
+    seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (user_id, message_id)
 );
 
 CREATE TABLE IF NOT EXISTS guild_digest_config (
@@ -149,8 +207,15 @@ CREATE TABLE IF NOT EXISTS liquidity_score_snapshots (
     recorded_hour TEXT NOT NULL,
     PRIMARY KEY (id_item, recorded_hour)
 );
-CREATE INDEX IF NOT EXISTS idx_liquidity_snapshots_item_time
-    ON liquidity_score_snapshots (id_item, recorded_hour);
+-- This duplicated the primary key's own index exactly, doubling its size for nothing.
+DROP INDEX IF EXISTS idx_liquidity_snapshots_item_time;
+-- The two readers: get_liquidity_movers filters by time window alone, and
+-- get_liquidity_history by name (case-insensitively, hence the COLLATE) plus window.
+-- Without these both scanned the whole table (~445k rows on the Pi by 2026-09-29).
+CREATE INDEX IF NOT EXISTS idx_liquidity_snapshots_hour
+    ON liquidity_score_snapshots (recorded_hour);
+CREATE INDEX IF NOT EXISTS idx_liquidity_snapshots_name_hour
+    ON liquidity_score_snapshots (item_name COLLATE NOCASE, recorded_hour);
 
 -- Accumulating index of Marketplace items the bot has actually observed being traded, built
 -- by periodically snapshotting /marketplace_trends (which only ever exposes ~100 items live
@@ -197,7 +262,7 @@ CREATE TABLE IF NOT EXISTS marketplace_item_tier_stats (
 -- Commodity restock watches: unlike price_alerts (one-shot), these are persistent - a
 -- background poller checks /commodities_prices across every terminal and notifies whenever
 -- one flips from no-stock to has-stock. ship_query is optional (falls back to the watcher's
--- /set-default-ship at notify time if unset) and is only used to describe how much of a
+-- saved default ship at notify time if unset) and is only used to describe how much of a
 -- restock would fill that ship's hold, not to filter/gate the alert itself. `scope` picks the
 -- delivery: 'global' posts in the channel the alert was created in and pings the creator
 -- (visible to everyone else there too); 'personal' DMs only the creator, nobody else sees it.
@@ -268,6 +333,15 @@ CREATE TABLE IF NOT EXISTS terminal_market_state (
     buy_report_count INTEGER,
     sell_report_count INTEGER,
     last_seen TEXT NOT NULL DEFAULT (datetime('now')),
+    source TEXT NOT NULL DEFAULT 'uex' CHECK (source IN ('uex', 'player_report')),
+    -- Suppression window: set when a player report confirms a side is genuinely empty
+    -- (Recommendation Outcome Tracking's 'missing'/drained-'more' outcomes - see
+    -- bot/uex/route_progression.py's update_confirms_depletion), so route recommendations
+    -- stop suggesting that exact (commodity, terminal, side) until it's had a real chance
+    -- to refresh. NULL or in the past means "not currently suppressed" - no separate flag
+    -- needed, and nothing proactively clears it early on a later UEX poll; it just expires.
+    buy_suppressed_until TEXT,
+    sell_suppressed_until TEXT,
     PRIMARY KEY (id_commodity, id_terminal)
 );
 
@@ -287,7 +361,8 @@ CREATE TABLE IF NOT EXISTS terminal_market_observations (
     volatility_buy REAL,
     volatility_sell REAL,
     buy_report_count INTEGER,
-    sell_report_count INTEGER
+    sell_report_count INTEGER,
+    source TEXT NOT NULL DEFAULT 'uex' CHECK (source IN ('uex', 'player_report'))
 );
 CREATE INDEX IF NOT EXISTS idx_terminal_market_observations_lookup
     ON terminal_market_observations (id_commodity, id_terminal, observed_at);
@@ -391,10 +466,23 @@ CREATE TABLE IF NOT EXISTS refinery_yield_observations (
     recorded_day TEXT NOT NULL,
     commodity_name TEXT NOT NULL,
     terminal_name TEXT NOT NULL,
+    star_system_name TEXT,
     yield_bonus INTEGER,
     yield_bonus_week INTEGER,
     yield_bonus_month INTEGER,
     PRIMARY KEY (id_commodity, id_terminal, recorded_day)
+);
+
+-- Audit finding: /refineries_yields is documented as capped at 500 rows with no
+-- pagination offered, and intelligence.py's refresh_reference_data only ever logged a
+-- transient warning when a fetch reached that cap - nothing was actually persisted, so
+-- there was no way to look back and tell whether a past fetch was already truncated, or
+-- how the response size has trended over time. One row per refresh (~1/day at the current
+-- 24h collection interval), so this stays tiny indefinitely - no pruning needed.
+CREATE TABLE IF NOT EXISTS refinery_yield_fetch_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    fetched_at TEXT NOT NULL DEFAULT (datetime('now')),
+    response_count INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS marketplace_tier_observations (
@@ -472,6 +560,292 @@ CREATE INDEX IF NOT EXISTS idx_marketplace_post_jobs_due
     ON marketplace_post_jobs (status, scheduled_for);
 CREATE INDEX IF NOT EXISTS idx_marketplace_post_jobs_listing
     ON marketplace_post_jobs (listing_id);
+
+-- Recommendation Outcome Tracking (Phase 1, local-only): a user selects a suggested
+-- route, tracks it leg-by-leg in a private Discord thread, and reports whether each leg
+-- matched what was quoted. route_snapshot is the full route as shown at selection time,
+-- kept for display/audit only - the per-leg quoted_* columns below are the queryable
+-- subset used for confidence-calibration aggregation without parsing JSON.
+CREATE TABLE IF NOT EXISTS route_progression_threads (
+    thread_id INTEGER PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    guild_id INTEGER NOT NULL,
+    route_kind TEXT NOT NULL CHECK (
+        route_kind IN ('best_route', 'top_routes', 'mixed_routes', 'multi_stop_route')
+    ),
+    route_snapshot TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'in_progress' CHECK (
+        status IN ('in_progress', 'completed', 'abandoned')
+    ),
+    total_legs INTEGER NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    completed_at TEXT,
+    -- The leg_index of the most recent "advance" step (a leg prompt posted, or the
+    -- route's completion message) this thread has actually claimed - -1 means nothing
+    -- posted yet. claim_route_progression_advance's conditional UPDATE (only advance if
+    -- the new value is higher) is what makes _post_leg_prompt/completion idempotent
+    -- across a retried handle_leg_outcome or a genuinely duplicate leg-outcome report -
+    -- see PROJECT_CONTEXT.md's writeup of the post-ack-retry durability fix.
+    advanced_to_index INTEGER NOT NULL DEFAULT -1
+);
+CREATE INDEX IF NOT EXISTS idx_route_progression_threads_user_status
+    ON route_progression_threads (user_id, status);
+
+-- outcome is only set once a leg is reported; precision only applies to outcome='more'
+-- ('exact' when the terminal was confirmed drained, 'floor' when the player's own cargo
+-- hold or the terminal's demand capped them before the true stock/demand was known - a
+-- floor must never be written back to terminal_market_state as if it were an exact figure).
+CREATE TABLE IF NOT EXISTS route_progression_legs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    thread_id INTEGER NOT NULL,
+    leg_index INTEGER NOT NULL,
+    side TEXT NOT NULL CHECK (side IN ('buy', 'sell')),
+    id_terminal INTEGER NOT NULL,
+    id_commodity INTEGER NOT NULL,
+    quoted_price REAL,
+    quoted_scu REAL,
+    quoted_status INTEGER,
+    outcome TEXT CHECK (outcome IN ('matched', 'less', 'more', 'missing')),
+    actual_price REAL,
+    actual_scu REAL,
+    precision TEXT CHECK (precision IN ('exact', 'floor')),
+    reported_at TEXT,
+    market_update_applied_at TEXT,
+    suppression_applied_at TEXT,
+    UNIQUE (thread_id, leg_index)
+);
+CREATE INDEX IF NOT EXISTS idx_route_progression_legs_thread
+    ON route_progression_legs (thread_id, leg_index);
+
+-- A hedge suggested reactively in a tracking thread (bot.uex.mixed_routes.find_hedge_cargo,
+-- triggered by a buy-side shortfall - see RouteProgression._suggest_shortfall_hedge)
+-- lives HERE, deliberately separate from route_progression_legs: it was never part of the
+-- route the player asked to track, has no claimed leg_index of its own, and must never
+-- interact with claim_route_progression_advance/total_legs - those exist to make the
+-- tracked route's OWN sequence idempotent across retries, a guarantee a hedge has no need
+-- of and no business risking. destination_leg_index is the anchor route's own paired sell
+-- leg (matched on id_commodity in route_progression_legs at suggestion time) - purely a
+-- lookup key for "when that leg's prompt posts, also ask about this hedge's sale," not a
+-- real position in the tracked sequence.
+CREATE TABLE IF NOT EXISTS route_progression_hedges (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    thread_id INTEGER NOT NULL,
+    origin_leg_index INTEGER NOT NULL,
+    destination_leg_index INTEGER NOT NULL,
+    id_commodity INTEGER NOT NULL,
+    commodity_name TEXT NOT NULL,
+    id_terminal_origin INTEGER NOT NULL,
+    terminal_name_origin TEXT NOT NULL,
+    id_terminal_destination INTEGER NOT NULL,
+    terminal_name_destination TEXT NOT NULL,
+    quoted_price_buy REAL,
+    quoted_scu REAL,
+    quoted_price_sell REAL,
+    -- The terminal's REAL quoted stock/demand at suggestion time (MixedCargoItem.source/
+    -- .destination's own scu_buy/scu_sell) - kept separate from quoted_scu (the PLANNED
+    -- allocation find_hedge_cargo capped to the shortfall), matching
+    -- terminal_state_update_for_outcome's own market_scu parameter and its documented
+    -- reasoning (see that function's docstring in bot/uex/route_progression.py).
+    market_scu_buy REAL,
+    market_scu_sell REAL,
+    status_buy INTEGER,
+    status_sell INTEGER,
+    buy_outcome TEXT CHECK (buy_outcome IN ('matched', 'less', 'more', 'missing')),
+    buy_actual_price REAL,
+    buy_actual_scu REAL,
+    buy_reported_at TEXT,
+    sell_outcome TEXT CHECK (sell_outcome IN ('matched', 'less', 'more', 'missing')),
+    sell_actual_price REAL,
+    sell_actual_scu REAL,
+    sell_reported_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_route_progression_hedges_thread
+    ON route_progression_hedges (thread_id, destination_leg_index);
+
+-- Durable recovery queue for a post-ack action (a leg outcome or an abandon) whose
+-- retry attempts (POST_ACK_RETRY_ATTEMPTS in bot/cogs/route_progression.py) were all
+-- exhausted - fully self-contained (carries every field handle_leg_outcome/abandon_thread
+-- need), never dependent on RouteProgression._active_legs, so a retry_pending_route_
+-- progression_actions poll tick can complete the action even after a bot restart wiped
+-- that in-memory cache. Rows are deleted on success; a failed retry just bumps
+-- attempts/last_attempt_at and is picked up again next poll - the existing 48h
+-- abandonment poller remains the last-resort backstop if this queue itself can never
+-- succeed (e.g. the thread/channel is gone).
+CREATE TABLE IF NOT EXISTS route_progression_pending_actions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    thread_id INTEGER NOT NULL,
+    action_kind TEXT NOT NULL CHECK (action_kind IN ('leg_outcome', 'abandon')),
+    leg_index INTEGER,
+    side TEXT,
+    id_terminal INTEGER,
+    id_commodity INTEGER,
+    terminal_name TEXT,
+    commodity_name TEXT,
+    display_label TEXT,
+    quoted_price REAL,
+    quoted_scu REAL,
+    quoted_status INTEGER,
+    market_scu REAL,
+    outcome TEXT,
+    actual_price REAL,
+    actual_scu REAL,
+    precision TEXT,
+    reason TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_attempt_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_route_progression_pending_actions_thread
+    ON route_progression_pending_actions (thread_id);
+-- Defense-in-depth, not a confirmed-reachable-bug fix: no path was found by which the
+-- current code could actually queue two rows for the same leg/thread (LegOutcomeView's
+-- claim() is a synchronous check-then-set with no await inside it, so two racing
+-- callbacks can't interleave between the check and the set; these Views also aren't
+-- Discord-persistent, so a bot restart kills the buttons outright rather than enabling an
+-- automatic re-trigger) - kept cheap and additive against whatever a FUTURE change might
+-- introduce. Two separate partial indexes, not one combined UNIQUE(thread_id, action_kind,
+-- leg_index): 'leg_outcome' rows key on (thread_id, leg_index), but 'abandon' rows always
+-- have leg_index NULL, and SQLite treats every NULL as distinct for uniqueness purposes -
+-- a single combined index would never catch two abandon rows for the same thread. Not
+-- created here - see _migrate_dedupe_route_progression_pending_actions's docstring for
+-- why these two statements are issued explicitly in init(), after migrations, instead of
+-- living in this executescript'd SCHEMA like every other index in this file.
+CREATE TABLE IF NOT EXISTS blueprint_shopping_entries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    guild_id INTEGER NOT NULL,
+    request_id TEXT NOT NULL,
+    plan_json TEXT NOT NULL,
+    UNIQUE(user_id, guild_id, request_id)
+);
+CREATE INDEX IF NOT EXISTS idx_blueprint_shopping_owner
+    ON blueprint_shopping_entries (user_id, guild_id, id);
+CREATE TABLE IF NOT EXISTS blueprint_shopping_threads (
+    user_id INTEGER NOT NULL,
+    guild_id INTEGER NOT NULL,
+    thread_id INTEGER NOT NULL UNIQUE,
+    message_id INTEGER,
+    PRIMARY KEY(user_id, guild_id)
+);
+
+-- Blueprint search: one snapshot of the Star Citizen Wiki API's blueprint-bearing contracts,
+-- replaced wholesale (never patched in place) by replace_blueprint_snapshot in one transaction,
+-- so a failed or partial sync can never leave a half-old, half-new mix. blueprint_snapshot_state
+-- is a single row (id = 1) recording which game version the rows came from and when.
+CREATE TABLE IF NOT EXISTS blueprint_snapshot_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    game_version TEXT NOT NULL,
+    synced_at TEXT NOT NULL,
+    mission_count INTEGER NOT NULL,
+    blueprint_count INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS blueprint_missions (
+    mission_uuid TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    giver TEXT NOT NULL,
+    debug_name TEXT,
+    rank_name TEXT,
+    rank_index INTEGER,
+    reputation INTEGER,
+    star_systems TEXT NOT NULL DEFAULT '[]',
+    illegal INTEGER NOT NULL DEFAULT 0,
+    reward_scope TEXT,
+    game_version TEXT
+);
+
+CREATE TABLE IF NOT EXISTS blueprint_pool_entries (
+    mission_uuid TEXT NOT NULL,
+    blueprint_uuid TEXT NOT NULL,
+    blueprint_name TEXT NOT NULL,
+    PRIMARY KEY (mission_uuid, blueprint_uuid)
+);
+
+CREATE INDEX IF NOT EXISTS idx_blueprint_pool_by_blueprint ON blueprint_pool_entries (blueprint_uuid);
+
+-- One row per (command, user), aggregated rather than one row per invocation - matches this
+-- project's standing preference for keeping the Pi's own storage footprint lean (see
+-- CLAUDE.local.md) over a raw per-event log nobody needs the individual rows of; still
+-- bounded by unique command x user pairs, not unbounded like a per-invocation log would be.
+-- Per-user counts are the source of truth - excluding the bot owner's own constant testing
+-- from a "real usage" report is a read-time GROUP BY (get_command_usage_stats), not a
+-- write-time decision, so the raw data stays usable for anything else later (e.g. which
+-- users use a given command) without a schema change. username is refreshed on every write
+-- (not set-once) so it reflects the user's current display name as of their last use of
+-- THIS specific command, not whatever it was the first time - added specifically so the
+-- owner can recognize who to reach out to for feedback, not just a count.
+CREATE TABLE IF NOT EXISTS command_usage_by_user (
+    command_name TEXT NOT NULL,
+    user_id INTEGER NOT NULL,
+    username TEXT NOT NULL DEFAULT '',
+    use_count INTEGER NOT NULL DEFAULT 0,
+    last_used_at TEXT NOT NULL,
+    PRIMARY KEY (command_name, user_id)
+);
+
+-- Ship Parts Finder (/ship-parts-finder, registered and deployed to production, still being
+-- refined): one row per (ship, hardpoint) - daily-refreshed reference data bridging a
+-- ship's real component slots (sourced from the Star Citizen Wiki API - UEX has no
+-- equivalent) to UEX's own item catalog by category (fit checked against the wiki's own size). Replaced wholesale per ship on
+-- each collector run, same "never patch reference data in place" convention as
+-- terminal_reference/commodity_reference above.
+CREATE TABLE IF NOT EXISTS ship_parts_reference (
+    id_vehicle INTEGER NOT NULL,
+    vehicle_name TEXT NOT NULL,
+    port_name TEXT NOT NULL,
+    port_type TEXT NOT NULL,
+    size_min INTEGER NOT NULL,
+    size_max INTEGER NOT NULL,
+    accepts_guns INTEGER NOT NULL DEFAULT 0,
+    -- Space-separated ship + port tags a ship-specific part's required_tags must match.
+    port_tags TEXT NOT NULL DEFAULT '',
+    -- The wiki's own "can the player swap this" flag, the port's own required tags (the
+    -- part must carry them), and the stock item's uuid (where a turret's gun slots are).
+    editable INTEGER NOT NULL DEFAULT 1,
+    required_tags TEXT NOT NULL DEFAULT '',
+    equipped_uuid TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (id_vehicle, port_name)
+);
+CREATE INDEX IF NOT EXISTS idx_ship_parts_reference_vehicle_name ON ship_parts_reference (vehicle_name);
+
+-- When the wiki was last asked about each ship, including ships it returned no slots for
+-- (which have no ship_parts_reference rows to date them), so the hourly refresh only asks
+-- about ships not checked in the last day - a restart no longer re-crawls every ship.
+CREATE TABLE IF NOT EXISTS ship_parts_reference_status (
+    id_vehicle INTEGER PRIMARY KEY,
+    refreshed_at TEXT NOT NULL,
+    port_count INTEGER NOT NULL
+);
+
+-- One locked-in part per (user, guild, ship, slot category, physical port) - re-locking the
+-- same port replaces its row rather than accumulating duplicates, unlike
+-- blueprint_shopping_entries (which combines many distinct plans, not one slot per category).
+-- Keyed on port_name, not just category, because a ship can have multiple physical slots in
+-- the same category (e.g. two independently-sized turrets) that need independent choices -
+-- an earlier version keyed on category alone and silently collapsed them to one.
+CREATE TABLE IF NOT EXISTS ship_parts_shopping_entries (
+    user_id INTEGER NOT NULL,
+    guild_id INTEGER NOT NULL,
+    id_vehicle INTEGER NOT NULL,
+    vehicle_name TEXT NOT NULL,
+    category TEXT NOT NULL,
+    port_name TEXT NOT NULL,
+    id_item INTEGER NOT NULL,
+    item_name TEXT NOT NULL,
+    id_terminal INTEGER,
+    terminal_name TEXT,
+    price_buy REAL,
+    locked_at TEXT NOT NULL,
+    PRIMARY KEY (user_id, guild_id, id_vehicle, category, port_name)
+);
+CREATE TABLE IF NOT EXISTS ship_parts_shopping_threads (
+    user_id INTEGER NOT NULL,
+    guild_id INTEGER NOT NULL,
+    thread_id INTEGER NOT NULL UNIQUE,
+    message_id INTEGER,
+    PRIMARY KEY(user_id, guild_id)
+);
 """
 
 
@@ -483,6 +857,7 @@ class Database:
 
     async def init(self) -> None:
         async with aiosqlite.connect(self._path) as db:
+            await self._configure_connection(db)
             await db.executescript(SCHEMA)
             await self._run_migrations(db)
             # Must run after _run_migrations: on a database old enough to still need the
@@ -492,6 +867,22 @@ class Database:
                 "CREATE INDEX IF NOT EXISTS idx_liquidity_scores_id_item ON liquidity_scores (id_item)"
             )
             await self._migrate_pricing_strategy_check(db)
+            await self._migrate_negotiation_message_seen_scope(db)
+            await self._migrate_ship_parts_entries_port_name(db)
+            await self._migrate_ship_preference_into_trading_preferences(db)
+            # Must run before the two CREATE UNIQUE INDEX statements below - see
+            # _migrate_dedupe_route_progression_pending_actions's own docstring.
+            await self._migrate_dedupe_route_progression_pending_actions(db)
+            await db.execute(
+                """CREATE UNIQUE INDEX IF NOT EXISTS idx_route_progression_pending_actions_leg_unique
+                   ON route_progression_pending_actions (thread_id, leg_index)
+                   WHERE action_kind = 'leg_outcome'"""
+            )
+            await db.execute(
+                """CREATE UNIQUE INDEX IF NOT EXISTS idx_route_progression_pending_actions_abandon_unique
+                   ON route_progression_pending_actions (thread_id)
+                   WHERE action_kind = 'abandon'"""
+            )
             await db.commit()
 
     async def _migrate_pricing_strategy_check(self, db: aiosqlite.Connection) -> None:
@@ -565,6 +956,275 @@ class Database:
         await db.execute("PRAGMA foreign_keys=on")
         logger.info("Migrated marketplace_post_jobs to allow pricing_strategy='custom'")
 
+    async def _migrate_negotiation_message_seen_scope(self, db: aiosqlite.Connection) -> None:
+        """SQLite has no ALTER TABLE for a primary key - moving negotiation_message_seen
+        from a bare `message_id PRIMARY KEY` to `(user_id, message_id)` needs a full
+        rebuild. Detected via the stored CREATE TABLE text, same as
+        _migrate_pricing_strategy_check, so this only runs once.
+
+        A pre-migration row only ever recorded a bare message_id, with no record of which
+        user's poll actually marked it - but the only way a message ever got marked seen at
+        all was via a poll or baseline-seed for some user who had alerts enabled at the
+        time, so scoping each old row to every CURRENTLY enabled user is the closest safe
+        approximation: it preserves the "don't re-flood existing history" guarantee those
+        users already had, without guessing at attribution. A user who enables alerts after
+        this migration is unaffected either way, since enabling always re-seeds that user's
+        own baseline from scratch (_seed_baseline) regardless of this table's contents.
+        """
+        cursor = await db.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'negotiation_message_seen'"
+        )
+        row = await cursor.fetchone()
+        if row is None or "user_id" in row[0]:
+            return
+        cursor = await db.execute("SELECT message_id FROM negotiation_message_seen")
+        old_message_ids = [r[0] for r in await cursor.fetchall()]
+        cursor = await db.execute("SELECT user_id FROM negotiation_alert_settings WHERE enabled = 1")
+        enabled_user_ids = [r[0] for r in await cursor.fetchall()]
+
+        await db.execute("ALTER TABLE negotiation_message_seen RENAME TO negotiation_message_seen_pre_scope")
+        await db.execute(
+            """CREATE TABLE negotiation_message_seen (
+                user_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (user_id, message_id)
+            )"""
+        )
+        if old_message_ids and enabled_user_ids:
+            await db.executemany(
+                "INSERT OR IGNORE INTO negotiation_message_seen (user_id, message_id) VALUES (?, ?)",
+                [(user_id, message_id) for user_id in enabled_user_ids for message_id in old_message_ids],
+            )
+        await db.execute("DROP TABLE negotiation_message_seen_pre_scope")
+        logger.info("Migrated negotiation_message_seen to scope seen-state per user")
+
+    async def _migrate_ship_parts_entries_port_name(self, db: aiosqlite.Connection) -> None:
+        """The first /ship-parts-finder commit (370e232) keyed ship_parts_shopping_entries on
+        (user, guild, ship, category) with no port_name column; the next one added port_name
+        to the key so two slots in one category can hold different parts. CREATE TABLE IF NOT
+        EXISTS never upgrades an existing table, so a database created by that first commit
+        failed every lock-in with "no column named port_name". Rebuild once, detected by the
+        missing column. An old row has no record of which physical slot it was for, so it
+        keeps its part under the placeholder slot 'unknown_slot' (shown as "Unknown Slot")
+        rather than being dropped or guessed onto a real port; re-locking that category's
+        real slot adds a correct row, and "Remove a part" clears the placeholder."""
+        cursor = await db.execute("PRAGMA table_info(ship_parts_shopping_entries)")
+        columns = {r[1] for r in await cursor.fetchall()}
+        if not columns or "port_name" in columns:
+            return
+        await db.execute("ALTER TABLE ship_parts_shopping_entries RENAME TO ship_parts_shopping_entries_pre_port")
+        await db.execute(
+            """CREATE TABLE ship_parts_shopping_entries (
+                user_id INTEGER NOT NULL,
+                guild_id INTEGER NOT NULL,
+                id_vehicle INTEGER NOT NULL,
+                vehicle_name TEXT NOT NULL,
+                category TEXT NOT NULL,
+                port_name TEXT NOT NULL,
+                id_item INTEGER NOT NULL,
+                item_name TEXT NOT NULL,
+                id_terminal INTEGER,
+                terminal_name TEXT,
+                price_buy REAL,
+                locked_at TEXT NOT NULL,
+                PRIMARY KEY (user_id, guild_id, id_vehicle, category, port_name)
+            )"""
+        )
+        await db.execute(
+            """INSERT INTO ship_parts_shopping_entries
+               (user_id, guild_id, id_vehicle, vehicle_name, category, port_name, id_item,
+                item_name, id_terminal, terminal_name, price_buy, locked_at)
+               SELECT user_id, guild_id, id_vehicle, vehicle_name, category, 'unknown_slot', id_item,
+                      item_name, id_terminal, terminal_name, price_buy, locked_at
+               FROM ship_parts_shopping_entries_pre_port"""
+        )
+        await db.execute("DROP TABLE ship_parts_shopping_entries_pre_port")
+        logger.info("Migrated ship_parts_shopping_entries to key on port_name")
+
+    async def _migrate_ship_preference_into_trading_preferences(self, db: aiosqlite.Connection) -> None:
+        """One-time-per-user backfill: user_ship_preference predates user_trading_preferences,
+        and real users already have rows there - folding ship selection into the same
+        per-user preferences row (per user direction) means those existing saved ships need
+        copying over, not just newly-set ones. Runs every startup, but each user is only
+        ever actually migrated once - see below for why that had to be per-user state, not
+        just "is ship_name NULL". user_ship_preference itself is intentionally left in
+        place, unwritten - this codebase's tables are additive-only, never dropped once
+        real data has lived there.
+
+        Guarded by ship_preference_migrated, not just "ship_name IS NULL on the
+        preferences row": a follow-up review found that guard couldn't distinguish "never
+        migrated yet" from "migrated, then the user deliberately cleared it" -
+        clearing the ship (/clear-default-ship then, the 'No default ship' choice of
+        /set-trading-preferences now) sets ship_name back to NULL, and
+        /clear-trading-preferences deletes the whole preferences row outright, and either
+        one looked identical to "not migrated" to the old NULL-based check, so the legacy
+        ship reappeared on the very next restart regardless of what the user had just
+        asked to clear. ship_preference_migrated survives both of those operations (it's
+        a separate table neither one touches), so once a user is marked, this function
+        never looks at their row again - their ship_name is then entirely under their own
+        control.
+
+        Two plain statements per step, not one INSERT...SELECT...ON CONFLICT DO UPDATE:
+        this SQLite build rejects that combination outright ("near \"DO\": syntax error")
+        even for SQLite's own documented upsert-from-SELECT example - INSERT...VALUES...
+        ON CONFLICT works fine (used everywhere else in this file), only pairing ON
+        CONFLICT with an INSERT whose source is a SELECT does not. Confirmed via a
+        standalone repro before writing this workaround, not assumed.
+        """
+        not_yet_migrated = "s.user_id NOT IN (SELECT user_id FROM ship_preference_migrated)"
+        await db.execute(
+            f"""INSERT INTO user_trading_preferences (user_id, ship_name, updated_at)
+                SELECT s.user_id, s.ship_name, datetime('now') FROM user_ship_preference AS s
+                WHERE s.user_id NOT IN (SELECT user_id FROM user_trading_preferences)
+                  AND {not_yet_migrated}"""
+        )
+        await db.execute(
+            f"""UPDATE user_trading_preferences
+                SET ship_name = (
+                        SELECT ship_name FROM user_ship_preference AS s
+                        WHERE s.user_id = user_trading_preferences.user_id
+                    ),
+                    updated_at = datetime('now')
+                WHERE ship_name IS NULL
+                  AND user_id IN (
+                      SELECT s.user_id FROM user_ship_preference AS s WHERE {not_yet_migrated}
+                  )"""
+        )
+        await db.execute(
+            """INSERT INTO ship_preference_migrated (user_id, migrated_at)
+               SELECT user_id, datetime('now') FROM user_ship_preference AS s
+               WHERE s.user_id NOT IN (SELECT user_id FROM ship_preference_migrated)"""
+        )
+
+    async def _migrate_dedupe_route_progression_pending_actions(self, db: aiosqlite.Connection) -> None:
+        """Audit-confirmed defect #4 (2026-09-15 follow-up audit): the two partial UNIQUE
+        indexes on route_progression_pending_actions (idx_..._leg_unique, idx_...
+        _abandon_unique - added as defense-in-depth, see SCHEMA's own comment above them)
+        used to be created directly in SCHEMA, which executescript runs BEFORE
+        _run_migrations ever gets a chance to run. A database old enough to have queued a
+        genuine duplicate before this uniqueness guard existed would fail CREATE UNIQUE
+        INDEX outright with sqlite3.IntegrityError, crashing init() before startup even
+        completes - confirmed via a standalone repro (a temp DB shaped like the
+        pre-index schema, two abandon rows inserted for one thread, init() raised). Not
+        evidence the live Pi currently has duplicates (it doesn't, checked directly) - a
+        conditional upgrade risk for any database that does.
+
+        Must run after every other migration above and before the two CREATE UNIQUE INDEX
+        statements issued explicitly in init() (not left in SCHEMA - see its own comment).
+        For 'abandon', keeps only the highest `id` (the freshest queued attempt -
+        AUTOINCREMENT id is a strict, gap-free ordering, unlike created_at's one-second
+        text resolution) and deletes the rest - there's no conflicting-payload concept
+        for an abandon action (it either applies or it doesn't; two duplicate rows can't
+        disagree about anything the way two different leg-outcome reports can), so which
+        one survives never matters. Idempotent and cheap: a no-op once no duplicates
+        remain, which is every ordinary startup from here on.
+
+        'leg_outcome' needs its own, more careful reconciliation - see
+        _dedupe_leg_outcome_pending_actions below for why a blind highest-id pick isn't
+        safe for it the way it is for 'abandon' (follow-up audit finding #5, 2026-09-15).
+        """
+        cursor = await db.execute(
+            """DELETE FROM route_progression_pending_actions
+                WHERE action_kind = 'abandon' AND id NOT IN (
+                    SELECT MAX(id) FROM route_progression_pending_actions
+                    WHERE action_kind = 'abandon' GROUP BY thread_id
+                )"""
+        )
+        if cursor.rowcount > 0:
+            logger.warning(
+                "Removed %d duplicate 'abandon' row(s) from route_progression_pending_actions "
+                "before creating its uniqueness index - each duplicate is already safely "
+                "covered by whichever row remains", cursor.rowcount,
+            )
+        await self._dedupe_leg_outcome_pending_actions(db)
+
+    async def _dedupe_leg_outcome_pending_actions(self, db: aiosqlite.Connection) -> None:
+        """The 'leg_outcome' half of _migrate_dedupe_route_progression_pending_actions.
+
+        Follow-up audit finding #5 (2026-09-15): unlike 'abandon', a blind highest-id
+        pick here can discard the one duplicate that actually MATCHES an outcome already
+        committed to route_progression_legs, in favor of a conflicting one that
+        handle_leg_outcome's own conflicting-report guard will just reject (harmlessly,
+        but uselessly) the next time the recovery poller replays it - silently losing the
+        only payload able to resume that leg's unfinished downstream work. A matching
+        replay isn't just "also valid" the way two genuinely-interchangeable duplicates
+        would be: handle_leg_outcome's own is_same_report fall-through specifically exists
+        so a replay of the SAME already-saved report skips the redundant write and
+        proceeds straight to whatever didn't finish last time (the next-leg prompt, or
+        completion) - a non-matching replay can never do that, it can only ever produce a
+        "this leg was already reported" message and get discarded. Confirmed via the
+        audit's own reproduction: a 'matched' outcome saved without ever advancing, plus
+        legacy duplicate rows ('matched', then a higher-id 'missing') - the old rule kept
+        'missing' and the route never advanced, since the one payload that could have
+        resumed it was gone.
+
+        Reconciled in Python, not one clean DELETE, since "prefer the row that matches
+        the committed outcome, else fall back to highest-id" isn't expressible as a
+        single set-based SQL statement the way the abandon case is - but this only ever
+        runs once per group of real duplicates (rare, legacy-only), so the extra
+        round trips per group cost nothing that matters.
+        """
+        # init()'s own connection has no row_factory set (unlike self.connect()'s), so
+        # every row read here is a plain positional tuple - matching this file's existing
+        # precedent for other init()-time migrations (e.g. _migrate_pricing_strategy_check's
+        # own row[0] access), not the column-name access self.connect()-based methods use.
+        cursor = await db.execute(
+            "SELECT DISTINCT thread_id, leg_index FROM route_progression_pending_actions "
+            "WHERE action_kind = 'leg_outcome'"
+        )
+        groups = await cursor.fetchall()
+        removed = 0
+        for thread_id, leg_index in groups:
+            cursor = await db.execute(
+                """SELECT id, outcome, actual_price, actual_scu, precision
+                   FROM route_progression_pending_actions
+                   WHERE action_kind = 'leg_outcome' AND thread_id = ? AND leg_index = ?
+                   ORDER BY id""",
+                (thread_id, leg_index),
+            )
+            candidates = await cursor.fetchall()
+            if len(candidates) <= 1:
+                continue
+            stored_cursor = await db.execute(
+                """SELECT outcome, actual_price, actual_scu, precision FROM route_progression_legs
+                   WHERE thread_id = ? AND leg_index = ?""",
+                (thread_id, leg_index),
+            )
+            stored = await stored_cursor.fetchone()
+            keep_id = None
+            if stored is not None and stored[0] is not None:
+                stored_outcome, stored_price, stored_scu, stored_precision = stored
+                for candidate_id, outcome, actual_price, actual_scu, precision in candidates:
+                    if (
+                        outcome == stored_outcome
+                        and actual_price == stored_price
+                        and actual_scu == stored_scu
+                        and precision == stored_precision
+                    ):
+                        keep_id = candidate_id
+                        break
+            if keep_id is None:
+                # No committed outcome to reconcile against yet, or none of the
+                # candidates match it (every one is equally useless to keep) - the
+                # highest-id (freshest attempt) fallback matches the pre-existing,
+                # still-correct behavior for that case. candidates is ORDER BY id, so
+                # the last row is the highest id.
+                keep_id = candidates[-1][0]
+            ids_to_remove = [candidate_id for candidate_id, *_ in candidates if candidate_id != keep_id]
+            await db.executemany(
+                "DELETE FROM route_progression_pending_actions WHERE id = ?",
+                [(row_id,) for row_id in ids_to_remove],
+            )
+            removed += len(ids_to_remove)
+        if removed > 0:
+            logger.warning(
+                "Removed %d duplicate 'leg_outcome' row(s) from route_progression_pending_actions "
+                "before creating its uniqueness index - preferred a payload matching an "
+                "already-committed outcome where one exists, so its own unfinished "
+                "downstream work can still be resumed", removed,
+            )
+
     async def _run_migrations(self, db: aiosqlite.Connection) -> None:
         """Additive-only migrations for columns added to a table after it may have already
         been created (via CREATE TABLE IF NOT EXISTS above, which only creates - it never
@@ -580,6 +1240,12 @@ class Database:
             # their actual existing behavior (channel post, ping the creator) exactly, so
             # nothing changes for anyone's already-running watches.
             "ALTER TABLE stock_alerts ADD COLUMN scope TEXT NOT NULL DEFAULT 'global'",
+            # The same delivery choice on price and marketplace alerts (audit UX-12). Each
+            # default matches how that table's existing alerts were already delivered.
+            "ALTER TABLE price_alerts ADD COLUMN scope TEXT NOT NULL DEFAULT 'global'",
+            "ALTER TABLE marketplace_alerts ADD COLUMN scope TEXT NOT NULL DEFAULT 'personal'",
+            "ALTER TABLE marketplace_alerts ADD COLUMN guild_id INTEGER",
+            "ALTER TABLE marketplace_alerts ADD COLUMN channel_id INTEGER",
             "ALTER TABLE liquidity_scores ADD COLUMN id_item INTEGER",
             "ALTER TABLE liquidity_scores ADD COLUMN negotiations_success INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE liquidity_scores ADD COLUMN negotiations_open INTEGER NOT NULL DEFAULT 0",
@@ -599,6 +1265,57 @@ class Database:
             "ALTER TABLE terminal_data_health_observations ADD COLUMN last_update_days_limit INTEGER",
             "ALTER TABLE terminal_data_health_observations ADD COLUMN last_update_days_percentage INTEGER",
             "ALTER TABLE marketplace_post_jobs ADD COLUMN custom_price INTEGER",
+            "ALTER TABLE user_trading_preferences ADD COLUMN ship_name TEXT",
+            "ALTER TABLE user_trading_preferences ADD COLUMN budget REAL",
+            # Recommendation Outcome Tracking (Phase 1): distinguishes a player-confirmed
+            # leg report from the UEX collector's own snapshot, so evidence classification
+            # never silently blends an unverified player tap with UEX's own vetted figure.
+            "ALTER TABLE terminal_market_state ADD COLUMN source TEXT NOT NULL DEFAULT 'uex' CHECK (source IN ('uex', 'player_report'))",
+            "ALTER TABLE terminal_market_observations ADD COLUMN source TEXT NOT NULL DEFAULT 'uex' CHECK (source IN ('uex', 'player_report'))",
+            "ALTER TABLE terminal_market_state ADD COLUMN buy_suppressed_until TEXT",
+            "ALTER TABLE terminal_market_state ADD COLUMN sell_suppressed_until TEXT",
+            "ALTER TABLE route_progression_threads ADD COLUMN advanced_to_index INTEGER NOT NULL DEFAULT -1",
+            # Consistent Refinery System Names: /refineries_yields' own terminal_name only
+            # embeds a system suffix for some terminals (gateway terminals disambiguating
+            # same-named gateways in different systems), never for others - stored
+            # separately so display logic can show the system consistently for every
+            # terminal instead of relying on whichever ones UEX's raw text happens to name.
+            "ALTER TABLE refinery_yield_observations ADD COLUMN star_system_name TEXT",
+            # UEX's own per-row date_added/date_modified timestamps (int, per the
+            # /refineries_yields docs) - distinct from recorded_day above, which is this
+            # bot's OWN collection day, not UEX's. Lets a future look-back tell "this row
+            # is old on UEX's own side too" apart from "we just haven't re-collected it."
+            "ALTER TABLE refinery_yield_observations ADD COLUMN date_added INTEGER",
+            "ALTER TABLE refinery_yield_observations ADD COLUMN date_modified INTEGER",
+            # Audit-confirmed carry-forward defect: a retried/replayed leg report (after a
+            # delivery failure, or via the durable recovery queue) always re-applied its
+            # terminal_market_state update unconditionally - if anything else (a fresh UEX
+            # collector snapshot, a different leg touching the same commodity/terminal)
+            # wrote a newer value in the meantime, the replay silently overwrote it with
+            # this report's own stale one. Marks whether THIS leg's update has already been
+            # successfully applied, so a same-report replay can skip re-applying it once it
+            # has - see record_player_report_market_update's own docstring for why this is
+            # set atomically alongside the write itself, not as a separate step.
+            "ALTER TABLE route_progression_legs ADD COLUMN market_update_applied_at TEXT",
+            # Follow-up audit finding #2 (2026-09-15): market_update_applied_at above
+            # used to gate BOTH the market-state write and the separate suppression
+            # write - if suppression alone failed after the marker committed, no replay
+            # ever retried it again. Tracked independently, set atomically inside
+            # suppress_terminal_market_side's own transaction the same way
+            # market_update_applied_at is - see that method's docstring.
+            "ALTER TABLE route_progression_legs ADD COLUMN suppression_applied_at TEXT",
+            # command_usage_by_user shipped without this column - added so the owner can
+            # recognize who to reach out to for feedback, not just see a use count.
+            "ALTER TABLE command_usage_by_user ADD COLUMN username TEXT NOT NULL DEFAULT ''",
+            # Whether a ship_parts_reference port also takes a gun directly (the wiki lists
+            # WeaponGun in a gun hardpoint's compatible_types), so /ship-parts-finder can
+            # offer Weapons as well as Gun mounts for it. 0 on old rows until the daily
+            # reference refresh (which also runs at startup) rewrites every ship.
+            "ALTER TABLE ship_parts_reference ADD COLUMN accepts_guns INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE ship_parts_reference ADD COLUMN port_tags TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE ship_parts_reference ADD COLUMN editable INTEGER NOT NULL DEFAULT 1",
+            "ALTER TABLE ship_parts_reference ADD COLUMN required_tags TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE ship_parts_reference ADD COLUMN equipped_uuid TEXT NOT NULL DEFAULT ''",
         ]
         for statement in migrations:
             try:
@@ -607,10 +1324,30 @@ class Database:
                 if "duplicate column name" not in str(exc).lower():
                     raise
 
+    @staticmethod
+    async def _configure_connection(db: aiosqlite.Connection) -> None:
+        """WAL persists in the database file itself once set, but busy_timeout is a
+        per-connection runtime setting that resets on every new connection - both are
+        set here so every caller gets them, not just this method's own direct callers.
+
+        Without an explicit busy_timeout, aiosqlite/sqlite3's own default (5s) is what
+        was in effect - confirmed live: with ~8 independent background pollers each
+        opening their own connection to write, two whose loops happen to coincide (e.g.
+        intelligence.py's 1h and 2h collectors, which coincide every 2h since both start
+        from the same bot-startup reference point) can occasionally still exceed 5s,
+        surfacing as 'sqlite3.OperationalError: database is locked' and silently
+        dropping that write cycle (caught and logged, not fatal, but still a real gap in
+        data freshness). WAL mode also makes each commit itself faster/cheaper, shrinking
+        the window during which a lock is even held.
+        """
+        await db.execute("PRAGMA journal_mode=WAL")
+        await db.execute("PRAGMA busy_timeout=30000")
+
     @asynccontextmanager
     async def connect(self) -> AsyncIterator[aiosqlite.Connection]:
         db = await aiosqlite.connect(self._path)
         db.row_factory = aiosqlite.Row
+        await self._configure_connection(db)
         try:
             yield db
         finally:
@@ -639,9 +1376,22 @@ class Database:
             return 1
         return 1 if (cls._integer(value) or 0) != 0 else 0
 
-    async def record_terminal_market_snapshot(self, rows: list[dict[str, Any]]) -> tuple[int, int]:
+    async def record_terminal_market_snapshot(
+        self, rows: list[dict[str, Any]], *, source: str = "uex"
+    ) -> tuple[int, int]:
         """Store all currently known terminal commodity states, appending history only for
-        changed values. Returns ``(changed_rows, valid_rows)`` for concise collector logs."""
+        changed values. Returns ``(changed_rows, valid_rows)`` for concise collector logs.
+
+        ``source`` tags who reported these figures ('uex', the default, for the intelligence
+        collector; 'player_report' for a confirmed Recommendation Outcome Tracking leg) so
+        evidence classification never silently blends an unverified player tap with UEX's
+        own vetted figure. It always overwrites the stored value on conflict - a later 'uex'
+        write correctly reverts a prior 'player_report' tag, matching the documented design
+        that a local correction is temporary, not permanent, until the next real UEX poll.
+        Excluded from the changed-detection comparison: a re-confirmation that happens to
+        match already-stored values (a 'matched' leg outcome, most commonly) shouldn't create
+        a spurious observation-history row just because its source tag differs.
+        """
         normalized: list[tuple[Any, ...]] = []
         for row in rows:
             id_commodity = self._integer(row.get("id_commodity"))
@@ -664,6 +1414,7 @@ class Database:
                     self._integer(coalesce_report_count(
                         row.get("price_sell_users_rows"), row.get("scu_sell_users_rows")
                     )),
+                    source,
                 )
             )
         if not normalized:
@@ -680,13 +1431,13 @@ class Database:
                 (row["id_commodity"], row["id_terminal"]): tuple(row)[2:]
                 for row in await cursor.fetchall()
             }
-            changed = [row for row in normalized if existing.get((row[0], row[1])) != row[2:]]
+            changed = [row for row in normalized if existing.get((row[0], row[1])) != row[2:-1]]
             await db.executemany(
                 """INSERT INTO terminal_market_state
                    (id_commodity, id_terminal, commodity_name, terminal_name, price_buy, price_sell,
                     scu_buy, scu_sell, status_buy, status_sell, quality, volatility_buy,
-                    volatility_sell, buy_report_count, sell_report_count, last_seen)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                    volatility_sell, buy_report_count, sell_report_count, last_seen, source)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?)
                    ON CONFLICT(id_commodity, id_terminal) DO UPDATE SET
                        commodity_name=excluded.commodity_name, terminal_name=excluded.terminal_name,
                        price_buy=excluded.price_buy, price_sell=excluded.price_sell, scu_buy=excluded.scu_buy,
@@ -694,7 +1445,7 @@ class Database:
                        quality=excluded.quality, volatility_buy=excluded.volatility_buy,
                        volatility_sell=excluded.volatility_sell,
                        buy_report_count=excluded.buy_report_count, sell_report_count=excluded.sell_report_count,
-                       last_seen=datetime('now')""",
+                       last_seen=datetime('now'), source=excluded.source""",
                 normalized,
             )
             if changed:
@@ -702,12 +1453,697 @@ class Database:
                     """INSERT INTO terminal_market_observations
                        (id_commodity, id_terminal, commodity_name, terminal_name, price_buy, price_sell,
                         scu_buy, scu_sell, status_buy, status_sell, quality, volatility_buy,
-                        volatility_sell, buy_report_count, sell_report_count)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        volatility_sell, buy_report_count, sell_report_count, source)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     changed,
                 )
             await db.commit()
         return (len(changed), len(normalized))
+
+    # A player-reported leg outcome only ever carries ONE side's fields (see
+    # bot.uex.route_progression.terminal_state_update_for_outcome) - these are the only
+    # columns record_player_report_market_update ever touches; commodity_name/terminal_name
+    # are handled separately (always written) and quality/volatility_*/*_report_count are
+    # never touched by a player report at all, since it was never given a value for them.
+    _PLAYER_REPORT_OPTIONAL_COLUMNS = (
+        "price_buy", "price_sell", "scu_buy", "scu_sell", "status_buy", "status_sell",
+    )
+
+    async def record_player_report_market_update(
+        self, row: dict[str, Any], *, thread_id: int, leg_index: int
+    ) -> None:
+        """Merge ONE confirmed player-reported leg outcome into terminal_market_state,
+        touching only the side's fields the outcome actually carries - unlike
+        record_terminal_market_snapshot's full-row UEX-collector semantics (a complete
+        snapshot that legitimately replaces every field), a partial player report must
+        never blank out the other side's price/stock/status, or quality/volatility/report
+        counts, which it was never given in the first place. A buy-side 'matched' report
+        must not erase the sell side's price/demand/status just because this row's dict
+        doesn't mention them.
+
+        A column's mere PRESENCE as a key in ``row`` - even mapped to None (e.g. a
+        'missing' outcome's confirmed-unknown price) - marks it as an intentional value to
+        write; an ABSENT key is left completely untouched. This is what distinguishes "the
+        player confirmed this is now unknown" from "the player's report never covered this
+        at all."
+
+        Appends a terminal_market_observations row (tagged source='player_report') only
+        when the merge actually changes on-disk state, matching
+        record_terminal_market_snapshot's own change-only history semantics - a 'matched'
+        re-confirmation that happens to match what's already stored doesn't create a
+        spurious observation.
+
+        Also marks route_progression_legs.market_update_applied_at for (thread_id,
+        leg_index) in this SAME transaction (one connection, one commit) - audit-confirmed
+        carry-forward defect: the caller (handle_leg_outcome) must never call this again
+        for a leg once it's applied, since terminal_market_state may have moved on to
+        something newer by the time a replay reaches here, and reapplying this report's
+        own values would silently clobber it. The marker has to land in the SAME commit as
+        the write it's guarding - marking it in a separate call, before this one, would
+        mean a failure in the write below leaves it falsely marked "applied" with nothing
+        actually written; marking it after, in a separate call, would mean a crash between
+        the two leaves it un-marked, which is safe (a retry just re-applies once more) but
+        only if callers can't observe a nonatomic half-state in between, which a single
+        transaction guarantees and two separate calls would not.
+        """
+        id_commodity = self._integer(row.get("id_commodity"))
+        id_terminal = self._integer(row.get("id_terminal"))
+        commodity_name = row.get("commodity_name")
+        terminal_name = row.get("terminal_name")
+        if id_commodity is None or id_terminal is None or not commodity_name or not terminal_name:
+            return
+
+        present_columns = [c for c in self._PLAYER_REPORT_OPTIONAL_COLUMNS if c in row]
+        if not present_columns:
+            return
+
+        def _normalize(column: str, value: Any) -> Any:
+            return self._integer(value) if column in ("status_buy", "status_sell") else self._number(value)
+
+        async with self.connect() as db:
+            cursor = await db.execute(
+                "SELECT * FROM terminal_market_state WHERE id_commodity = ? AND id_terminal = ?",
+                (id_commodity, id_terminal),
+            )
+            existing_row = await cursor.fetchone()
+            existing = dict(existing_row) if existing_row is not None else None
+
+            merged = {column: (existing.get(column) if existing else None) for column in self._PLAYER_REPORT_OPTIONAL_COLUMNS}
+            for column in present_columns:
+                merged[column] = _normalize(column, row[column])
+
+            changed = existing is None or any(
+                merged[column] != existing.get(column) for column in self._PLAYER_REPORT_OPTIONAL_COLUMNS
+            )
+
+            set_clause = ", ".join(f"{column}=excluded.{column}" for column in present_columns)
+            await db.execute(
+                f"""INSERT INTO terminal_market_state
+                    (id_commodity, id_terminal, commodity_name, terminal_name,
+                     price_buy, price_sell, scu_buy, scu_sell, status_buy, status_sell,
+                     last_seen, source)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), 'player_report')
+                    ON CONFLICT(id_commodity, id_terminal) DO UPDATE SET
+                        commodity_name=excluded.commodity_name, terminal_name=excluded.terminal_name,
+                        {set_clause}, last_seen=datetime('now'), source='player_report'""",
+                (
+                    id_commodity, id_terminal, str(commodity_name), str(terminal_name),
+                    merged["price_buy"], merged["price_sell"], merged["scu_buy"], merged["scu_sell"],
+                    merged["status_buy"], merged["status_sell"],
+                ),
+            )
+            if changed:
+                await db.execute(
+                    """INSERT INTO terminal_market_observations
+                       (id_commodity, id_terminal, commodity_name, terminal_name, price_buy, price_sell,
+                        scu_buy, scu_sell, status_buy, status_sell, quality, volatility_buy,
+                        volatility_sell, buy_report_count, sell_report_count, source)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'player_report')""",
+                    (
+                        id_commodity, id_terminal, str(commodity_name), str(terminal_name),
+                        merged["price_buy"], merged["price_sell"], merged["scu_buy"], merged["scu_sell"],
+                        merged["status_buy"], merged["status_sell"],
+                        existing.get("quality") if existing else None,
+                        existing.get("volatility_buy") if existing else None,
+                        existing.get("volatility_sell") if existing else None,
+                        existing.get("buy_report_count") if existing else None,
+                        existing.get("sell_report_count") if existing else None,
+                    ),
+                )
+            await db.execute(
+                """UPDATE route_progression_legs SET market_update_applied_at = datetime('now')
+                   WHERE thread_id = ? AND leg_index = ? AND market_update_applied_at IS NULL""",
+                (thread_id, leg_index),
+            )
+            await db.commit()
+
+    async def suppress_terminal_market_side(
+        self, *, id_commodity: int, id_terminal: int, side: str, until: str,
+        thread_id: int, leg_index: int,
+    ) -> None:
+        """Mark one (commodity, terminal) pair's buy or sell side suppressed from route
+        recommendations until `until` (a naive UTC string matching SQLite's own
+        datetime('now') format) - called after a player report confirms that side is
+        genuinely empty (see bot/uex/route_progression.py's update_confirms_depletion).
+        A no-op (on the suppression write itself) if the pair has no terminal_market_state
+        row yet (nothing to suppress a recommendation FROM in that case).
+
+        Also marks route_progression_legs.suppression_applied_at for (thread_id,
+        leg_index) in this SAME transaction - follow-up audit finding #2 (2026-09-15):
+        this used to share market_update_applied_at with record_player_report_market_
+        update's own write, so a suppression failure occurring AFTER that marker had
+        already committed was never retried again on any later replay (the caller
+        skipped this whole call once market_update_already_applied was true). Tracked
+        with its own independent marker instead, set atomically alongside this write for
+        the exact same reason record_player_report_market_update's own marker is: a
+        failure here must leave it unmarked (so a retry tries again), and success must
+        never be observably separate from the marker being set."""
+        column = "buy_suppressed_until" if side == "buy" else "sell_suppressed_until"
+        async with self.connect() as db:
+            await db.execute(
+                f"UPDATE terminal_market_state SET {column} = ? WHERE id_commodity = ? AND id_terminal = ?",
+                (until, id_commodity, id_terminal),
+            )
+            await db.execute(
+                """UPDATE route_progression_legs SET suppression_applied_at = datetime('now')
+                   WHERE thread_id = ? AND leg_index = ? AND suppression_applied_at IS NULL""",
+                (thread_id, leg_index),
+            )
+            await db.commit()
+
+    async def record_hedge_report_market_update(self, row: dict[str, Any]) -> None:
+        """The hedge-report counterpart to record_player_report_market_update, for a
+        route_progression_hedges row instead of a route_progression_legs one - a
+        suggested hedge was never part of the route the player asked to track, so there
+        is no real (thread_id, leg_index) to mark, and this deliberately never touches
+        route_progression_legs at all (unlike the sibling method, which always does).
+        Kept as its own copy of the merge/write logic rather than sharing code with that
+        method, specifically so a change to the tracked-route path can never accidentally
+        alter hedge-report behavior (or vice versa) as a side effect - if the two ever
+        need to diverge (e.g. a different idempotency rule for hedges), that already
+        matches the intent, not an oversight. Any change to the SQL/merge semantics here
+        should be checked against record_player_report_market_update's own docstring for
+        whether the same reasoning applies there too, and vice versa.
+        """
+        id_commodity = self._integer(row.get("id_commodity"))
+        id_terminal = self._integer(row.get("id_terminal"))
+        commodity_name = row.get("commodity_name")
+        terminal_name = row.get("terminal_name")
+        if id_commodity is None or id_terminal is None or not commodity_name or not terminal_name:
+            return
+
+        present_columns = [c for c in self._PLAYER_REPORT_OPTIONAL_COLUMNS if c in row]
+        if not present_columns:
+            return
+
+        def _normalize(column: str, value: Any) -> Any:
+            return self._integer(value) if column in ("status_buy", "status_sell") else self._number(value)
+
+        async with self.connect() as db:
+            cursor = await db.execute(
+                "SELECT * FROM terminal_market_state WHERE id_commodity = ? AND id_terminal = ?",
+                (id_commodity, id_terminal),
+            )
+            existing_row = await cursor.fetchone()
+            existing = dict(existing_row) if existing_row is not None else None
+
+            merged = {column: (existing.get(column) if existing else None) for column in self._PLAYER_REPORT_OPTIONAL_COLUMNS}
+            for column in present_columns:
+                merged[column] = _normalize(column, row[column])
+
+            changed = existing is None or any(
+                merged[column] != existing.get(column) for column in self._PLAYER_REPORT_OPTIONAL_COLUMNS
+            )
+
+            set_clause = ", ".join(f"{column}=excluded.{column}" for column in present_columns)
+            await db.execute(
+                f"""INSERT INTO terminal_market_state
+                    (id_commodity, id_terminal, commodity_name, terminal_name,
+                     price_buy, price_sell, scu_buy, scu_sell, status_buy, status_sell,
+                     last_seen, source)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), 'player_report')
+                    ON CONFLICT(id_commodity, id_terminal) DO UPDATE SET
+                        commodity_name=excluded.commodity_name, terminal_name=excluded.terminal_name,
+                        {set_clause}, last_seen=datetime('now'), source='player_report'""",
+                (
+                    id_commodity, id_terminal, str(commodity_name), str(terminal_name),
+                    merged["price_buy"], merged["price_sell"], merged["scu_buy"], merged["scu_sell"],
+                    merged["status_buy"], merged["status_sell"],
+                ),
+            )
+            if changed:
+                await db.execute(
+                    """INSERT INTO terminal_market_observations
+                       (id_commodity, id_terminal, commodity_name, terminal_name, price_buy, price_sell,
+                        scu_buy, scu_sell, status_buy, status_sell, quality, volatility_buy,
+                        volatility_sell, buy_report_count, sell_report_count, source)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'player_report')""",
+                    (
+                        id_commodity, id_terminal, str(commodity_name), str(terminal_name),
+                        merged["price_buy"], merged["price_sell"], merged["scu_buy"], merged["scu_sell"],
+                        merged["status_buy"], merged["status_sell"],
+                        existing.get("quality") if existing else None,
+                        existing.get("volatility_buy") if existing else None,
+                        existing.get("volatility_sell") if existing else None,
+                        existing.get("buy_report_count") if existing else None,
+                        existing.get("sell_report_count") if existing else None,
+                    ),
+                )
+            await db.commit()
+
+    async def create_route_progression_hedge(
+        self, *,
+        thread_id: int, origin_leg_index: int, destination_leg_index: int,
+        id_commodity: int, commodity_name: str,
+        id_terminal_origin: int, terminal_name_origin: str,
+        id_terminal_destination: int, terminal_name_destination: str,
+        quoted_price_buy: float | None, quoted_scu: float | None, quoted_price_sell: float | None,
+        market_scu_buy: float | None, market_scu_sell: float | None,
+        status_buy: int | None, status_sell: int | None,
+    ) -> int:
+        """Records a hedge suggestion (bot.uex.mixed_routes.find_hedge_cargo) so its
+        buy/sell confirmations can be collected later - see route_progression_hedges'
+        own schema comment for why this is a separate table, not a route_progression_legs
+        row. Returns the new hedge's id."""
+        async with self.connect() as db:
+            cursor = await db.execute(
+                """INSERT INTO route_progression_hedges
+                   (thread_id, origin_leg_index, destination_leg_index, id_commodity, commodity_name,
+                    id_terminal_origin, terminal_name_origin, id_terminal_destination, terminal_name_destination,
+                    quoted_price_buy, quoted_scu, quoted_price_sell, market_scu_buy, market_scu_sell,
+                    status_buy, status_sell)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    thread_id, origin_leg_index, destination_leg_index, id_commodity, commodity_name,
+                    id_terminal_origin, terminal_name_origin, id_terminal_destination, terminal_name_destination,
+                    quoted_price_buy, quoted_scu, quoted_price_sell, market_scu_buy, market_scu_sell,
+                    status_buy, status_sell,
+                ),
+            )
+            await db.commit()
+            return cursor.lastrowid
+
+    async def get_route_progression_hedge(self, hedge_id: int) -> dict[str, Any] | None:
+        async with self.connect() as db:
+            cursor = await db.execute("SELECT * FROM route_progression_hedges WHERE id = ?", (hedge_id,))
+            row = await cursor.fetchone()
+        return dict(row) if row is not None else None
+
+    async def get_pending_hedge_sell_for_leg(
+        self, thread_id: int, destination_leg_index: int
+    ) -> dict[str, Any] | None:
+        """The hedge (if any) whose buy side is already confirmed and whose sell side
+        isn't yet, for the anchor leg about to be prompted - used to piggyback a hedge
+        sale confirmation onto that leg's own prompt. A hedge whose buy side was never
+        confirmed has nothing to ask about yet (the player may never have gone through
+        with it), so it's deliberately excluded here, not just left for later."""
+        async with self.connect() as db:
+            cursor = await db.execute(
+                """SELECT * FROM route_progression_hedges
+                   WHERE thread_id = ? AND destination_leg_index = ?
+                     AND buy_outcome IS NOT NULL AND sell_outcome IS NULL
+                   ORDER BY id LIMIT 1""",
+                (thread_id, destination_leg_index),
+            )
+            row = await cursor.fetchone()
+        return dict(row) if row is not None else None
+
+    async def record_hedge_side_outcome(
+        self, hedge_id: int, side: str, *,
+        outcome: str, actual_price: float | None, actual_scu: float | None,
+    ) -> bool:
+        """Idempotent, matching record_route_progression_leg_outcome's own WHERE-guarded
+        UPDATE - only the first report for a given side actually commits; a retry or a
+        second click sees 0 rows affected and returns False."""
+        if side not in ("buy", "sell"):
+            raise ValueError(f"side must be 'buy' or 'sell', got {side!r}")
+        outcome_column = f"{side}_outcome"
+        price_column = f"{side}_actual_price"
+        scu_column = f"{side}_actual_scu"
+        reported_column = f"{side}_reported_at"
+        async with self.connect() as db:
+            cursor = await db.execute(
+                f"""UPDATE route_progression_hedges
+                    SET {outcome_column} = ?, {price_column} = ?, {scu_column} = ?,
+                        {reported_column} = datetime('now')
+                    WHERE id = ? AND {outcome_column} IS NULL""",
+                (outcome, actual_price, actual_scu, hedge_id),
+            )
+            await db.commit()
+            return cursor.rowcount > 0
+
+    async def suppress_hedge_market_side(
+        self, *, id_commodity: int, id_terminal: int, side: str, until: str
+    ) -> None:
+        """The hedge-report counterpart to suppress_terminal_market_side, for the same
+        reason record_hedge_report_market_update exists separately from
+        record_player_report_market_update: a hedge has no real route_progression_legs
+        row of its own. Critically, this must NEVER reuse the sibling method by passing
+        the anchor route's own destination_leg_index - that would mark the ANCHOR leg's
+        suppression_applied_at for a suppression that's actually about the hedge's
+        commodity/terminal, silently causing a later, genuine suppression need for that
+        anchor leg to be skipped as 'already applied' when it never was."""
+        column = "buy_suppressed_until" if side == "buy" else "sell_suppressed_until"
+        async with self.connect() as db:
+            await db.execute(
+                f"UPDATE terminal_market_state SET {column} = ? WHERE id_commodity = ? AND id_terminal = ?",
+                (until, id_commodity, id_terminal),
+            )
+            await db.commit()
+
+    async def get_suppressed_sides_by_ids(
+        self, commodity_terminal_ids: list[tuple[int, int]], *, now: str
+    ) -> dict[tuple[int, int], dict[str, bool]]:
+        """Bulk lookup of which side(s) are CURRENTLY suppressed (until is set and still
+        in the future relative to `now`, a naive UTC string) for each requested pair -
+        same bulk-then-filter shape as get_route_market_signals_by_ids. Only pairs with at
+        least one active suppression are included in the result; a pair absent from the
+        result has neither side suppressed."""
+        keys: set[tuple[int, int]] = set()
+        for commodity_id, terminal_id in commodity_terminal_ids:
+            parsed_commodity = self._integer(commodity_id)
+            parsed_terminal = self._integer(terminal_id)
+            if (
+                parsed_commodity is not None and parsed_commodity > 0
+                and parsed_terminal is not None and parsed_terminal > 0
+            ):
+                keys.add((parsed_commodity, parsed_terminal))
+        if not keys:
+            return {}
+        commodity_ids = sorted({key[0] for key in keys})
+        terminal_ids = sorted({key[1] for key in keys})
+        commodity_marks = ",".join("?" for _ in commodity_ids)
+        terminal_marks = ",".join("?" for _ in terminal_ids)
+        async with self.connect() as db:
+            cursor = await db.execute(
+                f"""SELECT id_commodity, id_terminal, buy_suppressed_until, sell_suppressed_until
+                    FROM terminal_market_state
+                    WHERE id_commodity IN ({commodity_marks}) AND id_terminal IN ({terminal_marks})
+                      AND (
+                          (buy_suppressed_until IS NOT NULL AND buy_suppressed_until > ?)
+                          OR (sell_suppressed_until IS NOT NULL AND sell_suppressed_until > ?)
+                      )""",
+                [*commodity_ids, *terminal_ids, now, now],
+            )
+            rows = await cursor.fetchall()
+        result: dict[tuple[int, int], dict[str, bool]] = {}
+        for row in rows:
+            key = (int(row["id_commodity"]), int(row["id_terminal"]))
+            if key not in keys:
+                continue
+            result[key] = {
+                "buy": row["buy_suppressed_until"] is not None and row["buy_suppressed_until"] > now,
+                "sell": row["sell_suppressed_until"] is not None and row["sell_suppressed_until"] > now,
+            }
+        return result
+
+    # -- Recommendation Outcome Tracking (Phase 1) ---------------------------------------
+
+    async def create_route_progression_thread(
+        self,
+        *,
+        thread_id: int,
+        user_id: int,
+        guild_id: int,
+        route_kind: str,
+        route_snapshot: dict[str, Any],
+        legs: list[dict[str, Any]],
+    ) -> None:
+        """Create a tracked route's thread row and its per-leg rows together. Each entry in
+        ``legs`` needs side/id_terminal/id_commodity, plus optional quoted_price/quoted_scu/
+        quoted_status - leg_index is assigned from list order."""
+        async with self.connect() as db:
+            await db.execute(
+                """INSERT INTO route_progression_threads
+                   (thread_id, user_id, guild_id, route_kind, route_snapshot, total_legs)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (thread_id, user_id, guild_id, route_kind, json.dumps(route_snapshot), len(legs)),
+            )
+            await db.executemany(
+                """INSERT INTO route_progression_legs
+                   (thread_id, leg_index, side, id_terminal, id_commodity,
+                    quoted_price, quoted_scu, quoted_status)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                [
+                    (
+                        thread_id, index, leg["side"], leg["id_terminal"], leg["id_commodity"],
+                        leg.get("quoted_price"), leg.get("quoted_scu"), leg.get("quoted_status"),
+                    )
+                    for index, leg in enumerate(legs)
+                ],
+            )
+            await db.commit()
+
+    async def delete_route_progression_thread(self, thread_id: int) -> None:
+        """Removes a route-progression thread and its legs entirely - not part of the
+        normal lifecycle (abandon/complete via set_route_progression_thread_status are the
+        correct terminal states for a route that ever became genuinely trackable). Used
+        only by start_tracking's own rollback when a step AFTER this row was created
+        (an intro message, the first leg prompt) fails partway through - audit-confirmed
+        defect #4. No FOREIGN KEY/cascade exists on route_progression_legs, so both tables
+        need an explicit delete."""
+        async with self.connect() as db:
+            await db.execute("DELETE FROM route_progression_legs WHERE thread_id = ?", (thread_id,))
+            await db.execute("DELETE FROM route_progression_threads WHERE thread_id = ?", (thread_id,))
+            await db.commit()
+
+    async def get_route_progression_thread(self, thread_id: int) -> dict[str, Any] | None:
+        async with self.connect() as db:
+            cursor = await db.execute(
+                "SELECT * FROM route_progression_threads WHERE thread_id = ?", (thread_id,)
+            )
+            row = await cursor.fetchone()
+        return dict(row) if row is not None else None
+
+    async def get_route_progression_legs(self, thread_id: int) -> list[dict[str, Any]]:
+        async with self.connect() as db:
+            cursor = await db.execute(
+                "SELECT * FROM route_progression_legs WHERE thread_id = ? ORDER BY leg_index",
+                (thread_id,),
+            )
+            rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    async def get_route_progression_leg(self, thread_id: int, leg_index: int) -> dict[str, Any] | None:
+        async with self.connect() as db:
+            cursor = await db.execute(
+                "SELECT * FROM route_progression_legs WHERE thread_id = ? AND leg_index = ?",
+                (thread_id, leg_index),
+            )
+            row = await cursor.fetchone()
+        return dict(row) if row is not None else None
+
+    async def record_route_progression_leg_outcome(
+        self,
+        *,
+        thread_id: int,
+        leg_index: int,
+        outcome: str,
+        actual_price: float | None = None,
+        actual_scu: float | None = None,
+        precision: str | None = None,
+    ) -> bool:
+        """Records a leg's outcome - but only the FIRST time; the WHERE clause's own
+        `outcome IS NULL` guard makes this a no-op (0 rows affected) for any second call
+        against the same leg, however it was reached (a genuinely duplicate leg-outcome
+        report from two live prompts for the same leg, or a retried handle_leg_outcome
+        whose earlier attempt already got this far). Returns whether THIS call actually
+        wrote the row - callers must not treat their own outcome as authoritative unless
+        this is True, since a duplicate/losing report must never be allowed to overwrite
+        (or drive downstream side effects for) whichever report won the race.
+
+        Also refuses (0 rows affected) once the thread's own status has left 'in_progress'
+        - audit-confirmed defect #3: without this, a leg-outcome report racing a concurrent
+        abandonment could still record an outcome and drive its market-state side effects
+        for a route nobody is tracking anymore. Callers must tell this reason apart from
+        "a different report already won" (see handle_leg_outcome) - both return False here,
+        but only one means "check what's already stored," the other means "the thread is
+        gone, don't act on this report at all"."""
+        async with self.connect() as db:
+            cursor = await db.execute(
+                """UPDATE route_progression_legs
+                   SET outcome = ?, actual_price = ?, actual_scu = ?, precision = ?,
+                       reported_at = datetime('now')
+                   WHERE thread_id = ? AND leg_index = ? AND outcome IS NULL
+                     AND (SELECT status FROM route_progression_threads WHERE thread_id = ?) = 'in_progress'""",
+                (outcome, actual_price, actual_scu, precision, thread_id, leg_index, thread_id),
+            )
+            await db.commit()
+            return cursor.rowcount > 0
+
+    async def claim_route_progression_advance(self, thread_id: int, *, to_index: int) -> bool:
+        """Atomically claims the right to perform the "advance" step for `to_index` (post
+        that leg's prompt, or - when to_index == total_legs - send the completion message)
+        - the conditional UPDATE only succeeds when nothing has already claimed this index
+        or a later one, so calling this twice for the same to_index (a retried
+        handle_leg_outcome, or the recovery poller redoing a step that already happened)
+        only actually performs the send once. Returns whether THIS call won the claim.
+
+        Also refuses once the thread's status has left 'in_progress' - audit-confirmed
+        defect #3: without this, a leg-outcome report racing a concurrent abandonment could
+        still claim the right to post a next-leg prompt (or the completion message) into an
+        already-abandoned thread. Both existing callers (_post_leg_prompt,
+        handle_leg_outcome's completion branch) already treat a lost claim as "nothing to
+        do here, return quietly" - exactly the right behavior for this new reason too."""
+        async with self.connect() as db:
+            cursor = await db.execute(
+                """UPDATE route_progression_threads SET advanced_to_index = ?
+                   WHERE thread_id = ? AND advanced_to_index < ? AND status = 'in_progress'""",
+                (to_index, thread_id, to_index),
+            )
+            await db.commit()
+            return cursor.rowcount > 0
+
+    async def release_route_progression_advance_claim(
+        self, thread_id: int, *, claimed_index: int, revert_to: int
+    ) -> bool:
+        """Undoes a claim_route_progression_advance call whose guarded action (the
+        Discord send, or the completion status write) definitely failed - a committed
+        claim is not proof the thing it guards actually happened, so a definite failure
+        must give a retry's own claim attempt the chance to win again rather than seeing
+        the index as already (falsely) advanced. Only releases if the row still shows
+        exactly `claimed_index` - if something else has since moved it further (which
+        shouldn't happen for a single in-flight action, but costs nothing to guard),
+        this is a stale release and must not stomp on that newer progress."""
+        async with self.connect() as db:
+            cursor = await db.execute(
+                """UPDATE route_progression_threads SET advanced_to_index = ?
+                   WHERE thread_id = ? AND advanced_to_index = ?""",
+                (revert_to, thread_id, claimed_index),
+            )
+            await db.commit()
+            return cursor.rowcount > 0
+
+    async def set_route_progression_thread_status(self, thread_id: int, status: str) -> bool:
+        """status: 'completed' or 'abandoned'. completed_at's name predates 'abandoned'
+        being added - read it as "when this thread stopped being in_progress," not
+        literally "when it succeeded".
+
+        Only writes while the thread is still 'in_progress' - audit-confirmed defect #3:
+        the previous unconditional UPDATE let a completion write silently overwrite a
+        concurrent abandonment (or vice versa), whichever call happened to run second,
+        even though the two are mutually exclusive real-world outcomes. Returns whether
+        THIS call actually changed the status - callers (handle_leg_outcome's completion
+        branch, abandon_thread) must skip their own success messaging/archiving when this
+        is False, since some other action already decided this thread's fate first."""
+        async with self.connect() as db:
+            cursor = await db.execute(
+                """UPDATE route_progression_threads
+                   SET status = ?, completed_at = datetime('now')
+                   WHERE thread_id = ? AND status = 'in_progress'""",
+                (status, thread_id),
+            )
+            await db.commit()
+            return cursor.rowcount > 0
+
+    async def get_stale_route_progression_threads(self, *, older_than_hours: float) -> list[dict[str, Any]]:
+        """in_progress threads with no recent activity - used by the abandonment poller to
+        auto-close threads nobody came back to. Activity is the thread's most recently
+        reported leg, or its own created_at if no leg has been reported yet."""
+        threshold_modifier = f"-{abs(older_than_hours)} hours"
+        async with self.connect() as db:
+            cursor = await db.execute(
+                """SELECT t.* FROM route_progression_threads AS t
+                   WHERE t.status = 'in_progress'
+                     AND COALESCE(
+                           (SELECT MAX(l.reported_at) FROM route_progression_legs AS l
+                            WHERE l.thread_id = t.thread_id),
+                           t.created_at
+                         ) <= datetime('now', ?)""",
+                (threshold_modifier,),
+            )
+            rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    async def queue_route_progression_leg_recovery(
+        self,
+        *,
+        thread_id: int,
+        leg_index: int,
+        side: str,
+        id_terminal: int,
+        id_commodity: int,
+        terminal_name: str,
+        commodity_name: str,
+        display_label: str,
+        quoted_price: float | None,
+        quoted_scu: float | None,
+        quoted_status: int | None,
+        market_scu: float | None,
+        outcome: str,
+        actual_price: float | None,
+        actual_scu: float | None,
+        precision: str | None,
+    ) -> None:
+        """Durably queues a leg-outcome action whose post-ack retries were all exhausted -
+        carries every field needed to reconstruct the leg and re-run handle_leg_outcome
+        later with no dependency on RouteProgression._active_legs (see the table's own
+        comment in SCHEMA for why). Picked up by retry_pending_route_progression_actions.
+
+        INSERT OR IGNORE against idx_route_progression_pending_actions_leg_unique - see
+        that index's own schema comment for why this is defense-in-depth rather than a
+        confirmed-reachable case. A silently-ignored duplicate is still correctly reported
+        as "recovery scheduled" by the caller either way, since the original row is still
+        there and still valid."""
+        async with self.connect() as db:
+            await db.execute(
+                """INSERT OR IGNORE INTO route_progression_pending_actions
+                   (thread_id, action_kind, leg_index, side, id_terminal, id_commodity,
+                    terminal_name, commodity_name, display_label, quoted_price, quoted_scu,
+                    quoted_status, market_scu, outcome, actual_price, actual_scu, precision)
+                   VALUES (?, 'leg_outcome', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    thread_id, leg_index, side, id_terminal, id_commodity, terminal_name,
+                    commodity_name, display_label, quoted_price, quoted_scu, quoted_status,
+                    market_scu, outcome, actual_price, actual_scu, precision,
+                ),
+            )
+            await db.commit()
+
+    async def queue_route_progression_abandon_recovery(self, *, thread_id: int, reason: str) -> None:
+        """Durably queues an abandon action whose post-ack retries were all exhausted.
+        INSERT OR IGNORE against idx_route_progression_pending_actions_abandon_unique -
+        same defense-in-depth reasoning as queue_route_progression_leg_recovery."""
+        async with self.connect() as db:
+            await db.execute(
+                """INSERT OR IGNORE INTO route_progression_pending_actions (thread_id, action_kind, reason)
+                   VALUES (?, 'abandon', ?)""",
+                (thread_id, reason),
+            )
+            await db.commit()
+
+    async def get_pending_route_progression_actions(self) -> list[dict[str, Any]]:
+        async with self.connect() as db:
+            cursor = await db.execute("SELECT * FROM route_progression_pending_actions ORDER BY id")
+            rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    async def delete_route_progression_pending_action(self, action_id: int) -> None:
+        async with self.connect() as db:
+            await db.execute("DELETE FROM route_progression_pending_actions WHERE id = ?", (action_id,))
+            await db.commit()
+
+    async def mark_route_progression_pending_action_attempted(self, action_id: int) -> None:
+        async with self.connect() as db:
+            await db.execute(
+                """UPDATE route_progression_pending_actions
+                   SET attempts = attempts + 1, last_attempt_at = datetime('now') WHERE id = ?""",
+                (action_id,),
+            )
+            await db.commit()
+
+    async def get_route_progression_track_record(
+        self, pairs: list[tuple[int, int, str]]
+    ) -> dict[tuple[int, int, str], tuple[int, int]]:
+        """(matched_count, total_reported_count) per (id_commodity, id_terminal, side) -
+        the real-world track record behind route_confidence.py's track_record_modifier.
+        Bulk-fetches by the id sets involved, then filters to the exact requested pairs in
+        Python, matching get_terminal_market_observations_by_ids' established shape."""
+        id_commodities = {pair[0] for pair in pairs}
+        id_terminals = {pair[1] for pair in pairs}
+        if not id_commodities or not id_terminals:
+            return {}
+        wanted = set(pairs)
+        placeholders_c = ",".join("?" for _ in id_commodities)
+        placeholders_t = ",".join("?" for _ in id_terminals)
+        async with self.connect() as db:
+            cursor = await db.execute(
+                f"""SELECT id_commodity, id_terminal, side, outcome FROM route_progression_legs
+                    WHERE outcome IS NOT NULL
+                      AND id_commodity IN ({placeholders_c}) AND id_terminal IN ({placeholders_t})""",
+                (*id_commodities, *id_terminals),
+            )
+            rows = await cursor.fetchall()
+        counts: dict[tuple[int, int, str], list[int]] = {}
+        for row in rows:
+            key = (row["id_commodity"], row["id_terminal"], row["side"])
+            if key not in wanted:
+                continue
+            bucket = counts.setdefault(key, [0, 0])
+            bucket[1] += 1
+            if row["outcome"] == "matched":
+                bucket[0] += 1
+        return {key: (matched, total) for key, (matched, total) in counts.items()}
 
     async def record_terminal_data_health_snapshot(self, rows: list[dict[str, Any]]) -> tuple[int, int]:
         normalized = []
@@ -819,11 +2255,68 @@ class Database:
                 if (int(row["id_commodity"]), int(row["id_terminal"])) in keys
             }
 
-    async def get_mixed_route_market_rows(self) -> list[dict[str, Any]]:
-        """Current market snapshot enriched with terminal and commodity warning metadata."""
+    async def get_terminal_market_observations_by_ids(
+        self, commodity_terminal_ids: list[tuple[int, int]]
+    ) -> dict[tuple[int, int], list[dict[str, Any]]]:
+        """Bulk counterpart to get_terminal_market_history's single-pair, name-based
+        observation lookup - for route commands that already have stable ids and need
+        change-only history for many (commodity, terminal) pairs at once (the inferred-
+        trend evidence-level fallback used when a route has no live stock/demand figure).
+        Same id-validation/bulk-then-filter shape as get_route_market_signals_by_ids."""
+        keys: set[tuple[int, int]] = set()
+        for commodity_id, terminal_id in commodity_terminal_ids:
+            parsed_commodity = self._integer(commodity_id)
+            parsed_terminal = self._integer(terminal_id)
+            if (
+                parsed_commodity is not None and parsed_commodity > 0
+                and parsed_terminal is not None and parsed_terminal > 0
+            ):
+                keys.add((parsed_commodity, parsed_terminal))
+        if not keys:
+            return {}
+        commodity_ids = sorted({key[0] for key in keys})
+        terminal_ids = sorted({key[1] for key in keys})
+        commodity_marks = ",".join("?" for _ in commodity_ids)
+        terminal_marks = ",".join("?" for _ in terminal_ids)
         async with self.connect() as db:
             cursor = await db.execute(
-                """SELECT m.*,
+                f"""SELECT * FROM terminal_market_observations
+                    WHERE id_commodity IN ({commodity_marks})
+                      AND id_terminal IN ({terminal_marks})
+                    ORDER BY observed_at""",
+                [*commodity_ids, *terminal_ids],
+            )
+            rows = await cursor.fetchall()
+            grouped: dict[tuple[int, int], list[dict[str, Any]]] = {}
+            for row in rows:
+                key = (int(row["id_commodity"]), int(row["id_terminal"]))
+                if key in keys:
+                    grouped.setdefault(key, []).append(dict(row))
+            return grouped
+
+    async def get_mixed_route_market_rows(self) -> list[dict[str, Any]]:
+        """Current market snapshot enriched with terminal and commodity warning metadata.
+
+        scu_buy/scu_sell read as 0 for any side currently suppressed (see
+        suppress_terminal_market_side) - the allocator this feeds (allocate_pair_cargo)
+        already treats zero stock/demand as "skip this side," the exact same behavior a
+        genuinely empty terminal produces, so no separate suppression-aware code is
+        needed anywhere downstream. The real, unsuppressed values are still readable via
+        buy_suppressed_until/sell_suppressed_until and the row's own real scu figures are
+        never overwritten in storage - only this read is masked.
+        """
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        async with self.connect() as db:
+            cursor = await db.execute(
+                """SELECT m.id_commodity, m.id_terminal, m.commodity_name, m.terminal_name,
+                          m.price_buy, m.price_sell,
+                          CASE WHEN m.buy_suppressed_until IS NOT NULL AND m.buy_suppressed_until > ?
+                               THEN 0 ELSE m.scu_buy END AS scu_buy,
+                          CASE WHEN m.sell_suppressed_until IS NOT NULL AND m.sell_suppressed_until > ?
+                               THEN 0 ELSE m.scu_sell END AS scu_sell,
+                          m.status_buy, m.status_sell, m.quality, m.volatility_buy, m.volatility_sell,
+                          m.buy_report_count, m.sell_report_count, m.last_seen, m.source,
+                          m.buy_suppressed_until, m.sell_suppressed_until,
                           t.terminal_type, t.id_space_station, t.space_station_name,
                           t.id_outpost, t.outpost_name, t.id_city,
                           t.star_system_name, t.planet_name, t.moon_name,
@@ -834,7 +2327,8 @@ class Database:
                           c.is_explosive, c.is_buggy
                    FROM terminal_market_state AS m
                    LEFT JOIN terminal_reference AS t ON t.id_terminal = m.id_terminal
-                   LEFT JOIN commodity_reference AS c ON c.id_commodity = m.id_commodity"""
+                   LEFT JOIN commodity_reference AS c ON c.id_commodity = m.id_commodity""",
+                (now, now),
             )
             return [dict(row) for row in await cursor.fetchall()]
 
@@ -891,6 +2385,63 @@ class Database:
             )
             observations = await cursor.fetchall()
             return dict(state_row), [dict(row) for row in observations]
+
+    async def search_terminals_by_name(self, query: str, limit: int = 25) -> list[dict[str, Any]]:
+        """Suggest terminals by name substring for autocomplete - the local 24h-cached
+        terminal_reference table, not a live UEX call."""
+        stripped = query.strip()
+        if not stripped:
+            return []
+        async with self.connect() as db:
+            cursor = await db.execute(
+                """SELECT id_terminal, terminal_name FROM terminal_reference
+                   WHERE lower(terminal_name) LIKE lower(?)
+                   ORDER BY terminal_name LIMIT ?""",
+                (f"%{stripped}%", limit),
+            )
+            return [dict(row) for row in await cursor.fetchall()]
+
+    async def resolve_terminal_id_by_name(self, name: str) -> tuple[int, str] | None:
+        """Exact (case-insensitive) match first; falls back to a substring match only if
+        it resolves to exactly one terminal - same tiered/gated pattern as
+        find_item_id_by_name (bot/uex/marketplace.py), never guessing between candidates."""
+        stripped = name.strip()
+        if not stripped:
+            return None
+        async with self.connect() as db:
+            cursor = await db.execute(
+                "SELECT id_terminal, terminal_name FROM terminal_reference WHERE lower(terminal_name) = lower(?)",
+                (stripped,),
+            )
+            exact = await cursor.fetchall()
+            if len(exact) == 1:
+                return exact[0]["id_terminal"], exact[0]["terminal_name"]
+            if len(exact) > 1:
+                return None
+            cursor = await db.execute(
+                "SELECT id_terminal, terminal_name FROM terminal_reference WHERE lower(terminal_name) LIKE lower(?)",
+                (f"%{stripped}%",),
+            )
+            candidates = await cursor.fetchall()
+            if len(candidates) == 1:
+                return candidates[0]["id_terminal"], candidates[0]["terminal_name"]
+        return None
+
+    async def get_terminal_star_system(self, id_terminal: int) -> str | None:
+        """The star system a terminal belongs to, from the cached terminal_reference table.
+        Used by /ingame-item-finder as a same-system fallback signal when a live
+        /terminals_distances lookup returns no usable distance for a specific pair - a real,
+        observed UEX data gap for some pairs (not just a network hiccup): e.g. Admin -
+        Seraphim -> Skutters - GrimHEX, both in Crusader orbit and effectively neighbors,
+        returns a bare `false`. Without this, that neighbor sorts dead last behind every
+        successfully-measured but genuinely cross-system option and can fall off the
+        display entirely on a widely-stocked item."""
+        async with self.connect() as db:
+            cursor = await db.execute(
+                "SELECT star_system_name FROM terminal_reference WHERE id_terminal = ?", (id_terminal,)
+            )
+            row = await cursor.fetchone()
+            return row["star_system_name"] if row else None
 
     async def find_terminal_market_names(self, commodity_name: str, query: str, limit: int = 10) -> list[str]:
         """Suggest known terminal names when an exact /terminal-history lookup misses."""
@@ -1028,9 +2579,12 @@ class Database:
             name, terminal = row.get("commodity_name"), row.get("terminal_name")
             if id_commodity is None or id_terminal is None or not name or not terminal:
                 continue
+            star_system = row.get("star_system_name")
             params.append(
-                (id_commodity, id_terminal, str(name), str(terminal), self._integer(row.get("value")),
-                 self._integer(row.get("value_week")), self._integer(row.get("value_month")))
+                (id_commodity, id_terminal, str(name), str(terminal),
+                 str(star_system) if star_system else None, self._integer(row.get("value")),
+                 self._integer(row.get("value_week")), self._integer(row.get("value_month")),
+                 self._integer(row.get("date_added")), self._integer(row.get("date_modified")))
             )
         if not params:
             return 0
@@ -1038,16 +2592,49 @@ class Database:
             await db.executemany(
                 """INSERT INTO refinery_yield_observations
                    (id_commodity, id_terminal, recorded_day, commodity_name, terminal_name,
-                    yield_bonus, yield_bonus_week, yield_bonus_month)
-                   VALUES (?, ?, date('now'), ?, ?, ?, ?, ?)
+                    star_system_name, yield_bonus, yield_bonus_week, yield_bonus_month,
+                    date_added, date_modified)
+                   VALUES (?, ?, date('now'), ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(id_commodity, id_terminal, recorded_day) DO UPDATE SET
                        commodity_name=excluded.commodity_name, terminal_name=excluded.terminal_name,
+                       star_system_name=excluded.star_system_name,
                        yield_bonus=excluded.yield_bonus, yield_bonus_week=excluded.yield_bonus_week,
-                       yield_bonus_month=excluded.yield_bonus_month""",
+                       yield_bonus_month=excluded.yield_bonus_month,
+                       date_added=excluded.date_added, date_modified=excluded.date_modified""",
                 params,
             )
             await db.commit()
         return len(params)
+
+    async def record_refinery_yield_fetch(self, response_count: int) -> None:
+        """Logs one /refineries_yields fetch's raw response row count - see
+        refinery_yield_fetch_log's own schema comment for why this is worth keeping a
+        history of, not just a transient warning at the moment a fetch happens to hit the
+        documented 500-row cap."""
+        async with self.connect() as db:
+            await db.execute(
+                "INSERT INTO refinery_yield_fetch_log (response_count) VALUES (?)",
+                (response_count,),
+            )
+            await db.commit()
+
+    async def get_latest_refinery_yields_for_commodity(self, id_commodity: int) -> list[dict[str, Any]]:
+        """The most recently recorded day's refinery-yield-bonus rows for one raw commodity,
+        across every terminal that's been reported - used by /refinery-advisor to rank
+        terminals. Empty if this commodity has never appeared in a /refineries_yields
+        snapshot (record_refinery_yield_snapshot, run by intelligence.py's reference
+        refresh)."""
+        async with self.connect() as db:
+            cursor = await db.execute(
+                """SELECT * FROM refinery_yield_observations
+                   WHERE id_commodity = ? AND recorded_day = (
+                       SELECT MAX(recorded_day) FROM refinery_yield_observations WHERE id_commodity = ?
+                   )
+                   ORDER BY yield_bonus DESC""",
+                (id_commodity, id_commodity),
+            )
+            rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
 
     # -- price alerts ---------------------------------------------------
 
@@ -1060,13 +2647,14 @@ class Database:
         commodity_name: str,
         direction: str,
         target_price: float,
+        scope: str = "personal",
     ) -> int:
         async with self.connect() as db:
             cursor = await db.execute(
                 """INSERT INTO price_alerts
-                   (guild_id, channel_id, user_id, commodity_name, direction, target_price)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (guild_id, channel_id, user_id, commodity_name, direction, target_price),
+                   (guild_id, channel_id, user_id, commodity_name, direction, target_price, scope)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (guild_id, channel_id, user_id, commodity_name, direction, target_price, scope),
             )
             await db.commit()
             return cursor.lastrowid
@@ -1123,6 +2711,14 @@ class Database:
             )
             await db.commit()
             return cursor.lastrowid
+
+    async def delete_trade_log_entry(self, user_id: int, entry_id: int) -> bool:
+        """Removes one of the user's own logged trades (the /trade-log menu, audit UX-16).
+        Keyed on user_id as well as id, so an id alone can't remove someone else's entry."""
+        async with self.connect() as db:
+            cursor = await db.execute("DELETE FROM trade_log WHERE id = ? AND user_id = ?", (entry_id, user_id))
+            await db.commit()
+            return cursor.rowcount > 0
 
     async def get_trade_log(self, user_id: int, limit: int = 20) -> list[dict[str, Any]]:
         async with self.connect() as db:
@@ -1183,29 +2779,121 @@ class Database:
     # a stale id pointing at the wrong thing.
 
     async def set_default_ship(self, user_id: int, ship_name: str) -> None:
-        async with self.connect() as db:
-            await db.execute(
-                """INSERT INTO user_ship_preference (user_id, ship_name, updated_at)
-                   VALUES (?, ?, datetime('now'))
-                   ON CONFLICT(user_id) DO UPDATE SET
-                       ship_name = excluded.ship_name,
-                       updated_at = datetime('now')""",
-                (user_id, ship_name),
-            )
-            await db.commit()
+        """Thin wrapper over set_trading_preferences - ship_name now lives in
+        user_trading_preferences alongside the other route-shaping preferences, not its own
+        table (user_ship_preference predates this and is now migration-source-only, see
+        _migrate_ship_preference_into_trading_preferences)."""
+        await self.set_trading_preferences(user_id, ship_name=ship_name)
 
     async def get_default_ship(self, user_id: int) -> str | None:
-        async with self.connect() as db:
-            cursor = await db.execute(
-                "SELECT ship_name FROM user_ship_preference WHERE user_id = ?", (user_id,)
-            )
-            row = await cursor.fetchone()
-            return row["ship_name"] if row else None
+        prefs = await self.get_trading_preferences(user_id)
+        return prefs["ship_name"]
 
     async def clear_default_ship(self, user_id: int) -> bool:
+        """Only clears the ship, not the other 5 trading preferences - distinct from
+        clear_trading_preferences, which resets the whole row including the ship."""
+        current = await self.get_trading_preferences(user_id)
+        if current["ship_name"] is None:
+            return False
+        await self.set_trading_preferences(user_id, ship_name=None)
+        return True
+
+    # -- saved trading preferences (route-filter defaults + default ship) ----
+
+    async def get_trading_preferences(self, user_id: int) -> dict[str, Any]:
+        """Always returns all 7 fields, defaulted, so callers never null-check a missing row."""
         async with self.connect() as db:
             cursor = await db.execute(
-                "DELETE FROM user_ship_preference WHERE user_id = ?", (user_id,)
+                "SELECT * FROM user_trading_preferences WHERE user_id = ?", (user_id,)
+            )
+            row = await cursor.fetchone()
+        if row is None:
+            return dict(DEFAULT_TRADING_PREFERENCES)
+        return {
+            "space_only": bool(row["space_only"]),
+            "capital_ship_access": bool(row["capital_ship_access"]),
+            "auto_load_only": bool(row["auto_load_only"]),
+            "preferred_system": row["preferred_system"],
+            "risk_tolerance": row["risk_tolerance"],
+            "ship_name": row["ship_name"],
+            "budget": row["budget"],
+        }
+
+    # Column -> coercion applied before storage, for the fields set_trading_preferences
+    # actually persists (used by both the INSERT-defaults fallback and any provided value).
+    _TRADING_PREFERENCE_BOOL_COLUMNS = ("space_only", "capital_ship_access", "auto_load_only")
+
+    async def set_trading_preferences(
+        self,
+        user_id: int,
+        *,
+        space_only: bool | object = UNSET,
+        capital_ship_access: bool | object = UNSET,
+        auto_load_only: bool | object = UNSET,
+        preferred_system: str | None | object = UNSET,
+        risk_tolerance: str | None | object = UNSET,
+        ship_name: str | None | object = UNSET,
+        budget: float | None | object = UNSET,
+    ) -> dict[str, Any]:
+        """Partial update: a field left at UNSET (the default) keeps its current value -
+        only fields the caller explicitly passes are changed, so a single-option
+        /set-trading-preferences call never resets the other 6.
+
+        Built as ONE atomic INSERT ... ON CONFLICT DO UPDATE whose DO UPDATE SET clause
+        names ONLY the columns the caller actually passed - not a Python-side
+        read-then-merge-then-write. A follow-up review found the earlier read-modify-write
+        version was a real lost-update race: two concurrent calls (e.g. one setting
+        space_only, the other auto_load_only) could both read the same pre-change row,
+        each apply their own field on top of that same stale copy, and whichever wrote
+        last would silently discard the other's change - reproduced with a synchronized
+        interleaving that lost auto_load_only entirely. Naming only the touched columns in
+        DO UPDATE SET means two concurrent calls touching different fields can never
+        clobber each other, regardless of interleaving - each writes only what it means to
+        change. UNSET fields still need a value for the INSERT branch (a brand-new row has
+        no prior state to fall back on); DEFAULT_TRADING_PREFERENCES supplies that, but
+        they're never named in DO UPDATE SET, so an existing row's value for an untouched
+        field is left completely alone.
+        """
+        provided: dict[str, Any] = {}
+        for column, value in (
+            ("space_only", space_only),
+            ("capital_ship_access", capital_ship_access),
+            ("auto_load_only", auto_load_only),
+            ("preferred_system", preferred_system),
+            ("risk_tolerance", risk_tolerance),
+            ("ship_name", ship_name),
+            ("budget", budget),
+        ):
+            if value is not UNSET:
+                provided[column] = value
+        if not provided:
+            return await self.get_trading_preferences(user_id)
+
+        def _coerce(column: str, value: Any) -> Any:
+            return int(value) if column in self._TRADING_PREFERENCE_BOOL_COLUMNS else value
+
+        all_columns = list(DEFAULT_TRADING_PREFERENCES.keys())
+        insert_values = [
+            _coerce(column, provided.get(column, DEFAULT_TRADING_PREFERENCES[column]))
+            for column in all_columns
+        ]
+        set_clause = ", ".join(f"{column} = excluded.{column}" for column in provided)
+        async with self.connect() as db:
+            await db.execute(
+                f"""INSERT INTO user_trading_preferences
+                    (user_id, {", ".join(all_columns)}, updated_at)
+                    VALUES (?, {", ".join("?" for _ in all_columns)}, datetime('now'))
+                    ON CONFLICT(user_id) DO UPDATE SET
+                        {set_clause}, updated_at = excluded.updated_at""",
+                (user_id, *insert_values),
+            )
+            await db.commit()
+        return await self.get_trading_preferences(user_id)
+
+    async def clear_trading_preferences(self, user_id: int) -> bool:
+        async with self.connect() as db:
+            cursor = await db.execute(
+                "DELETE FROM user_trading_preferences WHERE user_id = ?", (user_id,)
             )
             await db.commit()
             return cursor.rowcount > 0
@@ -1233,12 +2921,16 @@ class Database:
         target_price: float | None = None,
         min_quality: float | None = None,
         max_quality: float | None = None,
+        scope: str = "personal",
+        guild_id: int | None = None,
+        channel_id: int | None = None,
     ) -> int:
         async with self.connect() as db:
             cursor = await db.execute(
-                """INSERT INTO marketplace_alerts (user_id, keyword, operation, target_price, min_quality, max_quality)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (user_id, keyword, operation, target_price, min_quality, max_quality),
+                """INSERT INTO marketplace_alerts
+                   (user_id, keyword, operation, target_price, min_quality, max_quality, scope, guild_id, channel_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (user_id, keyword, operation, target_price, min_quality, max_quality, scope, guild_id, channel_id),
             )
             await db.commit()
             return cursor.lastrowid
@@ -1322,17 +3014,19 @@ class Database:
             )
             await db.commit()
 
-    async def is_negotiation_message_seen(self, message_id: int) -> bool:
+    async def is_negotiation_message_seen(self, user_id: int, message_id: int) -> bool:
         async with self.connect() as db:
             cursor = await db.execute(
-                "SELECT 1 FROM negotiation_message_seen WHERE message_id = ?", (message_id,)
+                "SELECT 1 FROM negotiation_message_seen WHERE user_id = ? AND message_id = ?",
+                (user_id, message_id),
             )
             return await cursor.fetchone() is not None
 
-    async def mark_negotiation_message_seen(self, message_id: int) -> None:
+    async def mark_negotiation_message_seen(self, user_id: int, message_id: int) -> None:
         async with self.connect() as db:
             await db.execute(
-                "INSERT OR IGNORE INTO negotiation_message_seen (message_id) VALUES (?)", (message_id,)
+                "INSERT OR IGNORE INTO negotiation_message_seen (user_id, message_id) VALUES (?, ?)",
+                (user_id, message_id),
             )
             await db.commit()
 
@@ -1398,27 +3092,107 @@ class Database:
             }
 
     async def get_terminal_market_shifts(self, hours: int = 24) -> list[dict[str, Any]]:
-        """Supply and demand changes between each market's oldest/newest observations."""
+        """Supply and demand changes between each market's most recent observation and the
+        best available baseline before it.
+
+        Requiring 2+ observations strictly inside the window (the original approach) missed
+        a long-stable market that then had exactly one recent change: with only one
+        in-window row, there was nothing to diff against even though a real, large shift
+        just happened. The fix compares the latest observation against a baseline chosen in
+        priority order: (1) the most recent observation at or before the window start (a
+        true "state ~`hours` ago" reference, however old it actually is), falling back to
+        (2) the EARLIEST observation still inside the window, for a commodity/terminal only
+        ever observed recently (nothing predates the window at all, e.g. newly tracked) -
+        this fallback is what the original approach got right and a naive "require a
+        pre-window baseline" rewrite would have broken.
+
+        These two candidates need OPPOSITE orderings (most-recent-first for the pre-window
+        baseline; earliest-first for the in-window fallback), so they're two separate
+        ranked CTEs, not one shared ORDER BY - an earlier version tried to rank both cases
+        in a single CTE ordered `... DESC` throughout, which is correct for the pre-window
+        tier but silently picks the MOST recent in-window observation as the "fallback"
+        instead of the earliest, understating (or reversing the sign of) the reported
+        change for a newly tracked pair with 3+ in-window observations (confirmed: 100 @
+        -3h, 600 @ -2h, 200 @ -1h(latest) reported -400 instead of the correct +100 against
+        the true earliest baseline). The window boundary is treated consistently as
+        belonging to the baseline side ("at or before") - `windowed` uses a strict `>` and
+        the pre-window CTE uses `<=` - so a hypothetical observation landing exactly on the
+        boundary is never double-counted as its own baseline. A pair with no observation
+        earlier than its own latest one (a single ever-recorded data point) has no baseline
+        candidate at all (both CTEs empty for it) and is correctly excluded, same as before.
+
+        The chosen baseline's scu_buy and scu_sell are read from the SAME row, not
+        independently COALESCEd column-by-column - an earlier version did
+        `COALESCE(pwb.scu_buy, iwe.scu_buy)` and separately `COALESCE(pwb.scu_sell,
+        iwe.scu_sell)`, which silently mixes two different observations' timestamps
+        whenever the pre-window row exists but has just ONE of its two measurements NULL:
+        confirmed with a 48h-old baseline (supply unknown, demand 500) plus in-window rows
+        at -3h (600, 400) and -1h/latest (200, 300) - the old query reported previous
+        supply 600 from three hours ago (borrowed from the in-window fallback) alongside
+        previous demand 500 from 48 hours ago (correctly from the real baseline), presenting
+        a single "since-baseline" comparison built from two different points in time. The
+        `baseline` CTE below picks the row ONCE (`pwb` if it exists at all, else `iwe`) and
+        takes both measurements from that one row - a genuinely NULL measurement on the
+        chosen row stays NULL (not silently replaced by a different row's value).
+
+        Both sides of each *_change get the same NULL-preserving treatment, not just the
+        baseline side: an earlier version still wrapped the CURRENT (`latest`) measurement
+        in `COALESCE(latest.scu_buy, 0)`, so a known baseline (e.g. 500) paired with a
+        genuinely unknown current value (`latest.scu_buy IS NULL` - UEX simply didn't
+        report it this cycle) computed `0 - 500 = -500`, inventing a complete-depletion
+        shift `current_supply` itself reports as unknown, not zero. A real numeric zero
+        (an actual observed depletion) is a perfectly valid change and is not the case being
+        guarded against here - only a missing measurement is. Each *_change is NULL exactly
+        when EITHER side is NULL, on both sides symmetrically. A NULL *_change is naturally
+        excluded by intelligence_brief.py's `if r["supply_change"]` ranking filter, since
+        None is falsy - no separate handling needed downstream.
+        """
         async with self.connect() as db:
             cursor = await db.execute(
                 """WITH windowed AS (
                        SELECT * FROM terminal_market_observations
-                       WHERE observed_at >= datetime('now', ?)
-                   ), bounds AS (
-                       SELECT id_commodity, id_terminal, MIN(observed_at) first_at, MAX(observed_at) last_at
-                       FROM windowed GROUP BY id_commodity, id_terminal HAVING COUNT(*) >= 2
+                       WHERE observed_at > datetime('now', ?)
+                   ), latest AS (
+                       SELECT *, ROW_NUMBER() OVER (
+                           PARTITION BY id_commodity, id_terminal ORDER BY observed_at DESC
+                       ) AS rn
+                       FROM windowed
+                   ), pre_window_baseline AS (
+                       SELECT *, ROW_NUMBER() OVER (
+                           PARTITION BY id_commodity, id_terminal ORDER BY observed_at DESC
+                       ) AS rn
+                       FROM terminal_market_observations
+                       WHERE observed_at <= datetime('now', ?)
+                   ), in_window_earliest AS (
+                       SELECT *, ROW_NUMBER() OVER (
+                           PARTITION BY id_commodity, id_terminal ORDER BY observed_at ASC
+                       ) AS rn
+                       FROM windowed
+                   ), baseline AS (
+                       SELECT latest.id_commodity, latest.id_terminal,
+                              CASE WHEN pwb.id_commodity IS NOT NULL THEN pwb.scu_buy ELSE iwe.scu_buy END AS scu_buy,
+                              CASE WHEN pwb.id_commodity IS NOT NULL THEN pwb.scu_sell ELSE iwe.scu_sell END AS scu_sell
+                       FROM latest
+                       LEFT JOIN pre_window_baseline pwb
+                         ON pwb.id_commodity = latest.id_commodity AND pwb.id_terminal = latest.id_terminal
+                        AND pwb.rn = 1
+                       LEFT JOIN in_window_earliest iwe
+                         ON iwe.id_commodity = latest.id_commodity AND iwe.id_terminal = latest.id_terminal
+                        AND iwe.rn = 1 AND iwe.observed_at < latest.observed_at
+                       WHERE latest.rn = 1 AND (pwb.id_commodity IS NOT NULL OR iwe.id_commodity IS NOT NULL)
                    )
                    SELECT latest.commodity_name, latest.terminal_name,
-                          earliest.scu_buy AS previous_supply, latest.scu_buy AS current_supply,
-                          earliest.scu_sell AS previous_demand, latest.scu_sell AS current_demand,
-                          COALESCE(latest.scu_buy, 0) - COALESCE(earliest.scu_buy, 0) AS supply_change,
-                          COALESCE(latest.scu_sell, 0) - COALESCE(earliest.scu_sell, 0) AS demand_change
-                   FROM bounds
-                   JOIN windowed earliest ON earliest.id_commodity=bounds.id_commodity
-                     AND earliest.id_terminal=bounds.id_terminal AND earliest.observed_at=bounds.first_at
-                   JOIN windowed latest ON latest.id_commodity=bounds.id_commodity
-                     AND latest.id_terminal=bounds.id_terminal AND latest.observed_at=bounds.last_at""",
-                (f"-{hours} hours",),
+                          baseline.scu_buy AS previous_supply, latest.scu_buy AS current_supply,
+                          baseline.scu_sell AS previous_demand, latest.scu_sell AS current_demand,
+                          CASE WHEN baseline.scu_buy IS NULL OR latest.scu_buy IS NULL THEN NULL
+                               ELSE latest.scu_buy - baseline.scu_buy END AS supply_change,
+                          CASE WHEN baseline.scu_sell IS NULL OR latest.scu_sell IS NULL THEN NULL
+                               ELSE latest.scu_sell - baseline.scu_sell END AS demand_change
+                   FROM latest
+                   JOIN baseline
+                     ON baseline.id_commodity = latest.id_commodity AND baseline.id_terminal = latest.id_terminal
+                   WHERE latest.rn = 1""",
+                (f"-{hours} hours", f"-{hours} hours"),
             )
             return [dict(row) for row in await cursor.fetchall()]
 
@@ -1479,7 +3253,34 @@ class Database:
                 )
                 count += 1
             await db.commit()
+        await self.prune_liquidity_snapshots()
         return count
+
+    async def prune_liquidity_snapshots(self) -> int:
+        """Drop liquidity snapshots older than LIQUIDITY_SNAPSHOT_RETENTION_DAYS. Hourly
+        snapshots of ~500 items grew this table by ~12k rows a day with no end (445k rows
+        after 37 days on the Pi), and nothing reads further back than 7 days. The full
+        history still lives in the PC's archived deploy backups (scripts/sync_pi_backups.sh).
+
+        Deleted in small batches, each its own transaction: the first run on the Pi's
+        backlog removes ~278k rows, which as one DELETE held the write lock for 8s on a PC -
+        several times that on the Pi, long enough for other writers to hit the 30s busy
+        timeout. At most LIQUIDITY_PRUNE_MAX_BATCHES per call, so a backlog drains over a
+        few hourly runs instead of one long stall. Returns the number of rows deleted."""
+        deleted = 0
+        async with self.connect() as db:
+            for _ in range(LIQUIDITY_PRUNE_MAX_BATCHES):
+                cursor = await db.execute(
+                    """DELETE FROM liquidity_score_snapshots WHERE rowid IN (
+                           SELECT rowid FROM liquidity_score_snapshots
+                           WHERE recorded_hour < datetime('now', ?) LIMIT ?)""",
+                    (f"-{LIQUIDITY_SNAPSHOT_RETENTION_DAYS} days", LIQUIDITY_PRUNE_BATCH_ROWS),
+                )
+                await db.commit()
+                deleted += cursor.rowcount
+                if cursor.rowcount < LIQUIDITY_PRUNE_BATCH_ROWS:
+                    break
+        return deleted
 
     async def get_top_liquidity_items(self, limit: int = 10) -> list[dict[str, Any]]:
         """Returns the top N items with the highest liquidity scores."""
@@ -2341,13 +4142,27 @@ class Database:
                 (status, quantity_sold, unsold, job_id),
             )
             await db.commit()
+            # A job only ever reaches needs_confirmation with listing_id still NULL via an
+            # ambiguous POST (mark_inventory_post_failed(ambiguous=True) - a network error or
+            # missing id_listing after the POST itself) or an interrupted-while-posting flag
+            # (flag_stale_inventory_post_jobs) - in both cases UEX's own acceptance of that
+            # POST was never confirmed one way or the other, so a still-live, un-tracked
+            # listing may already exist. Every other needs_confirmation path (both call sites
+            # of mark_inventory_post_needs_confirmation) only fires after independently
+            # observing GET /marketplace_listings return empty for that listing_id - i.e. the
+            # listing is confirmed gone - so relisting there is safe. Releasing the local
+            # reservation above is always safe (it never touches UEX); only *automatically
+            # queuing a new POST* risks a real duplicate, so only that is gated here.
+            original_listing_unresolved = job["listing_id"] is None
             return {
                 "inventory_id": job["inventory_id"],
                 "unsold": unsold,
                 "sold": quantity_sold,
-                "auto_relist": bool(job["auto_relist"]),
+                "auto_relist": bool(job["auto_relist"]) and not original_listing_unresolved,
                 "relist_count": job["relist_count"] + 1,
                 "pricing_strategy": job["pricing_strategy"],
+                "custom_price": job["custom_price"],
+                "original_listing_unresolved": original_listing_unresolved,
             }
 
     @staticmethod
@@ -2372,7 +4187,7 @@ class Database:
         user_id: int,
         commodity_name: str,
         ship_query: str | None = None,
-        scope: str = "global",
+        scope: str = "personal",
     ) -> int:
         async with self.connect() as db:
             cursor = await db.execute(
@@ -2457,6 +4272,14 @@ class Database:
             row = await cursor.fetchone()
             return row["channel_id"] if row else None
 
+    async def clear_scanner_channel(self, user_id: int) -> bool:
+        """Turn a user's deal scanner off. True if it was on. Their seen-deal rows are kept,
+        so turning it back on doesn't re-send deals they were already shown."""
+        async with self.connect() as db:
+            cursor = await db.execute("DELETE FROM user_scanner_channel WHERE user_id = ?", (user_id,))
+            await db.commit()
+            return cursor.rowcount > 0
+
     async def list_scanner_watchers(self) -> list[dict[str, Any]]:
         """Every user with a scanner channel configured - polled by the background loop."""
         async with self.connect() as db:
@@ -2479,3 +4302,403 @@ class Database:
                 (user_id, listing_id),
             )
             await db.commit()
+
+    # -- Blueprint search snapshot ------------------------------------------------------------
+
+    async def replace_blueprint_snapshot(
+        self, missions: list[BlueprintMission], *, game_version: str, synced_at: datetime | None = None,
+    ) -> tuple[int, int]:
+        """Replace the whole blueprint snapshot with `missions` in ONE transaction: a failure at any
+        point (a bad row, a full disk, a lock timeout) rolls everything back, leaving the previous
+        snapshot fully intact - never a half-old, half-new mix, never an empty table. Returns
+        ``(mission_count, distinct_blueprint_count)``. An empty list is refused outright: replacing a
+        good snapshot with nothing is a wipe, whatever the caller thought it fetched."""
+        if not missions:
+            raise ValueError("refusing to replace the blueprint snapshot with zero missions")
+        stamp = (synced_at or datetime.now(timezone.utc)).replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S")
+        blueprint_ids = {ref.uuid for mission in missions for ref in mission.pool}
+        async with self.connect() as db:
+            try:
+                await db.execute("DELETE FROM blueprint_pool_entries")
+                await db.execute("DELETE FROM blueprint_missions")
+                await db.executemany(
+                    """INSERT INTO blueprint_missions
+                       (mission_uuid, title, giver, debug_name, rank_name, rank_index, reputation,
+                        star_systems, illegal, reward_scope, game_version)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    [
+                        (m.uuid, m.title, m.giver, m.debug_name, m.rank_name, m.rank_index, m.reputation,
+                         json.dumps(list(m.star_systems)), 1 if m.illegal else 0, m.reward_scope, m.game_version)
+                        for m in missions
+                    ],
+                )
+                await db.executemany(
+                    "INSERT INTO blueprint_pool_entries (mission_uuid, blueprint_uuid, blueprint_name) VALUES (?, ?, ?)",
+                    [(m.uuid, ref.uuid, ref.name) for m in missions for ref in m.pool],
+                )
+                await db.execute(
+                    """INSERT INTO blueprint_snapshot_state (id, game_version, synced_at, mission_count, blueprint_count)
+                       VALUES (1, ?, ?, ?, ?)
+                       ON CONFLICT(id) DO UPDATE SET game_version = excluded.game_version,
+                           synced_at = excluded.synced_at, mission_count = excluded.mission_count,
+                           blueprint_count = excluded.blueprint_count""",
+                    (game_version, stamp, len(missions), len(blueprint_ids)),
+                )
+                await db.commit()
+            except BaseException:
+                await db.rollback()
+                raise
+        return len(missions), len(blueprint_ids)
+
+    async def get_blueprint_snapshot_state(self) -> SnapshotState | None:
+        async with self.connect() as db:
+            cursor = await db.execute(
+                "SELECT game_version, synced_at, mission_count, blueprint_count FROM blueprint_snapshot_state WHERE id = 1"
+            )
+            row = await cursor.fetchone()
+        if row is None:
+            return None
+        return SnapshotState(
+            game_version=row["game_version"],
+            synced_at=datetime.strptime(row["synced_at"], "%Y-%m-%d %H:%M:%S"),
+            mission_count=row["mission_count"],
+            blueprint_count=row["blueprint_count"],
+        )
+
+    async def get_blueprint_refs(self) -> list[BlueprintRef]:
+        """Every distinct blueprint any stored mission can award - the autocomplete/matching universe."""
+        async with self.connect() as db:
+            cursor = await db.execute(
+                "SELECT DISTINCT blueprint_uuid, blueprint_name FROM blueprint_pool_entries ORDER BY blueprint_name, blueprint_uuid"
+            )
+            return [BlueprintRef(row["blueprint_uuid"], row["blueprint_name"]) for row in await cursor.fetchall()]
+
+    async def get_blueprint_missions(self, blueprint_uuids: list[str]) -> list[BlueprintMission]:
+        """Every stored mission whose pool contains any of `blueprint_uuids`, each with its FULL pool
+        (pool size and composition matter for telling look-alike contracts apart)."""
+        if not blueprint_uuids:
+            return []
+        marks = ",".join("?" for _ in blueprint_uuids)
+        async with self.connect() as db:
+            cursor = await db.execute(
+                f"SELECT DISTINCT mission_uuid FROM blueprint_pool_entries WHERE blueprint_uuid IN ({marks})",
+                blueprint_uuids,
+            )
+            mission_ids = [row["mission_uuid"] for row in await cursor.fetchall()]
+            missions: list[BlueprintMission] = []
+            # SQLite's default variable cap is 999; chunk so a very common blueprint can't exceed it.
+            for start in range(0, len(mission_ids), 500):
+                chunk = mission_ids[start:start + 500]
+                chunk_marks = ",".join("?" for _ in chunk)
+                pool_rows = await (await db.execute(
+                    f"""SELECT mission_uuid, blueprint_uuid, blueprint_name FROM blueprint_pool_entries
+                        WHERE mission_uuid IN ({chunk_marks}) ORDER BY blueprint_name, blueprint_uuid""",
+                    chunk,
+                )).fetchall()
+                pools: dict[str, list[BlueprintRef]] = {}
+                for row in pool_rows:
+                    pools.setdefault(row["mission_uuid"], []).append(BlueprintRef(row["blueprint_uuid"], row["blueprint_name"]))
+                mission_rows = await (await db.execute(
+                    f"SELECT * FROM blueprint_missions WHERE mission_uuid IN ({chunk_marks})", chunk,
+                )).fetchall()
+                for row in mission_rows:
+                    missions.append(BlueprintMission(
+                        uuid=row["mission_uuid"], title=row["title"], giver=row["giver"],
+                        debug_name=row["debug_name"], rank_name=row["rank_name"], rank_index=row["rank_index"],
+                        reputation=row["reputation"], star_systems=tuple(json.loads(row["star_systems"] or "[]")),
+                        illegal=bool(row["illegal"]), reward_scope=row["reward_scope"],
+                        game_version=row["game_version"], pool=tuple(pools.get(row["mission_uuid"], ())),
+                    ))
+        return sorted(missions, key=lambda m: (m.giver.lower(), m.title.lower(), m.uuid))
+
+    # -- Blueprint shopping plans: immutable per-add snapshots, owner/guild scoped --
+
+    async def add_blueprint_plan(self, user_id: int, guild_id: int, request_id: str, plan: dict) -> None:
+        payload = json.dumps(plan, allow_nan=False, sort_keys=True)
+        async with self.connect() as db:
+            await db.execute(
+                "INSERT OR IGNORE INTO blueprint_shopping_entries (user_id, guild_id, request_id, plan_json) VALUES (?, ?, ?, ?)",
+                (user_id, guild_id, request_id, payload),
+            )
+            await db.commit()
+
+    async def get_blueprint_plans(self, user_id: int, guild_id: int) -> list[dict]:
+        async with self.connect() as db:
+            rows = await (await db.execute(
+                "SELECT id, plan_json FROM blueprint_shopping_entries WHERE user_id=? AND guild_id=? ORDER BY id",
+                (user_id, guild_id),
+            )).fetchall()
+        return [{"id": row["id"], "plan": json.loads(row["plan_json"])} for row in rows]
+
+    async def remove_blueprint_plan(self, user_id: int, guild_id: int, entry_id: int) -> bool:
+        async with self.connect() as db:
+            cursor = await db.execute(
+                "DELETE FROM blueprint_shopping_entries WHERE user_id=? AND guild_id=? AND id=?",
+                (user_id, guild_id, entry_id),
+            )
+            await db.commit()
+            return cursor.rowcount > 0
+
+    async def clear_blueprint_plans(self, user_id: int, guild_id: int) -> None:
+        async with self.connect() as db:
+            await db.execute("DELETE FROM blueprint_shopping_entries WHERE user_id=? AND guild_id=?", (user_id, guild_id))
+            await db.commit()
+
+    async def get_blueprint_thread(self, user_id: int, guild_id: int) -> dict | None:
+        async with self.connect() as db:
+            row = await (await db.execute(
+                "SELECT * FROM blueprint_shopping_threads WHERE user_id=? AND guild_id=?", (user_id, guild_id),
+            )).fetchone()
+            return dict(row) if row else None
+
+    async def get_blueprint_thread_owner(self, thread_id: int) -> dict | None:
+        async with self.connect() as db:
+            row = await (await db.execute(
+                "SELECT * FROM blueprint_shopping_threads WHERE thread_id=?", (thread_id,),
+            )).fetchone()
+            return dict(row) if row else None
+
+    async def set_blueprint_thread(self, user_id: int, guild_id: int, thread_id: int, message_id: int | None) -> None:
+        async with self.connect() as db:
+            await db.execute(
+                """INSERT INTO blueprint_shopping_threads (user_id, guild_id, thread_id, message_id) VALUES (?, ?, ?, ?)
+                   ON CONFLICT(user_id, guild_id) DO UPDATE SET thread_id=excluded.thread_id, message_id=excluded.message_id""",
+                (user_id, guild_id, thread_id, message_id),
+            )
+            await db.commit()
+
+    async def delete_blueprint_thread(self, user_id: int, guild_id: int) -> None:
+        async with self.connect() as db:
+            await db.execute(
+                "DELETE FROM blueprint_shopping_threads WHERE user_id=? AND guild_id=?", (user_id, guild_id),
+            )
+            await db.commit()
+
+    async def replace_ship_parts_reference(self, id_vehicle: int, vehicle_name: str, ports: list[dict]) -> None:
+        """Wholesale replace one ship's port rows in one transaction - never a patch-in-place,
+        so a failed or partial collector run for this ship can't leave a half-old, half-new
+        mix. Each port dict needs name/port_type/size_min/size_max and optionally
+        accepts_guns, port_tags and required_tags (lists), editable, and equipped_uuid
+        (matches bot.uex.ship_parts.ShipPort's fields)."""
+        async with self.connect() as db:
+            await db.execute("DELETE FROM ship_parts_reference WHERE id_vehicle=?", (id_vehicle,))
+            await db.executemany(
+                """INSERT INTO ship_parts_reference
+                   (id_vehicle, vehicle_name, port_name, port_type, size_min, size_max, accepts_guns, port_tags,
+                    editable, required_tags, equipped_uuid)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                [
+                    (id_vehicle, vehicle_name, port["name"], port["port_type"], port["size_min"], port["size_max"],
+                     1 if port.get("accepts_guns") else 0, " ".join(port.get("port_tags") or []),
+                     0 if port.get("editable") is False else 1, " ".join(port.get("required_tags") or []),
+                     port.get("equipped_uuid") or "")
+                    for port in ports
+                ],
+            )
+            await db.commit()
+
+    async def mark_ship_parts_refreshed(self, id_vehicle: int, port_count: int) -> None:
+        async with self.connect() as db:
+            await db.execute(
+                """INSERT INTO ship_parts_reference_status (id_vehicle, refreshed_at, port_count)
+                   VALUES (?, datetime('now'), ?)
+                   ON CONFLICT(id_vehicle) DO UPDATE SET refreshed_at=excluded.refreshed_at,
+                                                         port_count=excluded.port_count""",
+                (id_vehicle, port_count),
+            )
+            await db.commit()
+
+    async def get_fresh_ship_parts_vehicles(self, max_age_hours: float) -> set[int]:
+        """Ships whose slots the wiki was asked about within the last max_age_hours."""
+        async with self.connect() as db:
+            rows = await (await db.execute(
+                "SELECT id_vehicle FROM ship_parts_reference_status WHERE refreshed_at > datetime('now', ?)",
+                (f"-{max_age_hours} hours",),
+            )).fetchall()
+            return {row[0] for row in rows}
+
+    async def get_ship_parts_reference(self, id_vehicle: int) -> list[dict]:
+        async with self.connect() as db:
+            rows = await (await db.execute(
+                "SELECT * FROM ship_parts_reference WHERE id_vehicle=? ORDER BY port_name", (id_vehicle,),
+            )).fetchall()
+            return [dict(row) for row in rows]
+
+    async def set_ship_parts_entry(
+        self, user_id: int, guild_id: int, id_vehicle: int, vehicle_name: str, category: str,
+        port_name: str, id_item: int, item_name: str, id_terminal: int | None, terminal_name: str | None,
+        price_buy: float | None, locked_at: str,
+    ) -> None:
+        """Locks in one physical slot's part for (user, guild, ship, category, port_name) -
+        replaces any previously locked part for that same slot rather than accumulating
+        duplicates. Keyed on port_name (not just category) since a ship can have multiple
+        independent slots in the same category, e.g. two differently-sized turrets."""
+        async with self.connect() as db:
+            await db.execute(
+                """INSERT INTO ship_parts_shopping_entries
+                   (user_id, guild_id, id_vehicle, vehicle_name, category, port_name, id_item,
+                    item_name, id_terminal, terminal_name, price_buy, locked_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(user_id, guild_id, id_vehicle, category, port_name) DO UPDATE SET
+                       id_item=excluded.id_item, item_name=excluded.item_name,
+                       id_terminal=excluded.id_terminal, terminal_name=excluded.terminal_name,
+                       price_buy=excluded.price_buy, locked_at=excluded.locked_at""",
+                (user_id, guild_id, id_vehicle, vehicle_name, category, port_name, id_item, item_name,
+                 id_terminal, terminal_name, price_buy, locked_at),
+            )
+            await db.commit()
+
+    async def get_ship_parts_entries(self, user_id: int, guild_id: int) -> list[dict]:
+        async with self.connect() as db:
+            rows = await (await db.execute(
+                """SELECT * FROM ship_parts_shopping_entries WHERE user_id=? AND guild_id=?
+                   ORDER BY vehicle_name, category, port_name""",
+                (user_id, guild_id),
+            )).fetchall()
+            return [dict(row) for row in rows]
+
+    async def clear_ship_parts_entries(self, user_id: int, guild_id: int) -> None:
+        async with self.connect() as db:
+            await db.execute(
+                "DELETE FROM ship_parts_shopping_entries WHERE user_id=? AND guild_id=?", (user_id, guild_id),
+            )
+            await db.commit()
+
+    async def remove_ship_parts_entry(
+        self, user_id: int, guild_id: int, id_vehicle: int, category: str, port_name: str,
+    ) -> None:
+        """Removes one locked-in slot without touching the rest of the list - the same
+        composite primary key set_ship_parts_entry keys its own upsert on."""
+        async with self.connect() as db:
+            await db.execute(
+                """DELETE FROM ship_parts_shopping_entries
+                   WHERE user_id=? AND guild_id=? AND id_vehicle=? AND category=? AND port_name=?""",
+                (user_id, guild_id, id_vehicle, category, port_name),
+            )
+            await db.commit()
+
+    async def get_ship_parts_thread(self, user_id: int, guild_id: int) -> dict | None:
+        async with self.connect() as db:
+            row = await (await db.execute(
+                "SELECT * FROM ship_parts_shopping_threads WHERE user_id=? AND guild_id=?", (user_id, guild_id),
+            )).fetchone()
+            return dict(row) if row else None
+
+    async def get_ship_parts_thread_owner(self, thread_id: int) -> dict | None:
+        async with self.connect() as db:
+            row = await (await db.execute(
+                "SELECT * FROM ship_parts_shopping_threads WHERE thread_id=?", (thread_id,),
+            )).fetchone()
+            return dict(row) if row else None
+
+    async def set_ship_parts_thread(self, user_id: int, guild_id: int, thread_id: int, message_id: int | None) -> None:
+        async with self.connect() as db:
+            await db.execute(
+                """INSERT INTO ship_parts_shopping_threads (user_id, guild_id, thread_id, message_id) VALUES (?, ?, ?, ?)
+                   ON CONFLICT(user_id, guild_id) DO UPDATE SET thread_id=excluded.thread_id, message_id=excluded.message_id""",
+                (user_id, guild_id, thread_id, message_id),
+            )
+            await db.commit()
+
+    async def delete_ship_parts_thread(self, user_id: int, guild_id: int) -> None:
+        async with self.connect() as db:
+            await db.execute(
+                "DELETE FROM ship_parts_shopping_threads WHERE user_id=? AND guild_id=?", (user_id, guild_id),
+            )
+            await db.commit()
+
+    async def record_command_usage(self, command_name: str, user_id: int, username: str) -> None:
+        """Best-effort usage counter for /command-usage - see command_usage_by_user's own
+        schema comment for why this is one aggregated row per (command, user), not a
+        per-invocation log. Deliberately records the raw user_id and nothing about
+        "ownership" - excluding the bot owner's own testing from a real-usage report is
+        get_command_usage_stats' job at read time, not this method's. username is
+        overwritten on every call (not set-once), so it always reflects the user's current
+        display name as of their last use of THIS command."""
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        async with self.connect() as db:
+            await db.execute(
+                """INSERT INTO command_usage_by_user (command_name, user_id, username, use_count, last_used_at)
+                   VALUES (?, ?, ?, 1, ?)
+                   ON CONFLICT(command_name, user_id) DO UPDATE SET
+                       username = excluded.username,
+                       use_count = use_count + 1,
+                       last_used_at = excluded.last_used_at""",
+                (command_name, user_id, username, now),
+            )
+            await db.commit()
+
+    async def get_command_users(self, command_name: str, owner_ids: set[int]) -> list[dict[str, Any]]:
+        """Who has actually run this specific command (owner_ids excluded), ranked by use
+        count - the per-command drill-down /command-usage's command option shows, meant for
+        picking real users to reach out to for feedback, not just seeing a count."""
+        owner_ids = owner_ids or set()
+        # Built conditionally, never as a NULL placeholder - audit-confirmed defect.
+        # SQLite evaluates `x NOT IN (NULL)` as NULL for every row (never true), so
+        # `placeholders = ... or "NULL"` used to silently turn an empty owner_ids (reachable
+        # via this command's own autocomplete callback before bot.is_owner() has ever run
+        # and populated owner_id/owner_ids) into "match nobody" instead of "nobody to
+        # exclude, everyone is real."
+        if owner_ids:
+            placeholders = ",".join("?" for _ in owner_ids)
+            exclude_clause = f"AND user_id NOT IN ({placeholders})"
+            params: tuple = (command_name, *owner_ids)
+        else:
+            exclude_clause = ""
+            params = (command_name,)
+        async with self.connect() as db:
+            rows = await (await db.execute(
+                f"""SELECT user_id, username, use_count, last_used_at
+                    FROM command_usage_by_user
+                    WHERE command_name = ? {exclude_clause}
+                    ORDER BY use_count DESC, last_used_at DESC""",
+                params,
+            )).fetchall()
+            return [dict(row) for row in rows]
+
+    async def get_command_usage_stats(self, owner_ids: set[int]) -> list[dict[str, Any]]:
+        """One row per command: total_count/owner_count/last_used_at across every user, plus
+        the same three figures with owner_ids excluded (real_count/last_used_excluding_owner_at)
+        and distinct_real_users - how many non-owner users have ever run it at all, the
+        clearest single "is anyone actually using this" signal for trimming. owner_ids is a
+        set (not a single id) to cover a team-owned Discord application, where discord.py
+        populates bot.owner_ids instead of a single bot.owner_id - see UexBot.is_owner."""
+        owner_ids = owner_ids or set()
+        async with self.connect() as db:
+            if owner_ids:
+                # Built conditionally, never as a NULL placeholder - see get_command_users'
+                # own comment for why `placeholders = ... or "NULL"` was a real bug
+                # (`x NOT IN (NULL)` is NULL, never true, for every row in SQLite).
+                placeholders = ",".join("?" for _ in owner_ids)
+                cursor = await db.execute(
+                    f"""SELECT command_name,
+                               SUM(use_count) AS total_count,
+                               SUM(CASE WHEN user_id IN ({placeholders}) THEN use_count ELSE 0 END) AS owner_count,
+                               MAX(last_used_at) AS last_used_at,
+                               MAX(CASE WHEN user_id NOT IN ({placeholders}) THEN last_used_at END)
+                                   AS last_used_excluding_owner_at,
+                               COUNT(DISTINCT CASE WHEN user_id NOT IN ({placeholders}) THEN user_id END)
+                                   AS distinct_real_users
+                        FROM command_usage_by_user
+                        GROUP BY command_name
+                        ORDER BY (SUM(use_count) - SUM(CASE WHEN user_id IN ({placeholders}) THEN use_count ELSE 0 END)) DESC,
+                                 command_name""",
+                    (*owner_ids, *owner_ids, *owner_ids, *owner_ids),
+                )
+            else:
+                # No owner id known yet (reachable via this command's own autocomplete
+                # callback before bot.is_owner() has ever run and populated owner_id/
+                # owner_ids) - nobody to exclude, so every user counts as real.
+                cursor = await db.execute(
+                    """SELECT command_name,
+                              SUM(use_count) AS total_count,
+                              0 AS owner_count,
+                              MAX(last_used_at) AS last_used_at,
+                              MAX(last_used_at) AS last_used_excluding_owner_at,
+                              COUNT(DISTINCT user_id) AS distinct_real_users
+                       FROM command_usage_by_user
+                       GROUP BY command_name
+                       ORDER BY SUM(use_count) DESC, command_name"""
+                )
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]

@@ -2,17 +2,20 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 import time
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
-from bot.uex.exceptions import UexApiError
+from bot.delivery import fit_lines
+from bot.discord_ui import BotModal, BotView
+from bot.uex.exceptions import UexApiError, UexRejectedError
 from bot.uex.inventory import (
     DEFAULT_MARKETPLACE_TIMEZONE,
     PriceRecommendation,
@@ -38,6 +41,39 @@ SELECTION_PAGE_SIZE = 25
 MAX_BATCH_POSTS = 10
 MAX_TRACKED_POSTS_PER_CYCLE = 50
 RECONCILE_FETCH_BATCH_SIZE = 10
+
+# Discord's real limit is on one embed's TOTAL text (title + description + every field's
+# name and value + footer), not just each individual field's own 1024-char cap - ten
+# individually-legal inventory fields (long locations/notes, active-job status lines) can
+# still sum well past this, and Discord rejects the entire send in that case. Reserve
+# leaves headroom for this command's own title/description/footer overhead, computed once
+# rather than re-measured per page.
+DISCORD_EMBED_TOTAL_CHAR_LIMIT = 6000
+_INVENTORY_EMBED_OVERHEAD_RESERVE = 400
+
+
+def _paginate_inventory_fields(
+    fields: list[tuple[str, str]], *, max_per_page: int
+) -> list[list[tuple[str, str]]]:
+    """Group (name, value) field pairs into pages honoring both a max row count per page
+    and Discord's combined embed-size limit - a fixed row-count cap alone doesn't protect
+    the total, so a page that would otherwise overflow splits into an extra page instead of
+    either failing to send or silently dropping rows."""
+    pages: list[list[tuple[str, str]]] = []
+    current: list[tuple[str, str]] = []
+    current_chars = 0
+    budget = DISCORD_EMBED_TOTAL_CHAR_LIMIT - _INVENTORY_EMBED_OVERHEAD_RESERVE
+    for name, value in fields:
+        field_chars = len(name) + len(value)
+        if current and (len(current) >= max_per_page or current_chars + field_chars > budget):
+            pages.append(current)
+            current = []
+            current_chars = 0
+        current.append((name, value))
+        current_chars += field_chars
+    if current:
+        pages.append(current)
+    return pages or [[]]
 
 # Fresh listings may not be visible via GET /marketplace_listings yet if UEX staff approval
 # is still pending. This grace period is an unvalidated guess, not an observed figure - we
@@ -88,6 +124,67 @@ async def inventory_item_autocomplete(
     ]
 
 
+def _stack_label(row: dict[str, Any]) -> str:
+    """One inventory stack in an autocomplete list: enough to tell two stacks of the same
+    item apart (quality, place) and to see how much is already listed."""
+    parts = [f"#{row['id']} {row['item_name']}"]
+    if row.get("quality"):
+        parts.append(f"q{row['quality']}")
+    listed = int(row.get("reserved_quantity") or 0)
+    parts.append(f"×{row['quantity']}" + (f" ({listed} listed)" if listed else ""))
+    if row.get("location"):
+        parts.append(str(row["location"]))
+    return " · ".join(parts)[:100]
+
+
+def _autocomplete_matches(query: str, label: str) -> bool:
+    """A typed number means the stack or job number itself (not a quantity like ×32);
+    anything else matches anywhere in the label."""
+    number = query.lstrip("#")
+    if number.isdigit():
+        return label.startswith(f"#{number}")
+    return not query or query in label.lower()
+
+
+async def inventory_stack_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[int]]:
+    """The player's own stacks, so the inventory commands don't need the number copied out
+    of /inventory first (audit UX-10). Typing the number still works."""
+    rows = await interaction.client.db.list_inventory(interaction.user.id)
+    query = current.strip().lower()
+    labels = [(_stack_label(row), int(row["id"])) for row in rows]
+    return [app_commands.Choice(name=label, value=stack_id)
+            for label, stack_id in labels if _autocomplete_matches(query, label)][:25]
+
+
+_JOB_STATUS_TEXT = {"pending": "scheduled", "listed": "listed", "needs_confirmation": "needs confirming"}
+
+
+def _job_autocomplete(applies: Callable[[dict[str, Any]], bool]):
+    """Posting jobs a command can act on, e.g. only the ones waiting on a sale confirmation
+    for /inventory-confirm-sale (audit UX-10)."""
+    async def autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[int]]:
+        db = interaction.client.db
+        jobs = [job for job in await db.list_active_inventory_jobs(interaction.user.id) if applies(job)]
+        names = {int(row["id"]): row["item_name"] for row in await db.list_inventory(interaction.user.id)}
+        query = current.strip().lower()
+        choices = []
+        for job in jobs:
+            label = (f"#{job['id']} {names.get(int(job['inventory_id']), 'item')} ×{job['quantity']}"
+                     f" · {_JOB_STATUS_TEXT.get(job['status'], job['status'])}")[:100]
+            if _autocomplete_matches(query, label):
+                choices.append(app_commands.Choice(name=label, value=int(job["id"])))
+        return choices[:25]
+    return autocomplete
+
+
+confirm_sale_job_autocomplete = _job_autocomplete(lambda job: job["status"] == "needs_confirmation")
+cancel_post_job_autocomplete = _job_autocomplete(
+    lambda job: job["status"] in {"pending", "listed", "needs_confirmation"})
+floor_job_autocomplete = _job_autocomplete(lambda job: job["status"] == "listed" and not job.get("auto_relist"))
+
+
 class InventoryEntrySelect(discord.ui.Select):
     def __init__(self, owner: "InventorySelectionView") -> None:
         self.owner = owner
@@ -129,7 +226,7 @@ class InventoryEntrySelect(discord.ui.Select):
         )
 
 
-class InventorySelectionView(discord.ui.View):
+class InventorySelectionView(BotView):
     def __init__(self, cog: "PersonalInventory", author_id: int, rows: list[dict[str, Any]]) -> None:
         super().__init__(timeout=300)
         self.cog = cog
@@ -157,6 +254,7 @@ class InventorySelectionView(discord.ui.View):
         )
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        await super().interaction_check(interaction)
         if interaction.user.id != self.author_id:
             await interaction.response.send_message("This inventory menu belongs to someone else.", ephemeral=True)
             return False
@@ -200,10 +298,10 @@ class InventorySelectionView(discord.ui.View):
         selected = [row for row in self.rows if int(row["id"]) in self.selected_ids]
         missing_floor = [row for row in selected if not row.get("minimum_price")]
         if missing_floor:
-            await interaction.followup.send(
+            view = SetMinimumPricesView(self.cog, self.author_id, selected, missing_floor)
+            view.message = await interaction.followup.send(
                 "Set a minimum price before these can be authorized - never posted or relisted below it.",
-                view=SetMinimumPricesView(self.cog, self.author_id, selected, missing_floor),
-                ephemeral=True,
+                view=view, ephemeral=True, wait=True,
             )
             return
 
@@ -212,13 +310,13 @@ class InventorySelectionView(discord.ui.View):
             await interaction.followup.send("None of those stacks currently has unreserved inventory.", ephemeral=True)
             return
         embed, view = result
-        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+        view.message = await interaction.followup.send(embed=embed, view=view, ephemeral=True, wait=True)
 
 
 MAX_MINIMUM_PRICE_BUTTONS = 24  # a View caps at 25 components total; leave one for Cancel
 
 
-class SetMinimumPricesView(discord.ui.View):
+class SetMinimumPricesView(BotView):
     """Lets /inventory-sell set a missing minimum price inline instead of dead-ending with
     "run /inventory-set-minimum and start over" - one button per stack that still needs a
     floor. The moment the last one gets set, this same message turns into the authorize
@@ -238,6 +336,7 @@ class SetMinimumPricesView(discord.ui.View):
         self._rebuild()
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        await super().interaction_check(interaction)
         if interaction.user.id != self.author_id:
             await interaction.response.send_message("This menu belongs to someone else.", ephemeral=True)
             return False
@@ -285,6 +384,9 @@ class SetMinimumPricesView(discord.ui.View):
             return
 
         result = await self.cog._build_authorize_screen(self.author_id, self.selected)
+        # This message is about to lose this view, so stop it: its timeout would otherwise put
+        # its greyed-out buttons back on the message.
+        self.stop()
         if result is None:
             await interaction.response.edit_message(
                 content="None of those stacks currently has unreserved inventory.", embed=None, view=None
@@ -292,9 +394,10 @@ class SetMinimumPricesView(discord.ui.View):
             return
         embed, view = result
         await interaction.response.edit_message(content=None, embed=embed, view=view)
+        view.origin = interaction
 
 
-class SetMinimumModal(discord.ui.Modal, title="Set a minimum price"):
+class SetMinimumModal(BotModal, title="Set a minimum price"):
     price_input: discord.ui.TextInput = discord.ui.TextInput(
         label="Minimum price per unit (UEC)",
         placeholder="e.g. 500000",
@@ -329,7 +432,12 @@ class SetMinimumModal(discord.ui.Modal, title="Set a minimum price"):
         await self.view.resolve_minimum_set(interaction, self.inventory_id, price)
 
 
-class AuthorizeScheduleView(discord.ui.View):
+# A modal holds at most five text inputs (a Discord limit), so a bigger batch is priced
+# five stacks per form.
+PRICES_PER_FORM = 5
+
+
+class AuthorizeScheduleView(BotView):
     def __init__(self, cog: "PersonalInventory", author_id: int, specs: list[dict[str, Any]]) -> None:
         super().__init__(timeout=180)
         self.cog = cog
@@ -337,9 +445,60 @@ class AuthorizeScheduleView(discord.ui.View):
         self.specs = specs
         self.resolved = False
         self.pricing_strategy = "balanced"
-        self.custom_price: int | None = None
+        # A custom price per stack, by inventory id. Every stack needs one before a custom
+        # batch can be authorized; an absolute price doesn't carry from one item to another.
+        self.custom_prices: dict[int, int] = {}
+        self.next_price_start = 0
+        self.price_button: discord.ui.Button = discord.ui.Button(style=discord.ButtonStyle.blurple, row=2)
+        self.price_button.callback = self.open_price_form  # type: ignore[method-assign]
+
+    def price_form_label(self) -> str:
+        total = len(self.specs)
+        if total <= PRICES_PER_FORM:
+            return "Change custom prices" if len(self.custom_prices) == total else "Set custom prices"
+        end = min(self.next_price_start + PRICES_PER_FORM, total)
+        verb = "Change" if len(self.custom_prices) == total else "Set"
+        return f"{verb} prices for stacks {self.next_price_start + 1}-{end} of {total}"
+
+    def sync_price_button(self) -> None:
+        """Shown while custom pricing is chosen, so a price can be changed (or the next five
+        set) without re-running /inventory-sell (audit UX-20)."""
+        if self.pricing_strategy == "custom" and not self.resolved:
+            self.price_button.label = self.price_form_label()
+            if self.price_button not in self.children:
+                self.add_item(self.price_button)
+        elif self.price_button in self.children:
+            self.remove_item(self.price_button)
+
+    async def open_price_form(self, interaction: discord.Interaction) -> None:
+        await interaction.response.send_modal(StackPricesModal(self, self.next_price_start))
+
+    async def stack_prices_saved(self, interaction: discord.Interaction) -> None:
+        """After a StackPricesModal saved its stacks: on to the five holding the first stack
+        still without a price, or list them all once every stack has one."""
+        total = len(self.specs)
+        unpriced = [i for i, spec in enumerate(self.specs) if spec["inventory_id"] not in self.custom_prices]
+        priced = total - len(unpriced)
+        self.pricing_strategy = "custom"
+        for option in self.choose_pricing_strategy.options:
+            option.default = option.value == "custom"
+        if unpriced:
+            self.next_price_start = unpriced[0] - unpriced[0] % PRICES_PER_FORM
+            self.sync_price_button()
+            content = (f"Custom prices set for {priced} of {total} stacks - tap **{self.price_button.label}** "
+                       "for the rest before authorizing.")
+        else:
+            self.next_price_start = 0
+            self.sync_price_button()
+            content = fit_lines(
+                ["Pricing strategy: **custom**",
+                 *(f"{stack_name(spec)}: **{self.custom_prices[spec['inventory_id']]:,} UEC/unit**"
+                   for spec in self.specs)],
+            )
+        await interaction.response.edit_message(content=content, view=self)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        await super().interaction_check(interaction)
         if interaction.user.id != self.author_id:
             await interaction.response.send_message("Only the inventory owner can authorize these posts.", ephemeral=True)
             return False
@@ -362,23 +521,17 @@ class AuthorizeScheduleView(discord.ui.View):
     async def choose_pricing_strategy(self, interaction: discord.Interaction, select: discord.ui.Select) -> None:
         chosen = select.values[0]
         if chosen == "custom":
-            if len(self.specs) != 1:
-                for option in select.options:
-                    option.default = option.value == self.pricing_strategy
-                await interaction.response.edit_message(
-                    content=(
-                        "Custom pricing works one stack at a time - re-run `/inventory-sell` and select "
-                        "just this stack to set an exact price."
-                    ),
-                    view=self,
-                )
-                return
-            await interaction.response.send_modal(
-                CustomPriceModal(self, minimum_price=int(self.specs[0]["minimum_price"]))
-            )
+            # A price for every stack, five per form. This used to refuse any batch of more
+            # than one stack and send the player back to /inventory-sell (audit UX-20).
+            # Custom from here on, so Authorize can't quietly fall back to another strategy
+            # while prices are missing; it asks for them instead.
+            self.pricing_strategy = "custom"
+            self.next_price_start = 0
+            await interaction.response.send_modal(StackPricesModal(self, 0))
             return
         self.pricing_strategy = chosen
-        self.custom_price = None
+        self.custom_prices.clear()
+        self.sync_price_button()
         for option in select.options:
             option.default = option.value == self.pricing_strategy
         await interaction.response.edit_message(
@@ -388,12 +541,22 @@ class AuthorizeScheduleView(discord.ui.View):
 
     @discord.ui.button(label="Authorize scheduled posts", style=discord.ButtonStyle.green)
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if self.pricing_strategy == "custom":
+            missing = [spec for spec in self.specs if spec["inventory_id"] not in self.custom_prices]
+            if missing:
+                self.sync_price_button()
+                await interaction.response.edit_message(
+                    content=(f"{len(missing)} of {len(self.specs)} stacks still need a custom price - tap "
+                             f"**{self.price_button.label}** first. Nothing was scheduled."),
+                    view=self,
+                )
+                return
         self.disable()
         await interaction.response.edit_message(view=self)
         for spec in self.specs:
             spec["pricing_strategy"] = self.pricing_strategy
             if self.pricing_strategy == "custom":
-                spec["custom_price"] = self.custom_price
+                spec["custom_price"] = self.custom_prices[spec["inventory_id"]]
         try:
             job_ids = await self.cog.bot.db.create_inventory_post_jobs(self.author_id, self.specs)
         except ValueError as exc:
@@ -411,12 +574,70 @@ class AuthorizeScheduleView(discord.ui.View):
         await interaction.followup.send("Cancelled—no inventory was reserved or scheduled.", ephemeral=True)
 
 
-class CustomPriceModal(discord.ui.Modal, title="Enter a custom price"):
-    """Shared by PostNowView (single item) and AuthorizeScheduleView (batch, gated to exactly
-    one selected stack - an absolute price doesn't scale across different items the way the
-    undercut/premium percentage strategies do). Either view just needs `.pricing_strategy`,
+def stack_name(spec: dict[str, Any]) -> str:
+    return f"#{spec['inventory_id']} {spec.get('item_name') or ''}".strip()
+
+
+class StackPricesModal(BotModal, title="Enter custom prices"):
+    """A custom price for each of up to five stacks of an /inventory-sell batch, each input
+    prefilled with any price already set. Saves the form's prices only if every one is valid;
+    otherwise it lists what's wrong on the same message and keeps nothing from the form."""
+
+    def __init__(self, view: AuthorizeScheduleView, start: int) -> None:
+        super().__init__()
+        self.view = view
+        self.start = start
+        self.stacks = view.specs[start:start + PRICES_PER_FORM]
+        self.inputs: list[discord.ui.TextInput] = []
+        for spec in self.stacks:
+            current = view.custom_prices.get(spec["inventory_id"])
+            text_input: discord.ui.TextInput = discord.ui.TextInput(
+                label=stack_name(spec)[:45],
+                placeholder=f"UEC per unit, at least {int(spec['minimum_price']):,}"[:100],
+                default=str(current) if current else None,
+                style=discord.TextStyle.short,
+                max_length=15,
+            )
+            self.add_item(text_input)
+            self.inputs.append(text_input)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        prices: dict[int, int] = {}
+        problems: list[str] = []
+        for spec, text_input in zip(self.stacks, self.inputs):
+            name = stack_name(spec)
+            minimum = int(spec["minimum_price"])
+            try:
+                price = int(text_input.value.strip().replace(",", ""))
+            except ValueError:
+                problems.append(f"{name}: not a whole number")
+                continue
+            if price < max(minimum, 1):
+                problems.append(f"{name}: below your minimum of {minimum:,} UEC" if price > 0
+                                else f"{name}: must be a positive whole number")
+                continue
+            prices[spec["inventory_id"]] = price
+        if problems:
+            self.view.next_price_start = self.start
+            self.view.sync_price_button()
+            await interaction.response.edit_message(
+                content=fit_lines(
+                    ["Nothing was saved from that form:", *problems],
+                    footer=(f"Tap **{self.view.price_button.label}** to try again (or lower a minimum first "
+                            "with `/inventory-set-minimum`)."),
+                ),
+                view=self.view,
+            )
+            return
+        self.view.custom_prices.update(prices)
+        await self.view.stack_prices_saved(interaction)
+
+
+class CustomPriceModal(BotModal, title="Enter a custom price"):
+    """PostNowView's custom price for its one stack (AuthorizeScheduleView's batches use
+    StackPricesModal, a price per stack). The view needs `.pricing_strategy`,
     `.custom_price`, and `.choose_pricing_strategy` (the decorated Select); minimum_price is
-    passed in explicitly so this modal doesn't need to know which shape of view it's on.
+    passed in explicitly.
     """
     price_input: discord.ui.TextInput = discord.ui.TextInput(
         label="Price per unit (UEC)",
@@ -425,7 +646,7 @@ class CustomPriceModal(discord.ui.Modal, title="Enter a custom price"):
         max_length=15,
     )
 
-    def __init__(self, view: "PostNowView | AuthorizeScheduleView", *, minimum_price: int) -> None:
+    def __init__(self, view: "PostNowView", *, minimum_price: int) -> None:
         super().__init__()
         self.view = view
         self.minimum_price = minimum_price
@@ -456,7 +677,7 @@ class CustomPriceModal(discord.ui.Modal, title="Enter a custom price"):
         )
 
 
-class PostNowView(discord.ui.View):
+class PostNowView(BotView):
     def __init__(self, cog: "PersonalInventory", author_id: int, entry: dict[str, Any], quantity: int) -> None:
         super().__init__(timeout=180)
         self.cog = cog
@@ -468,6 +689,7 @@ class PostNowView(discord.ui.View):
         self.resolved = False
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        await super().interaction_check(interaction)
         if interaction.user.id != self.author_id:
             await interaction.response.send_message("Only the inventory owner can confirm this.", ephemeral=True)
             return False
@@ -541,7 +763,7 @@ class PostNowView(discord.ui.View):
         await interaction.followup.send("Cancelled - nothing was posted.", ephemeral=True)
 
 
-class LowerFloorModal(discord.ui.Modal, title="Set a new minimum price"):
+class LowerFloorModal(BotModal, title="Set a new minimum price"):
     price_input: discord.ui.TextInput = discord.ui.TextInput(
         label="New minimum price per unit (UEC)",
         placeholder="e.g. 800000",
@@ -575,7 +797,7 @@ class LowerFloorModal(discord.ui.Modal, title="Set a new minimum price"):
         await interaction.response.edit_message(content=content, embed=None, view=self.view)
 
 
-class FloorReachedView(discord.ui.View):
+class FloorReachedView(BotView):
     """Sent as a plain DM (not an interaction followup), so it can arrive whenever the 48h
     discount cycle actually hits the floor - possibly hours after any command was run."""
 
@@ -733,19 +955,9 @@ class PersonalInventory(commands.Cog):
         jobs_by_inventory: dict[int, list[dict[str, Any]]] = {}
         for job in await self.bot.db.list_active_inventory_jobs(interaction.user.id):
             jobs_by_inventory.setdefault(int(job["inventory_id"]), []).append(job)
-        page_count = max(1, (len(rows) + INVENTORY_PAGE_SIZE - 1) // INVENTORY_PAGE_SIZE)
-        page = max(1, min(int(page), page_count))
-        start = (page - 1) * INVENTORY_PAGE_SIZE
-        embed = discord.Embed(
-            title=f"Personal inventory · page {page}/{page_count}",
-            description=(
-                "Item names open matching UEX postings, including sold-out rows UEX still exposes "
-                "(useful asking-price evidence, not proof of the final deal price). "
-                "Sellability is the same 0–100 rating used by `/liquidity-rank`."
-            ),
-            color=discord.Color.blurple(),
-        )
-        for row in rows[start : start + INVENTORY_PAGE_SIZE]:
+
+        fields: list[tuple[str, str]] = []
+        for row in rows:
             available = int(row["quantity"]) - int(row["reserved_quantity"])
             score = row.get("sellability_score")
             score_text = f"**{float(score):.0f}/100**" if score is not None else "still collecting"
@@ -762,18 +974,41 @@ class PersonalInventory(commands.Cog):
                 value += f"\n{_format_job_status(job)}"
             if row.get("notes"):
                 value += f"\nPrivate notes: {str(row['notes'])[:300]}"
-            embed.add_field(name=f"Inventory #{row['id']}", value=value[:1024], inline=False)
+            fields.append((f"Inventory #{row['id']}", value[:1024]))
+
+        # Page boundaries follow both the row-count cap AND Discord's total embed-size
+        # limit - a page that would otherwise overflow (long locations/notes, several
+        # active jobs per stack) splits into an extra page instead of failing to send.
+        pages = _paginate_inventory_fields(fields, max_per_page=INVENTORY_PAGE_SIZE)
+        page_count = len(pages)
+        page = max(1, min(int(page), page_count))
+        embed = discord.Embed(
+            title=f"Personal inventory · page {page}/{page_count}",
+            description=(
+                "Item names open matching UEX postings, including sold-out rows UEX still exposes "
+                "(useful asking-price evidence, not proof of the final deal price). "
+                "Sellability is the same 0–100 rating used by `/liquidity-rank`."
+            ),
+            color=discord.Color.blurple(),
+        )
+        for name, value in pages[page - 1]:
+            embed.add_field(name=name, value=value, inline=False)
         embed.set_footer(text="Use /inventory-sell to check off stacks for guarded automatic posting.")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="inventory-set-minimum", description="Set the hard UEC price floor for an inventory stack.")
-    @app_commands.describe(inventory_id="Number shown by /inventory", minimum_price="Never post below this UEC price per unit")
+    @app_commands.describe(inventory_id="Which stack - pick from the list", minimum_price="Never post below this UEC price per unit")
+    @app_commands.autocomplete(inventory_id=inventory_stack_autocomplete)
     async def inventory_set_minimum(
         self,
         interaction: discord.Interaction,
         inventory_id: int,
         minimum_price: app_commands.Range[int, 1, 2_000_000_000],
     ) -> None:
+        # Deferred before any DB write: a write can wait on a lock past Discord's
+        # 3-second window, and a player who sees "did not respond" retries into a
+        # duplicate (audit REL-8).
+        await interaction.response.defer(ephemeral=True)
         changed = await self.bot.db.set_inventory_minimum_price(
             interaction.user.id, inventory_id, int(minimum_price)
         )
@@ -785,28 +1020,33 @@ class PersonalInventory(commands.Cog):
             if changed
             else f"Inventory #{inventory_id} was not found in your inventory."
         )
-        await interaction.response.send_message(message, ephemeral=True)
+        await interaction.followup.send(message, ephemeral=True)
 
     @app_commands.command(name="inventory-remove", description="Remove an unreserved quantity from your personal inventory.")
-    @app_commands.describe(inventory_id="Number shown by /inventory", quantity="How many to remove")
+    @app_commands.describe(inventory_id="Which stack - pick from the list", quantity="How many to remove")
+    @app_commands.autocomplete(inventory_id=inventory_stack_autocomplete)
     async def inventory_remove(
         self,
         interaction: discord.Interaction,
         inventory_id: int,
         quantity: app_commands.Range[int, 1, 1_000_000],
     ) -> None:
+        # Deferred before any DB write: a write can wait on a lock past Discord's
+        # 3-second window, and a player who sees "did not respond" retries into a
+        # duplicate (audit REL-8).
+        await interaction.response.defer(ephemeral=True)
         try:
             remaining = await self.bot.db.remove_inventory_quantity(
                 interaction.user.id, inventory_id, int(quantity)
             )
         except ValueError as exc:
-            await interaction.response.send_message(str(exc), ephemeral=True)
+            await interaction.followup.send(str(exc), ephemeral=True)
             return
         if remaining is None:
             message = f"Inventory #{inventory_id} was not found in your inventory."
         else:
             message = f"Removed **{quantity}** from inventory #{inventory_id}; **{remaining}** remain."
-        await interaction.response.send_message(message, ephemeral=True)
+        await interaction.followup.send(message, ephemeral=True)
 
     @app_commands.command(name="inventory-sell", description="Check off inventory stacks to schedule guarded automatic UEX posting.")
     async def inventory_sell(self, interaction: discord.Interaction) -> None:
@@ -828,12 +1068,14 @@ class PersonalInventory(commands.Cog):
             return
         view = InventorySelectionView(self, interaction.user.id, available)
         await interaction.response.send_message(content=view.status_text, view=view, ephemeral=True)
+        view.origin = interaction
 
     @app_commands.command(
         name="inventory-post-now",
         description="Skip the scheduled window and post one inventory stack for sale on UEX right now.",
     )
-    @app_commands.describe(inventory_id="The inventory stack number, shown by /inventory")
+    @app_commands.describe(inventory_id="Which stack - pick from the list")
+    @app_commands.autocomplete(inventory_id=inventory_stack_autocomplete)
     async def inventory_post_now(self, interaction: discord.Interaction, inventory_id: int) -> None:
         if not await self.bot.db.has_linked_uex_account(interaction.user.id):
             await interaction.response.send_message(
@@ -886,25 +1128,31 @@ class PersonalInventory(commands.Cog):
             ),
             color=discord.Color.orange(),
         )
-        await interaction.followup.send(embed=embed, view=PostNowView(self, interaction.user.id, entry, available), ephemeral=True)
+        view = PostNowView(self, interaction.user.id, entry, available)
+        view.message = await interaction.followup.send(embed=embed, view=view, ephemeral=True, wait=True)
 
     @app_commands.command(name="inventory-confirm-sale", description="Resolve a tracked listing when UEX cannot prove how many sold.")
-    @app_commands.describe(job_id="Posting job number from the bot's warning", quantity_sold="How many actually sold; use 0 if none sold")
+    @app_commands.describe(job_id="Which listing - pick from the list", quantity_sold="How many actually sold; use 0 if none sold")
+    @app_commands.autocomplete(job_id=confirm_sale_job_autocomplete)
     async def inventory_confirm_sale(
         self,
         interaction: discord.Interaction,
         job_id: int,
         quantity_sold: app_commands.Range[int, 0, 1_000_000],
     ) -> None:
+        # Deferred before any DB write: a write can wait on a lock past Discord's
+        # 3-second window, and a player who sees "did not respond" retries into a
+        # duplicate (audit REL-8).
+        await interaction.response.defer(ephemeral=True)
         try:
             result = await self.bot.db.confirm_ambiguous_inventory_sale(
                 interaction.user.id, job_id, int(quantity_sold)
             )
         except ValueError as exc:
-            await interaction.response.send_message(str(exc), ephemeral=True)
+            await interaction.followup.send(str(exc), ephemeral=True)
             return
         if not result:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"Job #{job_id} is not one of your listings awaiting confirmation.", ephemeral=True
             )
             return
@@ -922,23 +1170,32 @@ class PersonalInventory(commands.Cog):
                             "auto_relist": True,
                             "relist_count": result["relist_count"],
                             "pricing_strategy": result["pricing_strategy"],
+                            "custom_price": result["custom_price"],
                         }
                     ],
                 )
             except ValueError as exc:
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     f"Recorded **{result['sold']}** sold for job #{job_id}, but the **{result['unsold']}** "
                     f"unsold remainder could not be rescheduled: {exc}. Use `/inventory-sell` to reschedule it manually.",
                     ephemeral=True,
                 )
                 return
             relist_note = f" The **{result['unsold']}** unsold item(s) were safely rescheduled as job #{new_jobs[0]}."
-        await interaction.response.send_message(
+        elif result["unsold"] and result["original_listing_unresolved"]:
+            relist_note = (
+                f" Job #{job_id}'s original post to UEX was never confirmed as accepted or rejected, so the bot "
+                f"cannot rule out a live listing already existing for it. The **{result['unsold']}** unsold item(s) "
+                "were NOT automatically relisted - check your UEX marketplace listings for a stray duplicate, then "
+                "use `/inventory-sell` yourself once you've confirmed there isn't one."
+            )
+        await interaction.followup.send(
             f"Recorded **{result['sold']}** sold for job #{job_id}.{relist_note}", ephemeral=True
         )
 
     @app_commands.command(name="inventory-cancel-post", description="Cancel a pending or active automatic inventory post.")
-    @app_commands.describe(job_id="Posting job number shown when the stack was scheduled")
+    @app_commands.describe(job_id="Which post - pick from the list")
+    @app_commands.autocomplete(job_id=cancel_post_job_autocomplete)
     async def inventory_cancel_post(self, interaction: discord.Interaction, job_id: int) -> None:
         job = await self.bot.db.get_inventory_post_job(interaction.user.id, job_id)
         if not job:
@@ -973,7 +1230,8 @@ class PersonalInventory(commands.Cog):
         name="inventory-resolve-floor",
         description="Resend a working prompt for a listing paused at its floor price with no interest.",
     )
-    @app_commands.describe(job_id="Posting job number shown in the original floor-reached DM")
+    @app_commands.describe(job_id="Which listing - pick from the list")
+    @app_commands.autocomplete(job_id=floor_job_autocomplete)
     async def inventory_resolve_floor(self, interaction: discord.Interaction, job_id: int) -> None:
         job = await self.bot.db.get_inventory_post_job(interaction.user.id, job_id)
         if not job:
@@ -1103,6 +1361,7 @@ class PersonalInventory(commands.Cog):
                     "scheduled_for": scheduled_for,
                     "auto_relist": True,
                     "minimum_price": int(row["minimum_price"]),
+                    "item_name": str(row["item_name"]),
                 }
             )
             embed.add_field(
@@ -1184,6 +1443,21 @@ class PersonalInventory(commands.Cog):
                     user_id=int(job["user_id"]),
                     strategy=job.get("pricing_strategy", "balanced"),
                 )
+
+            # `job`'s own minimum_price column is frozen the instant claim_inventory_post_job()
+            # marks it 'posting' (set_inventory_minimum_price only updates 'pending', 'listed',
+            # and 'needs_confirmation' jobs) - so a floor raised anywhere during this coroutine's
+            # awaits above (fetching live prices can take real network round trips) would
+            # otherwise never reach the write below. Re-reading the live floor right before
+            # building the payload closes that window; a custom price already re-validated
+            # above against `job`'s snapshot still gets this second, live check too.
+            current_entry = await self.bot.db.get_inventory_item(int(job["user_id"]), int(job["inventory_id"]))
+            live_minimum_price = int(current_entry["minimum_price"]) if current_entry else int(job["minimum_price"])
+            if recommendation.price < live_minimum_price:
+                recommendation = dataclasses.replace(
+                    recommendation, price=live_minimum_price, floor_applied=True
+                )
+
             payload = build_inventory_listing_payload(
                 job, quantity=int(job["quantity"]), price=recommendation.price
             )
@@ -1203,13 +1477,14 @@ class PersonalInventory(commands.Cog):
             created = await self.bot.uex.post_marketplace_advertise(secret_key=secret_key, **payload)
         except UexApiError as exc:
             message = str(exc)
-            lowered = message.lower()
-            definitely_rejected = (
-                lowered.startswith("uex api error")
-                or lowered.startswith("uex auth error")
-                or "quota reached" in lowered
-            )
-            ambiguous = not definitely_rejected
+            # UexRejectedError means UEX responded and explicitly rejected the request - a
+            # definite outcome, nothing was created. Anything else (UexApiError's own
+            # network-level/malformed-response cases) is genuinely ambiguous. This used to
+            # classify by matching prefixes of the exception's message text, which broke
+            # silently the moment a new rejection path's message stopped starting with one
+            # of the recognized strings - checking the exception's actual type is stable
+            # against message-text changes in a way string matching never was.
+            ambiguous = not isinstance(exc, UexRejectedError)
             await self.bot.db.mark_inventory_post_failed(int(job["id"]), message, ambiguous=ambiguous)
             action = (
                 "UEX may have received it, so the bot stopped without retrying. Check the linked item page, then use "

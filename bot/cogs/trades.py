@@ -21,7 +21,10 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from bot.uex.exceptions import UexApiError
+from bot.cogs.prices import commodity_name_autocomplete, terminal_name_autocomplete
+from bot.delivery import MAX_MESSAGE_CHARS, fit_lines
+from bot.discord_ui import AlertRemovePickerView
+from bot.uex.exceptions import UexApiError, describe_uex_api_error
 from bot.uex.leaderboard import LeaderboardEntry, rank_leaderboard, sum_sell_revenue
 
 logger = logging.getLogger("uexbot.trades")
@@ -34,6 +37,36 @@ OPERATION_CHOICES = [
 # Small pacing delay between per-user /user_trades calls in /leaderboard, so a server with
 # many linked accounts doesn't burst well past what's reasonable against UEX's rate limit.
 _LEADERBOARD_CALL_DELAY = 0.3
+
+
+def _trade_time(value) -> str:
+    """A UEX trade's `date_added` (a unix timestamp) as a Discord timestamp, shown in each
+    viewer's own time zone - it used to print as a raw number like 1790000000 (audit MSG-9)."""
+    try:
+        return f"<t:{int(value)}:f>"
+    except (TypeError, ValueError):
+        return str(value) if value not in (None, "") else "date unknown"
+
+
+def _trade_line(entry: dict) -> str:
+    terminal = f" @ {entry['terminal_name']}" if entry["terminal_name"] else ""
+    return (
+        f"#{entry['id']} [{entry['logged_at']}] {entry['operation'].upper()} "
+        f"{entry['quantity_scu']} SCU {entry['commodity_name']}{terminal} "
+        f"({entry['unit_price']:.2f} aUEC/unit)"
+    )
+
+
+def _trade_choice(entry: dict) -> dict:
+    """One /trade-log entry as a row of the remove menu."""
+    terminal = f" @ {entry['terminal_name']}" if entry["terminal_name"] else ""
+    return {
+        "id": entry["id"],
+        "label": f"#{entry['id']} {entry['operation'].upper()} {entry['quantity_scu']} SCU {entry['commodity_name']}",
+        "description": f"{entry['unit_price']:.2f} aUEC/unit{terminal} · {entry['logged_at']}",
+    }
+
+
 LEADERBOARD_LIMIT = 10
 
 
@@ -44,12 +77,13 @@ class Trades(commands.Cog):
     @app_commands.command(name="trade-log-add", description="Log a buy/sell to your personal trade ledger.")
     @app_commands.describe(
         operation="Buy or sell",
-        commodity="Commodity name",
+        commodity="Commodity name - autocompletes",
         quantity_scu="Quantity in SCU",
         unit_price="Price per unit (aUEC)",
-        terminal="Where the trade happened (optional)",
+        terminal="Where the trade happened (optional) - autocompletes",
     )
     @app_commands.choices(operation=OPERATION_CHOICES)
+    @app_commands.autocomplete(commodity=commodity_name_autocomplete, terminal=terminal_name_autocomplete)
     async def trade_log_add(
         self,
         interaction: discord.Interaction,
@@ -59,6 +93,10 @@ class Trades(commands.Cog):
         unit_price: float,
         terminal: str | None = None,
     ) -> None:
+        # Deferred before any DB write: a write can wait on a lock past Discord's
+        # 3-second window, and a player who sees "did not respond" retries into a
+        # duplicate (audit REL-8).
+        await interaction.response.defer(ephemeral=True)
         entry_id = await self.bot.db.log_trade(
             user_id=interaction.user.id,
             commodity_name=commodity,
@@ -68,27 +106,41 @@ class Trades(commands.Cog):
             unit_price=unit_price,
         )
         total = quantity_scu * unit_price
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"Logged #{entry_id}: {operation.value} {quantity_scu} SCU of {commodity} "
-            f"@ {unit_price:.2f} aUEC (total {total:,.0f} aUEC)",
+            f"@ {unit_price:.2f} aUEC (total {total:,.0f} aUEC). A wrong entry can be removed "
+            "from /trade-log.",
             ephemeral=True,
         )
 
-    @app_commands.command(name="trade-log", description="Show your recent logged trades.")
-    async def trade_log(self, interaction: discord.Interaction, limit: int = 10) -> None:
+    @app_commands.command(name="trade-log", description="Show your recent logged trades, and remove a wrong one.")
+    @app_commands.describe(limit="How many recent trades to show (1-50, default 10)")
+    async def trade_log(
+        self, interaction: discord.Interaction, limit: app_commands.Range[int, 1, 50] = 10,
+    ) -> None:
         entries = await self.bot.db.get_trade_log(interaction.user.id, limit=limit)
         if not entries:
             await interaction.response.send_message("No trades logged yet. Use /trade-log-add.", ephemeral=True)
             return
-        lines = []
-        for e in entries:
-            terminal = f" @ {e['terminal_name']}" if e["terminal_name"] else ""
-            lines.append(
-                f"#{e['id']} [{e['logged_at']}] {e['operation'].upper()} "
-                f"{e['quantity_scu']} SCU {e['commodity_name']}{terminal} "
-                f"({e['unit_price']:.2f} aUEC/unit)"
-            )
-        await interaction.response.send_message("\n".join(lines), ephemeral=True)
+        # There was no way to fix a mistyped entry (audit UX-16). The menu removes one; the
+        # list above it is redrawn without it, so a correction is remove, then re-add.
+        shown = list(entries)
+
+        async def remove(_: discord.Interaction, entry_id: int) -> str:
+            removed = await self.bot.db.delete_trade_log_entry(interaction.user.id, int(entry_id))
+            shown[:] = [e for e in shown if e["id"] != entry_id]
+            head = f"Removed trade #{entry_id}." if removed else f"Trade #{entry_id} was already gone."
+            if not shown:
+                return f"{head} No trades left in this list."
+            return head + "\n" + fit_lines([_trade_line(e) for e in shown], limit=MAX_MESSAGE_CHARS - len(head) - 1)
+
+        view = AlertRemovePickerView(
+            alerts=[_trade_choice(e) for e in entries], author_id=interaction.user.id,
+            remove_callback=remove, placeholder_noun="trade",
+        )
+        await interaction.response.send_message(fit_lines([_trade_line(e) for e in entries]), view=view,
+                                                ephemeral=True)
+        view.origin = interaction
 
     @app_commands.command(name="uex-trades", description="Show your trade history as logged on UEX itself (requires a linked account).")
     async def uex_trades(self, interaction: discord.Interaction) -> None:
@@ -106,11 +158,10 @@ class Trades(commands.Cog):
         try:
             rows = await self.bot.uex.get_user_trades(secret_key=secret_key)
         except UexApiError as exc:
+            # Only an auth failure is the key's fault; this used to tell the player to
+            # re-link for any failure, a UEX outage included (audit MSG-10).
             await interaction.followup.send(
-                f"Couldn't fetch UEX trade history: {exc}\n"
-                "Your linked secret key may be invalid or expired — try /unlink-uex-account "
-                "then /link-uex-account again with a fresh key.",
-                ephemeral=True,
+                f"Couldn't fetch UEX trade history. {describe_uex_api_error(exc)}", ephemeral=True,
             )
             return
 
@@ -120,10 +171,10 @@ class Trades(commands.Cog):
 
         lines = [
             f"{r.get('operation', '?')} {r.get('scu', '?')} SCU {r.get('commodity_name', '?')} "
-            f"@ {r.get('price', '?')} aUEC/unit ({r.get('date_added', '?')})"
+            f"@ {r.get('price', '?')} aUEC/unit ({_trade_time(r.get('date_added'))})"
             for r in rows[:15]
         ]
-        await interaction.followup.send("\n".join(lines), ephemeral=True)
+        await interaction.followup.send(fit_lines(lines), ephemeral=True)
 
     @app_commands.command(
         name="leaderboard",

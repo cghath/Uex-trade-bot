@@ -86,7 +86,7 @@ def test_alert_list_shows_all_three_alert_types_grouped_into_sections(tmp_path):
         (text,), kwargs = interaction.response.messages[0]
         assert kwargs.get("ephemeral") is True
         assert "**Price alerts**" in text and "Gold" in text
-        assert "**Stock (restock) alerts**" in text and "Laranite" in text
+        assert "**Restock alerts**" in text and "Laranite" in text
         assert "**Marketplace alerts**" in text and "Cutlass Black" in text
 
     asyncio.run(run())

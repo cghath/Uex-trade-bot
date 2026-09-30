@@ -17,12 +17,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 import httpx
 
-from .exceptions import UexApiError, UexAuthError, UexRateLimitError
+from .exceptions import UexApiError, UexAuthError, UexRateLimitError, UexRejectedError
 
 logger = logging.getLogger(__name__)
 
@@ -35,25 +38,82 @@ _DEFAULT_CACHE_TTL = 300  # 5 minutes, conservative default
 _ENDPOINT_CACHE_TTL = {
     "terminals": 12 * 3600,
     "space_stations": 24 * 3600,
+    "star_systems": 24 * 3600,
+    "planets": 24 * 3600,
+    "moons": 24 * 3600,
+    "poi": 24 * 3600,
     "commodities": 12 * 3600,
     "commodities_prices": 30 * 60,
     "commodities_prices_all": 30 * 60,
     "commodities_routes": 30 * 60,
     "commodities_prices_history": 3600,
     "items": 12 * 3600,
+    "items_prices": 24 * 3600,  # UEX's own documented Cache TTL for this endpoint (+1 day)
+    "items_prices_all": 12 * 3600,  # UEX's own documented Cache TTL for this endpoint (+12h)
     "categories": 24 * 3600,
     "marketplace_trends": 3600,
     "vehicles": 12 * 3600,
+    # UEX's own documented Cache TTL for all four vehicle shop endpoints (+12h)
+    "vehicles_purchases_prices": 12 * 3600,
+    "vehicles_purchases_prices_all": 12 * 3600,
+    "vehicles_rentals_prices": 12 * 3600,
+    "vehicles_rentals_prices_all": 12 * 3600,
     "commodities_status": 24 * 3600,
     "data_monitor": 3600,
     "fuel_prices": 30 * 60,
     "refineries_yields": 24 * 3600,
+    "refineries_methods": 24 * 3600,
     "marketplace_prices_history": 3600,
     "marketplace_prices_averages": 3600,
     "marketplace_prices_averages_all": 3600,
     "marketplace_listings": 60,
     "terminals_distances": 12 * 3600,
 }
+
+
+
+def cache_interval_text(path: str) -> str:
+    """How often the bot's copy of an endpoint's data can change, for telling players e.g.
+    "sell prices updated every 30 min" instead of calling cached data "live" (audit
+    MSG-12). Read from the same table the cache uses, so the two can't disagree."""
+    seconds = _ENDPOINT_CACHE_TTL.get(path, _DEFAULT_CACHE_TTL)
+    if seconds % 3600 == 0:
+        return f"{seconds // 3600}h"
+    return f"{max(1, round(seconds / 60))} min"
+
+
+async def fetch_terminal_distances(uex: Any, origin_id: int, terminal_ids: list[int], *,
+                                   batch_size: int = 8) -> dict[int, float | None]:
+    """id_terminal -> gigameters from origin_id, None where UEX has no usable distance (it
+    answers a bare `false` for some pairs, even in one system). There's no batch endpoint,
+    so it's one /terminals_distances call per pair, batch_size at a time to stay well
+    under UEX's 120/min. `uex` is a UexClient (or anything with get_terminal_distance)."""
+    distances: dict[int, float | None] = {}
+    to_fetch = [tid for tid in terminal_ids if tid != origin_id]
+    if origin_id in terminal_ids:
+        distances[origin_id] = 0.0
+    for start in range(0, len(to_fetch), batch_size):
+        batch = to_fetch[start:start + batch_size]
+        results = await asyncio.gather(
+            *(uex.get_terminal_distance(origin_id, tid) for tid in batch), return_exceptions=True,
+        )
+        for tid, result in zip(batch, results):
+            if isinstance(result, Exception) or not result:
+                distances[tid] = None
+                continue
+            try:
+                distances[tid] = float(result.get("distance"))
+            except (TypeError, ValueError, AttributeError):
+                distances[tid] = None
+    return distances
+
+
+# Entries were only ever replaced by a later call with the same key, never removed, so
+# high-variety keys (terminal-distance pairs, per-listing lookups, per-item prices) grew
+# the cache for as long as the bot ran (audit REL-9). Expired entries are swept every
+# _CACHE_SWEEP_EVERY writes, and the oldest writes are dropped past _CACHE_MAX_ENTRIES.
+_CACHE_SWEEP_EVERY = 200
+_CACHE_MAX_ENTRIES = 5000
 
 # UEX status strings that specifically mean "the secret_key is missing/wrong/not allowed",
 # as opposed to statuses like "no_trades_found" which just mean an empty (but valid) result.
@@ -63,6 +123,35 @@ _AUTH_ERROR_STATUSES = {
     "user_not_found",
     "user_not_allowed",
 }
+
+# UEX's rate limit is per minute, so no 429 needs a longer wait than that.
+RETRY_AFTER_MAX_SECONDS = 60.0
+
+
+def retry_after_seconds(header: str | None, attempt: int, now: datetime | None = None) -> float:
+    """How long to wait after a 429. `Retry-After` may be seconds or an HTTP date (a past date
+    means now); anything else (missing, garbled, negative, not finite) falls back to
+    2**attempt, and every answer is capped at RETRY_AFTER_MAX_SECONDS. A plain float() used
+    to raise ValueError on a date, which none of the UEX-only excepts catch (audit REL-17)."""
+    fallback = float(2**attempt)
+    seconds = fallback
+    if header:
+        try:
+            seconds = float(header)
+            if seconds < 0:
+                seconds = fallback
+        except ValueError:
+            try:
+                when = parsedate_to_datetime(header)
+            except (TypeError, ValueError, IndexError):
+                when = None
+            if when is not None:
+                if when.tzinfo is None:
+                    when = when.replace(tzinfo=timezone.utc)
+                seconds = (when - (now or datetime.now(timezone.utc))).total_seconds()
+    if not math.isfinite(seconds):
+        seconds = fallback
+    return min(max(seconds, 0.0), RETRY_AFTER_MAX_SECONDS)
 
 
 class UexClient:
@@ -83,6 +172,7 @@ class UexClient:
         self._client = httpx.AsyncClient(timeout=timeout)
         self._cache: dict[tuple, tuple[float, Any]] = {}
         self._cache_lock = asyncio.Lock()
+        self._cache_writes_since_sweep = 0
         self._item_catalog: tuple[float, list[dict[str, Any]]] | None = None
         self._item_catalog_lock = asyncio.Lock()
 
@@ -195,7 +285,7 @@ class UexClient:
                 continue
 
             if response.status_code == 429:
-                retry_after = float(response.headers.get("Retry-After", 2**attempt))
+                retry_after = retry_after_seconds(response.headers.get("Retry-After"), attempt)
                 logger.warning("UEX rate limit hit on %s, retrying in %.1fs", path, retry_after)
                 await asyncio.sleep(retry_after)
                 continue
@@ -224,7 +314,33 @@ class UexClient:
                 raise UexAuthError(f"UEX auth error on {path}: {status} {message}{code_part}".strip())
 
             if status == "error":
-                raise UexApiError(f"UEX API error on {path}: {message}{code_part}")
+                raise UexRejectedError(f"UEX API error on {path}: {message}{code_part}")
+
+            if status != "ok" and method in ("POST", "DELETE"):
+                if method == "DELETE" and last_error is not None:
+                    # This DELETE was retried after an earlier attempt's network-level
+                    # failure (see the httpx.HTTPError branch above) - we never saw that
+                    # attempt's real response, so we don't know whether it actually reached
+                    # UEX and completed the deletion before the connection dropped. A
+                    # "not found"-style status on the retry (e.g. listing_not_found) is
+                    # genuinely ambiguous in that case: it could mean the listing never
+                    # existed, OR that our own earlier attempt already deleted it.
+                    # UexRejectedError's contract ("definitely nothing happened, no
+                    # reconciliation needed") would be actively wrong in the second case, so
+                    # this is the plain, ambiguous UexApiError instead.
+                    raise UexApiError(
+                        f"UEX rejected DELETE {path} on a retried request: {status} {message}{code_part} "
+                        "- an earlier attempt's response was lost to a network error, so it may have "
+                        "already succeeded before this retry ran".strip()
+                    )
+                # Unlike a GET's "nothing matched" statuses (see below), every documented
+                # non-"ok" status on a write endpoint (missing_id, listing_not_found,
+                # user_not_verified, user_active_listings_limit_reached, etc.) is a genuine
+                # rejection of the write itself - there is no soft/empty-but-valid case for a
+                # POST/DELETE. Treating any of these as success (the old behavior for any
+                # status not already in _AUTH_ERROR_STATUSES or literally "error") let a
+                # rejected DELETE be reported back to callers as a successful deletion.
+                raise UexRejectedError(f"UEX rejected {method} {path}: {status} {message}{code_part}".strip())
 
             # Any other status (e.g. "no_trades_found", "invalid_type") is an endpoint-specific
             # "nothing matched" signal, not a fatal error - UEX sends these with non-2xx HTTP
@@ -238,7 +354,7 @@ class UexClient:
             if use_cache:
                 ttl = _ENDPOINT_CACHE_TTL.get(path.strip("/").split("/")[0], _DEFAULT_CACHE_TTL)
                 async with self._cache_lock:
-                    self._cache[cache_key] = (time.monotonic() + ttl, data)
+                    self._store_cached(cache_key, ttl, data)
 
             return data
 
@@ -253,6 +369,20 @@ class UexClient:
     async def get_space_stations(self, **filters: Any) -> list[dict[str, Any]]:
         """Space-station access metadata, including pad sizes and external loading docks."""
         return await self._get("space_stations", params=filters) or []
+
+    async def get_star_systems(self, **filters: Any) -> list[dict[str, Any]]:
+        return await self._get("star_systems", params=filters) or []
+
+    async def get_planets(self, **filters: Any) -> list[dict[str, Any]]:
+        return await self._get("planets", params=filters) or []
+
+    async def get_moons(self, **filters: Any) -> list[dict[str, Any]]:
+        return await self._get("moons", params=filters) or []
+
+    async def get_poi(self, **filters: Any) -> list[dict[str, Any]]:
+        """Points of interest - includes is_mining_related, used by /where-to-mine to pick
+        out named mining sites (asteroid belts/rings) from the full POI list."""
+        return await self._get("poi", params=filters) or []
 
     async def get_commodities(self, **filters: Any) -> list[dict[str, Any]]:
         return await self._get("commodities", params=filters) or []
@@ -275,7 +405,7 @@ class UexClient:
         return await self._get("commodities_prices_all", params=filters) or []
 
     async def get_commodities_routes(self, **filters: Any) -> list[dict[str, Any]]:
-        """UEX's own precomputed buy->sell trade routes, with real distance (GM), ROI,
+        """UEX's own precomputed buy->sell trade routes, with real distance (Gm), ROI,
         profit, and a UEX quality score. Needs at least one of: id_commodity,
         id_terminal_origin, id_planet_origin, id_orbit_origin.
         """
@@ -310,6 +440,36 @@ class UexClient:
         Use :meth:`get_item_catalog` when a caller genuinely needs the whole catalog.
         """
         return await self._get("items", params=filters) or []
+
+    async def get_items_prices(self, **filters: Any) -> list[dict[str, Any]]:
+        """Where an item (armor, ship components, weapons, and more) is bought/sold and at
+        what price, per terminal - UEX requires id_terminal, id_item, or id_category
+        (a caller's job to supply)."""
+        return await self._get("items_prices", params=filters) or []
+
+    async def get_items_prices_all(self) -> list[dict[str, Any]]:
+        """Every item price row across every terminal, one unfiltered call - no id_item/
+        id_terminal/id_category required, unlike get_items_prices. Confirmed on real data
+        this is a much smaller, more useful pool than the full item catalog for anything
+        that needs "items actually sold somewhere right now": of 7,769 distinct catalogued
+        item names, only 2,829 have any row here at all - the rest are cosmetics, ship
+        paint, and similar items with no real shop listing (see item_finder.py's
+        sold_item_name_autocomplete)."""
+        return await self._get("items_prices_all", params={}) or []
+
+    def _store_cached(self, cache_key: tuple, ttl: float, data: Any) -> None:
+        """Cache `data` for `ttl` seconds. Call with _cache_lock held. Re-inserting moves the
+        key to the end, so "oldest" below means least recently written."""
+        now = time.monotonic()
+        self._cache.pop(cache_key, None)
+        self._cache[cache_key] = (now + ttl, data)
+        self._cache_writes_since_sweep += 1
+        if self._cache_writes_since_sweep < _CACHE_SWEEP_EVERY and len(self._cache) <= _CACHE_MAX_ENTRIES:
+            return
+        self._cache_writes_since_sweep = 0
+        self._cache = {key: entry for key, entry in self._cache.items() if entry[0] > now}
+        while len(self._cache) > _CACHE_MAX_ENTRIES:
+            self._cache.pop(next(iter(self._cache)))
 
     async def get_item_catalog(self) -> list[dict[str, Any]]:
         """Load every item category once and cache the combined catalog for 12 hours.
@@ -381,6 +541,27 @@ class UexClient:
         """
         return await self._get("vehicles", params=filters) or []
 
+    async def get_vehicle_purchase_prices(self, id_vehicle: int) -> list[dict[str, Any]]:
+        """In-game (aUEC) purchase price per terminal for one ship, with the terminal's full
+        name and star system. Pledge-store (real money) prices are a different endpoint."""
+        return await self._get("vehicles_purchases_prices", params={"id_vehicle": id_vehicle}) or []
+
+    async def get_vehicle_rental_prices(self, id_vehicle: int) -> list[dict[str, Any]]:
+        """In-game rental price per terminal for one ship. price_rent is the 1-day rate
+        (see bot/uex/ship_shops.py's RENTAL_RATE_NOTE)."""
+        return await self._get("vehicles_rentals_prices", params={"id_vehicle": id_vehicle}) or []
+
+    async def get_vehicle_purchase_prices_all(self) -> list[dict[str, Any]]:
+        """Every vehicle purchase row in one call. Only id_vehicle/id_terminal/price and a
+        SHORT terminal_name ('New Deal Lorville', not the per-vehicle endpoint's 'New Deal -
+        Teasa Spaceport - Lorville') - good for "which ships are sold anywhere", not display."""
+        return await self._get("vehicles_purchases_prices_all", params={}) or []
+
+    async def get_vehicle_rental_prices_all(self) -> list[dict[str, Any]]:
+        """Every vehicle rental row in one call - same short shape as
+        get_vehicle_purchase_prices_all."""
+        return await self._get("vehicles_rentals_prices_all", params={}) or []
+
     async def get_categories(self, **filters: Any) -> list[dict[str, Any]]:
         """Marketplace listing categories. Filter with type='item'|'service'|'contract'."""
         return await self._get("categories", params=filters) or []
@@ -410,6 +591,12 @@ class UexClient:
     async def get_refineries_yields(self, **filters: Any) -> list[dict[str, Any]]:
         """Current refinery yield bonuses by raw commodity and refinery terminal."""
         return await self._get("refineries_yields", params=filters) or []
+
+    async def get_refineries_methods(self, **filters: Any) -> list[dict[str, Any]]:
+        """The refining methods usable at any refinery (not terminal- or commodity-specific)
+        - each rated 1-3 (low/medium/high) on yield, cost, and speed. A small, patch-cadence
+        reference list; used by /refinery-advisor."""
+        return await self._get("refineries_methods", params=filters) or []
 
     # -- marketplace (player-to-player, separate from commodity/terminal trading) --
 
@@ -506,6 +693,15 @@ class UexClient:
         ) or []
 
     # -- user-scoped (requires the calling player's own secret_key) -----------
+
+    async def get_user_profile(self, secret_key: str) -> dict[str, Any] | None:
+        """The UEX profile a secret key belongs to (GET /user), used to check a key when a
+        player links it. A key UEX doesn't accept raises UexAuthError (invalid_secret_key,
+        user_not_found, user_not_allowed)."""
+        data = await self._get("user", require_secret=True, secret_key=secret_key, use_cache=False)
+        if isinstance(data, list):
+            data = data[0] if data else None
+        return data if isinstance(data, dict) else None
 
     async def get_user_trades(self, secret_key: str | None = None, **filters: Any) -> list[dict[str, Any]]:
         return await self._get(

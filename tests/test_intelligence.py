@@ -2,25 +2,43 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import sqlite3
+from datetime import datetime, timezone
+from types import SimpleNamespace as NS
+from unittest.mock import AsyncMock
 
+import aiosqlite
 from cryptography.fernet import Fernet
 
+from bot.cogs.intelligence import REFINERY_YIELDS_ROW_CAP, Intelligence
 from bot.db.database import Database
-from bot.uex.data_health import classify_terminal_health, format_health_note
-from bot.uex.supply_demand import analyze_terminal_market_history
+from bot.uex.data_health import (
+    TerminalDataHealth,
+    classify_terminal_health,
+    format_health_note,
+    freshness_emoji,
+    freshness_label,
+)
+from bot.uex.supply_demand import (
+    analyze_terminal_market_history,
+    classify_supply_evidence,
+    effective_sell_scu,
+    estimate_sell_capacity_from_history,
+)
 from bot.uex.practical_routes import (
     route_in_system,
     route_practical_notes,
     terminal_in_system,
     terminal_supports_auto_load,
 )
-from bot.cogs.intelligence_brief import _format_cross_system_note, _format_market_shifts
+from bot.cogs.intelligence_brief import _format_market_shifts
 from bot.uex.commodity_risk import (
     commodity_risk_labels,
     format_commodity_risk,
     has_commodity_risk_metadata,
 )
+from bot.uex.route_presentation import travel_warning
 
 
 def _make_db(tmp_path) -> Database:
@@ -45,6 +63,175 @@ def test_terminal_market_history_only_records_initial_and_changed_states(tmp_pat
         async with db.connect() as sqlite:
             cursor = await sqlite.execute("SELECT COUNT(*) AS count FROM terminal_market_observations")
             assert (await cursor.fetchone())["count"] == 2
+
+    asyncio.run(run())
+
+
+def test_source_column_migration_backfills_existing_rows_and_is_idempotent(tmp_path):
+    """Recommendation Outcome Tracking (Phase 1) added `source` to terminal_market_state/
+    terminal_market_observations via an additive ALTER TABLE migration, so a database
+    created before this change (like the live Pi deployment) needs it backfilled cleanly,
+    not just fresh databases created after. Also confirms init() stays idempotent across
+    a restart once the column already exists (the "duplicate column name" swallow)."""
+    path = tmp_path / "test.sqlite3"
+    with sqlite3.connect(path) as sqlite_conn:
+        sqlite_conn.execute(
+            """CREATE TABLE terminal_market_state (
+                   id_commodity INTEGER NOT NULL, id_terminal INTEGER NOT NULL,
+                   commodity_name TEXT NOT NULL, terminal_name TEXT NOT NULL,
+                   price_buy REAL, price_sell REAL, scu_buy REAL, scu_sell REAL,
+                   status_buy INTEGER, status_sell INTEGER, quality INTEGER,
+                   volatility_buy REAL, volatility_sell REAL,
+                   buy_report_count INTEGER, sell_report_count INTEGER,
+                   last_seen TEXT NOT NULL DEFAULT (datetime('now')),
+                   PRIMARY KEY (id_commodity, id_terminal)
+               )"""
+        )
+        sqlite_conn.execute(
+            """CREATE TABLE terminal_market_observations (
+                   id_commodity INTEGER NOT NULL, id_terminal INTEGER NOT NULL,
+                   observed_at TEXT NOT NULL DEFAULT (datetime('now')),
+                   commodity_name TEXT NOT NULL, terminal_name TEXT NOT NULL,
+                   price_buy REAL, price_sell REAL, scu_buy REAL, scu_sell REAL,
+                   status_buy INTEGER, status_sell INTEGER, quality INTEGER,
+                   volatility_buy REAL, volatility_sell REAL,
+                   buy_report_count INTEGER, sell_report_count INTEGER
+               )"""
+        )
+        sqlite_conn.execute(
+            """INSERT INTO terminal_market_state
+               (id_commodity, id_terminal, commodity_name, terminal_name, price_buy, scu_buy, status_buy)
+               VALUES (1, 2, 'Gold', 'Area18 TDD', 100, 50, 3)"""
+        )
+        sqlite_conn.execute(
+            """INSERT INTO terminal_market_observations
+               (id_commodity, id_terminal, commodity_name, terminal_name, price_buy, scu_buy, status_buy)
+               VALUES (1, 2, 'Gold', 'Area18 TDD', 100, 50, 3)"""
+        )
+
+    async def run():
+        db = Database(path, Fernet(Fernet.generate_key()))
+        await db.init()
+
+        async with db.connect() as conn:
+            cursor = await conn.execute(
+                "SELECT source FROM terminal_market_state WHERE id_commodity = 1 AND id_terminal = 2"
+            )
+            assert (await cursor.fetchone())["source"] == "uex"
+            cursor = await conn.execute("SELECT source FROM terminal_market_observations LIMIT 1")
+            assert (await cursor.fetchone())["source"] == "uex"
+
+        # A fresh UEX-sourced write after the migration still defaults correctly.
+        assert await db.record_terminal_market_snapshot(
+            [{
+                "id_commodity": "1", "id_terminal": "2", "commodity_name": "Gold",
+                "terminal_name": "Area18 TDD", "price_buy": "105", "scu_buy": "40", "status_buy": "3",
+            }]
+        ) == (1, 1)
+        async with db.connect() as conn:
+            cursor = await conn.execute(
+                "SELECT source, price_buy FROM terminal_market_state WHERE id_commodity = 1 AND id_terminal = 2"
+            )
+            row = await cursor.fetchone()
+            assert row["source"] == "uex"
+            assert row["price_buy"] == 105
+
+        # A restart (a second init() against the now-migrated database) must not raise.
+        await db.init()
+
+    asyncio.run(run())
+
+
+def test_route_progression_tables_enforce_outcome_and_route_kind_checks(tmp_path):
+    """Smoke test for the two new Recommendation Outcome Tracking tables: a valid thread +
+    leg insert succeeds, and an invalid enum value (route_kind here) is rejected by the
+    CHECK constraint rather than silently accepted - the same protection route_progression_
+    legs.outcome/precision rely on."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        async with db.connect() as conn:
+            await conn.execute(
+                """INSERT INTO route_progression_threads
+                   (thread_id, user_id, guild_id, route_kind, route_snapshot, total_legs)
+                   VALUES (1, 100, 200, 'best_route', '{}', 1)"""
+            )
+            await conn.execute(
+                """INSERT INTO route_progression_legs
+                   (thread_id, leg_index, side, id_terminal, id_commodity,
+                    quoted_price, quoted_scu, quoted_status)
+                   VALUES (1, 0, 'buy', 10, 20, 100, 50, 3)"""
+            )
+            await conn.commit()
+
+            cursor = await conn.execute("SELECT status FROM route_progression_threads WHERE thread_id = 1")
+            assert (await cursor.fetchone())["status"] == "in_progress"
+
+            raised = False
+            try:
+                await conn.execute(
+                    """INSERT INTO route_progression_threads
+                       (thread_id, user_id, guild_id, route_kind, route_snapshot, total_legs)
+                       VALUES (2, 100, 200, 'not_a_real_kind', '{}', 1)"""
+                )
+            except aiosqlite.IntegrityError:
+                raised = True
+            assert raised, "an invalid route_kind should violate the CHECK constraint"
+
+            raised = False
+            try:
+                await conn.execute(
+                    """UPDATE route_progression_legs SET outcome = 'not_a_real_outcome'
+                       WHERE thread_id = 1 AND leg_index = 0"""
+                )
+            except aiosqlite.IntegrityError:
+                raised = True
+            assert raised, "an invalid outcome should violate the CHECK constraint"
+
+    asyncio.run(run())
+
+
+def test_get_terminal_market_observations_by_ids_groups_and_filters_by_requested_pairs(tmp_path):
+    """Bulk counterpart to get_terminal_market_history's single-pair lookup - used by the
+    Evidence-Level Labels inferred-trend fallback across many routes at once. Confirms
+    grouping by (id_commodity, id_terminal), that only the requested pairs come back (not
+    every row in the table), and that invalid/zero ids are silently skipped rather than
+    raising, matching get_route_market_signals_by_ids' own established shape."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        row_a = {
+            "id_commodity": 1, "id_terminal": 10, "commodity_name": "Gold", "terminal_name": "A",
+            "price_buy": 100, "scu_buy": 50, "status_buy": 1,
+        }
+        row_b = {
+            "id_commodity": 1, "id_terminal": 20, "commodity_name": "Gold", "terminal_name": "B",
+            "price_sell": 150, "scu_sell": 30, "status_sell": 1,
+        }
+        row_c = {
+            "id_commodity": 2, "id_terminal": 10, "commodity_name": "Cobalt", "terminal_name": "A",
+            "price_buy": 20, "scu_buy": 5, "status_buy": 1,
+        }
+        await db.record_terminal_market_snapshot([row_a, row_b, row_c])
+        row_a["scu_buy"] = 60  # change-only: a second, different observation for (1, 10)
+        await db.record_terminal_market_snapshot([row_a, row_b, row_c])
+
+        result = await db.get_terminal_market_observations_by_ids([(1, 10), (1, 20), (0, 999), (1, None)])
+
+        assert set(result.keys()) == {(1, 10), (1, 20)}
+        assert len(result[(1, 10)]) == 2, "expected both observations for the changed pair"
+        assert len(result[(1, 20)]) == 1
+        assert (2, 10) not in result, "a real pair not passed in the query must not leak into the result"
+
+    asyncio.run(run())
+
+
+def test_get_terminal_market_observations_by_ids_returns_empty_for_no_valid_ids(tmp_path):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        assert await db.get_terminal_market_observations_by_ids([]) == {}
+        assert await db.get_terminal_market_observations_by_ids([(0, 0), (None, None)]) == {}
 
     asyncio.run(run())
 
@@ -232,6 +419,100 @@ def test_recent_terminal_health_without_a_warning_formats_as_none():
     assert format_health_note(health) is None
 
 
+# -- freshness_emoji (the always-present dot /price shows next to a live SCU figure) -----
+
+def test_freshness_emoji_maps_every_real_status_to_its_own_dot(tmp_path):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await db.record_terminal_data_health_snapshot(
+            [
+                {
+                    "id_terminal": 1, "type": "commodity", "terminal_name": "Fresh Terminal",
+                    "prices_total": 10, "prices_updated": 10, "prices_updated_percentage": 100,
+                    "last_update_days_limit": 10, "last_update_days": 0,
+                    "last_update_days_percentage": 90,
+                },
+                {
+                    "id_terminal": 2, "type": "commodity", "terminal_name": "Recent Terminal",
+                    "prices_total": 10, "prices_updated": 10, "prices_updated_percentage": 100,
+                    "last_update_days_limit": 2, "last_update_days": 1,
+                    "last_update_days_percentage": 50,
+                },
+                {
+                    "id_terminal": 3, "type": "commodity", "terminal_name": "Limited Terminal",
+                    "prices_total": 10, "prices_updated": 3, "prices_updated_percentage": 30,
+                    "last_update_days_limit": 1, "last_update_days": 0,
+                    "last_update_days_percentage": 100,
+                },
+                {
+                    "id_terminal": 4, "type": "commodity", "terminal_name": "Stale Terminal",
+                    "prices_total": 10, "prices_updated": 10, "prices_updated_percentage": 100,
+                    "last_update_days_limit": 1, "last_update_days": 14,
+                    "last_update_days_percentage": 0,
+                },
+            ]
+        )
+        rows = await db.get_terminal_data_health_by_ids([1, 2, 3, 4])
+
+        assert freshness_emoji(classify_terminal_health(rows[1])) == "🟢"
+        assert freshness_emoji(classify_terminal_health(rows[2])) == "🟡"
+        assert freshness_emoji(classify_terminal_health(rows[3])) == "🟠"
+        assert freshness_emoji(classify_terminal_health(rows[4])) == "🔴"
+
+    asyncio.run(run())
+
+
+def test_freshness_emoji_is_the_unknown_dot_for_missing_ttl_metadata_and_no_health_at_all():
+    missing_ttl = classify_terminal_health({"terminal_name": "No TTL"})
+    assert missing_ttl.status == "unknown"
+    assert freshness_emoji(missing_ttl) == "⚪"
+    assert freshness_emoji(None) == "⚪"
+
+
+def test_freshness_emoji_is_the_unknown_dot_when_local_collection_has_stalled():
+    """locally_stale terminals are already reclassified to status="unknown" by
+    classify_terminal_health itself - freshness_emoji doesn't need a separate check for
+    the flag, just for the status it's folded into."""
+    stalled = TerminalDataHealth(
+        terminal_name="Stalled", status="unknown", last_update_days=None,
+        last_update_days_limit=None, last_update_days_percentage=None,
+        coverage_percentage=None, has_recent_reports=False, locally_stale=True,
+    )
+    assert freshness_emoji(stalled) == "⚪"
+
+
+# -- freshness_label (dot + real elapsed days, since the dot alone can't tell 0 days from
+# 7 days apart even though both land in the same "fresh" bucket) ------------------------
+
+def test_freshness_label_pairs_the_dot_with_the_real_elapsed_days():
+    fresh_today = classify_terminal_health(
+        {
+            "terminal_name": "Just Updated", "prices_updated_percentage": 100,
+            "last_update_days_limit": 15, "last_update_days": 0,
+            "last_update_days_percentage": 100,
+        }
+    )
+    fresh_a_week_ago = classify_terminal_health(
+        {
+            "terminal_name": "A Week Old", "prices_updated_percentage": 100,
+            "last_update_days_limit": 15, "last_update_days": 7,
+            "last_update_days_percentage": 53,
+        }
+    )
+    # Both classify as "fresh" (the dot alone can't tell them apart) - closing exactly the
+    # gap a user asked about: 0 days and 7 days both show 🟢 with a bare dot.
+    assert fresh_today.status == fresh_a_week_ago.status == "fresh"
+    assert freshness_label(fresh_today) == "🟢 (0d)"
+    assert freshness_label(fresh_a_week_ago) == "🟢 (7d)"
+
+
+def test_freshness_label_falls_back_to_the_bare_dot_when_no_real_age_is_known():
+    assert freshness_label(None) == "⚪"
+    missing_ttl = classify_terminal_health({"terminal_name": "No TTL"})
+    assert freshness_label(missing_ttl) == "⚪"
+
+
 def test_terminal_health_falls_back_to_age_ratio_at_the_exact_50_percent_boundary():
     """Every other classify_terminal_health test supplies last_update_days_percentage
     directly, so the age/age_limit fallback branch (used whenever UEX omits that field)
@@ -274,13 +555,123 @@ def test_pending_report_queue_is_not_used_as_terminal_freshness():
     assert expired_with_pending_report.status == "stale"
 
 
-def test_cross_system_note_never_prints_none_as_a_system_name():
-    incomplete = _format_cross_system_note(None, "Stanton")
-    assert incomplete is not None
-    assert "None" not in incomplete
-    assert "incomplete" in incomplete
-    assert _format_cross_system_note("Stanton", "Stanton") is None
-    assert "Pyro → Stanton" in (_format_cross_system_note("Pyro", "Stanton") or "")
+def test_old_collected_health_is_not_still_fresh():
+    """A10: classify_terminal_health used only UEX's own age/TTL fields, captured at
+    whatever moment the row was last collected - if the collector stops running (a crash,
+    a bug, a long outage), the last successfully stored row keeps looking "fresh" forever,
+    purely because it looked fresh the one time it actually ran."""
+    from datetime import datetime, timezone
+
+    health = classify_terminal_health(
+        {
+            "terminal_name": "Example", "prices_updated_percentage": 100,
+            "last_update_days": 0, "last_update_days_limit": 3,
+            "last_update_days_percentage": 100, "last_seen": "2020-01-01 00:00:00",
+        },
+        now=datetime(2026, 9, 5, tzinfo=timezone.utc),
+    )
+    assert health.status == "unknown"
+
+
+def test_locally_stale_health_note_does_not_claim_ttl_metadata_is_missing():
+    """Follow-up review finding: classify_terminal_health's A10 fix added a SECOND,
+    distinct cause of status=='unknown' (the bot's own collection has gone stale, even
+    though UEX's TTL fields say fresh) - but format_health_note was never updated to
+    match, and kept hardcoding the message for the ORIGINAL cause ("TTL metadata
+    missing"). For the local-staleness path, TTL metadata is NOT missing - it's fully
+    present and says the data looked fine; the real problem is the bot hasn't re-checked
+    it recently. The old message was self-contradictory (claims metadata is missing while
+    showing an age figure that came from that same "missing" metadata)."""
+    from datetime import datetime, timezone
+
+    locally_stale = classify_terminal_health(
+        {
+            "terminal_name": "Example", "prices_updated_percentage": 100,
+            "last_update_days": 0, "last_update_days_limit": 3,
+            "last_update_days_percentage": 100, "last_seen": "2020-01-01 00:00:00",
+        },
+        now=datetime(2026, 9, 5, tzinfo=timezone.utc),
+    )
+    assert locally_stale.status == "unknown"
+    assert locally_stale.locally_stale is True
+    note = format_health_note(locally_stale)
+    assert "metadata missing" not in note.lower(), note
+    assert "stalled" in note.lower() or "hasn't re-checked" in note.lower(), note
+
+
+def test_genuinely_missing_ttl_metadata_still_gets_its_own_message():
+    """Regression guard: the locally_stale distinction must not swallow the ORIGINAL
+    "unknown" cause - a row with no TTL fields at all (and no last_seen) still gets the
+    "TTL metadata missing" message, unchanged."""
+    missing_ttl = classify_terminal_health({"terminal_name": "Example"})
+    assert missing_ttl.status == "unknown"
+    assert missing_ttl.locally_stale is False
+    note = format_health_note(missing_ttl)
+    assert "metadata missing" in note.lower(), note
+
+
+def test_recently_collected_health_is_unaffected_by_the_staleness_check():
+    from datetime import datetime, timezone
+
+    health = classify_terminal_health(
+        {
+            "terminal_name": "Example", "prices_updated_percentage": 100,
+            "last_update_days": 0, "last_update_days_limit": 3,
+            "last_update_days_percentage": 100, "last_seen": "2026-09-05 11:30:00",
+        },
+        now=datetime(2026, 9, 5, 12, 0, 0, tzinfo=timezone.utc),
+    )
+    assert health.status == "fresh"
+
+
+def test_missing_last_seen_does_not_trigger_the_staleness_check():
+    """Not every caller/row is guaranteed to carry last_seen - its absence must not be
+    treated as "infinitely stale"."""
+    health = classify_terminal_health(
+        {
+            "terminal_name": "Example", "prices_updated_percentage": 100,
+            "last_update_days": 0, "last_update_days_limit": 3,
+            "last_update_days_percentage": 100,
+        }
+    )
+    assert health.status == "fresh"
+
+
+def test_local_staleness_does_not_override_an_already_stale_or_limited_status():
+    """The local-collection check only ever downgrades "fresh"/"recent" to "unknown" - it
+    must never relabel a status UEX's own TTL already marked stale/limited, which carries
+    more specific information than a generic "unknown"."""
+    from datetime import datetime, timezone
+
+    stale = classify_terminal_health(
+        {
+            "terminal_name": "Example", "prices_updated_percentage": 100,
+            "last_update_days": 5, "last_update_days_limit": 3,
+            "last_update_days_percentage": 0, "last_seen": "2020-01-01 00:00:00",
+        },
+        now=datetime(2026, 9, 5, tzinfo=timezone.utc),
+    )
+    assert stale.status == "stale"
+
+
+def test_travel_warning_never_prints_none_as_a_system_name():
+    """/intelligence-brief used to have its own _format_cross_system_note with this same
+    guard - now folded into the shared bot.uex.route_presentation.travel_warning (used by
+    /best-route, /top-routes, /mixed-routes, /multi-stop-route, and /intelligence-brief
+    alike), so the regression is pinned there instead."""
+    for has_real_distance in (True, False):
+        incomplete = travel_warning(None, "Stanton", has_real_distance=has_real_distance)
+        assert incomplete is None or "None" not in incomplete
+
+
+def test_travel_warning_same_system_depends_on_whether_distance_is_already_shown():
+    assert travel_warning("Stanton", "Stanton", has_real_distance=True) is None
+    assert travel_warning("Stanton", "Stanton", has_real_distance=False) is not None
+
+
+def test_travel_warning_cross_system_always_speaks_up():
+    assert "Pyro → Stanton" in (travel_warning("Pyro", "Stanton", has_real_distance=False) or "")
+    assert "Pyro → Stanton" in (travel_warning("Pyro", "Stanton", has_real_distance=True) or "")
 
 
 def test_supply_demand_history_is_time_weighted_for_change_only_rows():
@@ -310,6 +701,210 @@ def test_supply_demand_history_marks_short_windows_preliminary():
     )
     assert history is not None
     assert not history.enough_history
+
+
+def _fresh_health():
+    return classify_terminal_health(dict(last_update_days_percentage=80, prices_updated_percentage=100))
+
+
+def _stale_health():
+    return classify_terminal_health(dict(last_update_days_percentage=0, prices_updated_percentage=100))
+
+
+def _long_history():
+    return analyze_terminal_market_history(
+        [
+            {"observed_at": "2026-08-01 00:00:00", "price_buy": 10, "scu_buy": 50,
+             "price_sell": 12, "scu_sell": 0, "status_sell": 7},
+            {"observed_at": "2026-08-01 06:00:00", "price_buy": 10, "scu_buy": 0,
+             "price_sell": 12, "scu_sell": 100, "status_sell": 1},
+        ],
+        observed_until="2026-08-02 00:00:00",
+    )
+
+
+def test_evidence_level_is_current_when_scu_is_live_and_health_is_fresh():
+    level = classify_supply_evidence(scu=500, health=_fresh_health(), history=None, side="supply")
+    assert level.tier == "current"
+    assert level.quantity_scu == 500
+
+
+def test_evidence_level_is_aging_when_scu_is_live_but_health_is_degraded():
+    level = classify_supply_evidence(scu=500, health=_stale_health(), history=None, side="supply")
+    assert level.tier == "aging"
+    assert level.quantity_scu == 500
+
+
+def test_evidence_level_confirmed_zero_stays_current_not_unknown():
+    """The whole point of Evidence-Level Labels: a REAL reported zero must never look the
+    same as having no information at all."""
+    level = classify_supply_evidence(scu=0, health=_fresh_health(), history=None, side="supply")
+    assert level.tier == "current"
+    assert level.quantity_scu == 0
+
+
+def test_evidence_level_falls_back_to_inferred_when_no_live_scu_but_enough_history():
+    level = classify_supply_evidence(scu=None, health=None, history=_long_history(), side="supply")
+    assert level.tier == "inferred"
+    assert level.historical_availability_pct is not None
+    assert level.observed_hours == 24
+
+
+def test_evidence_level_demand_side_reads_the_demand_percentage_not_supply():
+    history = _long_history()
+    supply = classify_supply_evidence(scu=None, health=None, history=history, side="supply")
+    demand = classify_supply_evidence(scu=None, health=None, history=history, side="demand")
+    assert supply.historical_availability_pct == history.supply_available_pct
+    assert demand.historical_availability_pct == history.demand_available_pct
+    assert supply.historical_availability_pct != demand.historical_availability_pct
+
+
+def test_evidence_level_is_unknown_when_no_live_scu_and_no_history():
+    level = classify_supply_evidence(scu=None, health=None, history=None, side="supply")
+    assert level.tier == "unknown"
+    assert level.quantity_scu is None
+
+
+def test_evidence_level_is_unknown_when_history_is_too_short_to_infer_from():
+    short_history = analyze_terminal_market_history(
+        [{"observed_at": "2026-08-01 00:00:00", "price_buy": 1, "scu_buy": 1}],
+        observed_until="2026-08-01 12:00:00",
+    )
+    assert not short_history.enough_history
+    level = classify_supply_evidence(scu=None, health=None, history=short_history, side="supply")
+    assert level.tier == "unknown"
+
+
+def test_evidence_level_single_observation_is_not_enough_history_even_with_elapsed_time():
+    """Audit fix: a single recorded observation (state_changes == 0) extrapolated forward
+    to observed_until is one point in time with zero corroboration that the state
+    actually persisted - MIN_STATE_CHANGES requires at least one real recorded transition
+    before "inferred" is allowed, not just enough elapsed hours since a single snapshot."""
+    history = analyze_terminal_market_history(
+        [{"observed_at": "2026-08-01 00:00:00", "price_buy": 10, "scu_buy": 50}],
+        observed_until="2026-09-01 00:00:00",  # 31 days later - comfortably >= MIN_HISTORY_HOURS
+    )
+    assert history is not None
+    assert history.state_changes == 0
+    assert history.observed_hours >= 24
+    assert not history.enough_history
+    level = classify_supply_evidence(scu=None, health=None, history=history, side="supply")
+    assert level.tier == "unknown"
+
+
+def test_evidence_level_demand_side_ignores_a_live_figure_when_status_confirms_no_demand():
+    """Audit fix: UEX status code 7 ('Maximum Inventory, No Demand') means the terminal is
+    CONFIRMED to have zero real demand even when scu_sell reports a real positive number -
+    the same inversion has_sell_side_demand already exists for. Without this,
+    classify_supply_evidence could report 'Demand: 500 SCU' in the same embed that
+    separately shows 'sell side: Maximum Inventory (No Demand)', contradicting itself."""
+    level = classify_supply_evidence(
+        scu=500, health=_fresh_health(), history=None, side="demand", status_sell=7,
+    )
+    assert level.tier == "current"
+    assert level.quantity_scu == 0
+
+
+def test_evidence_level_demand_side_confirms_zero_even_with_no_live_scu_when_status_says_no_demand():
+    """Carry-forward defect from the 2026-09-13 audit: the status-7 override right above
+    used to run ONLY when scu was also present - a MISSING scu_sell let the history
+    fallback below quietly report 'inferred demand, N% historically available' for a
+    terminal UEX itself already confirms has zero real demand right now, exactly the
+    same self-contradiction the live-figure case above exists to prevent. status_sell==7
+    is authoritative on its own, independent of whether a live quantity happens to be
+    reported at all."""
+    level = classify_supply_evidence(
+        scu=None, health=_fresh_health(), history=_long_history(), side="demand", status_sell=7,
+    )
+    assert level.tier == "current", "must be a confirmed zero, not an inferred historical guess"
+    assert level.quantity_scu == 0
+    assert level.historical_availability_pct is None
+
+
+def test_evidence_level_demand_side_trusts_a_live_figure_when_status_does_not_say_no_demand():
+    """Only status code 7 is an authoritative zero-demand signal - any other status
+    (including unknown/None) must never override a genuinely reported live figure."""
+    for status_sell in (None, 0, 1, 3):
+        level = classify_supply_evidence(
+            scu=500, health=_fresh_health(), history=None, side="demand", status_sell=status_sell,
+        )
+        assert level.tier == "current", status_sell
+        assert level.quantity_scu == 500, status_sell
+
+
+def test_evidence_level_supply_side_never_consults_status_sell():
+    """status_sell is a sell-side-only concept - the supply/buy side has no equivalent
+    inversion, so it must never be affected even if a caller passes a status_sell value."""
+    level = classify_supply_evidence(
+        scu=500, health=_fresh_health(), history=None, side="supply", status_sell=7,
+    )
+    assert level.tier == "current"
+    assert level.quantity_scu == 500
+
+
+# -- effective_sell_scu (the extracted helper /price's buying-capacity display uses) -----
+
+def test_effective_sell_scu_zeroes_a_live_figure_when_status_confirms_no_demand():
+    assert effective_sell_scu(500, status_sell=7) == 0.0
+
+
+def test_effective_sell_scu_trusts_a_live_figure_for_any_other_status():
+    for status_sell in (None, 0, 1, 3):
+        assert effective_sell_scu(500, status_sell=status_sell) == 500.0
+
+
+def test_effective_sell_scu_returns_none_when_scu_itself_is_missing():
+    """None must stay distinguishable from a confirmed zero - a caller (like /price) needs
+    to tell "no data reported" apart from "confirmed nobody is buying"."""
+    assert effective_sell_scu(None, status_sell=1) is None
+    assert effective_sell_scu(None, status_sell=7) is None
+
+
+# -- estimate_sell_capacity_from_history (the /price fallback for terminals with no live
+# confirmed buying figure, from UEX's own real /commodities_prices_history) --------------
+
+def test_estimate_sell_capacity_from_history_uses_the_highest_ever_recorded_stock():
+    """Real live case this was built from: a terminal currently holding 253 SCU whose own
+    UEX history shows it has held as much as 895 before - the gap is the estimate."""
+    history = [
+        {"scu_sell_stock": 253, "date_added": 1000},
+        {"scu_sell_stock": 895, "date_added": 2000},
+        {"scu_sell_stock": 400, "date_added": 3000},
+    ]
+    estimate = estimate_sell_capacity_from_history(history, current_stock=253)
+    assert estimate is not None
+    assert estimate.scu == 895 - 253
+
+
+def test_estimate_sell_capacity_from_history_returns_none_when_already_at_or_above_the_peak():
+    """No evidence of room to spare if the terminal is already at (or somehow above) the
+    highest level its own history has ever recorded - callers should fall back to a plain
+    on-hand-stock figure instead, not a zero/negative "estimate"."""
+    history = [{"scu_sell_stock": 500, "date_added": 1000}]
+    assert estimate_sell_capacity_from_history(history, current_stock=500) is None
+    assert estimate_sell_capacity_from_history(history, current_stock=600) is None
+
+
+def test_estimate_sell_capacity_from_history_returns_none_without_current_stock_context():
+    history = [{"scu_sell_stock": 500, "date_added": 1000}]
+    assert estimate_sell_capacity_from_history(history, current_stock=None) is None
+
+
+def test_estimate_sell_capacity_from_history_returns_none_for_empty_history():
+    assert estimate_sell_capacity_from_history([], current_stock=100) is None
+
+
+def test_estimate_sell_capacity_from_history_reports_the_peak_records_real_age():
+    """The peak stock reading a quiet terminal's estimate is based on can itself be many
+    days old (confirmed against real UEX data: up to ~11 days for a rarely-reported
+    terminal) - worth surfacing alongside the number so it isn't mistaken for something
+    just observed."""
+    now = datetime(2026, 9, 12, tzinfo=timezone.utc)
+    five_days_ago = now.timestamp() - 5 * 86400
+    history = [{"scu_sell_stock": 895, "date_added": five_days_ago}]
+    estimate = estimate_sell_capacity_from_history(history, current_stock=253, now=now)
+    assert estimate is not None
+    assert abs(estimate.source_age_days - 5.0) < 0.01
 
 
 def test_terminal_market_name_search_is_scoped_to_commodity(tmp_path):
@@ -431,6 +1026,145 @@ def test_terminal_market_shifts_compare_oldest_and_newest_observation(tmp_path):
     asyncio.run(run())
 
 
+def test_terminal_market_shifts_reports_a_single_recent_change_against_an_old_baseline(tmp_path):
+    """A11: a long-stable market (nothing recorded for two days) followed by exactly one
+    recent change only ever has ONE observation inside a 24h window - the original query
+    required 2+ in-window rows before it would report anything, silently dropping this
+    real, large shift. The fix compares the latest observation against the closest prior
+    baseline even when that baseline sits outside the window entirely."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        async with db.connect() as sqlite:
+            await sqlite.executescript(
+                """INSERT INTO terminal_market_observations
+                   (id_commodity,id_terminal,observed_at,commodity_name,terminal_name,scu_buy,scu_sell)
+                   VALUES (1,1,datetime('now','-2 days'),'Ore','Terminal',100,200);
+                   INSERT INTO terminal_market_observations
+                   (id_commodity,id_terminal,observed_at,commodity_name,terminal_name,scu_buy,scu_sell)
+                   VALUES (1,1,datetime('now','-1 hour'),'Ore','Terminal',600,200);"""
+            )
+            await sqlite.commit()
+        (shift,) = await db.get_terminal_market_shifts()
+        assert shift["supply_change"] == 500
+        assert shift["demand_change"] == 0
+
+    asyncio.run(run())
+
+
+def test_terminal_market_shifts_excludes_a_pair_with_only_one_ever_observation(tmp_path):
+    """A single ever-recorded data point has no earlier state to compare against - must not
+    show up as a "change" of 0 (which would be indistinguishable from a genuinely unchanged
+    market), it should be excluded entirely."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        async with db.connect() as sqlite:
+            await sqlite.execute(
+                """INSERT INTO terminal_market_observations
+                   (id_commodity,id_terminal,observed_at,commodity_name,terminal_name,scu_buy,scu_sell)
+                   VALUES (1,1,datetime('now','-1 hour'),'Ore','Terminal',100,200)"""
+            )
+            await sqlite.commit()
+        assert await db.get_terminal_market_shifts() == []
+
+    asyncio.run(run())
+
+
+def test_terminal_market_shifts_new_market_uses_earliest_not_most_recent_fallback(tmp_path):
+    """Follow-up review finding: the fix for the single-recent-change bug ranked both the
+    pre-window baseline AND the in-window fallback in one CTE ordered `... DESC` throughout
+    - correct for the pre-window tier (want the most recent one, closest to the window
+    boundary) but wrong for the in-window fallback tier, which should use the EARLIEST
+    in-window observation (the original, pre-fix behavior for this exact case). With no
+    pre-window baseline and three in-window observations (100 @ -3h, 600 @ -2h, 200 @ -1h =
+    latest), the buggy ordering picked -2h (600) as "baseline" - the second most recent,
+    not the earliest - reporting -400 instead of the correct +100 against the true
+    earliest reference point."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        async with db.connect() as sqlite:
+            for hours, stock in [(3, 100), (2, 600), (1, 200)]:
+                await sqlite.execute(
+                    """INSERT INTO terminal_market_observations
+                       (id_commodity,id_terminal,observed_at,commodity_name,terminal_name,scu_buy,scu_sell)
+                       VALUES (1,1,datetime('now',?),'Ore','Terminal',?,100)""",
+                    (f"-{hours} hours", stock),
+                )
+            await sqlite.commit()
+        (shift,) = await db.get_terminal_market_shifts()
+        assert shift["supply_change"] == 100, shift
+
+    asyncio.run(run())
+
+
+def test_terminal_market_shifts_never_mixes_measurements_from_two_baseline_rows(tmp_path):
+    """Follow-up review finding: the fix for the 3-observation ordering bug picked
+    previous_supply and previous_demand independently via COALESCE(pwb.scu_buy,
+    iwe.scu_buy) / COALESCE(pwb.scu_sell, iwe.scu_sell) - column by column, not row by
+    row. Whenever the real pre-window baseline row exists but has just ONE of its two
+    measurements NULL, this silently borrowed the OTHER measurement from a completely
+    different row (the in-window fallback), presenting one "since baseline" comparison
+    built from two different points in time. With a 48h-old baseline (supply unknown,
+    demand 500) and in-window rows at -3h (600, 400) and -1h/latest (200, 300), the buggy
+    query reported previous_supply=600 (borrowed from -3h) alongside previous_demand=500
+    (correctly from the real 48h baseline) - a fabricated -400 supply_change that doesn't
+    describe any single real comparison. The fix selects the baseline as one row: a
+    genuinely unknown measurement on the chosen row stays unknown (None), and its
+    corresponding *_change is None rather than a number computed against a substituted
+    value."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        async with db.connect() as sqlite:
+            for hours, supply, demand in [(48, None, 500), (3, 600, 400), (1, 200, 300)]:
+                await sqlite.execute(
+                    """INSERT INTO terminal_market_observations
+                       (id_commodity,id_terminal,observed_at,commodity_name,terminal_name,scu_buy,scu_sell)
+                       VALUES (1,1,datetime('now',?),'Ore','Terminal',?,?)""",
+                    (f"-{hours} hours", supply, demand),
+                )
+            await sqlite.commit()
+        (shift,) = await db.get_terminal_market_shifts()
+        assert shift["previous_supply"] is None, shift
+        assert shift["supply_change"] is None, shift
+        assert shift["previous_demand"] == 500, shift
+        assert shift["demand_change"] == -200, shift
+
+    asyncio.run(run())
+
+
+def test_terminal_market_shifts_unknown_current_supply_is_not_reported_as_zero(tmp_path):
+    """Follow-up review finding: the previous fix preserved a NULL BASELINE measurement
+    (previous_supply/previous_demand) instead of fabricating a change against it - but the
+    symmetric case on the CURRENT (latest) side was still wrapped in
+    COALESCE(latest.scu_buy, 0), so a known baseline (500) paired with a genuinely unknown
+    CURRENT value (UEX simply didn't report scu_buy this cycle) computed 0 - 500 = -500,
+    inventing a complete-depletion shift that current_supply itself reports as unknown,
+    not zero. Each *_change must be NULL whenever EITHER side is unknown, symmetrically."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        async with db.connect() as sqlite:
+            await sqlite.execute(
+                """INSERT INTO terminal_market_observations
+                   (id_commodity,id_terminal,observed_at,commodity_name,terminal_name,scu_buy,scu_sell)
+                   VALUES (1,1,datetime('now','-48 hours'),'Ore','Terminal',500,100)"""
+            )
+            await sqlite.execute(
+                """INSERT INTO terminal_market_observations
+                   (id_commodity,id_terminal,observed_at,commodity_name,terminal_name,scu_buy,scu_sell)
+                   VALUES (1,1,datetime('now','-1 hour'),'Ore','Terminal',NULL,100)"""
+            )
+            await sqlite.commit()
+        (shift,) = await db.get_terminal_market_shifts()
+        assert shift["current_supply"] is None, shift
+        assert shift["supply_change"] is None, shift
+
+    asyncio.run(run())
+
+
 def test_marketplace_tier_history_seeds_an_existing_current_state(tmp_path):
     async def run():
         db = _make_db(tmp_path)
@@ -448,5 +1182,86 @@ def test_marketplace_tier_history_seeds_an_existing_current_state(tmp_path):
         async with db.connect() as sqlite:
             cursor = await sqlite.execute("SELECT COUNT(*) AS count FROM marketplace_tier_observations")
             assert (await cursor.fetchone())["count"] == 1
+
+    asyncio.run(run())
+
+
+def _refinery_row(index: int) -> dict:
+    return {
+        "id_commodity": 1, "id_terminal": index, "commodity_name": "Quantainium (Raw)",
+        "terminal_name": f"Refinery {index}", "value": 10, "value_week": 10, "value_month": 10,
+    }
+
+
+def test_refresh_reference_data_warns_when_refinery_yields_hits_the_documented_row_cap(tmp_path, caplog):
+    """Audit finding: /refineries_yields is documented ('Limits — Maximum of 500 rows')
+    as capped with no pagination offered - a response landing at that cap is
+    indistinguishable from one that's been silently truncated, and refresh_reference_data
+    had no guard at all for it. REFINERY_YIELDS_ROW_CAP now triggers a warning so a real
+    truncation doesn't silently feed /refinery-advisor an incomplete dataset."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        cog = Intelligence.__new__(Intelligence)
+        cog.bot = NS(
+            uex=NS(
+                get_terminals=AsyncMock(return_value=[]),
+                get_commodities=AsyncMock(return_value=[]),
+                get_refineries_yields=AsyncMock(
+                    return_value=[_refinery_row(i) for i in range(REFINERY_YIELDS_ROW_CAP)]
+                ),
+            ),
+            db=db,
+        )
+        with caplog.at_level(logging.WARNING, logger="uexbot.intelligence"):
+            await cog.refresh_reference_data.coro(cog)
+        assert any("500" in record.message or "cap" in record.message.lower() for record in caplog.records)
+
+    asyncio.run(run())
+
+
+def test_refresh_reference_data_does_not_warn_below_the_refinery_yields_row_cap(tmp_path, caplog):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        cog = Intelligence.__new__(Intelligence)
+        cog.bot = NS(
+            uex=NS(
+                get_terminals=AsyncMock(return_value=[]),
+                get_commodities=AsyncMock(return_value=[]),
+                get_refineries_yields=AsyncMock(return_value=[_refinery_row(i) for i in range(215)]),
+            ),
+            db=db,
+        )
+        with caplog.at_level(logging.WARNING, logger="uexbot.intelligence"):
+            await cog.refresh_reference_data.coro(cog)
+        assert not caplog.records, f"expected no warning well below the cap: {[r.message for r in caplog.records]}"
+
+    asyncio.run(run())
+
+
+def test_refresh_reference_data_persists_the_response_count_every_run(tmp_path):
+    """Audit finding: the row-cap warning above was only ever transient (a log line at the
+    moment a fetch happens to hit the cap) - nothing was persisted, so there was no way to
+    look back and tell whether a past fetch was already truncated or how the response size
+    has trended over time. refresh_reference_data now logs every fetch's count, not just
+    the ones that happen to trip the warning threshold."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        cog = Intelligence.__new__(Intelligence)
+        cog.bot = NS(
+            uex=NS(
+                get_terminals=AsyncMock(return_value=[]),
+                get_commodities=AsyncMock(return_value=[]),
+                get_refineries_yields=AsyncMock(return_value=[_refinery_row(i) for i in range(215)]),
+            ),
+            db=db,
+        )
+        await cog.refresh_reference_data.coro(cog)
+        async with db.connect() as conn:
+            cursor = await conn.execute("SELECT response_count FROM refinery_yield_fetch_log")
+            rows = await cursor.fetchall()
+        assert [r["response_count"] for r in rows] == [215]
 
     asyncio.run(run())

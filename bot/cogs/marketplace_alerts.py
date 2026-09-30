@@ -4,8 +4,8 @@ keyword they're watching, optionally at or better than a target price.
 Unlike bot/cogs/alerts.py's price alerts (one-shot: fire once, deactivate), these are
 persistent watches - new listings keep appearing, so each alert stays active indefinitely
 and instead dedups per-listing-id (a listing only ever notifies once) via
-marketplace_alert_seen_listings. Delivery is always a DM, not a channel post, since a
-listing match is personal to whoever set the watch.
+marketplace_alert_seen_listings. Delivery is the player's choice, like every alert type: a DM
+(the default) or a post in the channel the alert was set in (audit UX-12).
 """
 from __future__ import annotations
 
@@ -16,12 +16,15 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from bot.cogs.marketplace import OPERATION_CHOICES, traded_item_autocomplete
+from bot.delivery import DELIVERY_CHOICES, DELIVERY_DESCRIPTION, Delivery, delivery_note, delivery_scope, send_alert
 from bot.uex.exceptions import UexApiError
 from bot.uex.marketplace import (
+    QUALITY_MAX,
     exclude_sold_out,
     filter_listings_by_keyword,
     filter_listings_by_quality,
     find_item_id_by_name,
+    format_quality_range,
     marketplace_item_link,
     parse_listing_quality,
     parse_uex_number,
@@ -49,10 +52,11 @@ class MarketplaceAlerts(commands.Cog):
         keyword="Item name or keyword to watch for, e.g. 'Cutlass Black' or 'Laranite'",
         operation="Watch sell listings (so you can buy) or buy listings (so you can sell into them)",
         target_price="Optional: only notify at or better than this price",
-        min_quality="Optional: only notify for listings with quality at least this (seller-set, UEX's 0-100 scale)",
-        max_quality="Optional: only notify for listings with quality at most this (seller-set, UEX's 0-100 scale)",
+        min_quality="Optional: only listings with quality at least this, 0-1000 (seller-set)",
+        max_quality="Optional: only listings with quality at most this, 0-1000 (seller-set)",
+        delivery=DELIVERY_DESCRIPTION,
     )
-    @app_commands.choices(operation=OPERATION_CHOICES)
+    @app_commands.choices(operation=OPERATION_CHOICES, delivery=DELIVERY_CHOICES)
     @app_commands.autocomplete(keyword=traded_item_autocomplete)
     async def marketplace_alert_add(
         self,
@@ -60,9 +64,16 @@ class MarketplaceAlerts(commands.Cog):
         keyword: str,
         operation: app_commands.Choice[str],
         target_price: float | None = None,
-        min_quality: float | None = None,
-        max_quality: float | None = None,
+        min_quality: app_commands.Range[float, 0, QUALITY_MAX] | None = None,
+        max_quality: app_commands.Range[float, 0, QUALITY_MAX] | None = None,
+        delivery: app_commands.Choice[str] | None = None,
     ) -> None:
+        scope = delivery_scope(delivery)
+        # Deferred before any DB write: a write can wait on a lock past Discord's
+        # 3-second window, and a player who sees "did not respond" retries into a
+        # duplicate (audit REL-8).
+        private = scope == "personal"
+        await interaction.response.defer(ephemeral=private)
         alert_id = await self.bot.db.add_marketplace_alert(
             user_id=interaction.user.id,
             keyword=keyword,
@@ -70,28 +81,37 @@ class MarketplaceAlerts(commands.Cog):
             target_price=target_price,
             min_quality=min_quality,
             max_quality=max_quality,
+            scope=scope,
+            guild_id=interaction.guild_id,
+            channel_id=interaction.channel_id,
         )
         side_note = "sell listings (so you can buy)" if operation.value == "sell" else "buy listings (so you can sell into them)"
         price_note = f" at or better than **{target_price:,.0f}**" if target_price is not None else ""
         quality_note = ""
         if min_quality is not None or max_quality is not None:
-            lo = f"{min_quality:.0f}" if min_quality is not None else "0"
-            hi = f"{max_quality:.0f}" if max_quality is not None else "100"
-            quality_note = f" and quality {lo}-{hi}"
+            quality_note = f" and quality {format_quality_range(min_quality, max_quality)}"
         quality_caveat = (
             " (note: most listings today don't have a quality value set at all, so this may match very little for now)"
             if quality_note
             else ""
         )
-        await interaction.response.send_message(
-            f"Marketplace alert #{alert_id} set: I'll DM you when a new {side_note} matching "
+        await interaction.followup.send(
+            f"Marketplace alert #{alert_id} set: {delivery_note(scope)} when a new {side_note} matching "
             f"'{keyword}'{price_note}{quality_note} appears (checked every {POLL_INTERVAL_MINUTES} min)."
-            f"{quality_caveat} This keeps watching - it won't turn off after the first match.",
-            ephemeral=True,
+            f"{quality_caveat} This keeps watching - it fires on every new matching listing, not just the first.",
+            ephemeral=private,
         )
 
     @tasks.loop(minutes=POLL_INTERVAL_MINUTES)
     async def poll_marketplace_alerts(self) -> None:
+        # Nothing may escape a tasks.loop body: it only restarts itself after a narrow set
+        # of network errors, so anything else would stop this poller until a restart.
+        try:
+            await self._poll_marketplace_alerts_once()
+        except Exception:
+            logger.exception("Marketplace alert poll failed; retrying next cycle")
+
+    async def _poll_marketplace_alerts_once(self) -> None:
         alerts = await self.bot.db.list_active_marketplace_alerts()
         if not alerts:
             return
@@ -124,22 +144,33 @@ class MarketplaceAlerts(commands.Cog):
             groups.setdefault(key, []).append(alert)
 
         for (keyword, operation), group_alerts in groups.items():
-            id_item = find_item_id_by_name(items, keyword)
+            # Per group, so one keyword's bad data can't block every group after it.
             try:
-                if id_item is not None:
-                    listings = await self.bot.uex.get_marketplace_listings(id_item=id_item, operation=operation)
-                else:
-                    listings = await self.bot.uex.get_marketplace_listings(operation=operation)
-                    listings = filter_listings_by_keyword(listings, keyword)
-            except UexApiError as exc:
-                logger.warning("Failed to poll marketplace listings for '%s': %s", keyword, exc)
-                continue
+                await self._poll_alert_group(keyword, operation, group_alerts, items)
+            except Exception:
+                logger.exception("Marketplace alerts for '%s' (%s) failed this cycle", keyword, operation)
 
-            listings = exclude_sold_out(listings)
-            if not listings:
-                continue
+    async def _poll_alert_group(
+        self, keyword: str, operation: str, group_alerts: list[dict], items: list[dict]
+    ) -> None:
+        id_item = find_item_id_by_name(items, keyword)
+        try:
+            if id_item is not None:
+                listings = await self.bot.uex.get_marketplace_listings(id_item=id_item, operation=operation)
+            else:
+                listings = await self.bot.uex.get_marketplace_listings(operation=operation)
+                listings = filter_listings_by_keyword(listings, keyword)
+        except UexApiError as exc:
+            logger.warning("Failed to poll marketplace listings for '%s': %s", keyword, exc)
+            return
 
-            for alert in group_alerts:
+        listings = exclude_sold_out(listings)
+        if not listings:
+            return
+
+        for alert in group_alerts:
+            # Per alert, so one alert's failure can't block the rest of this group.
+            try:
                 seen_ids = await self.bot.db.get_seen_marketplace_listing_ids(alert["id"])
                 # Quality bounds are per-alert (two alerts can share a keyword/operation group
                 # but want different quality ranges), so this filter is applied here, not
@@ -167,11 +198,22 @@ class MarketplaceAlerts(commands.Cog):
                             await self.bot.db.mark_marketplace_listing_seen(alert["id"], listing_id)
                             continue
 
-                    await self._notify_marketplace_alert(alert, listing)
+                    outcome = await self._notify_marketplace_alert(alert, listing)
+                    if not outcome.settled:
+                        # A temporary failure: leave this listing unseen so the next poll
+                        # retries it, and don't try the rest now either.
+                        break
                     await self.bot.db.mark_marketplace_listing_seen(alert["id"], listing_id)
+                    if outcome is Delivery.UNDELIVERABLE:
+                        # Discord refused the DM (closed DMs, unknown user). The others
+                        # would be refused the same way, so they wait for a later poll
+                        # rather than each failing now.
+                        break
                     notified += 1
+            except Exception:
+                logger.exception("Marketplace alert #%s failed this cycle", alert["id"])
 
-    async def _notify_marketplace_alert(self, alert: dict, listing: dict) -> None:
+    async def _notify_marketplace_alert(self, alert: dict, listing: dict) -> Delivery:
         title = listing.get("title", "Untitled listing")
         price = parse_uex_number(listing.get("price"))
         currency = listing.get("currency", "UEC")
@@ -179,15 +221,11 @@ class MarketplaceAlerts(commands.Cog):
         price_text = f"{price:,.0f} {currency}" if price is not None else "price n/a"
         quality = parse_listing_quality(listing.get("quality"))
         quality_text = f" · quality {quality:.0f}" if quality is not None else ""
-        message = (
-            f"Marketplace alert #{alert['id']} ('{alert['keyword']}'): new **{alert['operation']}** listing — "
+        body = (
+            f"marketplace alert #{alert['id']} ('{alert['keyword']}'): new **{alert['operation']}** listing — "
             f"**{marketplace_item_link(title, listing.get('id_item'))}** · {price_text}{quality_text} · by {seller}"
         )
-        try:
-            user = await self.bot.fetch_user(alert["user_id"])
-            await user.send(message)
-        except discord.HTTPException as exc:
-            logger.warning("Failed to DM marketplace alert #%s: %s", alert["id"], exc)
+        return await send_alert(self.bot, alert, body, label=f"marketplace alert #{alert['id']}")
 
     @poll_marketplace_alerts.before_loop
     async def before_poll_marketplace_alerts(self) -> None:

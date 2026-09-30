@@ -12,6 +12,7 @@ from discord.ext import commands
 from bot.config import Config
 from bot.db.crypto import load_or_create_key
 from bot.db.database import Database
+from bot.discord_ui import on_app_command_error
 from bot.uex.client import UexClient
 from bot.uex.exceptions import UexApiError
 
@@ -32,7 +33,6 @@ INITIAL_COGS = (
     "bot.cogs.intelligence_brief",
     "bot.cogs.marketplace_alerts",
     "bot.cogs.stock_alerts",
-    "bot.cogs.ships",
     "bot.cogs.digest",
     "bot.cogs.diagnostics",
     "bot.cogs.help",
@@ -40,15 +40,27 @@ INITIAL_COGS = (
     "bot.cogs.liquidity",
     "bot.cogs.personal_inventory",
     "bot.cogs.negotiation_alerts",
+    "bot.cogs.trading_preferences",
+    "bot.cogs.route_progression",
+    "bot.cogs.refinery",
+    "bot.cogs.mining_locations",
+    "bot.cogs.blueprints",
+    "bot.cogs.item_finder",
+    "bot.cogs.ship_parts_finder",
+    "bot.cogs.ship_shops",
 )
 
 
 class UexBot(commands.Bot):
     def __init__(self, config: Config) -> None:
+        # No privileged intents (audit MSG-14): nothing reads other people's messages, and a
+        # bot always sees its own. Asking for Message Content made startup fail on any bot
+        # that didn't also switch it on in the Developer Portal, which README says it needn't.
         intents = discord.Intents.default()
-        intents.message_content = True
         super().__init__(command_prefix="!uex-unused-", intents=intents)
         self.config = config
+        # Every slash command answers when it fails, instead of leaving "thinking..." up.
+        self.tree.error(on_app_command_error)
 
         # Fernet key for encrypting per-user UEX secret keys at rest, stored next to the DB.
         credentials_key_path = config.database_path.parent / "credentials.key"
@@ -97,6 +109,26 @@ class UexBot(commands.Bot):
             await self.uex.get_item_catalog()
         except UexApiError as exc:
             logger.warning("Could not warm the item catalog at startup: %s", exc)
+
+    async def on_app_command_completion(
+        self, interaction: discord.Interaction, command: discord.app_commands.Command,
+    ) -> None:
+        """discord.py dispatches this after every slash command that completes WITHOUT
+        raising - never for a failed one, so this only ever counts real, successful usage.
+        Best-effort only: a failure here must never surface to the user, since by this
+        point the command's own response has already been sent. Records the raw user_id
+        with no owner-exclusion here - see /command-usage (bot/cogs/diagnostics.py) for
+        where that happens, at read time. display_name (not the raw username) is stored -
+        it's the guild nickname when the interaction has one, falling back to the user's
+        global display name/username otherwise (discord.py's own User/Member.display_name
+        already handles that distinction), which is the name the owner would actually
+        recognize them by when deciding who to reach out to."""
+        try:
+            await self.db.record_command_usage(
+                command.qualified_name, interaction.user.id, interaction.user.display_name,
+            )
+        except Exception:
+            logger.warning("Could not record command usage for %s", command.qualified_name, exc_info=True)
 
     @commands.command()
     @commands.is_owner()

@@ -40,6 +40,7 @@ class Digest(commands.Cog):
         channel="Channel to post the daily digest in",
         hour_utc="Hour of day (UTC, 0-23) to post it",
     )
+    @app_commands.default_permissions(manage_guild=True)  # hidden from others (audit UX-17)
     @app_commands.checks.has_permissions(manage_guild=True)
     async def set_digest_channel(
         self,
@@ -47,10 +48,14 @@ class Digest(commands.Cog):
         channel: discord.TextChannel,
         hour_utc: app_commands.Range[int, 0, 23],
     ) -> None:
+        # Deferred before any DB write: a write can wait on a lock past Discord's
+        # 3-second window, and a player who sees "did not respond" retries into a
+        # duplicate (audit REL-8).
+        await interaction.response.defer(ephemeral=True)
         await self.bot.db.set_guild_digest_config(
             guild_id=interaction.guild_id, channel_id=channel.id, hour_utc=hour_utc
         )
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"Daily digest will post in {channel.mention} at **{hour_utc:02d}:00 UTC** every day "
             f"(checked every {CHECK_INTERVAL_MINUTES} min, so it may land up to that long after the exact hour). "
             "Use /digest-now to post one immediately, or /digest-disable to turn it off.",
@@ -58,11 +63,16 @@ class Digest(commands.Cog):
         )
 
     @app_commands.command(name="digest-disable", description="(Admin) Turn off the daily digest for this server.")
+    @app_commands.default_permissions(manage_guild=True)  # hidden from others (audit UX-17)
     @app_commands.checks.has_permissions(manage_guild=True)
     async def digest_disable(self, interaction: discord.Interaction) -> None:
+        # Deferred before any DB write: a write can wait on a lock past Discord's
+        # 3-second window, and a player who sees "did not respond" retries into a
+        # duplicate (audit REL-8).
+        await interaction.response.defer(ephemeral=True)
         disabled = await self.bot.db.disable_guild_digest(interaction.guild_id)
         msg = "Daily digest disabled." if disabled else "No digest was configured for this server."
-        await interaction.response.send_message(msg, ephemeral=True)
+        await interaction.followup.send(msg, ephemeral=True)
 
     @app_commands.command(
         name="digest-now",
@@ -153,6 +163,14 @@ class Digest(commands.Cog):
 
     @tasks.loop(minutes=CHECK_INTERVAL_MINUTES)
     async def post_scheduled_digests(self) -> None:
+        # Nothing may escape a tasks.loop body: it only restarts itself after a narrow set
+        # of network errors, so anything else would stop the daily digest until a restart.
+        try:
+            await self._post_scheduled_digests_once()
+        except Exception:
+            logger.exception("Scheduled digest check failed; retrying next cycle")
+
+    async def _post_scheduled_digests_once(self) -> None:
         configs = await self.bot.db.list_enabled_guild_digest_configs()
         if not configs:
             return
@@ -174,19 +192,15 @@ class Digest(commands.Cog):
             except discord.HTTPException as exc:
                 logger.warning("Failed to post digest for guild %s: %s", config["guild_id"], exc)
                 continue
-            await self.bot.db.mark_guild_digest_posted(config["guild_id"], today_str)
+            try:
+                await self.bot.db.mark_guild_digest_posted(config["guild_id"], today_str)
+            except Exception:
+                # Per guild, so one failed write can't stop the remaining guilds' digests.
+                logger.exception("Posted the digest for guild %s but couldn't record it", config["guild_id"])
 
     @post_scheduled_digests.before_loop
     async def before_post_scheduled_digests(self) -> None:
         await self.bot.wait_until_ready()
-
-    async def cog_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
-        if isinstance(error, app_commands.MissingPermissions):
-            await interaction.response.send_message(
-                "You need the Manage Server permission to configure the digest.", ephemeral=True
-            )
-            return
-        raise error
 
 
 async def setup(bot: commands.Bot) -> None:
@@ -241,7 +255,7 @@ def _format_data_freshness(
     current = now or datetime.now(timezone.utc)
     sources = (
         ("Terminal markets", "terminal_market", 3),
-        ("Liquidity ratings", "liquidity", 2),
+        ("Sellability Ratings", "liquidity", 2),
         ("Marketplace index", "marketplace", 2),
     )
     lines: list[str] = []
@@ -261,7 +275,8 @@ def _format_data_freshness(
         age_text = _format_age(age_seconds)
         overdue = age_seconds > stale_after_hours * 3600
         marker = "⚠️" if overdue else "✅"
-        lines.append(f"{marker} **{label}:** {age_text} ago{' · overdue' if overdue else ''}")
+        when = age_text if age_text == "just now" else f"{age_text} ago"
+        lines.append(f"{marker} **{label}:** {when}{' · overdue' if overdue else ''}")
     return "\n".join(lines)
 
 

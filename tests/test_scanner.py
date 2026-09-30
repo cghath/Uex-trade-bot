@@ -165,6 +165,39 @@ def test_find_steals_ignores_buy_side_listings():
     assert find_steals(listings, fair_prices, threshold=0.20) == []
 
 
+def test_find_steals_excludes_sold_out_listings():
+    """A09: nothing is actually purchasable at a sold-out listing's price, no matter how
+    deep the discount - is_sold_out is a real Marketplace field, confirmed to still show up
+    on listings UEX keeps exposing after they sell out (see personal_inventory.py's own use
+    of it) and must exclude a listing from being surfaced as a live deal."""
+    fair_prices = build_fair_price_index([_average_row(price_avg_month="1000")])
+    listings = [_listing(price="100", is_sold_out=1, in_stock=0)]  # 90% off, but unavailable
+    assert find_steals(listings, fair_prices, threshold=0.20) == []
+
+
+def test_find_steals_excludes_zero_stock_listings_even_if_not_flagged_sold_out():
+    fair_prices = build_fair_price_index([_average_row(price_avg_month="1000")])
+    listings = [_listing(price="100", is_sold_out=0, in_stock=0)]
+    assert find_steals(listings, fair_prices, threshold=0.20) == []
+
+
+def test_find_steals_still_flags_an_in_stock_listing():
+    fair_prices = build_fair_price_index([_average_row(price_avg_month="1000")])
+    listings = [_listing(price="100", is_sold_out=0, in_stock=25)]
+    (steal,) = find_steals(listings, fair_prices, threshold=0.20)
+    assert steal.listing_price == 100.0
+
+
+def test_find_steals_does_not_exclude_a_listing_with_unreported_stock():
+    """Availability fields aren't guaranteed on every listing - an unknown stock must not
+    be treated the same as a confirmed zero, or every listing missing this field would be
+    silently dropped instead of just the genuinely unavailable ones."""
+    fair_prices = build_fair_price_index([_average_row(price_avg_month="1000")])
+    listings = [_listing(price="100")]  # no is_sold_out/in_stock keys at all
+    (steal,) = find_steals(listings, fair_prices, threshold=0.20)
+    assert steal.listing_price == 100.0
+
+
 def test_find_steals_does_not_match_across_quality_tiers():
     """Regression test for the exact real-world false positive described in
     build_fair_price_index's test_build_fair_price_index_keeps_quality_tiers_separate:
