@@ -8,8 +8,14 @@ The owner's decisions (2026-10-01):
   (ship_part_display.ranking_stat). Stealth ranks every component by lowest EM signature, a
   cooler's IR only breaking EM ties (EM matters more; coolers first went by IR). Tank ranks
   shields by HP (already their key stat) and every other component by its own durability.
-  Guns rank by DPS in all three. Budget picks the most key stat per aUEC, only among parts that
-  beat the stock part.
+  Guns rank by DPS in all three, alpha damage breaking DPS ties. Budget picks the most key stat
+  per aUEC, only among parts that beat the stock part.
+- Scatterguns are never recommended (nobody uses them at the moment, the owner's call; their
+  wiki DPS also counts every pellet of a shot, which put them first in S1-S3). A stock one is
+  always worth replacing.
+- A point-defense (PDC) slot always keeps its stock turret, the M2C "Swarm" on every ship that
+  has one: it shoots down incoming missiles and never runs out of ammo, which the turret rank
+  (the gun size it holds) can't see - it had the Perseus swapping six for the Pepperbox.
 - Where the stock part is already the best pick, the slot says "keep stock" instead of
   suggesting a purchase.
 - A gun hardpoint keeps whatever mount the ship comes with: under a stock gimbal, the pick is a
@@ -49,6 +55,8 @@ NOTHING_BEATS_STOCK = "nothing sold beats the stock part"
 NOTHING_SOLD = "no shop sells a part that fits"
 NO_STATS = "the wiki has no stats for the parts sold for this slot"
 STOCK_UNKNOWN = "the stock part's stats couldn't be loaded to compare"
+ONLY_SCATTERGUNS = "the only guns sold for it are scatterguns"
+POINT_DEFENSE = "point defense: it shoots down incoming missiles and never runs out of ammo"
 
 # What each profile favours, under the loadout's title and in /ship-loadout's profile choices.
 # Player-facing, so the stat is named rather than called the "key stat" (a code term).
@@ -86,6 +94,29 @@ def component_health(detail: dict | None) -> float | None:
     return _number(_path(detail, "durability", "health"))
 
 
+def alpha_damage(detail: dict | None) -> float | None:
+    """A gun's damage per shot, every pellet included (vehicle_weapon.damage.alpha_total)."""
+    return _number(_path(detail, "vehicle_weapon", "damage", "alpha_total"))
+
+
+def is_scattergun(detail: dict | None) -> bool:
+    """A scattergun: the wiki's vehicle_weapon.type ('Laser Scattergun', 'Ballistic
+    Scattergun', 'Plasma Scattergun' on the live wiki, 4.10.1), or its name."""
+    if not isinstance(detail, dict):
+        return False
+    return any(isinstance(text, str) and "scattergun" in text.lower()
+               for text in (_path(detail, "vehicle_weapon", "type"), detail.get("name")))
+
+
+def is_point_defense(group: "SlotGroup") -> bool:
+    """A PDC slot: its stock part is a PDCTurret (wiki sub_type), or the slot only takes
+    parts tagged 'PDC' (the Perseus's hardpoint_pdc_* slots require it)."""
+    stock = group.stock
+    if isinstance(stock, dict) and str(stock.get("sub_type") or "").lower() == "pdcturret":
+        return True
+    return any(tag.lower() == "pdc" for tag in group.port.required_tags)
+
+
 def _lowest_first(value: float | None) -> tuple:
     # A part missing the figure sorts after every part that has it, whichever way the
     # figure itself is ordered: an unknown signature is never the stealthiest.
@@ -103,7 +134,11 @@ def merit_key(detail: dict | None, category: str, profile: str) -> tuple:
     best = _highest_first(key_stat(detail))
     if profile not in PROFILES:
         raise ValueError(f"unknown loadout profile: {profile!r}")
-    if category == GUNS_CATEGORY or profile in (BALANCED, BUDGET):
+    if category == GUNS_CATEGORY:
+        # A scattergun after every other gun, so a stock one is always replaced. Then DPS, with
+        # alpha damage breaking DPS ties (the AD4B and Revenant Gatling: both 1,266 DPS).
+        return (is_scattergun(detail),) + best + _highest_first(alpha_damage(detail))
+    if profile in (BALANCED, BUDGET):
         return best
     if profile == STEALTH:
         em = _lowest_first(em_signature(detail))
@@ -149,13 +184,19 @@ def rank_candidates(candidates: list[dict], category: str, profile: str, stock: 
     """The slot's candidates, best first for `profile`. A part with no key stat (no wiki
     detail) is left out: there's nothing to judge it by. Budget keeps only parts whose key stat
     beats `stock`'s (every rated part, for an empty slot) and ranks those by key stat per aUEC;
-    a stock part with no key stat of its own leaves Budget nothing it can call an upgrade."""
+    a stock part with no key stat of its own leaves Budget nothing it can call an upgrade. A gun
+    slot never ranks a scattergun, and any other gun beats a stock one."""
     rated = [c for c in candidates if key_stat(c) is not None]
+    if category == GUNS_CATEGORY:
+        rated = [c for c in rated if not is_scattergun(c)]
     if profile != BUDGET:
         return sorted(rated, key=lambda c: merit_key(c, category, profile) + shop_key(c))
-    floor = key_stat(stock)
-    if stock is not None and floor is None:
-        return []
+    if category == GUNS_CATEGORY and is_scattergun(stock):
+        floor = None
+    else:
+        floor = key_stat(stock)
+        if stock is not None and floor is None:
+            return []
     upgrades = [c for c in rated if value_per_auec(c) is not None and (floor is None or key_stat(c) > floor)]
     return sorted(upgrades, key=lambda c: (-value_per_auec(c),) + shop_key(c))
 
@@ -322,10 +363,14 @@ def pick_for_slot(group: SlotGroup, candidates: list[dict], profile: str) -> Slo
     profiles recommend their best pick, since its own stats are known."""
     if profile not in PROFILES:
         raise ValueError(f"unknown loadout profile: {profile!r}")
+    if is_point_defense(group) and (group.stock is not None or group.stock_unknown):
+        return SlotPick(group, None, POINT_DEFENSE)
     stock = group.stock
     rated = [c for c in candidates if key_stat(c) is not None]
     if not rated:
         return SlotPick(group, None, NO_STATS if candidates else NOTHING_SOLD)
+    if group.category == GUNS_CATEGORY and all(is_scattergun(c) for c in rated):
+        return SlotPick(group, None, ONLY_SCATTERGUNS)
     if profile == BUDGET:
         if group.stock_unknown or (stock is not None and key_stat(stock) is None):
             return SlotPick(group, None, STOCK_UNKNOWN)
@@ -399,13 +444,19 @@ def stat_text(label: str, value: float) -> str:
 def shown_stat(detail: dict | None, category: str, profile: str) -> tuple[str, str] | None:
     """(kind, text) of the figure a line shows for a part: profile_stat's, as stat_text. A
     Stealth cooler shows its EM and IR together ('EM 1,490 / IR 7,130'): EM decides, but coolers
-    often tie on it (the Bracer and Ultra-Flow are both EM 1,490), and then IR does."""
+    often tie on it (the Bracer and Ultra-Flow are both EM 1,490), and then IR does. A gun shows
+    its DPS and alpha damage together ('1,266 DPS / 84.4 alpha') for the same reason."""
     if profile == STEALTH and category == COOLERS_CATEGORY:
         em, ir = em_signature(detail), ir_signature(detail)
         if em is not None and ir is not None:
             return ("EM / IR", f"{stat_text('EM', em)} / {stat_text('IR', ir)}")
     stat = profile_stat(detail, category, profile)
-    return (stat[0], stat_text(*stat)) if stat is not None else None
+    if stat is None:
+        return None
+    alpha = alpha_damage(detail) if category == GUNS_CATEGORY and stat[0] == "DPS" else None
+    if alpha is not None:
+        return ("DPS / alpha", f"{stat_text(*stat)} / {_amount(alpha)} alpha")
+    return (stat[0], stat_text(*stat))
 
 
 def stat_vs_stock(part: dict, stock: dict | None, category: str, profile: str) -> str:
@@ -498,7 +549,8 @@ def pick_line(pick: SlotPick, profile: str, *, reason: str | None = None) -> str
             return f"{head} · nothing to recommend - {why}"
         name = group.stock.get("name") if isinstance(group.stock, dict) else None
         text = f"keep stock **{name}**" if name else "keep stock"
-        shown = shown_stat(group.stock, group.category, profile)
+        # A PDC's turret rank (the gun size it holds) isn't why it's kept, so it isn't shown.
+        shown = shown_stat(group.stock, group.category, profile) if why != POINT_DEFENSE else None
         if shown is not None:
             text += f" ({shown[1]})"
         return f"{head} · {text} - {why}"

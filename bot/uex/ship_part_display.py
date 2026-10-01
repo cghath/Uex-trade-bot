@@ -250,6 +250,10 @@ def shared_stats(details: list[dict]) -> list[str]:
     return shared
 
 
+# Port-name words that read as acronyms, not title case ('Pdc Top Right' -> 'PDC Top Right').
+_ACRONYMS = {"pdc": "PDC"}
+
+
 def format_port_label(port_name: str, size_min: int | None = None, size_max: int | None = None) -> str:
     """'hardpoint_weapon_gun_class1_left_wing' -> 'Left Wing Gun (S3)'. A mechanical
     cleanup of the wiki's raw port name, not a per-ship curated label. A gun slot inside a
@@ -267,7 +271,7 @@ def format_port_label(port_name: str, size_min: int | None = None, size_max: int
             trailing.append(label)
     if "weapon" in words and len(words) > 1:
         words.remove("weapon")
-    label = " ".join(words + trailing).title() or port_name
+    label = " ".join(_ACRONYMS.get(word) or word.title() for word in words + trailing) or port_name
     return format_port_label_size(label, size_min, size_max)
 
 

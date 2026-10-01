@@ -331,6 +331,12 @@ date - no open item, nothing to record here.
       `tests/test_ship_loadout.py`, `tests/test_ship_loadout_command.py`,
       `tests/test_wiki_api.py`, `tests/test_ship_parts_finder.py`. See PROJECT_CONTEXT.md
       entry 122
+- [ ] PR #107 - `/ship-loadout` guns: never a scattergun (`is_scattergun`, and a stock one is
+      always replaced), alpha damage breaking DPS ties, gun lines showing "DPS / alpha", and
+      PDC slots always keeping their stock turret (`is_point_defense`, `bot/uex/ship_loadout.py`);
+      "PDC" in port labels (`format_port_label`, `bot/uex/ship_part_display.py`). Needs PR #106
+      above first. Tests: `tests/test_ship_loadout.py`, `tests/test_ship_loadout_command.py`,
+      `tests/test_ship_part_display.py`. See PROJECT_CONTEXT.md entry 123
 
 ## To port: aiv2 -> production
 

@@ -1,7 +1,15 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.42.
+the oldest entry below); the next new entry is 2.43.
+
+---
+
+## 2.42 - 2026-10-01 - Better weapon picks in ship loadouts
+
+**Changed**
+- `/ship-loadout` - Never recommends a scattergun, and replaces one a ship comes with. When two guns do the same DPS, the one with more alpha damage wins, and every gun line shows both, like "1,266 DPS / 84.4 alpha".
+- `/ship-loadout` - Always keeps a ship's stock point-defense turrets (PDCs): they shoot down incoming missiles and never run out of ammo.
 
 ---
 

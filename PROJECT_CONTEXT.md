@@ -4396,6 +4396,50 @@ they're in sync).
        - Live check after (same ships, fresh cache): Titan Balanced 16 pips, Stealth 13 (a
          quieter plant), Perseus 48 from its 2 plants; the Cutlass Black, Carrack and Polaris
          get the warning. Each change undone in turn (17 mutations) failed a test every time.
+123. **`/ship-loadout` guns and point defense: no scatterguns, alpha breaks DPS ties, stock
+     PDCs kept.** The owner's
+     review of the live Perseus loadout (entry 122): every profile put a Dominance-3
+     Scattergun in its turrets, and nobody uses scatterguns at the moment. The wiki's DPS for
+     one counts all 8 pellets of a shot (`vehicle_weapon.modes[].pellets_per_shot`), so on
+     the live wiki (4.10.1) a scattergun had the most DPS in S1, S2 and S3 (Dominance-1/2/3,
+     Havoc, Hellion, Predator). Alpha damage (`vehicle_weapon.damage.alpha_total`, damage
+     per shot with every pellet) was asked for as a tiebreaker, "a fairly important stat".
+     - `is_scattergun` (`bot/uex/ship_loadout.py`) reads `vehicle_weapon.type` ("Laser
+       Scattergun", "Ballistic Scattergun", "Plasma Scattergun" live), else the name. A gun
+       slot never ranks one (`rank_candidates`), in any profile. A stock one sorts after
+       every other gun (`merit_key` leads with the flag), so it's always replaced, and
+       Budget treats any other gun as an upgrade over it. A slot where only scatterguns are
+       sold keeps its stock part with the reason `ONLY_SCATTERGUNS`.
+     - Guns go by DPS, then alpha, in Balanced, Stealth and Tank (Budget is still DPS per
+       aUEC, beating stock). Measured on live candidates for 6 ships: 6 exact DPS ties, so
+       the tiebreak decides real picks. The Avenger Titan's nose now buys the AD4B over its
+       stock Revenant Gatling (both 1,266 DPS; 84.4 vs 63.3 alpha), and the Tarantula GT-870
+       Mark 1 now ranks above the 9-Series Longsword (both 202.5 DPS). An unknown alpha sorts
+       last.
+     - A gun line shows both figures (`shown_stat`: "1,266 DPS / 84.4 alpha (was 1,266 DPS /
+       63.3 alpha stock)"), like a Stealth cooler's EM and IR, so a tie-broken pick doesn't
+       read as no improvement.
+     - Live check after (fresh cache): the Perseus's turret guns keep their stock Mantis
+       (853 DPS) in every profile; no scattergun anywhere across the Perseus, Avenger Titan,
+       Gladius, Arrow and Hawk. Each rule undone in turn (11 mutations) failed a test every
+       time. The command tests' made-up top gun was the Dominance-3 Scattergun; it's now an
+       "M5A Cannon" with the same made-up numbers, plus a test that a cheap, high-DPS
+       scattergun for sale is skipped in all four profiles through the real command.
+     - Point defense: the same Perseus loadout swapped all six PDCs for the PPB-116
+       "Pepperbox" (177,872 aUEC each). Both are `PDCTurret`s on the wiki, and turrets rank by
+       the gun size they hold (Pepperbox S5, Swarm S1), which says nothing about point
+       defense. The owner: the stock ones are better, since they shoot down incoming missiles
+       and never run out of ammo. Every stock PDC on the wiki is the M2C "Swarm" (103 slots,
+       11 ships), so `is_point_defense` (stock `sub_type` "PDCTurret", or a slot requiring
+       the "PDC" tag) makes `pick_for_slot` keep stock with `POINT_DEFENSE` as the reason, in
+       every profile, even when the stock part's stats didn't load. The kept line leaves out
+       the turret rank, since that isn't why it's kept. Port labels now say "PDC", not "Pdc"
+       (`format_port_label`, so the finder too). Live: the Perseus keeps its six Swarms in
+       all four profiles; Balanced drops from 2,722,980 to 1,379,200 aUEC. 6 more mutations,
+       all caught.
+     - Not changed: `/ship-parts-finder`'s own list still ranks guns by DPS alone, so
+       scatterguns still top it, and still lists the Pepperbox for PDC slots; it lists every
+       part, so that's a separate call.
 
 ## Where to look for what
 
