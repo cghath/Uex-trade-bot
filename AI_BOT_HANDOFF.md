@@ -311,6 +311,13 @@ date - no open item, nothing to record here.
       the sentence's period, so the question reads "Name 4 .... Which one do you mean?". Test:
       `test_ambiguous_commodity_text_lists_at_most_five_names` in `tests/test_price_command.py`.
       See PROJECT_CONTEXT.md entry 118
+- [ ] PR #103 - Marketplace listings picked by name, not typed by id. `/marketplace-listing`
+      and `/marketplace-delete-listing` take a `listing` autocomplete (your own listings via
+      the linked key's UEX username, plus favorites and open deals for the first), and
+      `/marketplace-search`, `/my-favorites` and `/my-negotiations` get a "Show details for..."
+      menu (`bot/cogs/marketplace.py`, `bot/uex/marketplace.py`'s listing-choice helpers,
+      `UexClient.get_user_username`). Tests: `tests/test_listing_pickers.py`. See
+      PROJECT_CONTEXT.md entry 119
 
 ## To port: aiv2 -> production
 

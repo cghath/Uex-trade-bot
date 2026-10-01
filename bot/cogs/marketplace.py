@@ -11,13 +11,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any
 
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
-from bot.autocomplete import fetch_within
+from bot.autocomplete import fetch_within, gather_within
 from bot.delivery import fit_lines
 from bot.discord_ui import BotModal, BotView
 from bot.uex.charts import render_price_history_chart
@@ -25,6 +26,7 @@ from bot.uex.exceptions import UexApiError, describe_uex_api_error
 from bot.uex.inventory import extract_listing_id
 from bot.uex.marketplace import (
     QUALITY_MAX,
+    ListingChoice,
     MarketplaceAverageEntry,
     compute_marketplace_movers,
     exclude_sold_out,
@@ -33,9 +35,12 @@ from bot.uex.marketplace import (
     filter_listings_by_keyword,
     filter_listings_by_quality,
     find_item_id_by_name,
+    listing_choices_from_rows,
     marketplace_item_link,
     marketplace_item_url,
+    match_listing_choices,
     match_traded_items,
+    merge_listing_choices,
     parse_listing_quality,
     parse_marketplace_average_rows,
     parse_uex_number,
@@ -136,6 +141,114 @@ async def category_autocomplete(interaction: discord.Interaction, current: str) 
     current_lower = current.lower()
     matches = [c for c in categories if current_lower in (c.get("name") or "").lower()][:25]
     return [app_commands.Choice(name=(c.get("name") or "")[:100], value=c.get("id")) for c in matches]
+
+
+# A player's listing pick list, kept briefly: Discord asks on every keystroke, and the client
+# never caches favorites or deals. Keyed (user id, includes favorites/deals).
+LISTING_PICKS_TTL_SECONDS = 60
+_listing_picks_cache: dict[tuple[int, bool], tuple[float, list[ListingChoice]]] = {}
+# The "Show details for..." menu stays usable this long. Under Discord's 15-minute limit on
+# editing an ephemeral message, so it can still grey itself out (BotView).
+LISTING_DETAILS_TIMEOUT_SECONDS = 600
+
+
+def forget_listing_picks(user_id: int) -> None:
+    """Drop a player's cached pick lists, e.g. after they delete a listing."""
+    for key in [key for key in _listing_picks_cache if key[0] == user_id]:
+        _listing_picks_cache.pop(key, None)
+
+
+async def _listing_picks(bot: Any, user_id: int, *, include_others: bool) -> list[ListingChoice]:
+    """The listings a player can pick by name: their own active listings (found by the UEX
+    username their linked key belongs to), then, with include_others, their favorites and
+    open deals. Empty without a linked account; typing a listing id still works then. A
+    list missing a source that failed or ran out of time is returned but not kept."""
+    key = (user_id, include_others)
+    cached = _listing_picks_cache.get(key)
+    if cached and cached[0] > time.monotonic():
+        return cached[1]
+    secret_key = await bot.db.get_user_secret_key(user_id)
+    if not secret_key:
+        return []
+
+    async def own() -> list[ListingChoice]:
+        username = await bot.uex.get_user_username(secret_key)
+        if not username:
+            return []
+        return listing_choices_from_rows(await bot.uex.get_marketplace_listings(username=username), "yours")
+
+    async def favorites() -> list[ListingChoice]:
+        rows = await bot.uex.get_marketplace_favorites(secret_key=secret_key)
+        return listing_choices_from_rows(rows, "favorite", id_key="id_listing")
+
+    async def deals() -> list[ListingChoice]:
+        rows = await bot.uex.get_marketplace_negotiations(secret_key=secret_key)
+        open_deals = [row for row in rows if not row.get("date_closed")]
+        return listing_choices_from_rows(open_deals, "deal", id_key="id_listing")
+
+    outcomes = await gather_within(own(), *((favorites(), deals()) if include_others else ()))
+    groups = [outcome for outcome in outcomes if isinstance(outcome, list)]
+    for outcome in outcomes:
+        if not isinstance(outcome, list):
+            logger.info("Listing pick list for %s missing a source: %r", user_id, outcome)
+    picks = merge_listing_choices(*groups)
+    if len(groups) == len(outcomes):
+        _listing_picks_cache[key] = (time.monotonic() + LISTING_PICKS_TTL_SECONDS, picks)
+    return picks
+
+
+async def own_listing_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[int]]:
+    """The player's own listings by name, for /marketplace-delete-listing."""
+    picks = await _listing_picks(interaction.client, interaction.user.id, include_others=False)
+    return [app_commands.Choice(name=label, value=listing_id)
+            for label, listing_id in match_listing_choices(picks, current)]
+
+
+async def any_listing_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[int]]:
+    """The player's own listings, favorites and open deals by name, for /marketplace-listing."""
+    picks = await _listing_picks(interaction.client, interaction.user.id, include_others=True)
+    return [app_commands.Choice(name=label, value=listing_id)
+            for label, listing_id in match_listing_choices(picks, current, show_source=True)]
+
+
+class ListingDetailsView(BotView):
+    """A "Show details for..." menu under a list of listings (search results, favorites,
+    deals), so seeing one in full never needs its id typed into /marketplace-listing. The
+    details are a private reply to whoever picks, so on a public search anyone can use it."""
+
+    def __init__(self, cog: "Marketplace", choices: list[ListingChoice]) -> None:
+        super().__init__(timeout=LISTING_DETAILS_TIMEOUT_SECONDS)
+        self.cog = cog
+        options = []
+        for choice in merge_listing_choices(choices)[:25]:
+            price = f" · {choice.price:,.0f} {choice.currency}" if choice.price is not None else ""
+            options.append(discord.SelectOption(
+                label=choice.title[:100], value=str(choice.id), description=f"#{choice.id}{price}"[:100],
+            ))
+        self.select = discord.ui.Select(placeholder="Show details for…", options=options)
+        self.select.callback = self.show_details
+        self.add_item(self.select)
+
+    async def show_details(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        embed, error = await self.cog.listing_detail(int(self.select.values[0]))
+        if embed is not None:
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        else:
+            await interaction.followup.send(error, ephemeral=True)
+
+
+async def send_with_details(
+    interaction: discord.Interaction, cog: "Marketplace", choices: list[ListingChoice], *args: Any, **kwargs: Any,
+) -> None:
+    """Send a list of listings with a "Show details for..." menu under it. Discord refuses a
+    menu with no options, so with nothing to pick (rows that carried no listing id) the list
+    goes out without one."""
+    if not choices:
+        await interaction.followup.send(*args, **kwargs)
+        return
+    view = ListingDetailsView(cog, choices)
+    view.message = await interaction.followup.send(*args, view=view, wait=True, **kwargs)
 
 
 async def unit_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
@@ -299,6 +412,7 @@ class ConfirmDeleteListingView(BotView):
             await self.bot.db.record_inventory_listing_stock(
                 int(tracked_job["id"]), in_stock=int(current_stock), sold_out=sold_out
             )
+        forget_listing_picks(self.author_id)
         released = await self.bot.db.cancel_tracked_inventory_listing(self.author_id, listing_id)
         inventory_note = " Its unsold reserved inventory is available again." if released else ""
         await interaction.followup.send(
@@ -545,11 +659,11 @@ class Marketplace(commands.Cog):
                 value=price_text + f"\nby {seller} · {location}{stock_text}{quality_text}",
                 inline=False,
             )
-        footer = "UEX Marketplace · player-to-player listings · /marketplace-listing <id> for details"
+        footer = "UEX Marketplace · player-to-player listings · pick one below for its full details"
         if min_quality is not None or max_quality is not None:
             footer += " · quality filter applied (0-1000 scale, only listings the seller set a quality on)"
         embed.set_footer(text=footer)
-        await interaction.followup.send(embed=embed)
+        await send_with_details(interaction, self, listing_choices_from_rows(listings, "search"), embed=embed)
 
     @app_commands.command(
         name="marketplace-trending",
@@ -815,8 +929,9 @@ class Marketplace(commands.Cog):
             # /marketplace-listing takes this (audit UX-4).
             lines.append(f"Listing #{f.get('id_listing')} — **{marketplace_item_link(title, id_item)}** · "
                          f"{price_text}{sold_note}")
-        await interaction.followup.send(
-            fit_lines(lines, footer="-# `/marketplace-listing <id>` shows a listing's full details.")
+        await send_with_details(
+            interaction, self, listing_choices_from_rows(favorites, "favorite", id_key="id_listing"),
+            fit_lines(lines, footer="-# Pick one below for its full details."),
         )
 
     @app_commands.command(name="my-negotiations", description="Your own active UEX Marketplace deals.")
@@ -852,7 +967,10 @@ class Marketplace(commands.Cog):
                 f"Listing #{n.get('id_listing')} {role} — {title} · "
                 f"{price_text} {n.get('currency', 'UEC')} · {status}"
             )
-        await interaction.followup.send(fit_lines(lines))
+        await send_with_details(
+            interaction, self, listing_choices_from_rows(negotiations, "deal", id_key="id_listing"),
+            fit_lines(lines, footer="-# Pick one below for its full details."),
+        )
 
     async def _resolve_id_item(self, id_listing: Any) -> int | None:
         """UEX's negotiations/favorites don't carry id_item directly - resolve it from the
@@ -937,21 +1055,29 @@ class Marketplace(commands.Cog):
 
         await interaction.response.send_modal(ListingDetailsModal(self.bot, base_payload))
 
-    @app_commands.command(name="marketplace-listing", description="Show full details for one UEX Marketplace listing by id.")
-    @app_commands.describe(listing_id="The listing id (shown when it was created, via /marketplace-search, or /inventory-post-now)")
-    async def marketplace_listing(self, interaction: discord.Interaction, listing_id: int) -> None:
+    @app_commands.command(name="marketplace-listing", description="Show full details for one UEX Marketplace listing.")
+    @app_commands.describe(listing="Pick one of your listings, favorites or deals, or type a listing id")
+    @app_commands.autocomplete(listing=any_listing_autocomplete)
+    async def marketplace_listing(self, interaction: discord.Interaction, listing: int) -> None:
         await interaction.response.defer()
+        embed, error = await self.listing_detail(listing)
+        if embed is not None:
+            await interaction.followup.send(embed=embed)
+        else:
+            await interaction.followup.send(error)
+
+    async def listing_detail(self, listing_id: int) -> tuple[discord.Embed | None, str | None]:
+        """One listing in full, as /marketplace-listing and the "Show details for..." menus
+        show it: (embed, None), or (None, what to say instead)."""
         try:
             rows = await self.bot.uex.get_marketplace_listings(id=listing_id, use_cache=False)
         except UexApiError as exc:
-            await interaction.followup.send(describe_uex_api_error(exc))
-            return
+            return None, describe_uex_api_error(exc)
         if not rows:
-            await interaction.followup.send(
+            return None, (
                 f"No active listing found with id **{listing_id}**. It may still be pending UEX approval, or has "
                 "expired, sold out, or been deleted."
             )
-            return
 
         listing = rows[0]
         price = parse_uex_number(listing.get("price"))
@@ -986,11 +1112,13 @@ class Marketplace(commands.Cog):
             embed.add_field(name="Expires", value=f"<t:{int(date_expiration)}:R>", inline=True)
 
         embed.set_footer(text=f"Listing #{listing_id} · UEX Marketplace")
-        await interaction.followup.send(embed=embed)
+        return embed, None
 
     @app_commands.command(name="marketplace-delete-listing", description="Delete one of your own UEX Marketplace listings.")
-    @app_commands.describe(listing_id="The listing id to delete (shown when it was created, or via /marketplace-search)")
-    async def marketplace_delete_listing(self, interaction: discord.Interaction, listing_id: int) -> None:
+    @app_commands.describe(listing="Pick one of your own listings, or type its listing id")
+    @app_commands.autocomplete(listing=own_listing_autocomplete)
+    async def marketplace_delete_listing(self, interaction: discord.Interaction, listing: int) -> None:
+        listing_id = listing
         secret_key = await self.bot.db.get_user_secret_key(interaction.user.id)
         if not secret_key:
             await interaction.response.send_message("You haven't linked a UEX account yet. Run /link-uex-account first.", ephemeral=True)

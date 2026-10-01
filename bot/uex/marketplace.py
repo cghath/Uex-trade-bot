@@ -460,3 +460,77 @@ def filter_listings_by_quality(
             continue
         kept.append(listing)
     return kept
+
+
+# -- picking a listing by name instead of by id -------------------------------------------
+
+# Where a listing in a player's pick list came from. /marketplace-listing shows the label
+# (its list mixes all three); /marketplace-delete-listing only ever lists the player's own.
+LISTING_SOURCE_LABELS = {"yours": "Yours", "favorite": "Favorite", "deal": "Deal"}
+
+
+@dataclass(frozen=True)
+class ListingChoice:
+    """One listing a player can pick from a menu, so they never have to copy its id."""
+    id: int
+    title: str
+    price: float | None
+    currency: str
+    source: str  # a LISTING_SOURCE_LABELS key
+
+
+def listing_choices_from_rows(rows: list[dict], source: str, *, id_key: str = "id") -> list[ListingChoice]:
+    """Rows from /marketplace_listings (id_key "id"), /marketplace_favorites or
+    /marketplace_negotiations (both id_key "id_listing": their own "id" is the favorite's or
+    the deal's, which no command takes). Rows without a usable listing id are skipped."""
+    choices = []
+    for row in rows:
+        listing_id = parse_uex_number(row.get(id_key))
+        if listing_id is None or listing_id <= 0:
+            continue
+        title = str(row.get("title") or row.get("listing_title") or "Untitled listing").strip()
+        choices.append(ListingChoice(
+            id=int(listing_id), title=title or "Untitled listing", price=parse_uex_number(row.get("price")),
+            currency=str(row.get("currency") or "UEC"), source=source,
+        ))
+    return choices
+
+
+def merge_listing_choices(*groups: list[ListingChoice]) -> list[ListingChoice]:
+    """Every listing once, in the order given: a listing that's both yours and in a deal
+    shows as yours. Several deals on one listing are one entry."""
+    seen: set[int] = set()
+    merged = []
+    for group in groups:
+        for choice in group:
+            if choice.id not in seen:
+                seen.add(choice.id)
+                merged.append(choice)
+    return merged
+
+
+def listing_choice_label(choice: ListingChoice, *, show_source: bool = False) -> str:
+    """"#175615 Ace Interceptor Helmet · 1,548,000 UEC", optionally led by where it came
+    from. Discord caps a choice name at 100 characters, so the title gives way first and
+    the id and price always show."""
+    price = f" · {choice.price:,.0f} {choice.currency}" if choice.price is not None else ""
+    prefix = f"{LISTING_SOURCE_LABELS.get(choice.source, choice.source)} · " if show_source else ""
+    head = f"{prefix}#{choice.id} "
+    room = 100 - len(head) - len(price)
+    title = choice.title if len(choice.title) <= room else choice.title[:max(room - 1, 0)].rstrip() + "…"
+    return f"{head}{title}{price}"
+
+
+def match_listing_choices(
+    choices: list[ListingChoice], query: str, *, show_source: bool = False, limit: int = 25,
+) -> list[tuple[str, int]]:
+    """(label, listing id) pairs for an autocomplete. A typed number matches the id's
+    start (so a known id still works); anything else matches anywhere in the label."""
+    query = query.strip().lower()
+    number = query.lstrip("#")
+    matched = []
+    for choice in choices:
+        label = listing_choice_label(choice, show_source=show_source)
+        if not query or (str(choice.id).startswith(number) if number.isdigit() else query in label.lower()):
+            matched.append((label, choice.id))
+    return matched[:limit]

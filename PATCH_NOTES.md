@@ -1,7 +1,16 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.38.
+the oldest entry below); the next new entry is 2.39.
+
+---
+
+## 2.38 - 2026-10-01 - Pick listings by name
+
+**Changed**
+- `/marketplace-listing` - Pick one of your listings, favorites or deals from a list by name, instead of typing its id. Typing an id still works.
+- `/marketplace-delete-listing` - Pick one of your own listings from a list by name.
+- `/marketplace-search`, `/my-favorites` and `/my-negotiations` - A "Show details for…" menu under the results shows any listing in full, privately.
 
 ---
 
