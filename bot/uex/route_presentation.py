@@ -17,6 +17,7 @@ from typing import Any, Iterable, NamedTuple, Protocol
 from bot.uex.commodity_risk import format_commodity_risk
 from bot.uex.data_health import TerminalDataHealth, format_health_note
 from bot.uex.mixed_routes import format_limiting_factors
+from bot.uex.price_outliers import PriceOutlierIndex, find_price_outlier, format_price_outlier_warning
 from bot.uex.route_confidence import RouteConfidence, compute_route_confidence
 from bot.uex.status import StatusLookup, resolve_status_label
 from bot.uex.supply_demand import EvidenceLevel, effective_sell_scu, has_sell_side_demand
@@ -104,19 +105,67 @@ def side_health_warnings(
 
 
 class _CargoItemLike(Protocol):
+    id_commodity: int
     commodity_name: str
     source: dict[str, Any]
     destination: dict[str, Any]
     limiting_factors: tuple[str, ...]
     quantity_scu: float
+    buy_price: float
+    sell_price: float
     profit_per_scu: float
     profit: float
 
 
-def cargo_item_warnings(item: _CargoItemLike, *, status_lookup: StatusLookup, prefix: str = "") -> list[str]:
-    """Risk, limiting-factor, and buy/sell market-status lines for one MixedCargoItem-
-    shaped object. `prefix` is prepended to each line verbatim (e.g. "Leg 2 ") - not
-    inserted after a warning emoji, since these lines don't all carry one."""
+def _terminal_id(row: dict[str, Any]) -> int | None:
+    try:
+        return int(row["id_terminal"]) if row.get("id_terminal") is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def price_outlier_warnings(
+    index: PriceOutlierIndex,
+    *,
+    id_commodity: int | None,
+    origin_id: int | None,
+    buy_price: float | None,
+    destination_id: int | None,
+    sell_price: float | None,
+) -> list[str]:
+    """A "⚠️ origin buy/destination sell price is N.Nx below/above the median of M other
+    terminals" line for each side whose price is a confirmed outlier against every other
+    terminal trading the same commodity in the same snapshot (bot/uex/price_outliers.py).
+    Shared by cargo_item_warnings and /best-route, which shows single-commodity routes."""
+    lines = []
+    for terminal_id, side, price, label in (
+        (origin_id, "buy", buy_price, "origin buy"), (destination_id, "sell", sell_price, "destination sell"),
+    ):
+        if terminal_id is None:
+            continue
+        outlier = find_price_outlier(index, id_commodity=id_commodity, id_terminal=terminal_id, side=side,
+                                     price=price)
+        if outlier is not None:
+            lines.append(f"⚠️ {format_price_outlier_warning(outlier, label=label)}")
+    return lines
+
+
+def cargo_item_warnings(
+    item: _CargoItemLike,
+    *,
+    status_lookup: StatusLookup,
+    prefix: str = "",
+    price_outlier_index: PriceOutlierIndex | None = None,
+) -> list[str]:
+    """Risk, limiting-factor, buy/sell market-status and (given `price_outlier_index`)
+    cross-terminal price-disagreement lines for one MixedCargoItem-shaped object. `prefix`
+    is prepended to each line verbatim (e.g. "Leg 2 ") - not inserted after a warning emoji,
+    since these lines don't all carry one.
+
+    price_outlier_index (index_commodity_prices, built once per market snapshot by the
+    caller) flags this item's buy or sell price when it's a confirmed outlier against every
+    other terminal trading the same commodity. None skips the check: a caller with no
+    snapshot in scope just doesn't get it."""
     lines: list[str] = []
     if risk := format_commodity_risk(item.source):
         lines.append(f"{prefix}{item.commodity_name}: {risk}")
@@ -140,6 +189,15 @@ def cargo_item_warnings(item: _CargoItemLike, *, status_lookup: StatusLookup, pr
         if sell_status:
             status_bits.append(f"destination {sell_status}")
         lines.append(f"{prefix}{item.commodity_name} market status: {' · '.join(status_bits)}")
+    if price_outlier_index is not None:
+        for warning in price_outlier_warnings(
+            price_outlier_index, id_commodity=item.id_commodity,
+            origin_id=_terminal_id(item.source), buy_price=item.buy_price,
+            destination_id=_terminal_id(item.destination), sell_price=item.sell_price,
+        ):
+            # "⚠️ origin buy price ..." -> "⚠️ Gold origin buy price ...", so a multi-item
+            # load says which cargo it's about.
+            lines.append(f"{prefix}⚠️ {item.commodity_name} {warning.removeprefix('⚠️ ')}")
     return lines
 
 
