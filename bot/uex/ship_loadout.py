@@ -8,11 +8,15 @@ The owner's decisions (2026-10-01):
   (ship_part_display.ranking_stat). Stealth ranks every component by lowest EM signature, a
   cooler's IR only breaking EM ties (EM matters more; coolers first went by IR). Tank ranks
   shields by HP (already their key stat) and every other component by its own durability.
-  Guns rank by DPS in all three, alpha damage breaking DPS ties. Budget picks the most key stat
-  per aUEC, only among parts that beat the stock part.
+  Guns rank by DPS in all three, except that between guns within 5% DPS of each other the
+  higher alpha damage wins (DPS_BAND). Budget picks the most key stat per aUEC, only among parts
+  that beat the stock part.
 - Scatterguns are never recommended (nobody uses them at the moment, the owner's call; their
   wiki DPS also counts every pellet of a shot, which put them first in S1-S3). A stock one is
   always worth replacing.
+- A turret the game locks, gimbals and all, still has guns a player can change: the Idris-M's
+  manned and remote turrets. Only the wiki's single-vehicle tree shows them
+  (locked_turret_gun_ports), and the loadout adds them as gun slots.
 - A point-defense (PDC) slot always keeps its stock turret, the M2C "Swarm" on every ship that
   has one: it shoots down incoming missiles and never runs out of ammo, which the turret rank
   (the gun size it holds) can't see - it had the Perseus swapping six for the Pepperbox.
@@ -28,6 +32,7 @@ The owner's decisions (2026-10-01):
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -56,6 +61,10 @@ NOTHING_SOLD = "no shop sells a part that fits"
 NO_STATS = "the wiki has no stats for the parts sold for this slot"
 STOCK_UNKNOWN = "the stock part's stats couldn't be loaded to compare"
 ONLY_SCATTERGUNS = "the only guns sold for it are scatterguns"
+# Guns whose DPS is within this fraction of each other count as level on DPS, and the higher
+# alpha damage wins between them (the owner's call, 2026-10-01). Revisit after the next game
+# patch's weapon damage changes (ROADMAP.md).
+DPS_BAND = 0.05
 POINT_DEFENSE = "point defense: it shoots down incoming missiles and never runs out of ammo"
 
 # What each profile favours, under the loadout's title and in /ship-loadout's profile choices.
@@ -115,6 +124,38 @@ def is_point_defense(group: "SlotGroup") -> bool:
     if isinstance(stock, dict) and str(stock.get("sub_type") or "").lower() == "pdcturret":
         return True
     return any(tag.lower() == "pdc" for tag in group.port.required_tags)
+
+
+def _level_on_dps(a: float | None, b: float | None) -> bool:
+    return a is not None and b is not None and abs(a - b) <= DPS_BAND * max(a, b)
+
+
+def gun_at_least_as_good(a: dict | None, b: dict | None) -> bool:
+    """Whether gun `a` is at least as good as gun `b`: a scattergun never is, against any other
+    gun; within DPS_BAND of each other, the higher alpha damage wins (then DPS); otherwise the
+    higher DPS. A missing figure counts as worse than any known one."""
+    if is_scattergun(a) != is_scattergun(b):
+        return not is_scattergun(a)
+    dps_a, dps_b = key_stat(a), key_stat(b)
+    if _level_on_dps(dps_a, dps_b):
+        return (_highest_first(alpha_damage(a)) + _highest_first(dps_a)
+                <= _highest_first(alpha_damage(b)) + _highest_first(dps_b))
+    return _highest_first(dps_a) <= _highest_first(dps_b)
+
+
+def _rank_guns(guns: list[dict]) -> list[dict]:
+    """Guns best first: the highest-DPS gun left leads, and every gun within DPS_BAND of it
+    is ordered by alpha damage (then DPS, then shop) ahead of the rest, which are ranked the
+    same way in turn."""
+    remaining = sorted(guns, key=lambda c: _highest_first(key_stat(c)) + shop_key(c))
+    ranked: list[dict] = []
+    while remaining:
+        lead = key_stat(remaining[0])
+        level = [c for c in remaining if _level_on_dps(key_stat(c), lead)] or remaining[:1]
+        level.sort(key=lambda c: _highest_first(alpha_damage(c)) + _highest_first(key_stat(c)) + shop_key(c))
+        ranked += level
+        remaining = [c for c in remaining if not any(c is chosen for chosen in level)]
+    return ranked
 
 
 def _lowest_first(value: float | None) -> tuple:
@@ -189,6 +230,8 @@ def rank_candidates(candidates: list[dict], category: str, profile: str, stock: 
     rated = [c for c in candidates if key_stat(c) is not None]
     if category == GUNS_CATEGORY:
         rated = [c for c in rated if not is_scattergun(c)]
+        if profile != BUDGET:
+            return _rank_guns(rated)
     if profile != BUDGET:
         return sorted(rated, key=lambda c: merit_key(c, category, profile) + shop_key(c))
     if category == GUNS_CATEGORY and is_scattergun(stock):
@@ -274,8 +317,11 @@ class SlotGroup:
         # between words that are still there.
         text = " ".join(word for i, word in enumerate(common) if word != "·" or (i and common[i - 1] != "·"))
         text = text.strip(" ·") or category_label(self.category)
-        if self.category == GUNS_CATEGORY and "gun" not in text.lower().split():
-            text += " Gun"
+        # The Idris-M's remote turrets share only 'Turret · Turret' ('Front Left Turret · Turret
+        # Left'): one word said twice across the separator reads as once.
+        text = re.sub(r"\b(\w+) · \1\b", r"\1", text)
+        if self.category == GUNS_CATEGORY and not any(word.endswith("gun") for word in text.lower().split()):
+            text += " Gun"  # a Nose Railgun slot is not a Nose Railgun Gun
         return f"{self.count}x {size} {text}" if self.count > 1 else f"{size} {text}"
 
 
@@ -342,6 +388,51 @@ def stock_uuids_by_port(raw_ports: Any, prefix: str = "") -> dict[str, str]:
     return result
 
 
+# Port types a turret comes in: 'TurretBase' is a manned turret (the Idris-M's), which the
+# finder doesn't list at all, since UEX sells none.
+_TURRET_PORT_TYPES = frozenset({"Turret", "TurretBase"})
+
+
+def locked_turret_gun_ports(raw_ports: Any, *, max_depth: int = 3) -> list[ShipPort]:
+    """Gun slots a player can change inside a turret, read from the wiki's single-vehicle tree
+    (GET /vehicles/{uuid}, the raw ports stock_uuids_by_port reads): every unlocked WeaponGun
+    port below a top-level turret, down to `max_depth` levels (the cog's MAX_MOUNT_DEPTH). The Idris-M's manned turrets
+    hold two locked VariPuck S5 gimbals each, with an unlocked gun inside: the finder's own
+    slots never reach those guns, since the gimbal slot is locked (child_gun_ports skips it).
+    Named by their full path, the shopping list's key for them. Every turret's guns are
+    returned; the caller drops a turret whose guns or mount the loadout already has (the
+    Perseus's remote turrets, through child_gun_ports). A PDC is left out: it keeps its stock
+    turret (is_point_defense)."""
+    result: list[ShipPort] = []
+
+    def walk(rows: Any, path: str, depth: int) -> None:
+        for row in rows if isinstance(rows, list) else []:
+            if not isinstance(row, dict) or not row.get("name"):
+                continue
+            child = f"{path}/{row['name']}"
+            sizes = row.get("sizes") or {}
+            low, high = sizes.get("min"), sizes.get("max")
+            if row.get("type") == "WeaponGun" and row.get("editable") is not False:
+                if isinstance(low, int) and isinstance(high, int) and not isinstance(low, bool):
+                    result.append(ShipPort(
+                        name=child, port_type="WeaponGun", size_min=low, size_max=high, accepts_guns=True,
+                        tags=frozenset(t for t in row.get("port_tags") or [] if isinstance(t, str)),
+                        required_tags=frozenset(t for t in row.get("required_tags") or [] if isinstance(t, str)),
+                        accepts_mounts=False,
+                    ))
+            elif depth < max_depth:
+                walk(row.get("ports"), child, depth + 1)
+
+    for row in raw_ports if isinstance(raw_ports, list) else []:
+        if not isinstance(row, dict) or row.get("type") not in _TURRET_PORT_TYPES or not row.get("name"):
+            continue
+        item = row.get("equipped_item") if isinstance(row.get("equipped_item"), dict) else {}
+        if str(item.get("sub_type") or "").lower() == "pdcturret":
+            continue
+        walk(row.get("ports"), row["name"], 1)
+    return result
+
+
 @dataclass(frozen=True)
 class SlotPick:
     """One line of the loadout: the part to buy for every slot in `group`, or None to keep
@@ -379,10 +470,11 @@ def pick_for_slot(group: SlotGroup, candidates: list[dict], profile: str) -> Slo
             return SlotPick(group, None, NOTHING_BEATS_STOCK if stock is not None else NOTHING_SOLD)
         return SlotPick(group, upgrades[0])
     best = rank_candidates(rated, group.category, profile)[0]
-    if stock is not None and (
-        same_part(best, stock)
-        or merit_key(stock, group.category, profile) <= merit_key(best, group.category, profile)
-    ):
+    if group.category == GUNS_CATEGORY:
+        stock_holds = gun_at_least_as_good(stock, best)
+    else:
+        stock_holds = merit_key(stock, group.category, profile) <= merit_key(best, group.category, profile)
+    if stock is not None and (same_part(best, stock) or stock_holds):
         return SlotPick(group, None, STOCK_IS_BEST)
     return SlotPick(group, best)
 

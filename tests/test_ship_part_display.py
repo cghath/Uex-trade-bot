@@ -224,6 +224,9 @@ def test_port_labels_are_cleaned_up():
     assert format_port_label("hardpoint_missilerack_right_wing", 3, 3) == "Right Wing Missile Rack (S3)"
     assert format_port_label("hardpoint_turret", 2, 4) == "Turret (S2-4)"
     assert format_port_label("hardpoint_pdc_top_right", 2, 2) == "PDC Top Right (S2)"
+    # A gimbal's own gun port says nothing to a player: left out of a path.
+    assert format_port_label("hardpoint_right_lower_turret/hardpoint_weapon_left/hardpoint_class_2") == (
+        "Right Lower Turret · Left")
     assert format_port_label("hardpoint_radar") == "Radar"
 
 

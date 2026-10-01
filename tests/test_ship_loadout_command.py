@@ -729,6 +729,49 @@ TURRET_TREE = [{"name": "hardpoint_turret", "equipped_item_uuid": "manned-turret
                           for side in ("left", "right")]}]
 
 
+# A manned turret the game locks, gimbals and all (the Idris-M's): the finder lists none of it
+# ('TurretBase'), and only the vehicle tree shows the unlocked gun inside each gimbal.
+LOCKED_MANNED_TURRET = {
+    "name": "hardpoint_turret_manned", "type": "TurretBase", "editable": False, "sizes": {"min": 3, "max": 3},
+    "equipped_item": {"name": "Manned Turret", "sub_type": "MannedTurret"},
+    "ports": [{"name": f"hardpoint_weapon_{side}", "type": "Turret", "editable": False, "sizes": {"min": 3, "max": 3},
+               "equipped_item_uuid": VARIPUCK_S3["uuid"],
+               "ports": [{"name": GUN_PORT, "type": "WeaponGun", "editable": True, "sizes": {"min": 3, "max": 3},
+                          "equipped_item_uuid": OMNISKY["uuid"]}]}
+              for side in ("left", "right")],
+}
+
+
+def test_guns_inside_a_locked_turret_are_recommended(tmp_path, monkeypatch):
+    async def run():
+        cog, thread = await _cog(tmp_path, monkeypatch, wiki=_wiki(stock_tree=[*STOCK_TREE, LOCKED_MANNED_TURRET]))
+        await _run_command(cog, thread)
+        return _posted(thread)
+
+    text, view = asyncio.run(run())
+    assert "**2x S3 Turret Manned Gun** → **M5A Cannon** · 930 DPS (was 547 DPS stock)" in text
+    (group,) = [g for g in view.groups if g.port.name.startswith("hardpoint_turret_manned/")]
+    assert [s.entry_port_name for s in group.slots] == [
+        f"hardpoint_turret_manned/hardpoint_weapon_{side}/{GUN_PORT}" for side in ("left", "right")]
+
+
+def test_a_turret_whose_guns_the_loadout_already_has_is_not_added_twice(tmp_path, monkeypatch):
+    """The browser's own turret (its gun slots from child_gun_ports): typed in the tree like
+    the Idris-M's, it still gives two gun slots, not four."""
+    tree = [dict(TURRET_TREE[0], type="Turret", editable=True, sizes={"min": 3, "max": 3},
+                 ports=[dict(row, type="WeaponGun", editable=True, sizes={"min": 3, "max": 3})
+                        for row in TURRET_TREE[0]["ports"]])]
+
+    async def run():
+        cog, thread = await _cog(tmp_path, monkeypatch, wiki=_wiki(stock_tree=tree, extra=[MANNED_TURRET]),
+                                 ports=TURRET_PORTS)
+        await _run_command(cog, thread)
+        return _posted(thread)
+
+    text, view = asyncio.run(run())
+    assert sum(g.count for g in view.groups if g.category == "Guns") == 2
+
+
 def test_a_turret_the_wiki_didnt_answer_for_is_said(tmp_path, monkeypatch):
     """Its gun slots never exist (ShipPartsFinder._with_child_gun_ports), so without a note
     the loadout - its total included - would read as complete. The power line is the plants'

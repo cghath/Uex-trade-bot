@@ -337,6 +337,11 @@ date - no open item, nothing to record here.
       "PDC" in port labels (`format_port_label`, `bot/uex/ship_part_display.py`). Needs PR #106
       above first. Tests: `tests/test_ship_loadout.py`, `tests/test_ship_loadout_command.py`,
       `tests/test_ship_part_display.py`. See PROJECT_CONTEXT.md entry 123
+- [ ] PR #108 - `/ship-loadout` turret guns and the alpha band: guns inside locked and
+      manned turrets from the single-vehicle tree (`locked_turret_gun_ports`, the cog's
+      `_vehicle_stock_tree`), guns within 5% DPS ranked by alpha (`DPS_BAND`,
+      `gun_at_least_as_good`, `_rank_guns`), and label fixes in `format_port_label` and
+      `SlotGroup.label`. Needs PRs #106 and #107 above first. See PROJECT_CONTEXT.md entry 124
 
 ## To port: aiv2 -> production
 
