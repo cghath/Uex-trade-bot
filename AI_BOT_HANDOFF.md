@@ -326,7 +326,7 @@ date - no open item, nothing to record here.
       here when aiv2 made it; found in a 2026-10-01 review of aiv2's log. Its other fixes are
       AI-chat or eval work, and fix #2 (city TDD terminals) needs a free-text terminal resolver
       production doesn't have.
-      (ported to production in PR #TBD, PROJECT_CONTEXT.md entry 120)
+      (ported to production in PR #104, PROJECT_CONTEXT.md entry 120)
 - [ ] aiv2 commit `a6bd024` - Cross-terminal price-outlier warnings: a commodity's buy/sell
       price checked against every other terminal trading it in the same snapshot, flagged
       when 4x-or-more off the median (`bot/uex/price_outliers.py`,
