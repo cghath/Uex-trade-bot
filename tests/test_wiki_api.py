@@ -11,7 +11,14 @@ import asyncio
 import httpx
 import pytest
 
-from bot.wiki_api import MAX_ATTEMPTS, MAX_PAGES, WikiApiClient, WikiApiError, WikiUnavailableError
+from bot.wiki_api import (
+    MAX_ATTEMPTS,
+    MAX_PAGES,
+    WikiApiClient,
+    WikiApiError,
+    WikiDuplicateNameError,
+    WikiUnavailableError,
+)
 
 UUID = "c098e722-902a-435b-83f8-a96cec36a012"
 
@@ -306,6 +313,63 @@ def test_vehicle_loadout_also_returns_the_ships_own_port_tags():
     assert h.run(lambda c: c.get_vehicle_loadout("Avenger Titan")) == ([{"name": "hp"}], ["AEGS_Avenger_Base"])
     h_none = _Harness(lambda req, n: httpx.Response(200, json={"data": []}))
     assert h_none.run(lambda c: c.get_vehicle_loadout("Avenger Titan")) == ([], [])
+
+
+def test_vehicle_loadout_raises_for_a_name_the_wiki_uses_for_several_ships():
+    """The Cutlass Black has a second, BIS2950 row of the same name: never a guess, and never
+    an empty answer the finder would show as "no slots"."""
+    rows = [_vehicle("Cutlass Black", [{"name": "a"}]), _vehicle("cutlass black ", [{"name": "b"}]),
+            _vehicle("Cutlass Black PYAM Exec", [{"name": "c"}])]
+    h = _Harness(lambda req, n: httpx.Response(200, json={"data": rows}))
+    with pytest.raises(WikiDuplicateNameError) as caught:
+        h.run(lambda c: c.get_vehicle_loadout("Cutlass Black"))
+    assert caught.value.count == 2 and caught.value.vehicle_name == "Cutlass Black"
+    assert isinstance(caught.value, WikiApiError)
+    # A substring-only match (the PYAM Exec) is still just one exact row away from resolving.
+    assert h.run(lambda c: c.get_vehicle_loadout("Cutlass Black PYAM Exec")) == ([{"name": "c"}], [])
+
+
+# -- get_vehicle_stock_ports (/ship-loadout's nested stock items) -------------------------------
+
+VEHICLE_UUID = "0079c5d5-1678-4f8c-85ba-18ca8f642af6"  # the Avenger Titan's, live
+
+
+def _stock_handler(detail_body, *, rows=None):
+    rows = rows if rows is not None else [{"uuid": VEHICLE_UUID, "name": "Avenger Titan", "ports": None}]
+
+    def handler(req, n):
+        if req.url.path.endswith("/vehicles"):
+            return httpx.Response(200, json={"data": rows})
+        return httpx.Response(200, json=detail_body)
+    return handler
+
+
+def test_vehicle_stock_ports_reads_the_single_vehicle_endpoint_by_the_exact_rows_uuid():
+    nested = [{"name": "hardpoint_weapon_class2_nose", "equipped_item_uuid": "gimbal",
+               "ports": [{"name": "hardpoint_class_2", "equipped_item_uuid": "revenant"}]}]
+    h = _Harness(_stock_handler({"data": {"uuid": VEHICLE_UUID, "ports": nested}}))
+    assert h.run(lambda c: c.get_vehicle_stock_ports("avenger titan")) == nested
+    assert h.requests[0].url.params["filter[name]"] == "avenger titan"
+    assert h.requests[1].url.path.endswith(f"/vehicles/{VEHICLE_UUID}")
+
+
+def test_vehicle_stock_ports_is_empty_without_one_exact_ship_and_never_requests_a_bad_uuid():
+    titan = {"uuid": VEHICLE_UUID, "name": "Cutlass Black"}
+    # Two rows of one name (the Cutlass Black and its BIS2950 edition): no guess.
+    h_two = _Harness(_stock_handler({}, rows=[titan, dict(titan, uuid=OTHER_UUID)]))
+    assert h_two.run(lambda c: c.get_vehicle_stock_ports("Cutlass Black")) == []
+    for bad in (None, "../items", 7):
+        h_bad = _Harness(_stock_handler({}, rows=[dict(titan, uuid=bad)]))
+        assert h_bad.run(lambda c: c.get_vehicle_stock_ports("Cutlass Black")) == []
+        assert len(h_bad.requests) == 1, "a missing or malformed uuid never reaches the network"
+
+
+def test_vehicle_stock_ports_rejects_another_ships_detail_and_tolerates_no_ports():
+    h = _Harness(_stock_handler({"data": {"uuid": OTHER_UUID, "ports": [{"name": "x"}]}}))
+    with pytest.raises(WikiApiError):
+        h.run(lambda c: c.get_vehicle_stock_ports("Avenger Titan"))
+    h_none = _Harness(_stock_handler({"data": {"uuid": VEHICLE_UUID, "ports": None}}))
+    assert h_none.run(lambda c: c.get_vehicle_stock_ports("Avenger Titan")) == []
 
 
 # -- find_item_variants_by_name / find_item_detail_by_name -------------------------------------

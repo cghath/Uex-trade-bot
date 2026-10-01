@@ -20,6 +20,12 @@ location), and the list is ranked by the category's key stat - see candidates_fo
 Every fitting part is kept and paged, never cut to a display limit (the repo's "filter
 before truncating" lesson). Display labels live in bot/uex/ship_part_display.py.
 
+/ship-loadout (and the browser's "Recommend a loadout" button) is built on the same
+candidates: one recommended part per slot for a profile - Balanced, Stealth, Tank or Budget
+- or "keep stock" where the stock part is already the best pick. Which part to pick is pure
+logic in bot/uex/ship_loadout.py; this file loads the slots, stock parts and candidates and
+shows the result (LoadoutView).
+
 An outside audit before merge found four real P2s, all fixed: (1) selecting a category ran
 the full catalog/price/wiki lookup before acknowledging the interaction, risking Discord's
 3s timeout on a cold cache - PartsBrowserView now defers first; (2) a category with more
@@ -59,6 +65,27 @@ from bot.uex.ship_part_display import (
     ranking_stat,
     shop_text,
 )
+from bot.uex.ship_loadout import (
+    DEFAULT_PROFILE,
+    NO_STATS,
+    PROFILE_BLURBS,
+    PROFILES,
+    LoadoutSlot,
+    SlotGroup,
+    SlotPick,
+    group_slots,
+    gun_entry_port_name,
+    is_gun_mount,
+    loadout_gun_ports,
+    paginate_lines,
+    pick_for_slot,
+    pick_line,
+    power_total,
+    purchases,
+    slot_category,
+    stock_uuids_by_port,
+    total_line,
+)
 from bot.uex.ship_parts import (
     GUNS_CATEGORY,
     MOUNTS_CATEGORY,
@@ -74,7 +101,7 @@ from bot.uex.ship_parts import (
     tags_allow,
 )
 from bot.uex.ships import resolve_ship
-from bot.wiki_api import WikiApiClient, WikiApiError, WikiUnavailableError
+from bot.wiki_api import WikiApiClient, WikiApiError, WikiDuplicateNameError, WikiUnavailableError
 
 logger = logging.getLogger("uexbot.ship_parts_finder")
 NO_MENTIONS = discord.AllowedMentions.none()
@@ -116,6 +143,19 @@ _REFRESH_PREFIX = "ship-parts-browse:refresh"
 REFRESH_TEMPLATE = _REFRESH_PREFIX + r":(?P<vehicle>\d+):(?P<terminal>\d+):(?P<category>.*)"
 MAX_CUSTOM_ID_CHARS = 100  # Discord's limit
 MAX_SELECT_OPTIONS = 25  # Discord's limit
+MESSAGE_LIMIT = 2000  # Discord's limit
+# /ship-loadout loads every slot's parts and every stock part, all under this one deadline
+# rather than LOAD_TIME_BUDGET_SECONDS for each slot: a dozen slots one after another could
+# otherwise wait over ten minutes on a hanging wiki. Past it, nothing new starts, and the
+# parts left unanswered are counted in the loadout's "wiki didn't respond" note.
+LOADOUT_TIME_BUDGET_SECONDS = 90.0
+LOADOUT_IDLE_SECONDS = BROWSER_IDLE_SECONDS
+# How many mounts deep a gun hardpoint's stock loadout is followed to its gun slot: a gimbal is
+# one, a turret holding gimbals two (the Perseus's remote turrets).
+MAX_MOUNT_DEPTH = 3
+LOADOUT_EXPIRED_NOTE = (f"⏸️ Closed after {LOADOUT_IDLE_SECONDS // 60} minutes idle. Run `/ship-loadout` again, or "
+                        "**Recommend a loadout** in the parts browser - anything you added to your list is saved.")
+WIKI_SILENT_FOR_SLOT = "the Star Citizen Wiki didn't respond for this slot's parts - try again in a few minutes"
 # Wiki detail fields no display or fit check reads - dropped before caching, so a full
 # cache stays small on the Pi.
 _UNUSED_DETAIL_KEYS = frozenset({
@@ -387,6 +427,56 @@ class ShipPartsShoppingService:
                                         ephemeral=True)
         return True
 
+    async def lock_in_many(
+        self, interaction: discord.Interaction, id_vehicle: int, vehicle_name: str, entries: list[dict],
+    ) -> int:
+        """lock_in for several parts at once - /ship-loadout's "Add all to shopping list". One
+        thread lookup, one list refresh and one reply, where calling lock_in per part would
+        post a reply and redraw the list once per part. Each entry has the keys lock_in takes
+        (category, port_name, id_item, item_name, id_terminal, terminal_name, price_buy); one
+        in a slot that already has a part replaces it, as a lock-in does. Returns how many
+        were saved."""
+        if interaction.guild_id is None:
+            await interaction.followup.send("Ship parts lists are available in a server.", ephemeral=True)
+            return 0
+        thread = await self._thread(interaction)
+        if thread is None:
+            await interaction.followup.send("I couldn't create your private ship parts thread. Check thread permissions.",
+                                            ephemeral=True)
+            return 0
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        saved = 0
+        for entry in entries:
+            try:
+                await self.bot.db.set_ship_parts_entry(
+                    interaction.user.id, interaction.guild_id, id_vehicle, vehicle_name, entry["category"],
+                    entry["port_name"], entry["id_item"], entry["item_name"], entry["id_terminal"],
+                    entry["terminal_name"], entry["price_buy"], now,
+                )
+            except Exception:
+                logger.exception("Could not save a ship parts entry from a loadout")
+                continue
+            saved += 1
+        if not saved:
+            await interaction.followup.send("I couldn't save those parts. Nothing was added; please try again.",
+                                            ephemeral=True)
+            return 0
+        failed = len(entries) - saved
+        added = f"{saved} part{'s' if saved != 1 else ''}"
+        not_saved = f" {failed} couldn't be saved - press it again to retry." if failed else ""
+        try:
+            await self.refresh(thread, interaction.user.id, interaction.guild_id)
+        except Exception:
+            logger.exception("Loadout parts saved but the Discord refresh failed")
+            await interaction.followup.send(
+                f"Saved {added}, but I couldn't refresh {thread.mention}. Use Refresh list there.{not_saved}",
+                ephemeral=True)
+            return saved
+        await interaction.followup.send(
+            f"Added {added} for **{vehicle_name}** to {thread.mention}, replacing anything already "
+            f"locked in for those slots.{not_saved}", ephemeral=True)
+        return saved
+
 
 class _RemoveEntrySelect(discord.ui.Select):
     """Transient, single-use dropdown for removing one locked-in part at a time, per the
@@ -548,6 +638,9 @@ class PartsBrowserView(BotView):
         self.expired = False
         # One-off explanation shown in the header, e.g. a refresh that couldn't reload its category.
         self.notice: str | None = None
+        # Set while "Recommend a loadout" is building one, so a double click doesn't build
+        # and post two (see loadout_button).
+        self._opening_loadout = False
         self.category_select = _CategorySelect(self)
         self.add_item(self.category_select)
         self._add_refresh()
@@ -781,6 +874,21 @@ class PartsBrowserView(BotView):
     async def lock_button(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
         await self.lock_in_selected(interaction)
 
+    # Row 3 is always free: the category, slot and part menus take rows 0-2 at most, and row 4
+    # is lock-in, the page buttons and ↻ Refresh.
+    @discord.ui.button(label="Recommend a loadout", style=discord.ButtonStyle.primary, row=3)
+    async def loadout_button(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        # Check-then-set with no await between, as LoadoutView.add_all: a second click while
+        # the first loadout is still building would otherwise build and post a second one.
+        if self._opening_loadout:
+            await interaction.response.send_message("Already building that loadout - one moment.", ephemeral=True)
+            return
+        self._opening_loadout = True
+        try:
+            await self.cog.open_loadout(interaction, self.vehicle, self.origin_terminal)
+        finally:
+            self._opening_loadout = False
+
 
 def _mark_default(options: list[discord.SelectOption], value: str) -> None:
     """Discord's own collapsed-dropdown display shows the placeholder again after every
@@ -850,6 +958,202 @@ class _PartSelect(discord.ui.Select):
         await interaction.response.edit_message(content=self.parent_view.text(), view=self.parent_view)
 
 
+class LoadoutView(BotView):
+    """/ship-loadout's message, also opened by the parts browser's "Recommend a loadout": one
+    recommended part per group of identical slots for a profile (bot/uex/ship_loadout.py),
+    with buttons to switch profile, page through a big ship, and add every purchase to the
+    private shopping list.
+
+    Every slot's candidates and stock parts are loaded once, when it opens. A profile switch
+    only re-picks from them, so it answers at once with no lookups. Posted in the player's
+    private ship parts thread like the browser (so a plain message edit, not a 15-minute
+    interaction token, greys it out when idle), and answers only the player who opened it."""
+    def __init__(
+        self, cog: "ShipPartsFinder", vehicle: dict, origin: tuple[int, str] | None, groups: list[SlotGroup],
+        candidates: dict[tuple, list[dict]], *, owner_id: int, profile: str = DEFAULT_PROFILE,
+        stock_unanswered: int = 0, slots_missing: int = 0, parts_unanswered: int = 0, turrets_unanswered: int = 0,
+    ) -> None:
+        super().__init__(timeout=LOADOUT_IDLE_SECONDS)
+        self.cog = cog
+        self.vehicle = vehicle
+        # (terminal id, name) of the player's location, or None: ties then go to the cheaper part.
+        self.origin = origin
+        self.groups = groups
+        # fit_key -> that slot's candidates (ShipPartsFinder.candidates_for_port).
+        self.candidates = candidates
+        self.owner_id = owner_id
+        self.profile = profile
+        # What the wiki didn't answer for, said in the header: slots whose stock part (listed,
+        # without a stock comparison), gun hardpoints whose mount (left out, since the mount
+        # decides the gun's size), sold parts (maybe missing, or without stats), and turrets
+        # whose own gun slots (left out, as the browser leaves them out - see
+        # ShipPartsFinder.turret_gun_lookups_unanswered).
+        self.stock_unanswered = stock_unanswered
+        self.slots_missing = slots_missing
+        self.parts_unanswered = parts_unanswered
+        self.turrets_unanswered = turrets_unanswered
+        # Set while "Add all" is saving, so a double click (or a redelivered interaction)
+        # doesn't save and redraw the list twice - see add_all.
+        self._adding = False
+        self.expired = False
+        self.message: discord.Message | None = None
+        self.picks: list[SlotPick] = []
+        self.pages: list[list[str]] = [[]]
+        self.page = 0
+        self.repick()
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        await super().interaction_check(interaction)
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message(
+                "This loadout belongs to another player - run `/ship-loadout` for your own.", ephemeral=True)
+            return False
+        return True
+
+    def repick(self) -> None:
+        """Pick every slot for the current profile, then page the lines so the whole message,
+        header and totals included, stays inside Discord's 2,000 characters."""
+        self.picks = [pick_for_slot(group, self.candidates.get(group.fit_key, []), self.profile)
+                      for group in self.groups]
+        lines = [pick_line(pick, self.profile, reason=self._reason(pick)) for pick in self.picks]
+        # Measured with a two-digit page count and the idle note, so neither can push a page over.
+        fixed = sum(len(part) + 2 for part in ("\n".join(self._header()), "\n".join(self._footer(99)),
+                                               LOADOUT_EXPIRED_NOTE))
+        self.pages = paginate_lines(lines, max(MESSAGE_LIMIT - fixed - 10, 400))
+        self.page = 0
+        self._show_buttons()
+
+    def _reason(self, pick: SlotPick) -> str | None:
+        """'No stats' only means the wiki lacks them when it answered; if it didn't, say that."""
+        candidates = self.candidates.get(pick.group.fit_key, [])
+        if pick.reason == NO_STATS and any(c.get("_detail_unanswered") for c in candidates):
+            return WIKI_SILENT_FOR_SLOT
+        return None
+
+    def _header(self) -> list[str]:
+        if self.origin is None:
+            shops = "Each part at its cheapest shop; ties go to the cheaper part."
+        else:
+            where = f"**{self.origin[1]}**" if self.origin[1] else "your location"
+            shops = f"Each part at its cheapest shop; ties go to the shop nearest {where}."
+        lines = [f"**{self.vehicle.get('name')}** recommended loadout · **{self.profile}**",
+                 f"-# {PROFILE_BLURBS[self.profile][0].upper()}{PROFILE_BLURBS[self.profile][1:]}. {shops}"]
+        # (count, noun, what it means for one, for several)
+        for count, what, one, many in (
+            (self.slots_missing, "gun slot", "it is left out", "they are left out"),
+            (self.turrets_unanswered, "turret", "its guns are left out", "their guns are left out"),
+            (self.stock_unanswered, "stock part", "it can't be compared against stock",
+             "they can't be compared against stock"),
+            (self.parts_unanswered, "part", "it may be missing", "they may be missing"),
+        ):
+            if not count:
+                continue
+            effect = one if count == 1 else many
+            effect += {"gun slot": ", since the mount decides the gun's size",
+                       "part": ", so a better pick may exist"}.get(what, "")
+            lines.append(f"⚠️ The Star Citizen Wiki didn't respond for {count} {what}{'s' if count != 1 else ''}: "
+                         f"{effect}. Try again in a few minutes.")
+        return lines
+
+    def _footer(self, page_count: int) -> list[str]:
+        lines = [total_line(self.picks)]
+        power = power_total(self.picks).line()
+        if power:
+            lines.append(power)
+        if page_count > 1:
+            lines.append(f"Page {self.page + 1} of {page_count}")
+        return lines
+
+    def text(self) -> str:
+        page = self.pages[min(self.page, len(self.pages) - 1)]
+        sections = ["\n".join(self._header()), "\n".join(page), "\n".join(self._footer(len(self.pages)))]
+        if self.expired:
+            sections.append(LOADOUT_EXPIRED_NOTE)
+        return discord.utils.escape_mentions("\n\n".join(s for s in sections if s))[:MESSAGE_LIMIT]
+
+    def _show_buttons(self) -> None:
+        for child in [c for c in self.children if isinstance(c, (_ProfileButton, _LoadoutPageButton))]:
+            self.remove_item(child)
+        for profile in PROFILES:
+            self.add_item(_ProfileButton(self, profile))
+        if len(self.pages) > 1:
+            self.add_item(_LoadoutPageButton(self, -1))
+            self.add_item(_LoadoutPageButton(self, +1))
+        self.add_all_button.disabled = not purchases(self.picks)
+
+    async def switch_profile(self, interaction: discord.Interaction, profile: str) -> None:
+        self.profile = profile
+        self.repick()
+        await interaction.response.edit_message(content=self.text(), view=self)
+
+    async def turn_page(self, interaction: discord.Interaction, delta: int) -> None:
+        self.page = max(0, min(len(self.pages) - 1, self.page + delta))
+        self._show_buttons()
+        await interaction.response.edit_message(content=self.text(), view=self)
+
+    async def add_all(self, interaction: discord.Interaction) -> None:
+        """Every purchase in the current profile's picks - never a kept-stock line - into the
+        private shopping list, each under its slot's own entry name (LoadoutSlot.entry_port_name),
+        so it replaces what the browser saved there and vice versa.
+
+        Two already-dispatched clicks would otherwise both save and both redraw the list - and
+        when the list message is gone, both post a new one, orphaning one. Checking `_adding`
+        and only then setting it is the guard (ConfirmListingView's pattern): nothing awaits
+        between the check and the set, so the second click always sees the first one's write."""
+        if self._adding:
+            await interaction.response.send_message("Already adding these parts - one moment.", ephemeral=True)
+            return
+        self._adding = True
+        try:
+            await interaction.response.defer(ephemeral=True)
+            entries = [{
+                "category": slot.category, "port_name": slot.entry_port_name, "id_item": part.get("_uex_id"),
+                "item_name": part.get("name") or "unknown", "id_terminal": part.get("_id_terminal"),
+                "terminal_name": part.get("_terminal_name"), "price_buy": part.get("_price_buy"),
+            } for slot, part in purchases(self.picks)]
+            if not entries:
+                await interaction.followup.send("Nothing to add: every slot keeps what it has.", ephemeral=True)
+                return
+            await self.cog.shopping.lock_in_many(
+                interaction, _vehicle_id(self.vehicle), self.vehicle.get("name") or "", entries)
+        finally:
+            self._adding = False
+
+    @discord.ui.button(label="Add all to shopping list", style=discord.ButtonStyle.success, row=1)
+    async def add_all_button(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        await self.add_all(interaction)
+
+    async def on_timeout(self) -> None:
+        """Grey every button out and say how to get the loadout back."""
+        self.expired = True
+        await self.grey_out(content=self.text())
+
+
+class _ProfileButton(discord.ui.Button):
+    """One per profile; the one showing is highlighted and can't be pressed again."""
+    def __init__(self, parent: LoadoutView, profile: str) -> None:
+        current = profile == parent.profile
+        super().__init__(label=profile, style=discord.ButtonStyle.primary if current else discord.ButtonStyle.secondary,
+                         row=0, disabled=current)
+        self.parent_view = parent
+        self.profile = profile
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await self.parent_view.switch_profile(interaction, self.profile)
+
+
+class _LoadoutPageButton(discord.ui.Button):
+    def __init__(self, parent: LoadoutView, delta: int) -> None:
+        at_edge = parent.page == 0 if delta < 0 else parent.page >= len(parent.pages) - 1
+        super().__init__(label="◀ Previous" if delta < 0 else "Next ▶", style=discord.ButtonStyle.secondary,
+                         row=1, disabled=at_edge)
+        self.parent_view = parent
+        self.delta = delta
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await self.parent_view.turn_page(interaction, self.delta)
+
+
 def _vehicle_id(vehicle: dict) -> int | None:
     try:
         return int(vehicle.get("id"))
@@ -913,6 +1217,9 @@ class ShipPartsFinder(commands.Cog):
         self.shopping = ShipPartsShoppingService(bot)
         # Live browsing views by message id, so a refresh can retire the one it replaces.
         self._browsers: dict[int, PartsBrowserView] = {}
+        # id_vehicle -> (expiry, port path -> stock item uuid) for /ship-loadout: see
+        # _vehicle_stock_uuids.
+        self._stock_trees: dict[int, tuple[float, dict[str, str]]] = {}
         if start_refresh:
             self.refresh_reference.start()
 
@@ -1038,12 +1345,23 @@ class ShipPartsFinder(commands.Cog):
         """The wiki names some ships with their maker ('MISC Reliant Tana', 'MISC
         Freelancer') where UEX's `name` doesn't ('Reliant Tana') - UEX's own `name_full`
         matches those, so it's tried second (21 of the 88 UEX ships the wiki didn't match
-        by name; most of the rest are concept ships the wiki's game data doesn't have)."""
+        by name; most of the rest are concept ships the wiki's game data doesn't have).
+
+        A name the wiki uses for several ships (the Cutlass Black) can't say which one's slots
+        to read: the next name is still tried, and WikiDuplicateNameError is raised only when
+        none of them gives slots, so the finder can say why rather than "no slots"."""
         names = [vehicle.get("name"), vehicle.get("name_full")]
+        duplicate: WikiDuplicateNameError | None = None
         for name in dict.fromkeys(n.strip() for n in names if isinstance(n, str) and n.strip()):
-            raw_ports, vehicle_tags = await self._wiki.get_vehicle_loadout(name)
+            try:
+                raw_ports, vehicle_tags = await self._wiki.get_vehicle_loadout(name)
+            except WikiDuplicateNameError as exc:
+                duplicate = duplicate or exc
+                continue
             if raw_ports:
                 return parse_ports(raw_ports, vehicle_tags)
+        if duplicate is not None:
+            raise duplicate
         return []
 
     async def _item_detail_cached(self, uex_row: dict) -> dict | None:
@@ -1330,17 +1648,27 @@ class ShipPartsFinder(commands.Cog):
         )
 
 
-    async def _build_browser(self, vehicle: dict, origin_terminal: tuple[int, str]) -> PartsBrowserView | str:
-        """A fresh browsing view for one ship, or the message to show instead. Shared by the
-        command and ↻ Refresh."""
+    async def _ports_or_message(self, vehicle: dict) -> list[ShipPort] | str:
+        """The ship's slots, or what to tell the player when the wiki can't give them."""
         try:
-            ports = await self._ports_for_vehicle(vehicle)
+            return await self._ports_for_vehicle(vehicle)
         except WikiUnavailableError:
             return (f"Couldn't reach the Star Citizen Wiki for **{vehicle.get('name')}**'s component slots "
                     "right now - try again in a few minutes.")
+        except WikiDuplicateNameError:
+            return (f"⚠️ The Star Citizen Wiki lists more than one ship named **{vehicle.get('name')}**, so "
+                    "its component slots can't be told apart yet. Known issue: parts and loadouts for this "
+                    "ship aren't available for now.")
         except WikiApiError:
             logger.warning("No usable wiki slot data for %s", vehicle.get("name"), exc_info=True)
             return f"The Star Citizen Wiki doesn't list usable component slots for **{vehicle.get('name')}** yet."
+
+    async def _build_browser(self, vehicle: dict, origin_terminal: tuple[int, str]) -> PartsBrowserView | str:
+        """A fresh browsing view for one ship, or the message to show instead. Shared by the
+        command and ↻ Refresh."""
+        ports = await self._ports_or_message(vehicle)
+        if isinstance(ports, str):
+            return ports
         grouped = group_ports_by_category(ports)
         if not grouped:
             return f"No supported component categories found for **{vehicle.get('name')}** yet."
@@ -1397,6 +1725,291 @@ class ShipPartsFinder(commands.Cog):
         view.message = message
         self._browsers[message.id] = view
         await interaction.edit_original_response(content=view.text(), view=view)
+
+    # -- /ship-loadout --------------------------------------------------------------------------
+
+    @app_commands.command(
+        name="ship-loadout",
+        description="Recommend a part for every slot on one ship - Balanced, Stealth, Tank or Budget.",
+    )
+    @app_commands.describe(
+        ship="Ship name, e.g. 'Avenger Titan' or 'Gladius' - autocompletes.",
+        profile="What to favour. Balanced if left out; you can switch on the loadout itself.",
+        location="Terminal you're at, so ties go to the nearest shop - autocompletes. Optional.",
+    )
+    @app_commands.choices(profile=[
+        app_commands.Choice(name=f"{profile} - {PROFILE_BLURBS[profile]}"[:100], value=profile) for profile in PROFILES
+    ])
+    @app_commands.autocomplete(ship=ship_name_autocomplete, location=terminal_name_autocomplete)
+    async def ship_loadout(
+        self, interaction: discord.Interaction, ship: str, profile: app_commands.Choice[str] | None = None,
+        location: str | None = None,
+    ) -> None:
+        await interaction.response.defer(ephemeral=True)
+        origin = None
+        if location:
+            origin = await self.bot.db.resolve_terminal_id_by_name(location)
+            if origin is None:
+                await interaction.followup.send(
+                    f"Couldn't find a single terminal matching '{location}' - pick one from the autocomplete list, "
+                    "or leave location out.", ephemeral=True,
+                )
+                return
+        try:
+            vehicles = await self.bot.uex.get_vehicles()
+        except UexApiError as exc:
+            await interaction.followup.send(describe_uex_api_error(exc), ephemeral=True)
+            return
+        vehicle = resolve_ship(vehicles, ship)
+        if vehicle is None:
+            await interaction.followup.send(
+                f"Couldn't find a single unambiguous match for '{ship}'. Try the full ship name "
+                "and pick from the autocomplete suggestions.", ephemeral=True,
+            )
+            return
+        await self._post_loadout(interaction, vehicle, origin, profile.value if profile else DEFAULT_PROFILE)
+
+    async def open_loadout(
+        self, interaction: discord.Interaction, vehicle: dict, origin_terminal: tuple[int, str],
+    ) -> None:
+        """The parts browser's "Recommend a loadout": the ship and location being browsed. A
+        browser rebuilt by ↻ Refresh has only the location's id, so its name is looked up."""
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        if not origin_terminal[1]:
+            origin_terminal = (origin_terminal[0], await self._terminal_name(origin_terminal[0]))
+        await self._post_loadout(interaction, vehicle, origin_terminal, DEFAULT_PROFILE)
+
+    async def _terminal_name(self, id_terminal: int) -> str:
+        try:
+            references = await self.bot.db.get_terminal_references_by_ids([id_terminal])
+        except Exception:
+            logger.warning("Couldn't look up terminal %s's name for a loadout", id_terminal, exc_info=True)
+            return ""
+        return (references.get(id_terminal) or {}).get("terminal_name") or ""
+
+    async def _post_loadout(
+        self, interaction: discord.Interaction, vehicle: dict, origin: tuple[int, str] | None, profile: str,
+    ) -> None:
+        """Build the loadout and post it in the player's private ship parts thread, beside the
+        list "Add all" fills, with an ephemeral pointer to it. The interaction is deferred.
+
+        In a DM there's no thread to post in: said before the build, which is the slowest work
+        in the feature (every slot's parts and stock parts), not after it."""
+        if interaction.guild_id is None:
+            await interaction.followup.send(
+                "Ship loadouts are available in a server: they're posted in your private ship parts thread there.",
+                ephemeral=True,
+            )
+            return
+        view = await self._build_loadout(vehicle, origin, profile, interaction.user.id)
+        if isinstance(view, str):
+            await interaction.followup.send(view, ephemeral=True)
+            return
+        thread = await self.shopping._thread(interaction)
+        if thread is None:
+            view.stop()
+            await interaction.followup.send(
+                "I couldn't open your private ship parts thread. Check thread permissions.", ephemeral=True,
+            )
+            return
+        try:
+            view.message = await thread.send(content=view.text(), view=view, allowed_mentions=NO_MENTIONS)
+        except discord.HTTPException:
+            logger.exception("Could not post a ship loadout in thread %s", thread.id)
+            view.stop()
+            await interaction.followup.send(
+                f"I couldn't post the loadout in {thread.mention}. Please try again.", ephemeral=True,
+            )
+            return
+        await interaction.followup.send(
+            f"Posted a **{profile}** loadout for **{vehicle.get('name')}** in {thread.mention}.", ephemeral=True,
+        )
+
+    async def _build_loadout(
+        self, vehicle: dict, origin: tuple[int, str] | None, profile: str, owner_id: int,
+    ) -> LoadoutView | str:
+        """A loadout view for one ship, or the message to show instead. Every lookup shares
+        one deadline (LOADOUT_TIME_BUDGET_SECONDS)."""
+        deadline = time.monotonic() + LOADOUT_TIME_BUDGET_SECONDS
+        ports = await self._ports_or_message(vehicle)
+        if isinstance(ports, str):
+            return ports
+        slots, stock_unanswered, slots_missing = await self._loadout_slots(vehicle, ports, deadline)
+        # A turret whose detail the wiki didn't answer has no gun slots in `ports` at all
+        # (_with_child_gun_ports): said, as the browser says it, rather than read as complete.
+        turrets_unanswered = self.turret_gun_lookups_unanswered(ports)
+        groups = group_slots(slots)
+        if not groups:
+            if slots_missing or turrets_unanswered:
+                return (f"Couldn't reach the Star Citizen Wiki for **{vehicle.get('name')}**'s stock parts "
+                        "right now - try again in a few minutes.")
+            return f"No supported component slots found for **{vehicle.get('name')}** yet."
+        try:
+            candidates, parts_unanswered = await self._loadout_candidates(groups, origin, deadline)
+        except UexApiError as exc:
+            return describe_uex_api_error(exc)
+        return LoadoutView(
+            self, vehicle, origin, groups, candidates, owner_id=owner_id, profile=profile,
+            stock_unanswered=stock_unanswered, slots_missing=slots_missing, parts_unanswered=parts_unanswered,
+            turrets_unanswered=turrets_unanswered,
+        )
+
+    async def _loadout_slots(
+        self, vehicle: dict, ports: list[ShipPort], deadline: float,
+    ) -> tuple[list[LoadoutSlot], int, int]:
+        """Every slot the loadout fills, in the ship's own order, each with its stock part's
+        wiki detail. Also returns how many slots' stock parts the wiki didn't answer for (kept,
+        with no stock comparison) and how many gun hardpoints were left out because it didn't
+        answer for their stock mount (whose own gun slot decides the gun's size).
+
+        A gun hardpoint keeps its stock mount (the owner's call): under a gimbal, the slot is
+        the gimbal's own gun slot (loadout_gun_ports), and the gun in it is named only by the
+        wiki's single-vehicle endpoint (_vehicle_stock_uuids). A mount inside a stock mount (a
+        turret holding gimbals) is kept too, down to the gun slot, up to MAX_MOUNT_DEPTH levels
+        - its own mount rank is never compared with a gun's DPS. A turret whose own gun slots
+        are in the loadout is kept the same way: recommending a new turret beside guns sized
+        for the stock one would contradict itself. A slot the game locks has no category and
+        is skipped, as the browser skips it."""
+        tree_result, = await _gather_until(deadline, [lambda: self._vehicle_stock_uuids(vehicle)])
+        tree = tree_result if isinstance(tree_result, dict) else None
+        filled = [(port, category) for port in ports if (category := slot_category(port)) is not None]
+        turrets_with_guns = {port.name.rsplit("/", 1)[0] for port, category in filled
+                             if category == GUNS_CATEGORY and "/" in port.name}
+        filled = [(port, category) for port, category in filled
+                  if not (category == MOUNTS_CATEGORY and port.name in turrets_with_guns)]
+
+        def stock_uuid(port: ShipPort) -> str | None:
+            return (tree or {}).get(port.name) or port.equipped_uuid
+
+        def stock_state(path: str, uuid: str | None, results: dict, *, nested: bool) -> tuple[dict | None, bool, bool]:
+            """(detail, unknown, unanswered) for one slot's stock item."""
+            if nested and tree is None:
+                # Only the single-vehicle tree names what's inside a mount, and it didn't load.
+                return None, True, True
+            if nested and path not in tree:
+                # The tree loaded but doesn't list this slot (its mount's row had no ports):
+                # unknown, never an empty slot - asking again won't change it.
+                return None, True, False
+            if not uuid:
+                return None, False, False  # an empty slot
+            result = results.get(uuid)
+            if isinstance(result, dict):
+                return result, False, False
+            # None is a part the wiki doesn't have: unknown, but asking again won't help.
+            return None, True, isinstance(result, BaseException)
+
+        def left_out(port: ShipPort) -> bool:
+            # A gun hardpoint whose stock item the wiki didn't answer for, when that item could
+            # be a mount: the mount decides the gun's size, so there's no slot to fill. One that
+            # only takes a gun is still its own size - kept, with its stock part unknown.
+            return top[port.name][2] and MOUNTS_CATEGORY in port.categories
+
+        top_results = await self._stock_details([stock_uuid(port) for port, _ in filled], deadline)
+        # A turret's own gun slot (child_gun_ports, e.g. the Perseus's) has no stock uuid of its own.
+        top = {port.name: stock_state(port.name, stock_uuid(port), top_results,
+                                      nested="/" in port.name and not port.equipped_uuid)
+               for port, _ in filled}
+        gun_slots = {port.name: loadout_gun_ports(port, top[port.name][0])
+                     for port, category in filled if category == GUNS_CATEGORY and not left_out(port)}
+
+        # The stock item in each mount's gun slot; where that is itself a mount, its own gun
+        # slots replace it and are looked up in turn.
+        inner_results: dict[str, object] = {}
+        pending = [gun for name, guns in gun_slots.items() for gun in guns if gun.name != name]
+        for _ in range(MAX_MOUNT_DEPTH):
+            if not pending:
+                break
+            inner_results.update(await self._stock_details([(tree or {}).get(gun.name) for gun in pending], deadline))
+            deeper = {gun.name: loadout_gun_ports(gun, inner_stock) for gun in pending
+                      if is_gun_mount(inner_stock := stock_state(gun.name, (tree or {}).get(gun.name), inner_results,
+                                                            nested=True)[0])}
+            gun_slots = {name: [inner for gun in guns for inner in deeper.get(gun.name, [gun])]
+                         for name, guns in gun_slots.items()}
+            pending = [inner for inners in deeper.values() for inner in inners]
+
+        slots: list[LoadoutSlot] = []
+        stock_unanswered = slots_missing = 0
+        for port, category in filled:
+            detail, unknown, unanswered = top[port.name]
+            if category != GUNS_CATEGORY:
+                slots.append(LoadoutSlot(port, category, port.name, detail, unknown))
+                stock_unanswered += unanswered
+                continue
+            if left_out(port):
+                slots_missing += 1
+                continue
+            guns = gun_slots[port.name]
+            for gun in guns:
+                if gun is port:  # a fixed gun, or an empty hardpoint: the hardpoint itself
+                    slots.append(LoadoutSlot(port, GUNS_CATEGORY, port.name, detail, unknown))
+                    stock_unanswered += unanswered
+                    continue
+                gun_detail, gun_unknown, gun_unanswered = stock_state(gun.name, (tree or {}).get(gun.name),
+                                                                       inner_results, nested=True)
+                if is_gun_mount(gun_detail):
+                    # Still a mount past MAX_MOUNT_DEPTH: not a gun to compare against.
+                    gun_detail, gun_unknown = None, True
+                slots.append(LoadoutSlot(gun, GUNS_CATEGORY, gun_entry_port_name(port, gun, len(guns)),
+                                         gun_detail, gun_unknown))
+                stock_unanswered += gun_unanswered
+        return slots, stock_unanswered, slots_missing
+
+    async def _stock_details(self, uuids: list[str | None], deadline: float) -> dict[str, object]:
+        """uuid -> its wiki detail (None when the wiki has no such item), or the exception
+        when the wiki didn't answer in time. Batched like the candidates' own details."""
+        unique = list(dict.fromkeys(uuid for uuid in uuids if uuid))
+        results: dict[str, object] = {}
+        for start in range(0, len(unique), DETAIL_BATCH_SIZE):
+            batch = unique[start:start + DETAIL_BATCH_SIZE]
+            answers = await _gather_until(deadline, [lambda u=u: self._item_detail_cached({"uuid": u}) for u in batch])
+            results.update(zip(batch, answers))
+        return results
+
+    async def _vehicle_stock_uuids(self, vehicle: dict) -> dict[str, str] | None:
+        """Port path -> stock item uuid for one ship, the items inside its stock mounts
+        included (stock_uuids_by_port over WikiApiClient.get_vehicle_stock_ports), cached for
+        DETAIL_CACHE_SECONDS. None when it isn't known - the wiki didn't answer, or didn't
+        resolve the ship by UEX's name or full name - so a gun inside a kept mount reads as
+        "stock unknown", never as an empty slot."""
+        id_vehicle = _vehicle_id(vehicle)
+        now = time.monotonic()
+        cached = self._stock_trees.get(id_vehicle)
+        if cached and cached[0] > now:
+            return cached[1]
+        names = [vehicle.get("name"), vehicle.get("name_full")]
+        for name in dict.fromkeys(n.strip() for n in names if isinstance(n, str) and n.strip()):
+            try:
+                raw_ports = await self._wiki.get_vehicle_stock_ports(name)
+            except WikiApiError as exc:
+                logger.info("No stock loadout from the wiki for %r: %s", name, exc)
+                return None
+            if raw_ports:
+                uuids = stock_uuids_by_port(raw_ports)
+                if len(self._stock_trees) >= DETAIL_CACHE_MAX:
+                    self._stock_trees.pop(next(iter(self._stock_trees)))
+                self._stock_trees[id_vehicle] = (now + DETAIL_CACHE_SECONDS, uuids)
+                return uuids
+        return None
+
+    async def _loadout_candidates(
+        self, groups: list[SlotGroup], origin: tuple[int, str] | None, deadline: float,
+    ) -> tuple[dict[tuple, list[dict]], int]:
+        """Each distinct slot shape's candidates (fit_key -> candidates_for_port), loaded once
+        however many slots share it, and how many sold parts the wiki didn't answer for."""
+        candidates: dict[tuple, list[dict]] = {}
+        # Per category: every slot shape in one category draws on the same sold parts, so
+        # adding them up would count a part the wiki didn't answer for once per shape.
+        unanswered: dict[str, int] = {}
+        for group in groups:
+            if group.fit_key in candidates:
+                continue
+            found = await self.candidates_for_port(
+                group.port, category=group.category, origin_id=origin[0] if origin else None,
+                time_budget=max(0.0, deadline - time.monotonic()),
+            )
+            candidates[group.fit_key] = found
+            unanswered[group.category] = max(unanswered.get(group.category, 0), getattr(found, "wiki_unavailable", 0))
+        return candidates, sum(unanswered.values())
 
 
 async def setup(bot: commands.Bot) -> None:
