@@ -338,7 +338,7 @@ date - no open item, nothing to record here.
       the unmerged `feature/price-outlier-detection` branch - porting this entry likely
       means merging that branch rather than re-implementing from scratch, but check it's
       still current (and still unmerged) before assuming a fresh port is needed.
-      (ported to production in PR #TBD, PROJECT_CONTEXT.md entry 121: rebuilt on today's
+      (ported to production in PR #105, PROJECT_CONTEXT.md entry 121: rebuilt on today's
       code from aiv2's version, since that branch was 79 commits behind)
 - [x] aiv2 commit `f2785ae` - Refinery Advisor finds sell prices for ores UEX
       links only from the refined side, and signs negative yield bonuses ("-3%", not "+-3%"):
