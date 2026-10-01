@@ -4271,6 +4271,37 @@ they're in sync).
      - Tests: `tests/test_ore_typos.py`, two of them through the real commands. Each change
        was undone one at a time (8 in all), and a test failed every time.
 
+121. **Route commands warn when a price disagrees with every other terminal.** Ported from
+     aiv2 commit `a6bd024`, which had itself ported production's own never-merged
+     `feature/price-outlier-detection` branch (`c63ca73`, 2026-09-22, 79 commits behind by
+     now; its PROJECT_CONTEXT entry 78 was never merged and that number went to another
+     entry). Rebuilt on today's commands rather than merging that branch.
+     - The incident: UEX showed Rayari Kaltag buying Fresh Food at 2,614 aUEC/SCU while every
+       other terminal agreed around 21,614, an ~8x gap confirmed in-game as a UEX data error.
+       No existing signal caught it: route confidence rewards freshness, report counts and
+       availability, and the bulk snapshot `/mixed-routes` and `/multi-stop-route` read has no
+       report counts at all (`/commodities_prices_all` sends them NULL).
+     - `bot/uex/price_outliers.py` compares one terminal's buy or sell price with the median of
+       every OTHER terminal's price for the same commodity and side in the same data, needing at
+       least 3 others, and flags it at 4x or more either way. The warning says the price
+       disagrees, never which number is right.
+     - `price_outlier_warnings` (`bot/uex/route_presentation.py`) words it once for everyone.
+       `cargo_item_warnings` takes an optional `price_outlier_index`, built once per command
+       from the market data it already loaded (no extra UEX calls): `/mixed-routes`,
+       `/multi-stop-route` (through `_send_multi_stop_routes`) and `/intelligence-brief`, from
+       the whole snapshot before any filtering. `/best-route` checks both of its branches
+       against the commodity's own `/commodities_prices` rows (exact-commodity since entry
+       118).
+     - Not covered, as in aiv2: `/top-routes`, whose entries are different commodities with no
+       per-commodity listing in memory; and the hedge ("backup load") lines.
+     - Live check on 2026-10-01, `/commodities_prices_all`: 2,528 prices had 3+ others to
+       compare with; none reached 4x. The largest gaps were 3.4x (Iron and Copper selling for
+       about a third of the median at Pickers Field and Rappel), plausibly real regional prices,
+       so the warning stays quiet day to day.
+     - Tests: `tests/test_price_outliers.py` (19), including every wired command run end to
+       end with the real incident's prices. Each change was undone one at a time (13 in all),
+       and a test failed every time.
+
 ## Where to look for what
 
 Six docs, deliberately scoped so they don't duplicate each other:

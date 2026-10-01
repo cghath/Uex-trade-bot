@@ -327,7 +327,7 @@ date - no open item, nothing to record here.
       AI-chat or eval work, and fix #2 (city TDD terminals) needs a free-text terminal resolver
       production doesn't have.
       (ported to production in PR #104, PROJECT_CONTEXT.md entry 120)
-- [ ] aiv2 commit `a6bd024` - Cross-terminal price-outlier warnings: a commodity's buy/sell
+- [x] aiv2 commit `a6bd024` - Cross-terminal price-outlier warnings: a commodity's buy/sell
       price checked against every other terminal trading it in the same snapshot, flagged
       when 4x-or-more off the median (`bot/uex/price_outliers.py`,
       `bot/uex/route_presentation.py`, `bot/cogs/prices.py`, `bot/cogs/intelligence_brief.py`,
@@ -338,6 +338,8 @@ date - no open item, nothing to record here.
       the unmerged `feature/price-outlier-detection` branch - porting this entry likely
       means merging that branch rather than re-implementing from scratch, but check it's
       still current (and still unmerged) before assuming a fresh port is needed.
+      (ported to production in PR #TBD, PROJECT_CONTEXT.md entry 121: rebuilt on today's
+      code from aiv2's version, since that branch was 79 commits behind)
 - [x] aiv2 commit `f2785ae` - Refinery Advisor finds sell prices for ores UEX
       links only from the refined side, and signs negative yield bonuses ("-3%", not "+-3%"):
       new `refined_form`/`format_yield_bonus` (`bot/uex/refinery.py`), used in

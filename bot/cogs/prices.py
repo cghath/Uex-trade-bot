@@ -60,6 +60,7 @@ def _filters_note(prefs: dict, saved_filters: dict, *, space_only: bool, auto_lo
     )
 from bot.cogs.route_progression import RouteLegInput, TrackableRoute
 from bot.route_pages import RoutePage, send_route_pages, text_pages
+from bot.uex.price_outliers import PriceOutlierIndex, index_commodity_prices
 from bot.uex.route_presentation import (
     add_chunked_fields,
     approximation_note,
@@ -73,6 +74,7 @@ from bot.uex.route_presentation import (
     hedge_room,
     missing_ship_cargo_line,
     missing_ship_note,
+    price_outlier_warnings,
     stock_headroom_warning,
     travel_warning,
     worst_confidence,
@@ -488,6 +490,9 @@ class Prices(commands.Cog):
 
         id_commodity = rows[0].get("id_commodity")
         commodity_display = rows[0].get("commodity_name", commodity)
+        # Each shown route's buy and sell price against every other terminal trading this
+        # commodity (bot/uex/price_outliers.py), from the rows just fetched.
+        price_outlier_index = index_commodity_prices(rows)
 
         # Resolve the ship to use for cargo math: an explicit /best-route option wins,
         # otherwise fall back to the user's saved default (/set-trading-preferences). Either way
@@ -678,6 +683,10 @@ class Prices(commands.Cog):
                     if sell_status:
                         status_bits.append(f"sell side: {sell_status}")
                     value_lines.append(" · ".join(status_bits))
+                value_lines.extend(price_outlier_warnings(
+                    price_outlier_index, id_commodity=id_commodity, origin_id=origin_id, buy_price=price_origin,
+                    destination_id=destination_id, sell_price=price_destination,
+                ))
 
                 origin_health_obj = classify_terminal_health(health_rows[origin_id]) if origin_id in health_rows else None
                 destination_health_obj = (
@@ -944,6 +953,10 @@ class Prices(commands.Cog):
                 if sell_status:
                     status_bits.append(f"sell side: {sell_status}")
                 value_lines.append(" · ".join(status_bits))
+            value_lines.extend(price_outlier_warnings(
+                price_outlier_index, id_commodity=id_commodity, origin_id=route.buy_terminal_id,
+                buy_price=route.buy_price, destination_id=route.sell_terminal_id, sell_price=route.sell_price,
+            ))
 
             origin_health_obj = (
                 classify_terminal_health(route_health_rows[route.buy_terminal_id])
@@ -1208,6 +1221,7 @@ class Prices(commands.Cog):
             return
 
         terminal_ids = [terminal_id for route in routes for terminal_id in (route.origin_id, route.destination_id)]
+        price_outlier_index = index_commodity_prices(market_rows)
         health_rows = await self.bot.db.get_terminal_data_health_by_ids(terminal_ids)
         status_lookup = await self._get_status_lookup()
         # RouteProgression may not be loaded (a cog load failure elsewhere shouldn't break
@@ -1231,7 +1245,8 @@ class Prices(commands.Cog):
                 origin_health=origin_health, destination_health=destination_health
             )
             for item in route.cargo:
-                warnings.extend(cargo_item_warnings(item, status_lookup=status_lookup))
+                warnings.extend(cargo_item_warnings(
+                    item, status_lookup=status_lookup, price_outlier_index=price_outlier_index))
             warnings.extend(route_practical_notes(route.cargo[0].source, route.cargo[0].destination))
             if capital_access_only:
                 warnings.append(capital_access_note("both ends"))
@@ -1482,6 +1497,7 @@ class Prices(commands.Cog):
             space_only=space_only, capital_access_only=capital_access_only, auto_load_only=auto_load_only,
             system=system_value, filters_note=_filters_note(
                 prefs, saved_filters, space_only=space_only, auto_load_only=auto_load_only, system=system_value),
+            price_outlier_index=index_commodity_prices(market_rows),
         )
 
     async def _send_multi_stop_routes(
@@ -1497,6 +1513,7 @@ class Prices(commands.Cog):
         auto_load_only: bool,
         system: str | None = None,
         filters_note: str | None = None,
+        price_outlier_index: PriceOutlierIndex | None = None,
     ) -> None:
         """Per-route embed/tracking/fallback sending for /multi-stop-route, whether its search
         was unconstrained or anchored to one starting terminal (`origin`, which was
@@ -1588,7 +1605,10 @@ class Prices(commands.Cog):
                     origin_label=f"{leg_prefix}Origin", destination_label=f"{leg_prefix}Destination",
                 ))
                 for item in leg.cargo:
-                    warnings.extend(cargo_item_warnings(item, status_lookup=status_lookup, prefix=leg_prefix))
+                    warnings.extend(cargo_item_warnings(
+                        item, status_lookup=status_lookup, prefix=leg_prefix,
+                        price_outlier_index=price_outlier_index,
+                    ))
                 warnings.extend(
                     f"{leg_prefix}{note}"
                     for note in route_practical_notes(leg.cargo[0].source, leg.cargo[0].destination)

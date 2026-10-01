@@ -1,7 +1,14 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.40.
+the oldest entry below); the next new entry is 2.41.
+
+---
+
+## 2.40 - 2026-10-01 - Suspicious prices flagged
+
+**Added**
+- `/best-route`, `/mixed-routes`, `/multi-stop-route` and `/intelligence-brief` - A route warns when its buy or sell price is 4x or more off what every other terminal charges for that commodity. It could be a real deal or a UEX data error, so check before you fly. This would have caught UEX once listing Fresh Food at 2,614 instead of about 21,614.
 
 ---
 
