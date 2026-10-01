@@ -30,6 +30,8 @@ Current features:
   with aUEC prices cheapest first and rentals grouped by star system (1-day rate).
   `/ship-parts-finder` (ready for testing) browses a ship's component slots, lists only parts that
   fit and are sold, ranked by each slot's key stat, and keeps a private shopping list of locked-in parts.
+  `/ship-loadout` recommends one part per slot (Balanced, Stealth, Tank or Budget), says where the
+  stock part is already the best pick, and adds every purchase to that list in one click.
 
 Run `/intro` in Discord for the complete categorized command guide.
 
@@ -227,8 +229,8 @@ bot/
     route_confidence.py, route_presentation.py, supply_demand.py, commodity_risk.py,
     data_health.py, practical_routes.py, trading_preferences.py,
     marketplace.py, scanner.py, inventory.py, charts.py, ships.py, ship_shops.py,
-    ship_parts.py, ship_part_display.py, item_finder.py, refinery.py, mining_locations.py,
-    stock_alerts.py, leaderboard.py, status.py, exceptions.py, ...
+    ship_parts.py, ship_part_display.py, ship_loadout.py, item_finder.py, refinery.py,
+    mining_locations.py, stock_alerts.py, leaderboard.py, status.py, exceptions.py, ...
   db/
     database.py      SQLite schema + queries (aiosqlite)
     crypto.py        Fernet key management for encrypting per-user secret keys
@@ -262,7 +264,7 @@ bot/
     blueprints.py         /blueprint-search, /blueprint-list + loop (blueprint_planner.py: its shopping list)
     item_finder.py        /ingame-item-finder
     ship_shops.py         /where-to-buy-ship
-    ship_parts_finder.py  /ship-parts-finder + loop
+    ship_parts_finder.py  /ship-parts-finder, /ship-loadout + loop
     diagnostics.py        /test-dm, /command-usage
     help.py               /intro (the categorized command guide)
 scripts/

@@ -318,6 +318,16 @@ date - no open item, nothing to record here.
       menu (`bot/cogs/marketplace.py`, `bot/uex/marketplace.py`'s listing-choice helpers,
       `UexClient.get_user_username`). Tests: `tests/test_listing_pickers.py`. See
       PROJECT_CONTEXT.md entry 119
+- [ ] PR #TBD - `/ship-loadout`, and a "Recommend a loadout" button in `/ship-parts-finder`'s
+      browser: one recommended part per slot for a Balanced/Stealth/Tank/Budget profile, with
+      keep-stock lines, total cost, a power/cooling warning and "Add all to shopping list".
+      Pure logic in the new `bot/uex/ship_loadout.py`; `LoadoutView`, `_loadout_slots` and
+      `ShipPartsShoppingService.lock_in_many` in `bot/cogs/ship_parts_finder.py`; the new
+      `WikiApiClient.get_vehicle_stock_ports` (`bot/wiki_api.py`) for the stock gun inside a
+      gimbal; "ship-loadout" in `bot/cogs/help.py`'s Ships category. aiv2 needs the finder's
+      earlier entries above first (PRs #60-#63 and the reliability items). Tests:
+      `tests/test_ship_loadout.py`, `tests/test_ship_loadout_command.py`,
+      `tests/test_wiki_api.py`. See PROJECT_CONTEXT.md entry 122
 
 ## To port: aiv2 -> production
 

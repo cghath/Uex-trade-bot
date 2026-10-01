@@ -4302,6 +4302,80 @@ they're in sync).
        end with the real incident's prices. Each change was undone one at a time (13 in all),
        and a test failed every time.
 
+122. **`/ship-loadout`: a recommended part for every slot on a ship.** A new command in the
+     `ShipPartsFinder` cog (`INITIAL_COGS` unchanged; 65 -> 66 commands), plus a "Recommend a
+     loadout" button in `/ship-parts-finder`'s browser that opens it for the ship and location
+     being browsed. Built on the browser's own candidates (`candidates_for_port`: sold, fits
+     size and tags, not locked), so it never recommends a part the browser wouldn't list.
+     - The owner's decisions: four profiles. Balanced takes each category's key stat
+       (`ranking_stat`); Stealth the lowest EM (coolers lowest IR first); Tank shield HP for
+       shields and `durability.health` for every other component; Budget the most key stat
+       per aUEC, only among parts that beat the stock part. Guns go by DPS in all four.
+       Wherever the stock part is already the best pick, the line says "keep stock" with its
+       stat; a purchase shows "(was X stock)". Power and cooling only warn ("Needs up to 22.1
+       power segments at full load; the power plant makes 16."), never change a pick. Out of
+       scope for v1: missiles themselves, damage types, fewer shops, fitting to the power
+       budget.
+     - Pure logic in `bot/uex/ship_loadout.py` (profiles, keep-stock, grouping into "2x S3 Wing
+       Gun" lines, cost, the resource check, the message lines and paging). The cog's
+       `_loadout_slots` reads the ship's slots and each stock part's wiki detail;
+       `LoadoutView` re-picks from the loaded candidates on a profile switch, with no lookups.
+     - A gun hardpoint keeps its stock mount. Under a gimbal the slot is the gimbal's own gun
+       slot (`loadout_gun_ports` -> `child_gun_ports`), and the size comes from the gimbal's
+       ports: every stock VariPuck gimbal on the live wiki (4.10.1) holds a gun of its own size
+       (S3 gimbal, S3 gun), not one size down. The stock gun inside it is named only by the
+       wiki's single-vehicle endpoint, so `WikiApiClient.get_vehicle_stock_ports` (new) reads
+       `GET /vehicles/{uuid}` after the same exact-name match `get_vehicle_loadout` uses, and
+       the cog caches its port-path -> uuid map per ship for a day. Without it, a gun line says
+       "stock part unknown" rather than treating the slot as empty, and Budget keeps stock.
+       The map records a slot the tree lists with nothing in it as `""` (really empty); a path
+       it doesn't list at all (a mount row that came back with no `ports`) is "stock part
+       unknown" too, never an empty slot, so Budget keeps its beats-stock guard. A mount
+       inside a stock mount (a turret holding gimbals) is followed down to the gun slot, up to
+       `MAX_MOUNT_DEPTH` (3) levels, so a gimbal's mount rank is never compared with a gun's
+       DPS. A swappable turret whose own gun slots are in the loadout is kept the same way:
+       no "buy a new turret" line beside guns sized for the stock one, which "Add all" would
+       have saved together.
+     - Every lookup in one loadout shares one deadline, `LOADOUT_TIME_BUDGET_SECONDS` (90),
+       instead of the browser's 45 s per slot; slot shapes load their candidates once however
+       many slots share them. What the wiki didn't answer for is said in the header, "it" or
+       "they" by count: stock parts (no comparison), gun slots whose mount it didn't answer
+       for (left out, since the mount sizes the gun - a slot that only takes a gun keeps its
+       own size and stays, with its stock part unknown), turrets whose own gun slots never
+       loaded (left out, as the browser says), and sold parts (counted once per category).
+       Left-out slots also make the power and cooling line partial ("Needs at least ... (no
+       power figure for 1 left-out slot)"), since their guns still draw both in-game.
+     - In a DM there is no thread to post in, so the command says loadouts are server-only
+       before the build, not after it. "Add all" and "Recommend a loadout" both have a
+       check-then-set guard (`ConfirmListingView`'s pattern), so a double click saves, or
+       builds, once. The profile choices name the stat ("the best main stat in every slot:
+       DPS, shield HP, ...") instead of the code's "key stat".
+     - "Add all to shopping list" saves every purchase, never a kept-stock line, through the new
+       `ShipPartsShoppingService.lock_in_many`: one thread lookup, one list refresh and one
+       reply. Each entry uses the slot's browser key (the hardpoint's own name for a gun), so it
+       replaces what the browser saved there. Only the player who opened the loadout can use
+       it. It is posted in the private ship parts thread, like the browser, and pages past
+       Discord's 2,000 characters.
+     - Live check on 2026-10-01 (live UEX and wiki, fresh cache, nothing sent to Discord):
+       Avenger Titan built in 7.5 s, Gladius 6.5 s, Perseus 4.0 s, X1 0.1 s. Titan Balanced:
+       keep the Revenant nose gun and racks, 2x Dominance-3 for the wings (930 vs 547 DPS),
+       520,274 aUEC total, power 19.1 needed vs 16 made. The Perseus's remote-turret gimbal
+       guns resolve two levels deep. The Cutlass Black still has no slots: the wiki lists two
+       ships of that exact name (open since the finder; unchanged here).
+     - The power warning shows on most ships, stock loadouts included: the wiki's own Titan
+       totals already draw 25.1 against 15 made, and shields and the quantum drive are both
+       counted though the game runs them as separate modes. Worded as a heads-up for now.
+     - Tests: `tests/test_ship_loadout.py` (106, the pure logic) and
+       `tests/test_ship_loadout_command.py` (50, end to end through the real
+       `candidates_for_port` and a real database), plus `tests/test_wiki_api.py` for the new
+       client call. The pure rules were mutation-checked earlier (72/72 killed); each piece of
+       the Discord wiring was then undone one at a time (35 in all), and a test failed every
+       time. A pre-merge review then found the gaps above (silent turret-gun loss, the
+       unlisted-path and mount-in-mount stock cases, the turret-plus-guns contradiction, the
+       DM ordering, no double-click guards, jargon and grammar) plus 25 mutations its own run
+       saw survive. A second run (46 mutations: each fix undone, and each surviving
+       mutation re-applied) killed all 46.
+
 ## Where to look for what
 
 Six docs, deliberately scoped so they don't duplicate each other:

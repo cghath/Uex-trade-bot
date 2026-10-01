@@ -209,16 +209,42 @@ class WikiApiClient:
         a ship-specific part like the 'Reliant Toshima Turret' carries `required_tags`
         (['MISC_Reliant_Base']) that only a ship with those tags satisfies. ([], []) when
         the name doesn't resolve to exactly one ship."""
+        row = await self._exact_vehicle_row(vehicle_name)
+        if row is None:
+            return [], []
+        ports = row.get("ports")
+        tags = row.get("port_tags")
+        return (ports if isinstance(ports, list) else [],
+                [t for t in tags if isinstance(t, str)] if isinstance(tags, list) else [])
+
+    async def _exact_vehicle_row(self, vehicle_name: str) -> dict[str, Any] | None:
+        """The one /vehicles list row named exactly `vehicle_name` (case-insensitive), or None
+        when zero or several are (the Cutlass Black has a second, BIS2950 row of the same name)."""
         body = await self._get_json("/vehicles", {"filter[name]": vehicle_name, "page[size]": 10})
         rows = self._rows(body, "/vehicles")
         target = vehicle_name.strip().lower()
-        exact = [row for row in rows if (row.get("name") or "").strip().lower() == target]
-        if len(exact) != 1:
-            return [], []
-        ports = exact[0].get("ports")
-        tags = exact[0].get("port_tags")
-        return (ports if isinstance(ports, list) else [],
-                [t for t in tags if isinstance(t, str)] if isinstance(tags, list) else [])
+        exact = [row for row in rows if isinstance(row, dict) and (row.get("name") or "").strip().lower() == target]
+        return exact[0] if len(exact) == 1 else None
+
+    async def get_vehicle_stock_ports(self, vehicle_name: str) -> list[dict[str, Any]]:
+        """One ship's ports from the single-vehicle endpoint (GET /vehicles/{uuid}), for
+        /ship-loadout: each with its stock item AND the ports inside that item, all the way
+        down. It's the only place the stock gun inside a stock gimbal is named - the list rows
+        get_vehicle_loadout reads have `ports: null` under every hardpoint, and the gimbal's
+        own item detail has its gun slot empty (checked live on the Avenger Titan, 4.10.1).
+
+        Resolved by exact name first, like get_vehicle_loadout, so [] when the name doesn't
+        resolve to exactly one ship. Two requests, so the caller caches the result."""
+        row = await self._exact_vehicle_row(vehicle_name)
+        vehicle_uuid = row.get("uuid") if row is not None else None
+        if not isinstance(vehicle_uuid, str) or not _UUID_RE.fullmatch(vehicle_uuid):
+            return []
+        body = await self._get_json(f"/vehicles/{vehicle_uuid}")
+        detail = body.get("data")
+        if not isinstance(detail, dict) or detail.get("uuid") != vehicle_uuid:
+            raise WikiApiError("vehicle detail identity mismatch")
+        ports = detail.get("ports")
+        return ports if isinstance(ports, list) else []
 
     async def get_item_detail(self, item_uuid: str) -> dict[str, Any]:
         """One component's real stats (e.g. `power_plant.power_segment_generation`) plus

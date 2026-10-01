@@ -25,8 +25,8 @@ CATEGORIES: list[tuple[str, str, list[str]]] = [
     ("📊 Commodity Trends", "Trade volume, price movement, and commodity price charts.", [
         "trending", "movers", "commodity-history",
     ]),
-    ("🚀 Ships", "Where to buy a ship, and the parts that fit it.", [
-        "ship-parts-finder", "where-to-buy-ship",
+    ("🚀 Ships", "Where to buy a ship, the parts that fit it, and a recommended loadout.", [
+        "ship-parts-finder", "ship-loadout", "where-to-buy-ship",
     ]),
     ("⚙️ Trading Preferences", "Save your default ship, budget and route filters once, instead of every call.", [
         "set-trading-preferences", "clear-trading-preferences", "my-trading-preferences",
