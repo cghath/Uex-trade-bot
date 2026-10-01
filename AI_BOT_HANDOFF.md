@@ -329,7 +329,7 @@ date - no open item, nothing to record here.
       shows no sell price for them today. Found through aiv2 chat testing. Production's
       `bot/uex/refinery.py` and `tests/test_refinery.py` matched aiv2's before this change, so
       it ports cleanly.
-      (ported to production in PR #TBD, PROJECT_CONTEXT.md entry 117)
+      (ported to production in PR #101, PROJECT_CONTEXT.md entry 117)
 - [ ] aiv2 commit `c4f1aa6` - Price only the commodity asked for. UEX's
       `/commodities_prices?commodity_name=` matches by SUBSTRING, and every lookup by name used
       the mixed rows as-is. Checked live 2026-09-29: "Gold" returns Gold + Golden Medmon, so
