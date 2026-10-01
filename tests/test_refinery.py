@@ -13,8 +13,10 @@ from bot.db.database import Database
 from bot.uex.refinery import (
     TerminalYield,
     display_terminal_name,
+    format_yield_bonus,
     high_yield_refining_methods,
     rank_refinery_terminals,
+    refined_form,
     resolve_raw_commodity,
     select_terminals_to_show,
 )
@@ -784,3 +786,66 @@ def test_a_failed_star_system_lookup_degrades_to_yield_only_ordering_without_a_n
     best = next(f.value for f in embed.fields if f.name == "Best refineries by yield bonus")
     assert best.index("Pyro Refinery") < best.index("Stanton Refinery") and "⚠️" not in best
     assert "common system" not in embed.footer.text and "No mining-location data" not in embed.footer.text
+
+# -- the refined form behind a raw ore, and signed yield bonuses ---------------------------
+# Ported from aiv2 commit f2785ae. UEX's Taranite (Raw) row has id_parent 0, though refined
+# Taranite still points back at it - 5 of 32 refinable ores have this shape (checked live
+# 2026-09-29 and 2026-10-01), so /refinery-advisor showed them with no sell price.
+
+
+def _refined_to(id, name, id_parent):
+    return dict(id=id, id_parent=id_parent, name=name, is_raw=0, is_refinable=0, is_refined=1)
+
+
+def test_refined_form_follows_the_raw_ores_own_link_first():
+    raw = _raw(14, "Bexalite (Raw)", 13)
+    commodities = [raw, _refined_to(13, "Bexalite", 14)]
+    assert refined_form(commodities, raw)["name"] == "Bexalite"
+
+
+def test_refined_form_falls_back_to_a_refined_row_linking_back():
+    raw = _raw(74, "Taranite (Raw)", 0)
+    commodities = [raw, _refined_to(73, "Taranite", 74), _refined_to(13, "Bexalite", 14)]
+    assert refined_form(commodities, raw)["name"] == "Taranite"
+
+
+def test_refined_form_is_none_without_a_link_or_with_two_candidates():
+    jaclium = _raw(5, "Jaclium (Ore)", 0)   # hand-mined, no refined form at all
+    assert refined_form([jaclium, _refined(6, "Gold")], jaclium) is None
+    raw = _raw(7, "Mystery (Raw)", None)
+    two = [raw, _refined_to(8, "Mystery A", 7), _refined_to(9, "Mystery B", 7)]
+    assert refined_form(two, raw) is None
+    # a forward link that lands on another raw row is not a refined form
+    loop = _raw(10, "Loop (Raw)", 11)
+    assert refined_form([loop, _raw(11, "Other (Raw)", 0)], loop) is None
+
+
+def test_yield_bonuses_carry_their_own_sign():
+    assert [format_yield_bonus(b) for b in (5, -3, 0)] == ["+5%", "-3%", "+0%"]
+
+
+def test_refinery_advisor_prices_an_ore_uex_links_only_backwards(tmp_path):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await db.record_refinery_yield_snapshot([
+            {"id_commodity": 74, "id_terminal": 10, "commodity_name": "Taranite (Raw)",
+             "terminal_name": "Refinement Processing - HUR-L2", "star_system_name": "Stanton", "value": -3},
+        ])
+        commodities = [_raw(74, "Taranite (Raw)", 0), _refined_to(73, "Taranite", 74)]
+        cog = _cog(
+            db, commodities=commodities, methods=_METHODS,
+            price_rows_by_commodity={
+                "Taranite": [{"terminal_name": "Admin - Patch City", "price_sell": 21000.0, "id_terminal": 11}],
+            },
+        )
+        interaction = _FakeInteraction()
+
+        await cog.refinery_advisor.callback(cog, interaction, ore_1="Taranite (Raw)", ore_2=None, ore_3=None)
+
+        fields = {f.name: f.value for f in interaction.followup.send.call_args.kwargs["embed"].fields}
+        assert "21000.00" in fields["Taranite — best sell price"]
+        assert "Taranite (Raw) -3%" in fields["Best refineries by yield bonus"]
+        assert "+-" not in fields["Best refineries by yield bonus"]
+
+    asyncio.run(run())

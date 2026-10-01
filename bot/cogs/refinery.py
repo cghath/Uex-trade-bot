@@ -18,8 +18,10 @@ from bot.uex.refinery import (
     SPEED_LABELS,
     combine_mining_systems,
     display_terminal_name,
+    format_yield_bonus,
     high_yield_refining_methods,
     rank_refinery_terminals,
+    refined_form,
     resolve_raw_commodity,
     select_terminals_to_show,
 )
@@ -192,7 +194,7 @@ class Refinery(commands.Cog):
             lines = []
             for terminal in ranked_terminals:
                 per_commodity = ", ".join(
-                    f"{name} +{bonus}%" for name, bonus in terminal.per_commodity.items()
+                    f"{name} {format_yield_bonus(bonus)}" for name, bonus in terminal.per_commodity.items()
                 )
                 missing = [c["name"] for c in resolved if c["name"] not in terminal.per_commodity]
                 missing_note = f" (no data: {', '.join(missing)})" if missing else ""
@@ -218,13 +220,11 @@ class Refinery(commands.Cog):
 
         seen_parent_ids: set[int] = set()
         for commodity in resolved:
-            id_parent = commodity.get("id_parent")
-            if not id_parent or id_parent in seen_parent_ids:
+            # 5 ores link to their refined form only from the refined side (refined_form).
+            refined = refined_form(commodities, commodity)
+            if refined is None or refined.get("id") in seen_parent_ids:
                 continue
-            seen_parent_ids.add(id_parent)
-            refined = next((c for c in commodities if c.get("id") == id_parent), None)
-            if refined is None:
-                continue
+            seen_parent_ids.add(refined.get("id"))
             prices_failed = False
             try:
                 price_rows = await self.bot.uex.get_commodities_prices(commodity_name=refined["name"])

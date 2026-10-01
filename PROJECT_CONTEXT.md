@@ -4160,6 +4160,23 @@ they're in sync).
        the fix reproduces the production `KeyError: 0` in 9 tests. New:
        `tests/test_listing_by_id.py` (the object, `false`, `{}`, and a list).
 
+117. **`/refinery-advisor` prices five more ores, and signs negative yields.** Ported from
+     aiv2 commit `f2785ae` (AI_BOT_HANDOFF.md, aiv2 -> production).
+     - The gap: the advisor found an ore's sell price only through the raw row's own
+       `id_parent`. Checked live on 2026-10-01: 5 of 32 refinable ores (Taranite, Lindinium,
+       Savrilium, Torite, Aslarite) have `id_parent` 0 there, while their refined row still
+       links back to the raw one. Those five got no sell price at all.
+     - Fix: `refined_form` (`bot/uex/refinery.py`) tries the raw row's link first, then a
+       single refined row linking back. Two back-links count as no answer, and a forward
+       link to another raw row is ignored. Against live data, 30 of 32 ores now resolve, up
+       from 25; the other two (Jaclium, Construction Pieces) have no refined form, and none
+       of the 25 changed target.
+     - `format_yield_bonus` signs the bonus itself: the old `+{bonus}%` template showed a
+       negative bonus as "+-3%".
+     - Tests: five from aiv2 in `tests/test_refinery.py`, one of them through the real
+       `/refinery-advisor` callback. Each change was undone one at a time (6 in all), and
+       its test failed every time.
+
 ## Where to look for what
 
 Six docs, deliberately scoped so they don't duplicate each other:

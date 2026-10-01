@@ -1,7 +1,15 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.36.
+the oldest entry below); the next new entry is 2.37.
+
+---
+
+## 2.36 - 2026-10-01 - Refinery prices for every ore
+
+**Fixed**
+- `/refinery-advisor` - Shows a sell price for Taranite, Lindinium, Savrilium, Torite and Aslarite, which had none.
+- `/refinery-advisor` - A negative yield bonus reads "-3%", not "+-3%".
 
 ---
 
