@@ -318,7 +318,7 @@ date - no open item, nothing to record here.
       menu (`bot/cogs/marketplace.py`, `bot/uex/marketplace.py`'s listing-choice helpers,
       `UexClient.get_user_username`). Tests: `tests/test_listing_pickers.py`. See
       PROJECT_CONTEXT.md entry 119
-- [ ] PR #TBD - `/ship-loadout`, and a "Recommend a loadout" button in `/ship-parts-finder`'s
+- [ ] PR #106 - `/ship-loadout`, and a "Recommend a loadout" button in `/ship-parts-finder`'s
       browser: one recommended part per slot for a Balanced/Stealth/Tank/Budget profile, with
       keep-stock lines, total cost, the total power pips and "Add all to shopping list".
       Pure logic in the new `bot/uex/ship_loadout.py`; `LoadoutView`, `_loadout_slots` and
