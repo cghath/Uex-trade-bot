@@ -289,6 +289,13 @@ date - no open item, nothing to record here.
       `trading_preferences` tool already leaves risk tolerance out. Tests:
       `tests/test_risk_tolerance.py` (rewritten), `tests/test_trading_preferences.py`,
       `tests/test_preference_scope.py`. See PROJECT_CONTEXT.md entry 114
+- [ ] PR #97 - Hedge lines and the other cargo in a backup load show their "⚠️ Cargo risk: ..."
+      label: `cargo_item_line(item, risk=True)` (`bot/uex/route_presentation.py`) at
+      `/best-route`'s two "Hedge:" lines, `/top-routes`' ranked list, a tracking thread's
+      shortfall hedge, and `_load_lines` in `bot/uex/backup_routes.py` for cargo that isn't
+      the player's own. aiv2 shows the same lines unlabelled. Tests:
+      `tests/test_risk_tolerance.py`, `tests/test_backup_routes.py`. See PROJECT_CONTEXT.md
+      entry 115
 
 ## To port: aiv2 -> production
 

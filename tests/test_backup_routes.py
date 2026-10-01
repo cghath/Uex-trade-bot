@@ -255,6 +255,20 @@ def test_the_carry_on_line_is_not_added_when_an_option_that_keeps_the_commodity_
     assert message.sections[0][0] == "Same trip, fuller hold"
 
 
+def test_cargo_besides_the_players_own_carries_its_risk_label():
+    """Workflow audit 2026-09-30: with PR #96's risk filter gone, labels are what flag risky cargo - but other cargo in
+    a backup load had none, so an illegal filler looked unflagged. The player's own commodity needs none here."""
+    from bot.uex.commodity_risk import RISK_FLAG_KEYS
+
+    flags = {key: 0 for key in RISK_FLAG_KEYS}
+    rows = [{**row, **flags} for row in _neon()] + [{**row, **flags, "is_illegal": 1} for row in _cobalt_at_d()]
+    message = build_backup_message(_find(rows), _context())
+    lines = [line for _, section in message.sections for line in section]
+    cobalt = next(line for line in lines if "Cobalt" in line)
+    neon = next(line for line in lines if "Neon" in line and "(yours)" in line)
+    assert "Cargo risk" in cobalt and "Cargo risk" not in neon
+
+
 def test_with_nothing_better_the_message_says_so_and_names_the_original_destination():
     message = build_backup_message(_find(_neon(e_price=None)), _context())
     assert message.sections == ()

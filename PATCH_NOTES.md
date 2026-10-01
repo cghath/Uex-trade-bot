@@ -1,7 +1,18 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.34.
+the oldest entry below); the next new entry is 2.35.
+
+---
+
+## 2.34 - 2026-09-30 - Risky hedges are labelled
+
+**Fixed**
+- `/best-route`, `/top-routes` - A "Hedge:" line now shows the ⚠️ cargo risk of what it suggests, e.g. "⚠️ Cargo
+  risk: restricted in some jurisdictions". Since 2.33 a hedge can be any cargo, illegal goods included, and it had no
+  label.
+- Route tracking threads - The "this could fill it" suggestion after a short purchase, and the other cargo in a backup
+  route, carry the same label.
 
 ---
 
