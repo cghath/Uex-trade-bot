@@ -321,6 +321,12 @@ date - no open item, nothing to record here.
 
 ## To port: aiv2 -> production
 
+- [x] aiv2 commit `c3c14ec` (fix #1 only) - typo-tolerant ore names in `/where-to-mine` and
+      `/refinery-advisor` (`resolve_raw_material_name` in `bot/uex/trading.py`). Not logged
+      here when aiv2 made it; found in a 2026-10-01 review of aiv2's log. Its other fixes are
+      AI-chat or eval work, and fix #2 (city TDD terminals) needs a free-text terminal resolver
+      production doesn't have.
+      (ported to production in PR #TBD, PROJECT_CONTEXT.md entry 120)
 - [ ] aiv2 commit `a6bd024` - Cross-terminal price-outlier warnings: a commodity's buy/sell
       price checked against every other terminal trading it in the same snapshot, flagged
       when 4x-or-more off the median (`bot/uex/price_outliers.py`,

@@ -4248,6 +4248,29 @@ they're in sync).
        checking that each menu offers the listing's own id (a favorite's row id is not one).
        Each change was undone one at a time (18 in all), and a test failed every time.
 
+120. **`/where-to-mine` and `/refinery-advisor` accept a misspelled ore.** Ported from aiv2
+     commit `c3c14ec` (fix #1 of six; the rest are aiv2's AI chat and evals). Both commands
+     autocomplete their ore, but a player can still send what they typed without picking a
+     suggestion, and "Quantanium" then failed outright.
+     - Both lookups (`resolve_mineable_commodity`, `resolve_raw_commodity`) now end in a typo
+       tier, `resolve_raw_material_name` (`bot/uex/trading.py`), after their exact and
+       unique-substring tiers. It matches by difflib ratio against the names with their
+       "(Raw)"/"(Ore)" tag stripped (`without_form_tag`), and only resolves when the best
+       name scores at least 0.7 and leads the next by 0.1 (`_resolve_fuzzy_name`, aiv2's
+       calibration). Two real materials sharing a stripped name are never merged.
+     - The refinery lookup only accepts refinable ores, but scores the typo against every raw
+       material (`compete_with`): scored against refinable ores alone, "Ahorite" (Aphorite,
+       not refinable) resolved to Torite.
+     - aiv2's fix #2 (bare "Area 18"/"New Babbage"/"Orison" resolving to the city's TDD) has
+       no production counterpart: production has no free-text terminal resolver.
+     - Checked against the live raw-material list, saved as `tests/fixtures/raw_materials.json`
+       (45 raw, 32 refinable): every name with one letter dropped or two adjacent letters
+       swapped resolves to the right ore or declines, never to another ore. `/where-to-mine`:
+       541 right, 104 declined, 0 wrong, the same as aiv2 measured; the refinery: 372 right,
+       0 wrong.
+     - Tests: `tests/test_ore_typos.py`, two of them through the real commands. Each change
+       was undone one at a time (8 in all), and a test failed every time.
+
 ## Where to look for what
 
 Six docs, deliberately scoped so they don't duplicate each other:

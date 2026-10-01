@@ -1,7 +1,14 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.39.
+the oldest entry below); the next new entry is 2.40.
+
+---
+
+## 2.39 - 2026-10-01 - Misspelled ores understood
+
+**Fixed**
+- `/where-to-mine` and `/refinery-advisor` - A misspelled ore sent without picking a suggestion, like "Quantanium", finds the right one instead of failing. A typo that could be two different ores still asks you to pick.
 
 ---
 
