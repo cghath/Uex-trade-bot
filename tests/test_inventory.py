@@ -1230,9 +1230,10 @@ async def _setup_reconcile(
         if "marketplace_prices_averages" in request.url.path:
             return httpx.Response(200, json={"status": "ok", "data": []})
         if "marketplace_listings" in request.url.path:
-            return httpx.Response(200, json={"status": "ok", "data": [
-                {"id": 555, "in_stock": 10, "is_sold_out": False},
-            ]})
+            # UEX answers an id= lookup with the bare listing object, not a one-row list
+            # (checked live 2026-10-01); a list here hid a KeyError in production.
+            assert request.url.params.get("id") == "555"
+            return httpx.Response(200, json={"status": "ok", "data": {"id": 555, "in_stock": 10, "is_sold_out": False}})
         if "marketplace_negotiations" in request.url.path:
             if negotiations_fail:
                 return httpx.Response(500, json={"status": "error", "message": "boom", "http_code": 500})

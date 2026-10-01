@@ -1,7 +1,17 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.35.
+the oldest entry below); the next new entry is 2.36.
+
+---
+
+## 2.35 - 2026-10-01 - Inventory listings tracked again
+
+**Fixed**
+- `/inventory-sell` - Listings you've posted are checked, repriced and reported on again. Since September 30 the
+  bot stopped at the first listing that had gone live on UEX, so none of it happened.
+- `/marketplace-listing`, `/marketplace-delete-listing`, `/inventory-cancel-post`, `/my-favorites`, `/my-negotiations`
+  - No longer fail on a listing that's live on UEX.
 
 ---
 

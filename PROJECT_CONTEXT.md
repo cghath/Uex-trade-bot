@@ -4132,6 +4132,34 @@ they're in sync).
        `test_cargo_besides_the_players_own_carries_its_risk_label` in
        `tests/test_backup_routes.py`.
 
+116. **A listing looked up by id comes back as a list again; inventory reconciliation was
+     stalled.** Found while checking the 2026-10-01 deploy's log, not by a report.
+     - The symptom: from 2026-09-30 10:15 UTC, every 5-minute inventory cycle failed with
+       `KeyError: 0` at `listing = rows[0]` in `_reconcile_listed_jobs`
+       (`bot/cogs/personal_inventory.py`), 202 times before it was noticed. The outer guard
+       from entry 87 kept the loop alive, but each cycle stopped there, so tracked listings
+       weren't reconciled, repriced or posted.
+     - The cause, checked live: UEX answers `/marketplace_listings?id=N` with the one
+       listing as a bare object, or `false` when there's none; `id_item=` gets a normal
+       list. `get_marketplace_listings` passed the object through, and all seven `id=`
+       callers read `rows[0]`. It first fired 45 minutes after jobs 5 and 6 were posted
+       (09:30 UTC), about when UEX approval would make them visible: the first tracked
+       listings that an `id=` lookup actually found. Whether UEX always answered `id=` this
+       way or changed recently isn't known. The Pi's logs (back to 2026-09-22) show this
+       error only from the reconcile loop, and nobody ran the other `id=` paths against a
+       live listing in that time.
+     - The same object also broke `/marketplace-listing`, `/marketplace-delete-listing`
+       (and its tracked-listing stock check), `/inventory-cancel-post` on a live listing, and
+       the item-link lookups in `/my-favorites`, `/my-negotiations` and negotiation alerts:
+       each read `rows[0]`.
+     - Fix: `get_marketplace_listings` wraps a bare object in a list, in one place, so
+       every caller gets the list it expects.
+     - Why tests missed it: the reconcile harness mocked an `id=` lookup answered with a
+       one-row list, a shape UEX never sends. It now returns the bare object (and asserts the
+       `id` it was asked for), so every reconcile test runs against the real shape; undoing
+       the fix reproduces the production `KeyError: 0` in 9 tests. New:
+       `tests/test_listing_by_id.py` (the object, `false`, `{}`, and a list).
+
 ## Where to look for what
 
 Six docs, deliberately scoped so they don't duplicate each other:
