@@ -1,7 +1,17 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.43.
+the oldest entry below); the next new entry is 2.44.
+
+---
+
+## 2.43 - 2026-10-01 - Turret guns in ship loadouts
+
+**Fixed**
+- `/ship-loadout` - Recommends guns for turrets it used to leave out: manned turrets, and remote turrets whose gimbals the game locks. The Idris-M now lists all 22 of its turret guns, and the Perseus, Constellation Andromeda and Redeemer gain their manned-turret guns.
+
+**Changed**
+- `/ship-loadout` - Between two guns within 5% DPS of each other, the one with more alpha damage wins, not only on an exact tie.
 
 ---
 

@@ -77,6 +77,7 @@ from bot.uex.ship_loadout import (
     gun_entry_port_name,
     is_gun_mount,
     loadout_gun_ports,
+    locked_turret_gun_ports,
     paginate_lines,
     pick_for_slot,
     pick_line,
@@ -1217,9 +1218,9 @@ class ShipPartsFinder(commands.Cog):
         self.shopping = ShipPartsShoppingService(bot)
         # Live browsing views by message id, so a refresh can retire the one it replaces.
         self._browsers: dict[int, PartsBrowserView] = {}
-        # id_vehicle -> (expiry, port path -> stock item uuid) for /ship-loadout: see
-        # _vehicle_stock_uuids.
-        self._stock_trees: dict[int, tuple[float, dict[str, str]]] = {}
+        # id_vehicle -> (expiry, port path -> stock item uuid, guns inside locked turrets) for
+        # /ship-loadout: see _vehicle_stock_tree.
+        self._stock_trees: dict[int, tuple[float, dict[str, str], list[ShipPort]]] = {}
         if start_refresh:
             self.refresh_reference.start()
 
@@ -1864,19 +1865,24 @@ class ShipPartsFinder(commands.Cog):
 
         A gun hardpoint keeps its stock mount (the owner's call): under a gimbal, the slot is
         the gimbal's own gun slot (loadout_gun_ports), and the gun in it is named only by the
-        wiki's single-vehicle endpoint (_vehicle_stock_uuids). A mount inside a stock mount (a
+        wiki's single-vehicle endpoint (_vehicle_stock_tree). A mount inside a stock mount (a
         turret holding gimbals) is kept too, down to the gun slot, up to MAX_MOUNT_DEPTH levels
         - its own mount rank is never compared with a gun's DPS. A turret whose own gun slots
         are in the loadout is kept the same way: recommending a new turret beside guns sized
         for the stock one would contradict itself. A slot the game locks has no category and
-        is skipped, as the browser skips it."""
-        tree_result, = await _gather_until(deadline, [lambda: self._vehicle_stock_uuids(vehicle)])
-        tree = tree_result if isinstance(tree_result, dict) else None
+        is skipped, as the browser skips it - but a turret locked gimbals and all still has guns
+        a player can change (the Idris-M's manned and remote turrets), which only the tree
+        names: those are added as gun slots of their own (locked_turret_gun_ports), for any
+        turret the loadout doesn't already cover."""
+        tree_result, = await _gather_until(deadline, [lambda: self._vehicle_stock_tree(vehicle)])
+        tree, turret_guns = tree_result if isinstance(tree_result, tuple) else (None, [])
         filled = [(port, category) for port in ports if (category := slot_category(port)) is not None]
         turrets_with_guns = {port.name.rsplit("/", 1)[0] for port, category in filled
                              if category == GUNS_CATEGORY and "/" in port.name}
         filled = [(port, category) for port, category in filled
                   if not (category == MOUNTS_CATEGORY and port.name in turrets_with_guns)]
+        covered = {port.name.split("/", 1)[0] for port, _ in filled}
+        filled += [(gun, GUNS_CATEGORY) for gun in turret_guns if gun.name.split("/", 1)[0] not in covered]
 
         def stock_uuid(port: ShipPort) -> str | None:
             return (tree or {}).get(port.name) or port.equipped_uuid
@@ -1965,17 +1971,18 @@ class ShipPartsFinder(commands.Cog):
             results.update(zip(batch, answers))
         return results
 
-    async def _vehicle_stock_uuids(self, vehicle: dict) -> dict[str, str] | None:
-        """Port path -> stock item uuid for one ship, the items inside its stock mounts
-        included (stock_uuids_by_port over WikiApiClient.get_vehicle_stock_ports), cached for
-        DETAIL_CACHE_SECONDS. None when it isn't known - the wiki didn't answer, or didn't
-        resolve the ship by UEX's name or full name - so a gun inside a kept mount reads as
-        "stock unknown", never as an empty slot."""
+    async def _vehicle_stock_tree(self, vehicle: dict) -> tuple[dict[str, str], list[ShipPort]] | None:
+        """(port path -> stock item uuid, the gun slots inside its locked turrets) for one ship,
+        from WikiApiClient.get_vehicle_stock_ports: stock_uuids_by_port, with the items inside
+        its stock mounts, and locked_turret_gun_ports. Cached for DETAIL_CACHE_SECONDS. None
+        when it isn't known - the wiki didn't answer, or didn't resolve the ship by UEX's name
+        or full name - so a gun inside a kept mount reads as "stock unknown", never as an
+        empty slot."""
         id_vehicle = _vehicle_id(vehicle)
         now = time.monotonic()
         cached = self._stock_trees.get(id_vehicle)
         if cached and cached[0] > now:
-            return cached[1]
+            return cached[1], cached[2]
         names = [vehicle.get("name"), vehicle.get("name_full")]
         for name in dict.fromkeys(n.strip() for n in names if isinstance(n, str) and n.strip()):
             try:
@@ -1985,10 +1992,11 @@ class ShipPartsFinder(commands.Cog):
                 return None
             if raw_ports:
                 uuids = stock_uuids_by_port(raw_ports)
+                turret_guns = locked_turret_gun_ports(raw_ports, max_depth=MAX_MOUNT_DEPTH)
                 if len(self._stock_trees) >= DETAIL_CACHE_MAX:
                     self._stock_trees.pop(next(iter(self._stock_trees)))
-                self._stock_trees[id_vehicle] = (now + DETAIL_CACHE_SECONDS, uuids)
-                return uuids
+                self._stock_trees[id_vehicle] = (now + DETAIL_CACHE_SECONDS, uuids, turret_guns)
+                return uuids, turret_guns
         return None
 
     async def _loadout_candidates(

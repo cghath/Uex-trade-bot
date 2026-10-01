@@ -925,6 +925,19 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
 
 ### Platform & Reliability
 
+- [ ] **Re-check loadout gun rules after the next patch** *(complexity: Low)*: the owner says
+  weapon damage changes are coming in the next game patch after 4.10.1. Once the wiki shows
+  it, re-run the live gun list (every sold gun's type, DPS and alpha per size) and check that
+  `/ship-loadout`'s rules still hold: no scatterguns, the 5% DPS band (`DPS_BAND`), alpha
+  as the decider inside it (PROJECT_CONTEXT.md entries 123 and 124).
+- [ ] **How often alpha decides a gun pick** *(complexity: Low, next session)*: the owner
+  asked for an analysis across every weapon of how often the 5% DPS band actually changes a
+  pick, per size and per profile, against the live gun list, before tuning it further.
+- [ ] **Guns inside locked or manned turrets in `/ship-parts-finder`** *(complexity:
+  Medium)*: `/ship-loadout` reads them from the wiki's single-vehicle tree
+  (`locked_turret_gun_ports`, entry 124), but the finder's browser still skips manned
+  turrets (`TurretBase`) and the guns inside locked gimbals, so the Idris-M's turret guns
+  can't be browsed there.
 - [ ] **Ships the wiki lists twice** *(complexity: Low)*: 12 ships UEX lists (Carrack,
   Cutlass Black/Blue/Red, Eclipse, F8C Lightning, Hammerhead, Idris-P, Polaris, S-65 Stingray,
   Valkyrie, Zeus Mk II CL) share their exact name with a second wiki /vehicles row (a BIS2950,

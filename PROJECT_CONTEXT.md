@@ -4440,6 +4440,43 @@ they're in sync).
      - Not changed: `/ship-parts-finder`'s own list still ranks guns by DPS alone, so
        scatterguns still top it, and still lists the Pepperbox for PDC slots; it lists every
        part, so that's a separate call.
+124. **`/ship-loadout`: guns inside locked turrets, and alpha within 5% DPS.** The owner's
+     review of the live Idris-M loadout: it listed the nose railgun, PDCs and components but
+     none of the turret guns. Two separate gaps, both found in the live wiki (4.10.1):
+     - Manned turrets are port type `TurretBase`, which `parse_ports` drops (not in
+       `PORT_TYPE_TO_UEX_CATEGORY`; UEX sells none), so the Idris-M's six S5 manned turrets
+       and its S7 front turret never became slots at all.
+     - Its remote turrets are parsed, but every port inside them is locked: each holds a
+       locked VariPuck gimbal (`editable: False` in the turret's own item detail), so
+       `child_gun_ports` finds no gun slots. The gun inside each gimbal is unlocked, and only
+       the single-vehicle tree (`get_vehicle_stock_ports`) shows it: `hardpoint_front_left_turret
+       /turret_left/hardpoint_class_2`, editable, a Revenant Gatling. The Perseus worked only
+       because its remote turrets' gimbal slots aren't locked.
+     - Fix, loadout only: `locked_turret_gun_ports` (`bot/uex/ship_loadout.py`) reads every
+       unlocked `WeaponGun` port below a top-level `Turret`/`TurretBase` in that tree, down to
+       the cog's `MAX_MOUNT_DEPTH`, skipping PDCs (they keep their stock turret, entry 123).
+       The cog caches them with the stock uuids (`_vehicle_stock_tree`, was
+       `_vehicle_stock_uuids`) and `_loadout_slots` adds them as gun slots for any turret it
+       doesn't already cover, so the Perseus's remote-turret guns aren't added twice. The
+       slots are named by their full path, which is also their shopping-list key.
+     - Live: the Idris-M now lists 22 turret guns (8x S4 remote, 12x S5 manned, 2x S7 front),
+       and manned-turret guns that were missing elsewhere appear too: 4 on the Perseus, 4 on
+       the Constellation Andromeda, 4 on the Redeemer.
+     - Labels: a path leaves out the gimbal's own `hardpoint_class_N` gun port
+       (`format_port_label`, so 'Right Lower Turret · Left'); a word shared across the
+       separator reads once ('Front Turret · Turret' -> 'Front Turret'); and a slot already
+       ending in "gun" isn't given another ('S10 Nose Railgun', not 'Nose Railgun Gun').
+     - Alpha: the owner agreed to widen entry 123's exact-tie rule. Guns within `DPS_BAND`
+       (5%) of each other count as level, and the higher alpha wins between them
+       (`gun_at_least_as_good` for keep-stock, `_rank_guns` for ranking: the band is
+       measured from the highest-DPS gun left, so it doesn't chain down the list). Live: the
+       Omnisky IX (546.8 DPS, 218.7 alpha) now beats the CF-337 Panther (545.6, 43.7). Budget
+       still ranks by DPS per aUEC. How often the band changes a pick across every weapon is
+       saved for a later session (ROADMAP.md), as is a re-check after the next game patch's
+       weapon damage changes.
+     - 17 mutations, each undone in turn, all caught.
+     - Not changed: `/ship-parts-finder` still doesn't list guns inside locked or manned
+       turrets (ROADMAP.md).
 
 ## Where to look for what
 

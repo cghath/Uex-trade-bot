@@ -25,6 +25,7 @@ from bot.uex.ship_loadout import (
     gun_entry_port_name,
     is_point_defense,
     is_scattergun,
+    locked_turret_gun_ports,
     is_gun_mount,
     loadout_gun_ports,
     merit_key,
@@ -339,6 +340,32 @@ def test_dps_still_leads_alpha():
     assert rank_candidates([_sold(no_alpha, 1), _sold(_gun("Some", 500, alpha=1), 1)], "Guns", BALANCED)[0]["name"] == "Some"
 
 
+def test_alpha_decides_between_guns_within_five_percent_dps():
+    # Live wiki 4.10.1: the Omnisky IX (546.8 DPS, 218.7 alpha) and the CF-337 Panther (545.6, 43.7).
+    omnisky, panther = _gun("Omnisky IX Cannon", 546.8, alpha=218.7), _gun("CF-337 Panther Repeater", 545.6, alpha=43.7)
+    assert rank_candidates([_sold(panther, 1), _sold(omnisky, 9000)], "Guns", BALANCED)[0]["name"] == "Omnisky IX Cannon"
+    fast = _gun("Fast", 1000, alpha=10)
+    hard_hitter = _gun("Hard Hitter", 960, alpha=500)  # 4% less DPS: level, so alpha decides
+    assert [c["name"] for c in rank_candidates([_sold(fast, 1), _sold(hard_hitter, 1)], "Guns", BALANCED)] == [
+        "Hard Hitter", "Fast"]
+    too_far = _gun("Too Far", 940, alpha=900)  # 6% less: DPS decides
+    assert rank_candidates([_sold(too_far, 1), _sold(fast, 1)], "Guns", BALANCED)[0]["name"] == "Fast"
+
+
+def test_the_band_is_measured_from_the_highest_dps_left():
+    # C is within 5% of B but not of A, the leader: A and B are level, and C ranks after both.
+    guns = [_gun("A", 1000, alpha=10), _gun("B", 960, alpha=500), _gun("C", 920, alpha=900)]
+    assert [c["name"] for c in rank_candidates([_sold(g, 1) for g in guns], "Guns", TANK)] == ["B", "A", "C"]
+
+
+def test_a_stock_gun_within_the_band_with_more_alpha_is_kept():
+    fast = _sold(_gun("Fast", 1000, alpha=10), 1)
+    kept = pick_for_slot(_group("Guns", _gun("Stock", 960, alpha=500)), [fast], BALANCED)
+    assert kept.part is None and kept.reason == STOCK_IS_BEST
+    replaced = pick_for_slot(_group("Guns", _gun("Stock", 940, alpha=500)), [fast], BALANCED)
+    assert replaced.part["name"] == "Fast"
+
+
 def test_a_gun_line_shows_dps_and_alpha():
     assert stat_vs_stock(AD4B, REVENANT_WITH_ALPHA, "Guns", BALANCED) == (
         "1,266 DPS / 84.4 alpha (was 1,266 DPS / 63.3 alpha stock)")
@@ -347,6 +374,57 @@ def test_a_gun_line_shows_dps_and_alpha():
     assert "keep stock **AD4B Ballistic Gatling** (1,266 DPS / 84.4 alpha)" in keep
     # A gun with no alpha figure shows DPS alone, and isn't compared with a stock one shown by both.
     assert stat_vs_stock(_gun("X", 900), REVENANT_WITH_ALPHA, "Guns", BALANCED) == "900 DPS"
+
+
+# -- Guns inside a locked turret (the Idris-M's) ------------------------------------------------
+
+def _tree_gun(name, size, uuid, *, editable=True):
+    return {"name": name, "type": "WeaponGun", "editable": editable, "sizes": {"min": size, "max": size},
+            "equipped_item_uuid": uuid}
+
+
+def _locked(name, port_type, size, ports, sub_type=None):
+    return {"name": name, "type": port_type, "editable": False, "sizes": {"min": size, "max": size},
+            "equipped_item": {"name": name, "sub_type": sub_type}, "ports": ports}
+
+
+# The shape of the live Idris-M tree (GET /vehicles/{uuid}, wiki 4.10.1): a manned turret
+# ('TurretBase') holding two locked VariPuck S5 gimbals, each with an unlocked gun inside.
+IDRIS_TREE = [
+    _locked("hardpoint_left_turret", "TurretBase", 5, [
+        _locked("hardpoint_weapon_left", "Turret", 5, [_tree_gun("hardpoint_class_2", 5, "galdereen")]),
+        _locked("hardpoint_weapon_right", "Turret", 5, [_tree_gun("hardpoint_class_2", 5, "galdereen")]),
+        {"name": "Screen_Radar", "type": "Display", "editable": False, "sizes": {"min": 1, "max": 1}},
+    ], sub_type="MannedTurret"),
+    _locked("hardpoint_pdc_01", "Turret", 2, [_tree_gun("hardpoint_turret_weapon", 1, "pdc-gun")], sub_type="PDCTurret"),
+    {"name": "hardpoint_power_plant", "type": "PowerPlant", "sizes": {"min": 4, "max": 4},
+     "ports": [_tree_gun("not_a_turret", 1, "x")]},
+    _locked("hardpoint_locked_gun_turret", "Turret", 4, [_tree_gun("turret_left", 4, "locked", editable=False)]),
+    _locked("hardpoint_deep_turret", "Turret", 5, [_locked("a", "Turret", 5, [_locked("b", "Turret", 5, [
+        _locked("c", "Turret", 5, [_tree_gun("hardpoint_class_2", 5, "deep")])])])]),
+]
+
+
+def test_guns_inside_a_locked_turret_are_found_in_the_vehicle_tree():
+    ports = locked_turret_gun_ports(IDRIS_TREE)
+    assert [p.name for p in ports] == ["hardpoint_left_turret/hardpoint_weapon_left/hardpoint_class_2",
+                                       "hardpoint_left_turret/hardpoint_weapon_right/hardpoint_class_2"]
+    assert all(p.port_type == "WeaponGun" and (p.size_min, p.size_max) == (5, 5) and p.categories == ["Guns"]
+               for p in ports), "a gun slot only: the locked gimbal stays"
+
+
+def test_the_turret_search_stops_at_its_depth_limit():
+    deep = "hardpoint_deep_turret/a/b/c/hardpoint_class_2"
+    assert deep not in [p.name for p in locked_turret_gun_ports(IDRIS_TREE)]
+    assert deep in [p.name for p in locked_turret_gun_ports(IDRIS_TREE, max_depth=4)]
+
+
+def test_a_gun_label_says_turret_once_and_never_gun_twice():
+    names = [f"hardpoint_front_{t}_turret/turret_{s}/hardpoint_class_2" for t in ("left", "right") for s in ("left", "right")]
+    group = _group("Guns", None, port=_port("x", "WeaponGun", 4), names=names)
+    assert group.label == "4x S4 Front Turret Gun", "not 'Front Turret · Turret Gun'"
+    railgun = _group("Guns", None, port=_port("hardpoint_nose_railgun", "WeaponGun", 10), names=["hardpoint_nose_railgun"])
+    assert railgun.label == "S10 Nose Railgun", "not 'Nose Railgun Gun'"
 
 
 # -- Point defense: a PDC slot keeps its stock turret -------------------------------------------

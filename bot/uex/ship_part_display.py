@@ -12,6 +12,7 @@ every line, including values identical across every option.
 """
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from bot.uex.item_finder import place_and_vendor_text, split_place_and_vendor
@@ -252,6 +253,7 @@ def shared_stats(details: list[dict]) -> list[str]:
 
 # Port-name words that read as acronyms, not title case ('Pdc Top Right' -> 'PDC Top Right').
 _ACRONYMS = {"pdc": "PDC"}
+_GIMBAL_GUN_PORT = re.compile(r"hardpoint_class_\d+", re.IGNORECASE)
 
 
 def format_port_label(port_name: str, size_min: int | None = None, size_max: int | None = None) -> str:
@@ -260,7 +262,11 @@ def format_port_label(port_name: str, size_min: int | None = None, size_max: int
     turret ('hardpoint_turret_remote_top/hardpoint_gimbal_left') reads 'Turret Remote Top ·
     Gimbal Left'."""
     if "/" in port_name:
-        label = " · ".join(format_port_label(part) for part in port_name.split("/") if part)
+        # A gimbal's own gun port ('hardpoint_class_2') says nothing a player would recognise:
+        # 'Right Lower Turret · Left', not '... · Left · Class 2'.
+        parts = [part for part in port_name.split("/") if part]
+        parts = [part for part in parts if not _GIMBAL_GUN_PORT.fullmatch(part)] or parts
+        label = " · ".join(format_port_label(part) for part in parts)
         return format_port_label_size(label, size_min, size_max)
     words = [w for w in port_name.lower().split("_") if w and w != "hardpoint"]
     words = [w for w in words if not (w.startswith("class") and w[5:].isdigit())]
