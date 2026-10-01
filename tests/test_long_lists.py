@@ -132,4 +132,4 @@ def test_a_full_favourites_list_with_long_titles_stays_under_the_limit(tmp_path)
 
     message = asyncio.run(run())
     assert len(message) <= MAX_MESSAGE_CHARS
-    assert "more." in message and message.endswith("shows a listing's full details.")
+    assert "more." in message and message.endswith("Pick one below for its full details.")

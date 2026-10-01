@@ -67,6 +67,8 @@ _ENDPOINT_CACHE_TTL = {
     "marketplace_prices_averages": 3600,
     "marketplace_prices_averages_all": 3600,
     "marketplace_listings": 60,
+    # get_user_username only - get_user_profile (checking a key at link time) never caches.
+    "user": 3600,
     "terminals_distances": 12 * 3600,
 }
 
@@ -710,6 +712,17 @@ class UexClient:
         if isinstance(data, list):
             data = data[0] if data else None
         return data if isinstance(data, dict) else None
+
+    async def get_user_username(self, secret_key: str) -> str | None:
+        """The UEX username a linked key belongs to: the same name as `user_username` on the
+        player's own Marketplace listings (checked live on 2026-10-01), so
+        get_marketplace_listings(username=...) finds them. Cached an hour per key, since the
+        listing pickers ask on every keystroke. Raises like get_user_profile."""
+        data = await self._get("user", require_secret=True, secret_key=secret_key)
+        if isinstance(data, list):
+            data = data[0] if data else None
+        name = str(data.get("username") or "").strip() if isinstance(data, dict) else ""
+        return name or None
 
     async def get_user_trades(self, secret_key: str | None = None, **filters: Any) -> list[dict[str, Any]]:
         return await self._get(

@@ -4213,6 +4213,41 @@ they're in sync).
        change was undone one at a time (13 in all: every call site, each helper rule, the
        empty-embed reply and the wording), and a test failed every time.
 
+119. **Marketplace listings are picked by name, not typed by id.** Asked for by the owner
+     on 2026-10-01: `/marketplace-listing` and `/marketplace-delete-listing` took a bare
+     `listing_id` that players had to copy out of another command's reply.
+     - Both commands' option is now `listing`, an autocomplete; typing an id still works.
+       `/marketplace-delete-listing` lists the player's own active listings.
+       `/marketplace-listing` lists those, then their favorites, then their open deals, each
+       once, marked "Yours", "Favorite" or "Deal".
+     - A player's own listings come from `/marketplace_listings?username=`. The username is
+       the one their linked key belongs to (`UexClient.get_user_username`, `/user`, cached an
+       hour). Checked live on 2026-10-01: `/user?username=cheeno` and the listings' own
+       `user_username` agree, and `?username=cheeno` returned all three of the owner's
+       listings, including one (#170683) the inventory loop doesn't track.
+     - The pick list is kept 60 seconds per player, because Discord asks on every keystroke
+       and the client never caches favorites or deals. A delete drops it. Each source is
+       fetched with `gather_within`, so a slow one is left out instead of missing Discord's
+       3-second deadline. A list missing a source is shown but not kept.
+     - `/marketplace-search`, `/my-favorites` and `/my-negotiations` put a "Show details
+       for..." menu under their results (`ListingDetailsView`), so browsing never needs an id.
+       Picking one replies privately to whoever picked, so anyone can use the menu on a
+       public search. It greys out after 10 minutes, inside Discord's 15-minute window for
+       editing an ephemeral message. `/marketplace-listing` and the menu share one builder,
+       `Marketplace.listing_detail`. Discord refuses a menu with no options, so
+       `send_with_details` sends a list whose rows carried no listing id without one.
+     - Pure helpers in `bot/uex/marketplace.py`: `listing_choices_from_rows` (a favorite's or
+       deal's listing id is `id_listing`, not its own `id`), `merge_listing_choices`,
+       `listing_choice_label` (100 characters at most; the title gives way, never the id or
+       price) and `match_listing_choices` (a typed number matches the id's start).
+     - The first draft named the pick-list cache and its fetch function both `_listing_picks`,
+       so the function replaced the cache and a delete raised `TypeError`. The existing
+       double-click delete test caught it; ruff doesn't flag a redefinition of a name that's
+       already used.
+     - Tests: `tests/test_listing_pickers.py` (19), plus `tests/test_listing_ids.py` now
+       checking that each menu offers the listing's own id (a favorite's row id is not one).
+       Each change was undone one at a time (18 in all), and a test failed every time.
+
 ## Where to look for what
 
 Six docs, deliberately scoped so they don't duplicate each other:
