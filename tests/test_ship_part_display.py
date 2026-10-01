@@ -223,6 +223,7 @@ def test_port_labels_are_cleaned_up():
     assert format_port_label("hardpoint_weapon_class2_nose", 4, 4) == "Nose (S4)"
     assert format_port_label("hardpoint_missilerack_right_wing", 3, 3) == "Right Wing Missile Rack (S3)"
     assert format_port_label("hardpoint_turret", 2, 4) == "Turret (S2-4)"
+    assert format_port_label("hardpoint_pdc_top_right", 2, 2) == "PDC Top Right (S2)"
     assert format_port_label("hardpoint_radar") == "Radar"
 
 

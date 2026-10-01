@@ -10,6 +10,8 @@ from bot.uex.ship_loadout import (
     NO_STATS,
     NOTHING_BEATS_STOCK,
     NOTHING_SOLD,
+    ONLY_SCATTERGUNS,
+    POINT_DEFENSE,
     PROFILE_BLURBS,
     PROFILES,
     STEALTH,
@@ -21,6 +23,8 @@ from bot.uex.ship_loadout import (
     SlotGroup,
     group_slots,
     gun_entry_port_name,
+    is_point_defense,
+    is_scattergun,
     is_gun_mount,
     loadout_gun_ports,
     merit_key,
@@ -86,11 +90,12 @@ def _radar(name, reach, *, uuid=None, em=1800, health=600, **kw):
                       name=name, uuid=uuid or f"rdr-{name}", em=em, health=health, power=5, coolant=5, **kw)
 
 
-def _gun(name, dps, *, size=3, uuid=None, em=743, health=1024, power=1.5):
+def _gun(name, dps, *, size=3, uuid=None, em=743, health=1024, power=1.5, alpha=None, kind=None):
     return {"uuid": uuid or f"gun-{name}", "name": name, "type": "WeaponGun", "sub_type": "Gun", "size": size,
             "grade": "A", "class": None, "tags": ["flightReady", "weaponMountUsable"], "required_tags": [],
             "emission": {"ir": 0, "em_min": 0, "em_max": em, "em_decay": 0.15}, "durability": {"health": health},
-            "resource_network": _usage(power, power), "vehicle_weapon": {"damage": {"burst": dps}}}
+            "resource_network": _usage(power, power),
+            "vehicle_weapon": {"type": kind, "damage": {"burst": dps, "alpha_total": alpha}}}
 
 
 def _gimbal(size, *, gun_size=None, uuid=None, gun_editable=True):
@@ -274,6 +279,109 @@ def test_stealth_breaks_em_ties_on_the_key_stat():
     a, b = _shield("Weak", 2000, em=1000), _shield("Strong", 3000, em=1000)
     ranked = rank_candidates([_sold(a, 1), _sold(b, 9000)], "Shield Generators", STEALTH)
     assert ranked[0]["name"] == "Strong"
+
+
+# -- Guns: never a scattergun; alpha damage breaks DPS ties ----------------------------------
+
+# Live wiki 4.10.1 figures: the Dominance-3's 930 DPS counts all 8 pellets of a shot.
+DOMINANCE = _gun("Dominance-3 Scattergun", 930, uuid="dominance", alpha=1116, kind="Laser Scattergun")
+MANTIS = _gun("Mantis GT-220 Gatling", 853.3, uuid="mantis", alpha=32, kind="Ballistic Gatling")
+AD4B = _gun("AD4B Ballistic Gatling", 1266, size=4, uuid="ad4b", alpha=84.4, kind="Ballistic Gatling")
+REVENANT_WITH_ALPHA = {**REVENANT, "vehicle_weapon": {"type": "Ballistic Gatling",
+                                                      "damage": {"burst": 1266, "alpha_total": 63.3}}}
+
+
+def test_a_scattergun_is_known_by_its_type_or_its_name():
+    assert is_scattergun(DOMINANCE)
+    assert is_scattergun(_gun("Mystery", 500, kind="Plasma Scattergun"))
+    assert is_scattergun(_gun("Predator Scattergun", 840))
+    assert not is_scattergun(MANTIS) and not is_scattergun(OMNISKY) and not is_scattergun(None)
+
+
+@pytest.mark.parametrize("profile", PROFILES)
+def test_a_scattergun_is_never_recommended_whatever_its_dps_or_price(profile):
+    cheap_scatter = _sold(DOMINANCE, 10)
+    pick = pick_for_slot(_group("Guns", OMNISKY, count=2), [cheap_scatter, _sold(MANTIS, 24045)], profile)
+    assert pick.part["name"] == "Mantis GT-220 Gatling"
+    assert [c["name"] for c in rank_candidates([cheap_scatter, _sold(MANTIS, 24045)], "Guns", profile, OMNISKY)] == [
+        "Mantis GT-220 Gatling"]
+
+
+@pytest.mark.parametrize("profile", PROFILES)
+def test_a_stock_scattergun_is_always_replaced(profile):
+    weaker = _gun("Weaker Cannon", 300, alpha=200)
+    pick = pick_for_slot(_group("Guns", DOMINANCE), [_sold(weaker, 1000)], profile)
+    assert pick.part["name"] == "Weaker Cannon", "any other gun beats a stock scattergun, Budget's too"
+
+
+@pytest.mark.parametrize("profile", PROFILES)
+def test_only_scatterguns_for_sale_keeps_stock_and_says_why(profile):
+    pick = pick_for_slot(_group("Guns", OMNISKY), [_sold(DOMINANCE, 10)], profile)
+    assert pick.part is None and pick.keeps_stock and pick.reason == ONLY_SCATTERGUNS
+    empty = pick_for_slot(_group("Guns"), [_sold(DOMINANCE, 10)], profile)
+    assert pick_line(empty, profile).endswith("nothing to recommend - the only guns sold for it are scatterguns")
+
+
+@pytest.mark.parametrize("profile", [BALANCED, STEALTH, TANK])
+def test_alpha_damage_breaks_a_dps_tie(profile):
+    # The AD4B and Revenant Gatling both do 1,266 DPS: the AD4B hits harder per shot.
+    pick = pick_for_slot(_group("Guns", REVENANT_WITH_ALPHA), [_sold(AD4B, 99999)], profile)
+    assert pick.part["name"] == "AD4B Ballistic Gatling"
+    tied = [_sold(_gun("Light", 500, alpha=20), 1), _sold(_gun("Heavy", 500, alpha=90), 9000)]
+    assert rank_candidates(tied, "Guns", profile)[0]["name"] == "Heavy", "alpha before the cheaper shop"
+
+
+def test_dps_still_leads_alpha():
+    sledge = _gun("Sledge III Mass Driver Cannon", 450, alpha=1125)
+    assert rank_candidates([_sold(sledge, 1), _sold(MANTIS, 1)], "Guns", BALANCED)[0]["name"] == "Mantis GT-220 Gatling"
+    # An unknown alpha sorts after a known one, never as the hardest hitter.
+    no_alpha = _gun("No Alpha", 500)
+    assert rank_candidates([_sold(no_alpha, 1), _sold(_gun("Some", 500, alpha=1), 1)], "Guns", BALANCED)[0]["name"] == "Some"
+
+
+def test_a_gun_line_shows_dps_and_alpha():
+    assert stat_vs_stock(AD4B, REVENANT_WITH_ALPHA, "Guns", BALANCED) == (
+        "1,266 DPS / 84.4 alpha (was 1,266 DPS / 63.3 alpha stock)")
+    assert shown_stat(DOMINANCE, "Guns", STEALTH) == ("DPS / alpha", "930 DPS / 1,116 alpha")
+    keep = pick_line(pick_for_slot(_group("Guns", AD4B), [_sold(REVENANT_WITH_ALPHA, 1)], BALANCED), BALANCED)
+    assert "keep stock **AD4B Ballistic Gatling** (1,266 DPS / 84.4 alpha)" in keep
+    # A gun with no alpha figure shows DPS alone, and isn't compared with a stock one shown by both.
+    assert stat_vs_stock(_gun("X", 900), REVENANT_WITH_ALPHA, "Guns", BALANCED) == "900 DPS"
+
+
+# -- Point defense: a PDC slot keeps its stock turret -------------------------------------------
+
+# Live wiki 4.10.1: every stock PDC is the M2C "Swarm"; the Pepperbox is a PDCTurret too, but its
+# turret rank (the gun size it holds, S5) beat the Swarm's S1.
+SWARM = {"uuid": "swarm", "name": 'M2C "Swarm"', "type": "Turret", "sub_type": "PDCTurret", "size": 2,
+         "tags": ["PDC"], "required_tags": [], "ports": [{"name": "hardpoint_turret_weapon", "sizes": {"min": 1, "max": 1}}],
+         "durability": {"health": 1500}, "emission": {"em_max": 100, "ir": 0}}
+PEPPERBOX = {**SWARM, "uuid": "pepperbox", "name": 'PPB-116 "Pepperbox"',
+             "ports": [{"name": "turret_centre", "sizes": {"min": 5, "max": 5}}], "durability": {"health": 9000},
+             "emission": {"em_max": 1, "ir": 0}}
+PDC_PORT = ShipPort(name="hardpoint_pdc_top_right", port_type="Turret", size_min=2, size_max=2,
+                    tags=frozenset({"rsi_perseus", "PDC"}), required_tags=frozenset({"PDC"}))
+
+
+@pytest.mark.parametrize("profile", PROFILES)
+def test_a_pdc_slot_keeps_its_stock_turret_in_every_profile(profile):
+    group = _group("Turrets", SWARM, port=PDC_PORT, count=6,
+                   names=[f"hardpoint_pdc_{side}" for side in ("top_right", "top_left", "bottom_right",
+                                                               "bottom_left", "rear_bottom", "rear_top")])
+    pick = pick_for_slot(group, [_sold(PEPPERBOX, 1)], profile)
+    assert pick.part is None and pick.keeps_stock and pick.reason == POINT_DEFENSE
+    assert pick_line(pick, profile) == ('**6x S2 PDC** · keep stock **M2C "Swarm"** - point defense: it shoots down '
+                                        "incoming missiles and never runs out of ammo")
+
+
+def test_a_pdc_slot_is_known_by_its_stock_part_or_its_slot_tag():
+    plain_port = _port("hardpoint_turret_top", "Turret", 2)
+    assert is_point_defense(_group("Turrets", SWARM, port=plain_port))
+    assert is_point_defense(_group("Turrets", None, port=PDC_PORT, stock_unknown=True))
+    assert not is_point_defense(_group("Turrets", VARIPUCK_S3, port=plain_port))
+    # Its stock part unknown, a PDC slot is still kept, never swapped blind.
+    pick = pick_for_slot(_group("Turrets", None, port=PDC_PORT, stock_unknown=True), [_sold(PEPPERBOX, 1)], BALANCED)
+    assert pick.part is None and pick.reason == POINT_DEFENSE
 
 
 def test_stealth_puts_a_part_with_no_em_figure_after_every_known_one():

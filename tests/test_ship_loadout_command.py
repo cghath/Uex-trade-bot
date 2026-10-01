@@ -26,6 +26,7 @@ from bot.cogs.ship_parts_finder import (
 from bot.db.database import Database
 from bot.uex.ship_loadout import (
     NO_STATS, NOTHING_BEATS_STOCK, NOTHING_SOLD, PROFILES, STOCK_IS_BEST, STOCK_UNKNOWN, LoadoutSlot, group_slots,
+    purchases,
 )
 from bot.uex.ship_parts import ShipPort
 from bot.wiki_api import WikiDuplicateNameError, WikiUnavailableError
@@ -42,7 +43,7 @@ GUN_PORT = "hardpoint_class_2"  # the gun slot inside every stock VariPuck gimba
 
 # For sale. Their numbers decide each profile's pick; see the expectations in the tests.
 MANTIS = _gun("Mantis GT-220 Gatling", 853.3, uuid="mantis")
-DOMINANCE = _gun("Dominance-3 Scattergun", 930, uuid="dominance")
+M5A = _gun("M5A Cannon", 930, uuid="m5a")
 TARANTULA = _gun("Tarantula GT-870 Mk3", 900, size=4, uuid="tarantula")  # S4, weaker than the stock Revenant
 BADGER = _gun("CF-227 Badger Repeater", 2000, size=2, uuid="badger")  # S2: fits no gun slot here
 SUNFLARE = _plant("SunFlare", 16, uuid="sunflare", em=9000, health=280)
@@ -55,7 +56,7 @@ CLOAK = _shield("Cloak", 1900, uuid="cloak", em=250)
 GIMBAL_FOR_SALE = dict(_gimbal(3), uuid="shop-gimbal")  # a mount: never what a gun slot is filled with
 
 SOLD = [  # (UEX id, detail, category, price, terminal)
-    (1, MANTIS, "Guns", 24045, 11), (2, DOMINANCE, "Guns", 69137, 12), (3, TARANTULA, "Guns", 30000, 11),
+    (1, MANTIS, "Guns", 24045, 11), (2, M5A, "Guns", 69137, 12), (3, TARANTULA, "Guns", 30000, 11),
     (4, BADGER, "Guns", 5000, 11), (5, SUNFLARE, "Power Plants", 60500, 13), (6, JS300, "Power Plants", 9000, 11),
     (7, GLACIER, "Coolers", 50000, 12), (8, HEATSAFE, "Coolers", 30800, 13),
     (9, RHADA, "Shield Generators", 15000, 11), (10, RHADA_TWIN, "Shield Generators", 20000, 12),
@@ -191,7 +192,7 @@ def test_the_command_posts_a_balanced_loadout_in_the_private_thread(tmp_path, mo
     assert _line(text, "S4 Nose Gun") == ("**S4 Nose Gun** · keep stock **Revenant Gatling** (1,266 DPS) - "
                                          f"{STOCK_IS_BEST}")
     assert _line(text, "2x S3 Wing Gun").startswith(
-        "**2x S3 Wing Gun** → **Dominance-3 Scattergun** · 930 DPS (was 547 DPS stock) · 69,137 aUEC each · Shop 12")
+        "**2x S3 Wing Gun** → **M5A Cannon** · 930 DPS (was 547 DPS stock) · 69,137 aUEC each · Shop 12")
     assert "**S1 Power Plant** → **SunFlare** · 16 power pips (was 15 power pips stock)" in text
     assert "**2x S1 Cooler** → **Glacier** · 40 cooling segments (was 34 cooling segments stock)" in text
     assert "**S1 Shield Generator Left** → **5SA 'Rhada'** · 3,000 shield HP (was 2,160 shield HP stock)" in text
@@ -269,8 +270,8 @@ def test_slots_of_one_shape_with_different_stock_guns_are_two_lines_but_one_look
     left = next(line for line in text.splitlines() if line.startswith("**S3 Left Wing Gun**"))
     right = next(line for line in text.splitlines() if line.startswith("**S3 Right Wing Gun**"))
     assert left.startswith("**S3 Left Wing Gun** → **Mantis GT-220 Gatling** · 853 DPS (was 547 DPS stock)")
-    # An equal Mantis isn't an upgrade, so Budget's best-value gun that beats it is the Dominance.
-    assert right.startswith("**S3 Right Wing Gun** → **Dominance-3 Scattergun** · 930 DPS (was 853 DPS stock)")
+    # An equal Mantis isn't an upgrade, so Budget's best-value gun that beats it is the M5A.
+    assert right.startswith("**S3 Right Wing Gun** → **M5A Cannon** · 930 DPS (was 853 DPS stock)")
 
 
 def test_a_fixed_gun_is_replaced_by_a_gun_of_the_slots_own_size(tmp_path, monkeypatch):
@@ -286,7 +287,7 @@ def test_a_fixed_gun_is_replaced_by_a_gun_of_the_slots_own_size(tmp_path, monkey
 
     text, view = _posted(asyncio.run(run()))
     assert [s.entry_port_name for g in view.groups for s in g.slots] == ["hardpoint_weapon"]
-    assert "→ **Dominance-3 Scattergun** · 930 DPS (was 304 DPS stock)" in text
+    assert "→ **M5A Cannon** · 930 DPS (was 304 DPS stock)" in text
 
 
 # -- switching profile -------------------------------------------------------------------------
@@ -314,13 +315,13 @@ def test_every_profile_switch_repicks_from_the_loaded_parts_without_new_lookups(
     assert "**2x S1 Cooler** → **HeatSafe** · EM 1,490 / IR 2,330 (was EM 1,490 / IR 7,260 stock)" in stealth
     assert "**S1 Shield Generator Left** → **Cloak** · EM 250 (was EM 1,490 stock)" in stealth
     assert _line(stealth, "S1 Power Plant").endswith(f"keep stock **Endurance** (EM 7,430) - {STOCK_IS_BEST}")
-    assert "**2x S3 Wing Gun** → **Dominance-3 Scattergun** · 930 DPS" in stealth, "guns stay by DPS"
+    assert "**2x S3 Wing Gun** → **M5A Cannon** · 930 DPS" in stealth, "guns stay by DPS"
 
     tank = texts["Tank"]
     assert "**S1 Power Plant** → **JS-300** · 400 component HP (was 270 component HP stock)" in tank
     assert "**2x S1 Cooler** → **Glacier** · 250 component HP (was 180 component HP stock)" in tank
     assert "**S1 Shield Generator Left** → **5SA 'Rhada'** · 3,000 shield HP" in tank, "shields by HP"
-    assert "**2x S3 Wing Gun** → **Dominance-3 Scattergun**" in tank
+    assert "**2x S3 Wing Gun** → **M5A Cannon**" in tank
 
     budget = texts["Budget"]
     assert "**2x S3 Wing Gun** → **Mantis GT-220 Gatling** · 853 DPS (was 547 DPS stock) · 24,045 aUEC each" in budget
@@ -363,6 +364,28 @@ def test_the_power_line_is_each_profiles_total_pips_never_a_draw_warning(tmp_pat
     assert "⚡ **15** power pips in total, from the power plant." in stealth, "Stealth keeps the stock plant"
     for text in (balanced, stealth, tank):
         assert "full load" not in text and "You assign power" not in text
+
+
+# -- scatterguns -------------------------------------------------------------------------------
+
+def test_a_scattergun_for_sale_is_never_recommended_in_any_profile(tmp_path, monkeypatch):
+    """Sold cheapest, with the most DPS: every profile, Budget included, still skips it."""
+    scatter = _gun("Dominance-3 Scattergun", 5000, uuid="dominance", alpha=1116, kind="Laser Scattergun")
+    monkeypatch.setitem(globals(), "SOLD", [*SOLD, (13, scatter, "Guns", 100, 12)])
+
+    async def run():
+        cog, thread = await _cog(tmp_path, monkeypatch)
+        await _run_command(cog, thread)
+        text, view = _posted(thread)
+        texts = [text] + [(await _switch(view, p)).response.edit_message.await_args.kwargs["content"]
+                          for p in ("Stealth", "Tank", "Budget")]
+        return texts, view
+
+    texts, view = asyncio.run(run())
+    for text in texts:
+        assert "Scattergun" not in text
+    assert "**2x S3 Wing Gun** → **M5A Cannon** · 930 DPS (was 547 DPS stock)" in texts[0]
+    assert all("dominance" not in str(part.get("uuid")) for _, part in purchases(view.picks))
 
 
 # -- add all to the shopping list ----------------------------------------------------------------
@@ -550,7 +573,7 @@ def test_without_the_vehicle_tree_the_stock_gun_is_unknown_not_an_empty_slot(tmp
         return text, budget
 
     text, budget = asyncio.run(run())
-    assert "→ **Dominance-3 Scattergun** · 930 DPS (stock part unknown)" in text
+    assert "→ **M5A Cannon** · 930 DPS (stock part unknown)" in text
     assert "didn't respond for 3 stock parts: they can't be compared against stock" in text
     assert _line(budget, "2x S3 Wing Gun").endswith(f"keep stock - {STOCK_UNKNOWN}"), \
         "Budget never buys what it can't call an upgrade"
@@ -739,9 +762,9 @@ def test_a_gun_slot_the_vehicle_tree_doesnt_list_is_stock_unknown_not_empty(tmp_
 
     text, budget = asyncio.run(run())
     assert _line(text, "S3 Left Wing Gun").startswith(
-        "**S3 Left Wing Gun** → **Dominance-3 Scattergun** · 930 DPS (stock part unknown)")
+        "**S3 Left Wing Gun** → **M5A Cannon** · 930 DPS (stock part unknown)")
     assert _line(text, "S3 Right Wing Gun").startswith(
-        "**S3 Right Wing Gun** → **Dominance-3 Scattergun** · 930 DPS · 69,137 aUEC")
+        "**S3 Right Wing Gun** → **M5A Cannon** · 930 DPS · 69,137 aUEC")
     assert "didn't respond" not in text, "a gap in the wiki's data, not an outage to retry"
     assert _line(budget, "S3 Left Wing Gun").endswith(f"keep stock - {STOCK_UNKNOWN}")
 
@@ -768,7 +791,7 @@ def test_a_mount_inside_a_stock_mount_is_kept_down_to_the_gun_slot(tmp_path, mon
     (group,) = view.groups
     assert group.port.name == f"{NOSE}/hardpoint_gimbal/{GUN_PORT}" and group.stock["name"] == "Omnisky IX Cannon"
     assert [s.entry_port_name for s in group.slots] == [NOSE], "saved where the browser saves the hardpoint's gun"
-    assert "→ **Dominance-3 Scattergun** · 930 DPS (was 547 DPS stock)" in text
+    assert "→ **M5A Cannon** · 930 DPS (was 547 DPS stock)" in text
     assert "holds" not in text and "VariPuck" not in text
 
 
@@ -789,7 +812,7 @@ def test_a_mount_still_found_past_the_depth_limit_is_never_compared_as_a_gun(tmp
         return thread
 
     text, _ = _posted(asyncio.run(run()))
-    assert "→ **Dominance-3 Scattergun** · 930 DPS (stock part unknown)" in text
+    assert "→ **M5A Cannon** · 930 DPS (stock part unknown)" in text
     assert "holds" not in text
 
 def test_a_turret_whose_guns_are_in_the_loadout_keeps_the_stock_turret(tmp_path, monkeypatch):
@@ -807,7 +830,7 @@ def test_a_turret_whose_guns_are_in_the_loadout_keeps_the_stock_turret(tmp_path,
     cog, thread = asyncio.run(run())
     text, view = _posted(thread)
     assert [g.category for g in view.groups] == ["Guns"]
-    assert "→ **Dominance-3 Scattergun** · 930 DPS (was 547 DPS stock)" in text
+    assert "→ **M5A Cannon** · 930 DPS (was 547 DPS stock)" in text
     assert "VariPuck" not in text
     entries = asyncio.run(cog.bot.db.get_ship_parts_entries(1, 10))
     assert {e["category"] for e in entries} == {"Guns"}
@@ -826,7 +849,7 @@ def test_a_turrets_gun_slots_without_the_vehicle_tree_are_stock_unknown(tmp_path
         return thread
 
     text, _ = _posted(asyncio.run(run()))
-    assert "→ **Dominance-3 Scattergun** · 930 DPS (stock part unknown)" in text
+    assert "→ **M5A Cannon** · 930 DPS (stock part unknown)" in text
     assert "didn't respond for 2 stock parts: they can't be compared against stock" in text
 
 
@@ -1003,7 +1026,7 @@ def test_the_vehicle_tree_is_found_by_uexs_full_name_too(tmp_path, monkeypatch):
         return thread
 
     text, _ = _posted(asyncio.run(run()))
-    assert "**2x S3 Wing Gun** → **Dominance-3 Scattergun** · 930 DPS (was 547 DPS stock)" in text
+    assert "**2x S3 Wing Gun** → **M5A Cannon** · 930 DPS (was 547 DPS stock)" in text
 
 
 def test_a_top_level_stock_part_comes_from_the_vehicle_tree_when_the_reference_lacks_it(tmp_path, monkeypatch):
