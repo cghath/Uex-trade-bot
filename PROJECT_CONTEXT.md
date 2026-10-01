@@ -4308,16 +4308,16 @@ they're in sync).
      being browsed. Built on the browser's own candidates (`candidates_for_port`: sold, fits
      size and tags, not locked), so it never recommends a part the browser wouldn't list.
      - The owner's decisions: four profiles. Balanced takes each category's key stat
-       (`ranking_stat`); Stealth the lowest EM (coolers lowest IR first); Tank shield HP for
+       (`ranking_stat`); Stealth the lowest EM (a cooler's IR only breaks EM ties); Tank shield HP for
        shields and `durability.health` for every other component; Budget the most key stat
        per aUEC, only among parts that beat the stock part. Guns go by DPS in all four.
        Wherever the stock part is already the best pick, the line says "keep stock" with its
-       stat; a purchase shows "(was X stock)". Power and cooling only warn ("Needs up to 22.1
-       power segments at full load; the power plant makes 16."), never change a pick. Out of
+       stat; a purchase shows "(was X stock)". Power is a total, never a warning ("⚡ **16** power
+       pips in total, from the power plant."), and never changes a pick. Out of
        scope for v1: missiles themselves, damage types, fewer shops, fitting to the power
        budget.
      - Pure logic in `bot/uex/ship_loadout.py` (profiles, keep-stock, grouping into "2x S3 Wing
-       Gun" lines, cost, the resource check, the message lines and paging). The cog's
+       Gun" lines, cost, the power total, the message lines and paging). The cog's
        `_loadout_slots` reads the ship's slots and each stock part's wiki detail;
        `LoadoutView` re-picks from the loaded candidates on a profile switch, with no lookups.
      - A gun hardpoint keeps its stock mount. Under a gimbal the slot is the gimbal's own gun
@@ -4343,8 +4343,6 @@ they're in sync).
        for (left out, since the mount sizes the gun - a slot that only takes a gun keeps its
        own size and stays, with its stock part unknown), turrets whose own gun slots never
        loaded (left out, as the browser says), and sold parts (counted once per category).
-       Left-out slots also make the power and cooling line partial ("Needs at least ... (no
-       power figure for 1 left-out slot)"), since their guns still draw both in-game.
      - In a DM there is no thread to post in, so the command says loadouts are server-only
        before the build, not after it. "Add all" and "Recommend a loadout" both have a
        check-then-set guard (`ConfirmListingView`'s pattern), so a double click saves, or
@@ -4359,14 +4357,10 @@ they're in sync).
      - Live check on 2026-10-01 (live UEX and wiki, fresh cache, nothing sent to Discord):
        Avenger Titan built in 7.5 s, Gladius 6.5 s, Perseus 4.0 s, X1 0.1 s. Titan Balanced:
        keep the Revenant nose gun and racks, 2x Dominance-3 for the wings (930 vs 547 DPS),
-       520,274 aUEC total, power 19.1 needed vs 16 made. The Perseus's remote-turret gimbal
-       guns resolve two levels deep. The Cutlass Black still has no slots: the wiki lists two
-       ships of that exact name (open since the finder; unchanged here).
-     - The power warning shows on most ships, stock loadouts included: the wiki's own Titan
-       totals already draw 25.1 against 15 made, and shields and the quantum drive are both
-       counted though the game runs them as separate modes. Worded as a heads-up for now.
-     - Tests: `tests/test_ship_loadout.py` (106, the pure logic) and
-       `tests/test_ship_loadout_command.py` (50, end to end through the real
+       520,274 aUEC total, 16 power pips. The Perseus's remote-turret gimbal
+       guns resolve two levels deep. The Cutlass Black has no slots: see the revision below.
+     - Tests: `tests/test_ship_loadout.py` (99, the pure logic) and
+       `tests/test_ship_loadout_command.py` (51, end to end through the real
        `candidates_for_port` and a real database), plus `tests/test_wiki_api.py` for the new
        client call. The pure rules were mutation-checked earlier (72/72 killed); each piece of
        the Discord wiring was then undone one at a time (35 in all), and a test failed every
@@ -4375,6 +4369,33 @@ they're in sync).
        DM ordering, no double-click guards, jargon and grammar) plus 25 mutations its own run
        saw survive. A second run (46 mutations: each fix undone, and each surviving
        mutation re-applied) killed all 46.
+     - Revised the same day, after the owner's review of the first build:
+       - Power: the first build compared every part's maximum draw with the plants' output and
+         warned on 16 of 32 profile builds across 8 live ships (never on Stealth, so 16 of the
+         other 24), stock loadouts included (the Titan's own parts: 22.1 against 15). The
+         owner's call: no ship is meant to run every part at max, so the warning went. The
+         footer now shows the loadout's total power pips, what its plants make (`power_total`,
+         `PowerTotal.line`). The cooling check went with it: it never fired, and rested on
+         the same maximum draw. A plant with no output figure makes the total "at least",
+         never a guess. The plant's own line says "pips" too, so one message never names the
+         unit two ways (the browser still says "segments").
+       - Stealth: EM matters more (the owner's call), so every component goes by lowest EM and
+         a cooler's IR only breaks EM ties. Real coolers tie on EM often (the Bracer and
+         Ultra-Flow are both EM 1,490), so a Stealth cooler line shows both figures
+         (`shown_stat`: "EM 250 / IR 2,330 (was EM 1,490 / IR 7,260 stock)").
+       - Ships the wiki lists twice: `WikiApiClient.get_vehicle_loadout` raises the new
+         `WikiDuplicateNameError` when several /vehicles rows share the exact name. The finder
+         tries UEX's full name next, then says so in `/ship-parts-finder` and `/ship-loadout`
+         ("⚠️ The Star Citizen Wiki lists more than one ship named **Cutlass Black** ... Known
+         issue") instead of "no supported component slots". Not just the Cutlass Black: 12
+         ships UEX lists (Carrack, Cutlass Black/Blue/Red, Eclipse, F8C Lightning, Hammerhead,
+         Idris-P, Polaris, S-65 Stingray, Valkyrie, Zeus Mk II CL; the wiki's list on
+         2026-10-01), none with saved slots on the Pi. The real fix is open (ROADMAP.md,
+         "Ships the wiki lists twice"). `get_vehicle_stock_ports` still declines duplicates
+         rather than guess.
+       - Live check after (same ships, fresh cache): Titan Balanced 16 pips, Stealth 13 (a
+         quieter plant), Perseus 48 from its 2 plants; the Cutlass Black, Carrack and Polaris
+         get the warning. Each change undone in turn (17 mutations) failed a test every time.
 
 ## Where to look for what
 

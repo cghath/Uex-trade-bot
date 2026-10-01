@@ -7,9 +7,11 @@ from unittest.mock import AsyncMock
 
 from cryptography.fernet import Fernet
 import discord
+import pytest
 
 from bot.cogs import ship_parts_finder
 from bot.cogs.ship_parts_finder import ShipPartsFinder, ShipPartsShoppingService, ShipPartsShoppingView
+from bot.wiki_api import WikiDuplicateNameError
 from bot.db.database import Database
 from bot.uex.ship_parts import ShipPort
 
@@ -491,6 +493,45 @@ def test_ports_for_vehicle_retries_with_uexs_full_name():
     ports, wiki = asyncio.run(run())
     assert [p.name for p in ports] == ["hp_power"]
     assert [c.args[0] for c in wiki.get_vehicle_loadout.await_args_list] == ["Reliant Tana", "MISC Reliant Tana"]
+
+
+def test_a_name_the_wiki_uses_twice_still_tries_the_full_name_then_says_why():
+    async def run(loadouts):
+        db = NS(get_ship_parts_reference=AsyncMock(return_value=[]))
+
+        async def get_vehicle_loadout(name):
+            found = loadouts[name]
+            if isinstance(found, Exception):
+                raise found
+            return found
+        wiki = NS(get_vehicle_loadout=AsyncMock(side_effect=get_vehicle_loadout))
+        cog = ShipPartsFinder(NS(db=db), wiki_client=wiki, start_refresh=False)
+        return await cog._ports_for_vehicle({"id": 7, "name": "Cutlass Black", "name_full": "Drake Cutlass Black"})
+
+    duplicate = WikiDuplicateNameError("Cutlass Black", 2)
+    power = ([{"name": "hp_power", "type": "PowerPlant", "sizes": {"min": 1, "max": 1}}], [])
+    # The full name resolving to one ship is used as before.
+    assert [p.name for p in asyncio.run(run({"Cutlass Black": duplicate, "Drake Cutlass Black": power}))] == ["hp_power"]
+    # Neither name giving slots: the duplicate is raised, not an empty "no slots".
+    with pytest.raises(WikiDuplicateNameError):
+        asyncio.run(run({"Cutlass Black": duplicate, "Drake Cutlass Black": ([], [])}))
+
+
+def test_command_warns_about_a_ship_the_wiki_lists_twice():
+    async def run():
+        db = NS(resolve_terminal_id_by_name=AsyncMock(return_value=(1, "Some Terminal")),
+                get_ship_parts_reference=AsyncMock(return_value=[]))
+        uex = NS(get_vehicles=AsyncMock(return_value=[{"id": 1, "name": "Cutlass Black"}]))
+        wiki = NS(get_vehicle_loadout=AsyncMock(side_effect=WikiDuplicateNameError("Cutlass Black", 2)))
+        cog = ShipPartsFinder(NS(db=db, uex=uex), wiki_client=wiki, start_refresh=False)
+        cog.bot = NS(db=db, uex=uex)
+        interaction = _interaction(NS(), user_id=1)
+        await cog.ship_parts_finder.callback(cog, interaction, "Cutlass Black", "Some Terminal")
+        return interaction
+
+    message = asyncio.run(run()).followup.send.await_args.args[0]
+    assert message.startswith("⚠️ The Star Citizen Wiki lists more than one ship named **Cutlass Black**")
+    assert "Known issue" in message
 
 
 def test_ports_for_vehicle_prefers_the_warm_db_reference_over_a_live_call():

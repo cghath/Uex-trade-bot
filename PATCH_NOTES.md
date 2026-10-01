@@ -8,8 +8,11 @@ the oldest entry below); the next new entry is 2.42.
 ## 2.41 - 2026-10-01 - Recommended ship loadouts
 
 **Added**
-- `/ship-loadout` - Pick a ship and get a recommended part for every slot: Balanced, Stealth, Tank or Budget, with buttons to switch. Each line shows the part, how it compares with the stock one, its price and shop, or says to keep the stock part when nothing sold beats it. Guns stay in the ship's own gimbals. Shows the total cost and warns when the loadout needs more power or cooling than it makes. "Add all to shopping list" adds every purchase to your private ship parts list. Add a location and ties go to the nearest shop.
+- `/ship-loadout` - Pick a ship and get a recommended part for every slot: Balanced, Stealth, Tank or Budget, with buttons to switch. Each line shows the part, how it compares with the stock one, its price and shop, or says to keep the stock part when nothing sold beats it. Guns stay in the ship's own gimbals. Stealth picks the lowest EM signature. Shows the total cost and the loadout's total power pips. "Add all to shopping list" adds every purchase to your private ship parts list. Add a location and ties go to the nearest shop.
 - `/ship-parts-finder` - A "Recommend a loadout" button opens the same loadout for the ship and location you're browsing.
+
+**Changed**
+- `/ship-parts-finder` - Ships the Star Citizen Wiki lists twice under one name, like the Cutlass Black, Carrack and Polaris, now say so instead of reporting no slots. Their parts aren't available yet.
 
 ---
 

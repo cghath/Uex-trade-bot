@@ -28,7 +28,7 @@ from bot.uex.ship_loadout import (
     NO_STATS, NOTHING_BEATS_STOCK, NOTHING_SOLD, PROFILES, STOCK_IS_BEST, STOCK_UNKNOWN, LoadoutSlot, group_slots,
 )
 from bot.uex.ship_parts import ShipPort
-from bot.wiki_api import WikiUnavailableError
+from bot.wiki_api import WikiDuplicateNameError, WikiUnavailableError
 from tests.test_ship_loadout import (
     BRACER, BULWARK, ENDURANCE, MSD_322, OMNISKY, REVENANT, VARIPUCK_S3, VARIPUCK_S4, _cooler, _gimbal, _gun, _plant,
     _shield,
@@ -192,7 +192,7 @@ def test_the_command_posts_a_balanced_loadout_in_the_private_thread(tmp_path, mo
                                          f"{STOCK_IS_BEST}")
     assert _line(text, "2x S3 Wing Gun").startswith(
         "**2x S3 Wing Gun** → **Dominance-3 Scattergun** · 930 DPS (was 547 DPS stock) · 69,137 aUEC each · Shop 12")
-    assert "**S1 Power Plant** → **SunFlare** · 16 power segments (was 15 power segments stock)" in text
+    assert "**S1 Power Plant** → **SunFlare** · 16 power pips (was 15 power pips stock)" in text
     assert "**2x S1 Cooler** → **Glacier** · 40 cooling segments (was 34 cooling segments stock)" in text
     assert "**S1 Shield Generator Left** → **5SA 'Rhada'** · 3,000 shield HP (was 2,160 shield HP stock)" in text
     assert _line(text, "S3 Left Wing Missile Rack").endswith(f"keep stock **MSD-322 Missile Rack** (2x S2 missiles) - "
@@ -311,7 +311,7 @@ def test_every_profile_switch_repicks_from_the_loaded_parts_without_new_lookups(
     assert before == after, "switching only re-picks: no UEX or wiki calls"
 
     stealth = texts["Stealth"]
-    assert "**2x S1 Cooler** → **HeatSafe** · IR 2,330 (was IR 7,260 stock)" in stealth
+    assert "**2x S1 Cooler** → **HeatSafe** · EM 1,490 / IR 2,330 (was EM 1,490 / IR 7,260 stock)" in stealth
     assert "**S1 Shield Generator Left** → **Cloak** · EM 250 (was EM 1,490 stock)" in stealth
     assert _line(stealth, "S1 Power Plant").endswith(f"keep stock **Endurance** (EM 7,430) - {STOCK_IS_BEST}")
     assert "**2x S3 Wing Gun** → **Dominance-3 Scattergun** · 930 DPS" in stealth, "guns stay by DPS"
@@ -345,9 +345,9 @@ def test_only_the_player_who_opened_the_loadout_can_use_it(tmp_path, monkeypatch
     assert "/ship-loadout" in click.response.send_message.await_args.args[0]
 
 
-# -- power and cooling -------------------------------------------------------------------------
+# -- power ---------------------------------------------------------------------------------------
 
-def test_the_power_warning_shows_only_when_the_loadout_needs_more_than_it_makes(tmp_path, monkeypatch):
+def test_the_power_line_is_each_profiles_total_pips_never_a_draw_warning(tmp_path, monkeypatch):
     async def run():
         cog, thread = await _cog(tmp_path, monkeypatch)
         await _run_command(cog, thread)
@@ -357,11 +357,12 @@ def test_the_power_warning_shows_only_when_the_loadout_needs_more_than_it_makes(
         return text, stealth, tank
 
     balanced, stealth, tank = asyncio.run(run())
-    # Revenant 0.1 + 2x Dominance 1.5 + 2x Glacier 8 + Rhada 3; the rack draws nothing.
-    assert "⚡ Needs up to 22.1 power segments at full load; the power plant makes 16." in balanced
-    assert "You assign power in-game" in balanced
-    assert "⚡ Needs up to 22.1 power segments at full load; the power plant makes 12." in tank
-    assert "⚡" not in stealth and "You assign power" not in stealth, "12.1 used against the stock 15: no line"
+    # The parts could take 22.1 pips in Balanced and Tank: never compared, nothing is meant to run at max.
+    assert "⚡ **16** power pips in total, from the power plant." in balanced
+    assert "⚡ **12** power pips in total, from the power plant." in tank
+    assert "⚡ **15** power pips in total, from the power plant." in stealth, "Stealth keeps the stock plant"
+    for text in (balanced, stealth, tank):
+        assert "full load" not in text and "You assign power" not in text
 
 
 # -- add all to the shopping list ----------------------------------------------------------------
@@ -494,12 +495,26 @@ def test_uex_down_is_said_instead_of_hanging(tmp_path, monkeypatch):
 def test_a_ship_with_no_supported_slots_is_said(tmp_path, monkeypatch):
     async def run():
         cog, thread = await _cog(tmp_path, monkeypatch, ports=[])
-        # The Cutlass Black: the wiki lists two ships of that exact name, so no slots resolve.
         cog._wiki.get_vehicle_loadout = AsyncMock(return_value=([], []))
         return await _run_command(cog, thread), thread
 
     interaction, thread = asyncio.run(run())
     assert interaction.followup.send.await_args.args[0] == "No supported component slots found for **Avenger Titan** yet."
+    thread.send.assert_not_awaited()
+
+
+def test_a_ship_the_wiki_lists_twice_is_warned_about_not_shown_as_slotless(tmp_path, monkeypatch):
+    """The Cutlass Black: the wiki has a second, BIS2950 row of that exact name (about a dozen
+    ships do), so its slots can't be told apart. Said as a known issue, not "no slots"."""
+    async def run():
+        cog, thread = await _cog(tmp_path, monkeypatch, ports=[])
+        cog._wiki.get_vehicle_loadout = AsyncMock(side_effect=WikiDuplicateNameError("Avenger Titan", 2))
+        return await _run_command(cog, thread), thread
+
+    interaction, thread = asyncio.run(run())
+    assert interaction.followup.send.await_args.args[0] == (
+        "⚠️ The Star Citizen Wiki lists more than one ship named **Avenger Titan**, so its component slots "
+        "can't be told apart yet. Known issue: parts and loadouts for this ship aren't available for now.")
     thread.send.assert_not_awaited()
 
 
@@ -691,9 +706,10 @@ TURRET_TREE = [{"name": "hardpoint_turret", "equipped_item_uuid": "manned-turret
                           for side in ("left", "right")]}]
 
 
-def test_a_turret_the_wiki_didnt_answer_for_is_said_and_makes_the_power_line_partial(tmp_path, monkeypatch):
+def test_a_turret_the_wiki_didnt_answer_for_is_said(tmp_path, monkeypatch):
     """Its gun slots never exist (ShipPartsFinder._with_child_gun_ports), so without a note
-    the loadout - total and power line included - would read as complete."""
+    the loadout - its total included - would read as complete. The power line is the plants'
+    output, which a left-out gun doesn't change."""
     async def run():
         cog, thread = await _cog(tmp_path, monkeypatch, wiki=_wiki(unavailable={"remote-turret"}),
                                  ports=[*PORTS, REMOTE_TURRET])
@@ -703,9 +719,7 @@ def test_a_turret_the_wiki_didnt_answer_for_is_said_and_makes_the_power_line_par
     text, view = _posted(asyncio.run(run()))
     assert ("⚠️ The Star Citizen Wiki didn't respond for 1 turret: its guns are left out. "
             "Try again in a few minutes.") in text
-    assert ("⚡ Needs at least 22.1 power segments at full load (no power figure for 1 left-out slot); "
-            "the power plant makes 16.") in text
-    assert "⚡ Cooling total is partial: no cooling figure for 1 left-out slot." in text
+    assert "⚡ **16** power pips in total, from the power plant." in text
 
 
 def test_a_gun_slot_the_vehicle_tree_doesnt_list_is_stock_unknown_not_empty(tmp_path, monkeypatch):
@@ -884,7 +898,7 @@ def test_one_stock_part_the_wiki_didnt_answer_for_is_said_in_the_singular(tmp_pa
     text, budget = asyncio.run(run())
     assert ("⚠️ The Star Citizen Wiki didn't respond for 1 stock part: it can't be compared against stock. "
             "Try again in a few minutes.") in text
-    assert "**S1 Power Plant** → **SunFlare** · 16 power segments (stock part unknown)" in text
+    assert "**S1 Power Plant** → **SunFlare** · 16 power pips (stock part unknown)" in text
     assert _line(budget, "S1 Power Plant").endswith(f"keep stock - {STOCK_UNKNOWN}")
 
 
@@ -1001,7 +1015,7 @@ def test_a_top_level_stock_part_comes_from_the_vehicle_tree_when_the_reference_l
         return thread
 
     text, _ = _posted(asyncio.run(run()))
-    assert "**S1 Power Plant** → **SunFlare** · 16 power segments (was 15 power segments stock)" in text
+    assert "**S1 Power Plant** → **SunFlare** · 16 power pips (was 15 power pips stock)" in text
 
 
 def test_a_stock_part_the_wiki_doesnt_have_isnt_called_an_outage(tmp_path, monkeypatch):
@@ -1015,7 +1029,7 @@ def test_a_stock_part_the_wiki_doesnt_have_isnt_called_an_outage(tmp_path, monke
         return thread
 
     text, _ = _posted(asyncio.run(run()))
-    assert "**S1 Power Plant** → **SunFlare** · 16 power segments (stock part unknown)" in text
+    assert "**S1 Power Plant** → **SunFlare** · 16 power pips (stock part unknown)" in text
     assert "didn't respond" not in text, "asking again won't help, so no 'try again'"
 
 

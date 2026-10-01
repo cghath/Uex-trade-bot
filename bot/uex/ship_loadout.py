@@ -5,17 +5,20 @@ stock parts' wiki details, and this decides what to recommend.
 
 The owner's decisions (2026-10-01):
 - Four profiles. Balanced ranks every slot by its category's key stat
-  (ship_part_display.ranking_stat). Stealth ranks components by lowest EM signature, coolers by
-  lowest IR first. Tank ranks shields by HP (already their key stat) and every other component
-  by its own durability. Guns rank by DPS in all three. Budget picks the most key stat per aUEC,
-  only among parts that beat the stock part.
+  (ship_part_display.ranking_stat). Stealth ranks every component by lowest EM signature, a
+  cooler's IR only breaking EM ties (EM matters more; coolers first went by IR). Tank ranks
+  shields by HP (already their key stat) and every other component by its own durability.
+  Guns rank by DPS in all three. Budget picks the most key stat per aUEC, only among parts that
+  beat the stock part.
 - Where the stock part is already the best pick, the slot says "keep stock" instead of
   suggesting a purchase.
 - A gun hardpoint keeps whatever mount the ship comes with: under a stock gimbal, the pick is a
   gun for the gimbal's own gun slot. Every stock VariPuck gimbal holds a gun of its own size
   (S3 gimbal, S3 gun - checked on the live wiki), so the size is read from the mount's ports,
   never assumed.
-- Power and cooling only warn; they never change a pick.
+- Power is shown, never warned about: the loadout's total power pips, what its power plants
+  make. Comparing that with every part's maximum draw warned on nearly every stock ship, and no
+  ship is meant to run every part at full power at once. It never changes a pick.
 """
 from __future__ import annotations
 
@@ -25,7 +28,6 @@ from typing import Any
 from bot.uex.ship_part_display import _number, format_port_label, ranking_stat, shop_text
 from bot.uex.ship_parts import (
     GUNS_CATEGORY,
-    MOUNTS_CATEGORY,
     ShipPort,
     _equipped_uuid,
     category_label,
@@ -40,7 +42,6 @@ DEFAULT_PROFILE = BALANCED
 SHIELDS_CATEGORY = "Shield Generators"
 COOLERS_CATEGORY = "Coolers"
 POWER_PLANTS_CATEGORY = "Power Plants"
-MISSILE_RACKS_CATEGORY = "Missile Racks"
 
 # Why a slot buys nothing. Shown to the player, so plain words.
 STOCK_IS_BEST = "stock is already the best pick"
@@ -53,7 +54,7 @@ STOCK_UNKNOWN = "the stock part's stats couldn't be loaded to compare"
 # Player-facing, so the stat is named rather than called the "key stat" (a code term).
 PROFILE_BLURBS = {
     BALANCED: "the best main stat in every slot: DPS, shield HP, quantum speed, power, cooling",
-    STEALTH: "the lowest EM signature (coolers: lowest IR); guns still by DPS",
+    STEALTH: "the lowest EM signature (IR breaks ties on coolers); guns still by DPS",
     TANK: "the most shield HP and the toughest components; guns still by DPS",
     BUDGET: "the cheapest real upgrades: the most main stat per aUEC, only where it beats stock",
 }
@@ -106,9 +107,9 @@ def merit_key(detail: dict | None, category: str, profile: str) -> tuple:
         return best
     if profile == STEALTH:
         em = _lowest_first(em_signature(detail))
-        # A cooler is the ship's main IR source, so its IR leads; its EM still counts after.
+        # EM leads everywhere. A cooler is the ship's main IR source, so its IR breaks EM ties.
         if category == COOLERS_CATEGORY:
-            return _lowest_first(ir_signature(detail)) + em + best
+            return em + _lowest_first(ir_signature(detail)) + best
         return em + best
     if category == SHIELDS_CATEGORY:
         return best
@@ -354,16 +355,17 @@ def total_cost(picks: list[SlotPick]) -> float:
 
 def profile_stat(detail: dict | None, category: str, profile: str) -> tuple[str, float] | None:
     """(label, value) of the figure `profile` chose this part by, for showing it beside the
-    stock part's: EM (a cooler's IR) for Stealth, component HP for Tank, else the key stat. A
-    part missing that figure shows its key stat instead, which is what decided it then."""
+    stock part's: EM for Stealth (a cooler with no EM figure: its IR, which decided it then),
+    component HP for Tank, else the key stat. A part missing that figure shows its key stat
+    instead, which is what decided it then."""
     if not isinstance(detail, dict):
         return None
     if category != GUNS_CATEGORY:
         if profile == STEALTH:
-            if category == COOLERS_CATEGORY and ir_signature(detail) is not None:
-                return ("IR", ir_signature(detail))
             if em_signature(detail) is not None:
                 return ("EM", em_signature(detail))
+            if category == COOLERS_CATEGORY and ir_signature(detail) is not None:
+                return ("IR", ir_signature(detail))
         if profile == TANK and category != SHIELDS_CATEGORY and component_health(detail) is not None:
             return ("component HP", component_health(detail))
     return ranking_stat(detail)
@@ -388,32 +390,34 @@ def stat_text(label: str, value: float) -> str:
     whole = {"DPS": "DPS", "shield HP": "shield HP", "component HP": "component HP", "aim assist range": "m aim assist"}
     if label in whole:
         return f"{value:,.0f} {whole[label]}"
-    segments = {"power generation": "power segments", "cooling": "cooling segments"}
+    # A power plant's segments are the pips players assign in-game: called that here, as in the
+    # loadout's total power line, so one message never names the same unit two ways.
+    segments = {"power generation": "power pips", "cooling": "cooling segments"}
     return f"{_amount(value)} {segments.get(label, label)}"
+
+
+def shown_stat(detail: dict | None, category: str, profile: str) -> tuple[str, str] | None:
+    """(kind, text) of the figure a line shows for a part: profile_stat's, as stat_text. A
+    Stealth cooler shows its EM and IR together ('EM 1,490 / IR 7,130'): EM decides, but coolers
+    often tie on it (the Bracer and Ultra-Flow are both EM 1,490), and then IR does."""
+    if profile == STEALTH and category == COOLERS_CATEGORY:
+        em, ir = em_signature(detail), ir_signature(detail)
+        if em is not None and ir is not None:
+            return ("EM / IR", f"{stat_text('EM', em)} / {stat_text('IR', ir)}")
+    stat = profile_stat(detail, category, profile)
+    return (stat[0], stat_text(*stat)) if stat is not None else None
 
 
 def stat_vs_stock(part: dict, stock: dict | None, category: str, profile: str) -> str:
     """'1,266 DPS (was 547 DPS stock)': the deciding figure, and the stock part's beside it
     when it has the same one."""
-    stat = profile_stat(part, category, profile)
-    if stat is None:
+    shown = shown_stat(part, category, profile)
+    if shown is None:
         return ""
-    text = stat_text(*stat)
-    was = profile_stat(stock, category, profile)
-    if was is not None and was[0] == stat[0]:
-        text += f" (was {stat_text(*was)} stock)"
-    return text
-
-
-# Gun mounts and missile racks report no power or coolant use (a mount has no
-# resource_network at all, a rack a null coolant use) - counted as zero, not as a gap that
-# makes a total partial.
-_DRAWS_NOTHING = frozenset({MOUNTS_CATEGORY, MISSILE_RACKS_CATEGORY})
-
-
-def _usage(part: dict, resource: str, category: str) -> float | None:
-    value = _number(_path(part, "resource_network", "usage", resource, "max"))
-    return 0.0 if value is None and category in _DRAWS_NOTHING else value
+    was = shown_stat(stock, category, profile)
+    if was is not None and was[0] == shown[0]:
+        return f"{shown[1]} (was {was[1]} stock)"
+    return shown[1]
 
 
 def power_generation(part: dict | None) -> float | None:
@@ -421,53 +425,28 @@ def power_generation(part: dict | None) -> float | None:
     return value if value is not None else _number(_path(part, "resource_network", "generation", "power"))
 
 
-def coolant_generation(part: dict | None) -> float | None:
-    value = _number(_path(part, "cooler", "coolant_segment_generation"))
-    return value if value is not None else _number(_path(part, "resource_network", "generation", "coolant"))
-
-
 @dataclass(frozen=True)
-class ResourceCheck:
-    """A loadout's power or cooling: summed maximum use against summed generation."""
-    noun: str  # "power" / "cooling"
-    maker: str  # "power plant" / "cooler"
-    need: float
-    make: float
-    makers: int
-    # Parts with no use figure, and makers with no generation figure: the sums leave them out.
-    unknown_use: int = 0
-    unknown_make: int = 0
-    # Slots the loadout left out altogether (a gun hardpoint or turret the wiki didn't answer
-    # for): their guns still draw power and coolant in-game, so the use total is partial too.
-    left_out: int = 0
+class PowerTotal:
+    """A loadout's power pips: what its power plants make between them."""
+    pips: float
+    plants: int
+    # Plants with no output figure (the wiki has none, or the stock plant's stats didn't load):
+    # the total leaves them out, so it's a lower bound.
+    unknown: int = 0
 
-    def warning(self) -> str | None:
-        """'Needs up to 34 power segments at full load; the power plant makes 28.' - only when
-        the loadout needs more than it makes. Players assign power in-game themselves, so this
-        is information, not a reason to change a pick. A missing figure is never guessed: the
-        line says the total is partial instead (a lower bound on use, when use still exceeds
-        a fully known generation)."""
-        use_gaps = [self._gap(n, noun) for n, noun in ((self.unknown_use, "part"), (self.left_out, "left-out slot"))
-                    if n]
-        exceeds = round(self.need, 1) > round(self.make, 1)
-        if exceeds and not self.unknown_make:
-            if self.makers == 0:
-                makes = f"no {self.maker} is fitted"
-            elif self.makers == 1:
-                makes = f"the {self.maker} makes {_amount(self.make)}"
-            else:
-                makes = f"the {self.makers} {self.maker}s make {_amount(self.make)}"
-            if use_gaps:
-                return (f"Needs at least {_amount(self.need)} {self.noun} segments at full load "
-                        f"({' and '.join(use_gaps)}); {makes}.")
-            return f"Needs up to {_amount(self.need)} {self.noun} segments at full load; {makes}."
-        gaps = use_gaps + ([self._gap(self.unknown_make, self.maker)] if self.unknown_make else [])
-        if gaps:
-            return f"{self.noun.capitalize()} total is partial: {' and '.join(gaps)}."
-        return None
-
-    def _gap(self, count: int, noun: str) -> str:
-        return f"no {self.noun} figure for {count} {noun}{'s' if count != 1 else ''}"
+    def line(self) -> str | None:
+        """'⚡ **16** power pips in total, from the power plant.' None for a ship with no power
+        plant. A missing figure is never guessed: the line says the total is a lower bound, or
+        unknown."""
+        if not self.plants:
+            return None
+        source = "the power plant" if self.plants == 1 else f"the {self.plants} power plants"
+        if not self.unknown:
+            return f"⚡ **{_amount(self.pips)}** power pips in total, from {source}."
+        if self.unknown == self.plants:
+            return f"⚡ Total power pips unknown: the wiki has no output figure for {source}."
+        return (f"⚡ At least **{_amount(self.pips)}** power pips in total: the wiki has no output figure "
+                f"for {self.unknown} of {source}.")
 
 
 def _installed(picks: list[SlotPick]) -> list[tuple[str, dict | None]]:
@@ -489,41 +468,20 @@ def _installed(picks: list[SlotPick]) -> list[tuple[str, dict | None]]:
     return installed
 
 
-def resource_checks(picks: list[SlotPick], *, left_out: int = 0) -> tuple[ResourceCheck, ResourceCheck]:
-    """(power, cooling) for the whole loadout. Power use sums every part's
-    resource_network.usage.power.max except the power plants': a plant's own "use" is its
-    output (the Endurance: 15 used, 15 made), and counting it would double-count. Coolant use
-    sums every part's usage.coolant.max, power plants included. Generation is each plant's
-    power_segment_generation and each cooler's coolant_segment_generation. `left_out` counts
-    slots that never became picks (the wiki didn't answer for their mount or turret): both
-    use totals then say they're partial rather than read as complete."""
-    power_need = power_make = cool_need = cool_make = 0.0
-    plants = coolers = power_gaps = cool_gaps = plant_gaps = cooler_gaps = 0
+def power_total(picks: list[SlotPick]) -> PowerTotal:
+    """The loadout's power pips as it leaves the ship: each power plant's
+    power_segment_generation, the bought plant's else the stock one's. Only output is totalled,
+    never the parts' maximum draw: no ship is meant to run every part at full power at once,
+    and draw against output warned on nearly every stock ship (the owner's call, 2026-10-01)."""
+    pips, plants, unknown = 0.0, 0, 0
     for category, part in _installed(picks):
-        if category == POWER_PLANTS_CATEGORY:
-            plants += 1
-            made = power_generation(part)
-            plant_gaps += made is None
-            power_make += made or 0.0
-        else:
-            used = _usage(part, "power", category) if part is not None else None
-            power_gaps += used is None
-            power_need += used or 0.0
-        if category == COOLERS_CATEGORY:
-            coolers += 1
-            made = coolant_generation(part)
-            cooler_gaps += made is None
-            cool_make += made or 0.0
-        used = _usage(part, "coolant", category) if part is not None else None
-        cool_gaps += used is None
-        cool_need += used or 0.0
-    return (ResourceCheck("power", "power plant", power_need, power_make, plants, power_gaps, plant_gaps, left_out),
-            ResourceCheck("cooling", "cooler", cool_need, cool_make, coolers, cool_gaps, cooler_gaps, left_out))
-
-
-def resource_warnings(picks: list[SlotPick], *, left_out: int = 0) -> list[str]:
-    """The loadout's power and cooling lines, if any (see ResourceCheck.warning)."""
-    return [line for line in (check.warning() for check in resource_checks(picks, left_out=left_out)) if line]
+        if category != POWER_PLANTS_CATEGORY:
+            continue
+        plants += 1
+        made = power_generation(part)
+        unknown += made is None
+        pips += made or 0.0
+    return PowerTotal(pips, plants, unknown)
 
 
 def pick_line(pick: SlotPick, profile: str, *, reason: str | None = None) -> str:
@@ -540,9 +498,9 @@ def pick_line(pick: SlotPick, profile: str, *, reason: str | None = None) -> str
             return f"{head} · nothing to recommend - {why}"
         name = group.stock.get("name") if isinstance(group.stock, dict) else None
         text = f"keep stock **{name}**" if name else "keep stock"
-        stat = profile_stat(group.stock, group.category, profile)
-        if stat is not None:
-            text += f" ({stat_text(*stat)})"
+        shown = shown_stat(group.stock, group.category, profile)
+        if shown is not None:
+            text += f" ({shown[1]})"
         return f"{head} · {text} - {why}"
     part = pick.part
     bits = [f"{head} → **{part.get('name') or 'Unknown'}**"]

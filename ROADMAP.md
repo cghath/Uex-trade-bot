@@ -925,6 +925,15 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
 
 ### Platform & Reliability
 
+- [ ] **Ships the wiki lists twice** *(complexity: Low)*: 12 ships UEX lists (Carrack,
+  Cutlass Black/Blue/Red, Eclipse, F8C Lightning, Hammerhead, Idris-P, Polaris, S-65 Stingray,
+  Valkyrie, Zeus Mk II CL) share their exact name with a second wiki /vehicles row (a BIS2950,
+  Collector or other edition), so `/ship-parts-finder` and `/ship-loadout` can't read their
+  slots and say so as a known issue (`WikiDuplicateNameError`, PROJECT_CONTEXT.md entry 122).
+  Likely fix: in all 12, one row's `class_name` is the base every other row's extends
+  (`DRAK_Cutlass_Black` vs `DRAK_Cutlass_Black_BIS2950`), so pick that row, and still decline
+  when no single base exists. Check first that the editions' slots really match the base
+  row's, or say which edition the slots are for.
 - [ ] **State-Table Cleanup Sweep** *(complexity: Low-Medium)*: Audit DB tables that
   accumulate rows with no built-in pressure-release mechanism, and add bounded, time-based
   cleanup wherever one's missing - the same problem `scripts/sync_pi_backups.sh` already

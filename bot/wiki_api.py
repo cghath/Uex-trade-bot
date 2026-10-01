@@ -36,6 +36,17 @@ class WikiApiError(Exception):
     """The wiki API could not give a usable, complete answer."""
 
 
+class WikiDuplicateNameError(WikiApiError):
+    """The wiki lists several ships under the one exact name asked for (the Cutlass Black has a
+    second, BIS2950 row of the same name; about a dozen ships do, 2026-10-01), so the name can't
+    say whose slots to read. Its own type so the finder can say so instead of "no slots"."""
+
+    def __init__(self, vehicle_name: str, count: int) -> None:
+        super().__init__(f"the wiki lists {count} ships named {vehicle_name!r}")
+        self.vehicle_name = vehicle_name
+        self.count = count
+
+
 class WikiUnavailableError(WikiApiError):
     """The wiki didn't answer at all (network errors, 429s or 5xx through every retry) - a
     temporary outage, unlike a definite answer such as a 404 or an identity mismatch. A
@@ -199,7 +210,8 @@ class WikiApiClient:
         must pass an already-resolved canonical ship name (e.g. via
         `bot/uex/ships.py: resolve_ship` against UEX's own vehicle list) rather than a raw
         user query, the same "resolve to exactly one candidate first" convention every other
-        name-matching helper in this codebase follows.
+        name-matching helper in this codebase follows. Several exact matches raise
+        WikiDuplicateNameError (see get_vehicle_loadout).
         """
         ports, _ = await self.get_vehicle_loadout(vehicle_name)
         return ports
@@ -208,23 +220,26 @@ class WikiApiClient:
         """get_vehicle_ports plus the ship's own `port_tags` (e.g. ['AEGS_Avenger_Base']) -
         a ship-specific part like the 'Reliant Toshima Turret' carries `required_tags`
         (['MISC_Reliant_Base']) that only a ship with those tags satisfies. ([], []) when
-        the name doesn't resolve to exactly one ship."""
-        row = await self._exact_vehicle_row(vehicle_name)
-        if row is None:
+        no ship has that exact name; WikiDuplicateNameError when several do."""
+        rows = await self._exact_vehicle_rows(vehicle_name)
+        if len(rows) > 1:
+            raise WikiDuplicateNameError(vehicle_name, len(rows))
+        if not rows:
             return [], []
+        row = rows[0]
         ports = row.get("ports")
         tags = row.get("port_tags")
         return (ports if isinstance(ports, list) else [],
                 [t for t in tags if isinstance(t, str)] if isinstance(tags, list) else [])
 
-    async def _exact_vehicle_row(self, vehicle_name: str) -> dict[str, Any] | None:
-        """The one /vehicles list row named exactly `vehicle_name` (case-insensitive), or None
-        when zero or several are (the Cutlass Black has a second, BIS2950 row of the same name)."""
+    async def _exact_vehicle_rows(self, vehicle_name: str) -> list[dict[str, Any]]:
+        """Every /vehicles list row named exactly `vehicle_name` (case-insensitive): usually
+        one, none for a ship the wiki doesn't have, several for a name the wiki uses twice (the
+        Cutlass Black has a second, BIS2950 row of the same name)."""
         body = await self._get_json("/vehicles", {"filter[name]": vehicle_name, "page[size]": 10})
         rows = self._rows(body, "/vehicles")
         target = vehicle_name.strip().lower()
-        exact = [row for row in rows if isinstance(row, dict) and (row.get("name") or "").strip().lower() == target]
-        return exact[0] if len(exact) == 1 else None
+        return [row for row in rows if isinstance(row, dict) and (row.get("name") or "").strip().lower() == target]
 
     async def get_vehicle_stock_ports(self, vehicle_name: str) -> list[dict[str, Any]]:
         """One ship's ports from the single-vehicle endpoint (GET /vehicles/{uuid}), for
@@ -235,8 +250,8 @@ class WikiApiClient:
 
         Resolved by exact name first, like get_vehicle_loadout, so [] when the name doesn't
         resolve to exactly one ship. Two requests, so the caller caches the result."""
-        row = await self._exact_vehicle_row(vehicle_name)
-        vehicle_uuid = row.get("uuid") if row is not None else None
+        rows = await self._exact_vehicle_rows(vehicle_name)
+        vehicle_uuid = rows[0].get("uuid") if len(rows) == 1 else None
         if not isinstance(vehicle_uuid, str) or not _UUID_RE.fullmatch(vehicle_uuid):
             return []
         body = await self._get_json(f"/vehicles/{vehicle_uuid}")

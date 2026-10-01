@@ -11,7 +11,14 @@ import asyncio
 import httpx
 import pytest
 
-from bot.wiki_api import MAX_ATTEMPTS, MAX_PAGES, WikiApiClient, WikiApiError, WikiUnavailableError
+from bot.wiki_api import (
+    MAX_ATTEMPTS,
+    MAX_PAGES,
+    WikiApiClient,
+    WikiApiError,
+    WikiDuplicateNameError,
+    WikiUnavailableError,
+)
 
 UUID = "c098e722-902a-435b-83f8-a96cec36a012"
 
@@ -306,6 +313,20 @@ def test_vehicle_loadout_also_returns_the_ships_own_port_tags():
     assert h.run(lambda c: c.get_vehicle_loadout("Avenger Titan")) == ([{"name": "hp"}], ["AEGS_Avenger_Base"])
     h_none = _Harness(lambda req, n: httpx.Response(200, json={"data": []}))
     assert h_none.run(lambda c: c.get_vehicle_loadout("Avenger Titan")) == ([], [])
+
+
+def test_vehicle_loadout_raises_for_a_name_the_wiki_uses_for_several_ships():
+    """The Cutlass Black has a second, BIS2950 row of the same name: never a guess, and never
+    an empty answer the finder would show as "no slots"."""
+    rows = [_vehicle("Cutlass Black", [{"name": "a"}]), _vehicle("cutlass black ", [{"name": "b"}]),
+            _vehicle("Cutlass Black PYAM Exec", [{"name": "c"}])]
+    h = _Harness(lambda req, n: httpx.Response(200, json={"data": rows}))
+    with pytest.raises(WikiDuplicateNameError) as caught:
+        h.run(lambda c: c.get_vehicle_loadout("Cutlass Black"))
+    assert caught.value.count == 2 and caught.value.vehicle_name == "Cutlass Black"
+    assert isinstance(caught.value, WikiApiError)
+    # A substring-only match (the PYAM Exec) is still just one exact row away from resolving.
+    assert h.run(lambda c: c.get_vehicle_loadout("Cutlass Black PYAM Exec")) == ([{"name": "c"}], [])
 
 
 # -- get_vehicle_stock_ports (/ship-loadout's nested stock items) -------------------------------

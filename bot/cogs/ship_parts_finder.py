@@ -80,8 +80,8 @@ from bot.uex.ship_loadout import (
     paginate_lines,
     pick_for_slot,
     pick_line,
+    power_total,
     purchases,
-    resource_warnings,
     slot_category,
     stock_uuids_by_port,
     total_line,
@@ -101,7 +101,7 @@ from bot.uex.ship_parts import (
     tags_allow,
 )
 from bot.uex.ships import resolve_ship
-from bot.wiki_api import WikiApiClient, WikiApiError, WikiUnavailableError
+from bot.wiki_api import WikiApiClient, WikiApiError, WikiDuplicateNameError, WikiUnavailableError
 
 logger = logging.getLogger("uexbot.ship_parts_finder")
 NO_MENTIONS = discord.AllowedMentions.none()
@@ -987,8 +987,7 @@ class LoadoutView(BotView):
         # without a stock comparison), gun hardpoints whose mount (left out, since the mount
         # decides the gun's size), sold parts (maybe missing, or without stats), and turrets
         # whose own gun slots (left out, as the browser leaves them out - see
-        # ShipPartsFinder.turret_gun_lookups_unanswered). Slots left out also make the power
-        # and cooling totals partial: their guns still draw both in-game.
+        # ShipPartsFinder.turret_gun_lookups_unanswered).
         self.stock_unanswered = stock_unanswered
         self.slots_missing = slots_missing
         self.parts_unanswered = parts_unanswered
@@ -1058,10 +1057,9 @@ class LoadoutView(BotView):
 
     def _footer(self, page_count: int) -> list[str]:
         lines = [total_line(self.picks)]
-        warnings = resource_warnings(self.picks, left_out=self.slots_missing + self.turrets_unanswered)
-        if warnings:
-            lines.extend(f"⚡ {warning}" for warning in warnings)
-            lines.append("-# You assign power in-game, so this is a heads-up, not a reason to change a pick.")
+        power = power_total(self.picks).line()
+        if power:
+            lines.append(power)
         if page_count > 1:
             lines.append(f"Page {self.page + 1} of {page_count}")
         return lines
@@ -1347,12 +1345,23 @@ class ShipPartsFinder(commands.Cog):
         """The wiki names some ships with their maker ('MISC Reliant Tana', 'MISC
         Freelancer') where UEX's `name` doesn't ('Reliant Tana') - UEX's own `name_full`
         matches those, so it's tried second (21 of the 88 UEX ships the wiki didn't match
-        by name; most of the rest are concept ships the wiki's game data doesn't have)."""
+        by name; most of the rest are concept ships the wiki's game data doesn't have).
+
+        A name the wiki uses for several ships (the Cutlass Black) can't say which one's slots
+        to read: the next name is still tried, and WikiDuplicateNameError is raised only when
+        none of them gives slots, so the finder can say why rather than "no slots"."""
         names = [vehicle.get("name"), vehicle.get("name_full")]
+        duplicate: WikiDuplicateNameError | None = None
         for name in dict.fromkeys(n.strip() for n in names if isinstance(n, str) and n.strip()):
-            raw_ports, vehicle_tags = await self._wiki.get_vehicle_loadout(name)
+            try:
+                raw_ports, vehicle_tags = await self._wiki.get_vehicle_loadout(name)
+            except WikiDuplicateNameError as exc:
+                duplicate = duplicate or exc
+                continue
             if raw_ports:
                 return parse_ports(raw_ports, vehicle_tags)
+        if duplicate is not None:
+            raise duplicate
         return []
 
     async def _item_detail_cached(self, uex_row: dict) -> dict | None:
@@ -1646,6 +1655,10 @@ class ShipPartsFinder(commands.Cog):
         except WikiUnavailableError:
             return (f"Couldn't reach the Star Citizen Wiki for **{vehicle.get('name')}**'s component slots "
                     "right now - try again in a few minutes.")
+        except WikiDuplicateNameError:
+            return (f"⚠️ The Star Citizen Wiki lists more than one ship named **{vehicle.get('name')}**, so "
+                    "its component slots can't be told apart yet. Known issue: parts and loadouts for this "
+                    "ship aren't available for now.")
         except WikiApiError:
             logger.warning("No usable wiki slot data for %s", vehicle.get("name"), exc_info=True)
             return f"The Star Citizen Wiki doesn't list usable component slots for **{vehicle.get('name')}** yet."

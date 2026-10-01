@@ -320,14 +320,17 @@ date - no open item, nothing to record here.
       PROJECT_CONTEXT.md entry 119
 - [ ] PR #TBD - `/ship-loadout`, and a "Recommend a loadout" button in `/ship-parts-finder`'s
       browser: one recommended part per slot for a Balanced/Stealth/Tank/Budget profile, with
-      keep-stock lines, total cost, a power/cooling warning and "Add all to shopping list".
+      keep-stock lines, total cost, the total power pips and "Add all to shopping list".
       Pure logic in the new `bot/uex/ship_loadout.py`; `LoadoutView`, `_loadout_slots` and
       `ShipPartsShoppingService.lock_in_many` in `bot/cogs/ship_parts_finder.py`; the new
       `WikiApiClient.get_vehicle_stock_ports` (`bot/wiki_api.py`) for the stock gun inside a
-      gimbal; "ship-loadout" in `bot/cogs/help.py`'s Ships category. aiv2 needs the finder's
+      gimbal, and `WikiDuplicateNameError` for a ship name the wiki uses twice (the Cutlass
+      Black), said as a known issue in both commands instead of "no slots"; "ship-loadout" in
+      `bot/cogs/help.py`'s Ships category. aiv2 needs the finder's
       earlier entries above first (PRs #60-#63 and the reliability items). Tests:
       `tests/test_ship_loadout.py`, `tests/test_ship_loadout_command.py`,
-      `tests/test_wiki_api.py`. See PROJECT_CONTEXT.md entry 122
+      `tests/test_wiki_api.py`, `tests/test_ship_parts_finder.py`. See PROJECT_CONTEXT.md
+      entry 122
 
 ## To port: aiv2 -> production
 

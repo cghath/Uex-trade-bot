@@ -1,5 +1,5 @@
 """/ship-loadout's pure logic (bot/uex/ship_loadout.py): the four profiles, keep-stock, the
-kept-mount gun rule, grouping, cost and the power/cooling warning. Detail dicts follow the
+kept-mount gun rule, grouping, cost and the power pips total. Detail dicts follow the
 shape of live wiki /items/{uuid} details (Avenger Titan and Gladius stock parts, wiki
 4.10.1); the alternatives' numbers are made up in that same shape."""
 import pytest
@@ -17,7 +17,7 @@ from bot.uex.ship_loadout import (
     STOCK_UNKNOWN,
     TANK,
     LoadoutSlot,
-    ResourceCheck,
+    PowerTotal,
     SlotGroup,
     group_slots,
     gun_entry_port_name,
@@ -26,12 +26,13 @@ from bot.uex.ship_loadout import (
     merit_key,
     paginate_lines,
     pick_for_slot,
+    pick_line,
+    power_total,
     profile_stat,
     purchases,
     rank_candidates,
-    resource_checks,
-    resource_warnings,
     same_part,
+    shown_stat,
     slot_category,
     stat_text,
     stat_vs_stock,
@@ -260,7 +261,7 @@ def test_a_better_part_still_beats_a_nearer_one():
     assert ranked[0]["name"] == "FR-66"
 
 
-# -- Stealth: lowest EM; coolers lowest IR first; guns still by DPS ---------------------------
+# -- Stealth: lowest EM everywhere; IR breaks cooler ties; guns still by DPS -----------------
 
 def test_stealth_picks_the_lowest_em_component_even_with_a_weaker_key_stat():
     quiet = _plant("Quiet", 12, em=3000)
@@ -281,17 +282,18 @@ def test_stealth_puts_a_part_with_no_em_figure_after_every_known_one():
     assert ranked[0]["name"] == "Loud"
 
 
-def test_stealth_coolers_go_by_ir_first_then_em():
+def test_stealth_coolers_go_by_em_first_then_ir():
     low_ir = _cooler("Low IR", 30, ir=4000, em=5000)
     low_em = _cooler("Low EM", 30, ir=7000, em=100)
-    ranked = rank_candidates([_sold(low_em, 1), _sold(low_ir, 1)], "Coolers", STEALTH)
-    assert [c["name"] for c in ranked] == ["Low IR", "Low EM"]
-    same_ir = rank_candidates([_sold(_cooler("A", 30, ir=4000, em=900), 1), _sold(_cooler("B", 30, ir=4000, em=200), 1)],
-                              "Coolers", STEALTH)
-    assert same_ir[0]["name"] == "B"
+    ranked = rank_candidates([_sold(low_ir, 1), _sold(low_em, 1)], "Coolers", STEALTH)
+    assert [c["name"] for c in ranked] == ["Low EM", "Low IR"]
+    # The real Bracer and Ultra-Flow tie on EM (1,490, wiki 4.10.1): the lower IR wins.
+    same_em = rank_candidates([_sold(_cooler("Bracer", 34, ir=7260, em=1490), 1),
+                               _sold(_cooler("Ultra-Flow", 34, ir=7130, em=1490), 1)], "Coolers", STEALTH)
+    assert same_em[0]["name"] == "Ultra-Flow"
 
 
-def test_stealth_coolers_equal_on_ir_and_em_go_by_the_key_stat_before_price():
+def test_stealth_coolers_equal_on_em_and_ir_go_by_the_key_stat_before_price():
     weak, strong = _cooler("Weak", 20, ir=4000, em=500), _cooler("Strong", 40, ir=4000, em=500)
     ranked = rank_candidates([_sold(weak, 1), _sold(strong, 9000)], "Coolers", STEALTH)
     assert [c["name"] for c in ranked] == ["Strong", "Weak"]
@@ -648,121 +650,60 @@ def _titan_stock_picks():
             _keep("Guns", OMNISKY, 2), _keep("Missile Racks", MSD_322, 2)]
 
 
-def test_titan_stock_power_and_cooling_totals():
-    power, cooling = resource_checks(_titan_stock_picks())
-    # Shields 2x3 + coolers 2x3 + QD 2 + radar 5 + guns 0.1 + 2x1.5; the plant's own 15 left out.
-    assert round(power.need, 1) == 22.1 and power.make == 15 and power.makers == 1
-    # The same plus the plant's coolant use (15): 37.1, the wiki's own figure for the Titan.
-    assert round(cooling.need, 1) == 37.1 and cooling.make == 68 and cooling.makers == 2
-    assert (power.unknown_use, power.unknown_make, cooling.unknown_use, cooling.unknown_make) == (0, 0, 0, 0)
+def test_titan_stock_power_total_is_the_plants_output():
+    assert power_total(_titan_stock_picks()) == PowerTotal(15, 1, 0)
+    assert power_total(_titan_stock_picks()).line() == "⚡ **15** power pips in total, from the power plant."
 
 
-def test_titan_stock_warns_about_power_only():
-    assert resource_warnings(_titan_stock_picks()) == [
-        "Needs up to 22.1 power segments at full load; the power plant makes 15."]
+def test_the_parts_maximum_draw_is_never_compared():
+    """The stock Titan's parts could take 22.1 pips at full power against the plant's 15 -
+    that warned on nearly every stock ship. No ship is meant to run everything at max, so the
+    line is the plant's total, whatever the parts could draw."""
+    picks = _titan_stock_picks()
+    greedy = {**BULWARK, "resource_network": {"usage": {"power": {"min": 0, "max": 500}}}}
+    picks[2] = _keep("Shield Generators", greedy, 2)
+    assert power_total(picks) == power_total(_titan_stock_picks())
+    assert "22" not in power_total(_titan_stock_picks()).line()
 
 
-def test_a_bought_part_counts_instead_of_the_stock_one():
+def test_a_bought_plant_counts_instead_of_the_stock_one():
     picks = _titan_stock_picks()
     picks[0] = pick_for_slot(picks[0].group, [_sold(_plant("Big", 30), 100)], BALANCED)
     assert picks[0].part is not None
-    assert resource_warnings(picks) == []
+    assert power_total(picks).pips == 30
 
 
-def test_cooling_warning_and_plural_makers():
-    picks = [_keep("Power Plants", _plant("Big", 15), 2), _keep("Coolers", _cooler("Small", 10), 2),
-             _keep("Shield Generators", _shield("S", 2000, power=3, coolant=8))]
-    # Plants 2x15 + coolers 2x3 + shield 8.
-    assert resource_warnings(picks) == [
-        "Needs up to 44 cooling segments at full load; the 2 coolers make 20."]
-
-
-def test_use_equal_to_generation_is_not_a_warning():
-    picks = [_keep("Power Plants", _plant("P", 6)), _keep("Shield Generators", _shield("S", 2000, power=3), 2)]
-    assert resource_checks(picks)[0].need == 6
-    assert resource_checks(picks)[0].warning() is None
+def test_several_plants_add_up_and_only_plants_count():
+    total = power_total([_keep("Power Plants", _plant("Big", 15), 2), _keep("Coolers", BRACER, 2),
+                         _keep("Shield Generators", BULWARK)])
+    assert total == PowerTotal(30, 2, 0)
+    assert total.line() == "⚡ **30** power pips in total, from the 2 power plants."
 
 
 def test_power_generation_falls_back_to_the_resource_network_figure():
     plant = _plant("P", 20)
     plant["power_plant"] = {"power_output": None}
-    assert resource_checks([_keep("Power Plants", plant)])[0].make == 20
+    assert power_total([_keep("Power Plants", plant)]).pips == 20
 
 
-def test_cooler_generation_falls_back_to_the_resource_network_figure():
-    cooler = _cooler("C", 21)
-    cooler["cooler"] = {}
-    assert resource_checks([_keep("Coolers", cooler)])[1].make == 21
+def test_a_plant_with_no_output_figure_makes_the_total_a_lower_bound_not_a_guess():
+    no_figure = {**_plant("P", 4), "power_plant": {}, "resource_network": {}}
+    total = power_total([_keep("Power Plants", ENDURANCE), _keep("Power Plants", no_figure)])
+    assert total == PowerTotal(15, 2, 1)
+    assert total.line() == ("⚡ At least **15** power pips in total: the wiki has no output figure for 1 of the "
+                            "2 power plants.")
+    assert power_total([_keep("Power Plants", no_figure)]).line() == (
+        "⚡ Total power pips unknown: the wiki has no output figure for the power plant.")
 
 
-def test_mounts_and_racks_draw_nothing_rather_than_making_the_total_partial():
-    picks = [_keep("Power Plants", ENDURANCE), _keep("Turrets", VARIPUCK_S3, 2), _keep("Missile Racks", MSD_322, 2)]
-    power, cooling = resource_checks(picks)
-    assert power.unknown_use == 0 and cooling.unknown_use == 0
-    assert power.need == 0
-
-
-def test_a_missing_use_figure_makes_the_total_partial_not_a_guess():
-    no_power = {**_shield("Mystery", 2000), "resource_network": None}
-    picks = [_keep("Power Plants", _plant("P", 4)), _keep("Shield Generators", BULWARK, 2),
-             _keep("Shield Generators", no_power)]
-    power, _ = resource_checks(picks)
-    assert power.unknown_use == 1 and power.need == 6
-    assert power.warning() == ("Needs at least 6 power segments at full load (no power figure for 1 part); "
-                               "the power plant makes 4.")
-
-
-def test_a_partial_total_that_does_not_exceed_still_says_so():
-    no_power = {**_shield("Mystery", 2000), "resource_network": {}}
-    power, cooling = resource_checks([_keep("Power Plants", ENDURANCE), _keep("Coolers", BRACER),
-                                      _keep("Shield Generators", no_power, 2)])
-    assert power.warning() == "Power total is partial: no power figure for 2 parts."
-    assert cooling.warning() == "Cooling total is partial: no cooling figure for 2 parts."
-
-
-def test_a_plant_with_no_output_figure_never_produces_a_shortfall_claim():
-    plant = {**_plant("P", 4), "power_plant": {}, "resource_network": {}}
-    power, _ = resource_checks([_keep("Power Plants", plant), _keep("Shield Generators", BULWARK, 5)])
-    assert power.unknown_make == 1
-    assert power.warning() == "Power total is partial: no power figure for 1 power plant."
-
-
-def test_a_stock_part_whose_stats_failed_to_load_is_a_gap():
-    picks = [_keep("Power Plants", ENDURANCE), pick_for_slot(_group("Radar", None, stock_unknown=True), [], BALANCED)]
-    power, cooling = resource_checks(picks)
-    assert power.unknown_use == 1 and cooling.unknown_use == 1
-
-
-def test_a_stock_plant_that_failed_to_load_is_a_generation_gap():
+def test_a_stock_plant_that_failed_to_load_is_unknown_not_zero():
     picks = [pick_for_slot(_group("Power Plants", None, stock_unknown=True), [], BALANCED)]
-    assert resource_checks(picks)[0].unknown_make == 1
+    assert power_total(picks) == PowerTotal(0, 1, 1)
 
 
-def test_an_empty_slot_with_nothing_bought_adds_nothing():
-    power, cooling = resource_checks([_keep("Power Plants", ENDURANCE), _keep("Radar", None)])
-    assert (power.need, power.unknown_use, cooling.unknown_use) == (0, 0, 0)
-
-
-def test_no_power_plant_fitted():
-    assert ResourceCheck("power", "power plant", 5, 0, 0).warning() == (
-        "Needs up to 5 power segments at full load; no power plant is fitted.")
-
-
-def test_both_kinds_of_gap_are_named():
-    check = ResourceCheck("cooling", "cooler", 50, 10, 1, unknown_use=2, unknown_make=1)
-    assert check.warning() == "Cooling total is partial: no cooling figure for 2 parts and no cooling figure for 1 cooler."
-
-
-def test_slots_left_out_of_the_loadout_make_both_use_totals_partial():
-    # Their guns still draw power and coolant in-game: never a definite "Needs up to".
-    power, cooling = resource_checks(_titan_stock_picks(), left_out=2)
-    assert power.warning() == ("Needs at least 22.1 power segments at full load (no power figure for 2 left-out "
-                               "slots); the power plant makes 15.")
-    assert cooling.warning() == "Cooling total is partial: no cooling figure for 2 left-out slots."
-    assert resource_warnings(_titan_stock_picks(), left_out=1)[0].startswith("Needs at least 22.1")
-    assert ResourceCheck("power", "power plant", 5, 4, 1, unknown_use=1, left_out=1).warning() == (
-        "Needs at least 5 power segments at full load (no power figure for 1 part and no power figure for "
-        "1 left-out slot); the power plant makes 4.")
+def test_no_power_plant_means_no_power_line():
+    assert power_total([_keep("Coolers", BRACER), _keep("Radar", ECOUTER)]).line() is None
+    assert power_total([_keep("Power Plants", None)]).line() is None, "an empty slot nothing is bought for"
 
 
 # -- What each line shows ------------------------------------------------------------------------
@@ -770,7 +711,8 @@ def test_slots_left_out_of_the_loadout_make_both_use_totals_partial():
 def test_profile_stat_is_the_figure_the_profile_chose_by():
     assert profile_stat(BULWARK, "Shield Generators", BALANCED) == ("shield HP", 2160)
     assert profile_stat(BULWARK, "Shield Generators", STEALTH) == ("EM", 1490)
-    assert profile_stat(BRACER, "Coolers", STEALTH) == ("IR", 7260)
+    assert profile_stat(BRACER, "Coolers", STEALTH) == ("EM", 1490)
+    assert profile_stat({**BRACER, "emission": {"em_max": None, "ir": 7260}}, "Coolers", STEALTH) == ("IR", 7260)
     assert profile_stat(BULWARK, "Shield Generators", TANK) == ("shield HP", 2160)
     assert profile_stat(ENDURANCE, "Power Plants", TANK) == ("component HP", 270)
     assert profile_stat(REVENANT, "Guns", STEALTH) == ("DPS", 1266)
@@ -783,7 +725,7 @@ def test_profile_stat_is_the_figure_the_profile_chose_by():
 @pytest.mark.parametrize("label,value,text", [
     ("DPS", 1266.4, "1,266 DPS"),
     ("shield HP", 2160, "2,160 shield HP"),
-    ("power generation", 15, "15 power segments"),
+    ("power generation", 15, "15 power pips"),
     ("cooling", 34, "34 cooling segments"),
     ("aim assist range", 1105, "1,105 m aim assist"),
     ("quantum speed", 189309100, "189.3 Mm/s"),
@@ -805,6 +747,27 @@ def test_stat_vs_stock():
     # A stock part missing the figure the pick was chosen by isn't compared on a different one.
     no_em_stock = {**BULWARK, "emission": None}
     assert stat_vs_stock(_shield("Quiet", 2000, em=900), no_em_stock, "Shield Generators", STEALTH) == "EM 900"
+
+
+def test_a_stealth_cooler_shows_em_and_ir_together():
+    """EM decides, but real coolers tie on it often and then IR decides: showing EM alone
+    would read 'EM 1,490 (was EM 1,490 stock)' for a real upgrade."""
+    assert shown_stat(BRACER, "Coolers", STEALTH) == ("EM / IR", "EM 1,490 / IR 7,260")
+    assert stat_vs_stock(_cooler("Ultra-Flow", 34, ir=7130, em=1490), BRACER, "Coolers", STEALTH) == (
+        "EM 1,490 / IR 7,130 (was EM 1,490 / IR 7,260 stock)")
+    # Only a Stealth cooler: other profiles, and other Stealth components, show the one figure.
+    assert shown_stat(BRACER, "Coolers", BALANCED) == ("cooling", "34 cooling segments")
+    assert shown_stat(BULWARK, "Shield Generators", STEALTH) == ("EM", "EM 1,490")
+    # A cooler missing either figure shows the one it has, and isn't compared with a stock
+    # part shown by both.
+    no_em = {**BRACER, "emission": {"em_max": None, "ir": 7130}}
+    assert shown_stat(no_em, "Coolers", STEALTH) == ("IR", "IR 7,130")
+    assert stat_vs_stock(no_em, BRACER, "Coolers", STEALTH) == "IR 7,130"
+
+
+def test_keeping_a_stealth_cooler_shows_both_figures():
+    line = pick_line(_keep("Coolers", BRACER, 2), STEALTH)
+    assert "keep stock **Bracer** (EM 1,490 / IR 7,260)" in line
 
 
 def test_total_line_counts_one_part_in_the_singular():
