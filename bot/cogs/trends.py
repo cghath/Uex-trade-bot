@@ -28,6 +28,7 @@ from discord.ext import commands, tasks
 from bot.cogs.prices import (
     SYSTEM_CHOICES,
     _add_chunked_fields,
+    ambiguous_commodity_text,
     commodity_name_autocomplete,
     terminal_name_autocomplete,
 )
@@ -64,6 +65,7 @@ from bot.uex.supply_demand import (
     classify_supply_evidence,
     has_sell_side_demand,
 )
+from bot.uex.trading import rows_for_commodity, rows_for_known_commodity
 from bot.uex.trading_preferences import (
     describe_active_preferences,
     saved_filter_labels,
@@ -322,6 +324,13 @@ class Trends(commands.Cog):
 
             # Per commodity, so one commodity's odd rows can't sink the whole refresh.
             try:
+                # UEX matches commodity_name as a SUBSTRING: 'Gold' also returned Golden
+                # Medmon (its 71,000 became Gold's trending best sell), and 'Tin' listed
+                # Astatine first, so rows[0]'s id gathered Astatine's routes a second time
+                # under Tin's name. Only this catalog commodity's own rows, by its id.
+                rows = rows_for_known_commodity(rows, name, commodity.get("id"))
+                if not rows:
+                    continue
                 total_trips, avg_volatility = aggregate_commodity_trips(rows)
                 if total_trips > 0:
                     best_sell = max((r.get("price_sell") or 0 for r in rows), default=0)
@@ -979,6 +988,14 @@ class Trends(commands.Cog):
 
         if not price_rows:
             await interaction.followup.send(f"No data found for '{commodity}'. Check the spelling.")
+            return
+
+        # UEX matches commodity_name as a SUBSTRING - 'Gold' also returned Golden Medmon,
+        # whose terminals could win the "most traded" default below and chart the wrong
+        # market. Only the commodity asked for.
+        price_rows, others = rows_for_commodity(price_rows, commodity)
+        if others:
+            await interaction.followup.send(ambiguous_commodity_text(commodity, others))
             return
 
         id_commodity = price_rows[0].get("id_commodity")

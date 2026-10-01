@@ -4177,6 +4177,42 @@ they're in sync).
        `/refinery-advisor` callback. Each change was undone one at a time (6 in all), and
        its test failed every time.
 
+118. **Every name lookup prices only the commodity asked for.** Ported from aiv2 commit
+     `c4f1aa6` (AI_BOT_HANDOFF.md, aiv2 -> production), core fix only: aiv2's chat price
+     tool, `price_summary.py` and evals have no production counterpart.
+     - The bug: `/commodities_prices?commodity_name=` matches by case-insensitive SUBSTRING,
+       and all seven name lookups used the mixed rows as-is. Checked live on 2026-10-01: 10
+       of 158 tradeable commodities pull in others. The best sell price was wrong for Gold
+       (71,000 from Golden Medmon; Gold's own is 31,000), Diamond (99,000 from Diamond
+       Laminate; 8,600) and Carbon (26,000 from Carbon-Silk; 430). Tin listed Astatine first
+       and Jaclium listed Jaclium (Ore) first, so `/best-route` took the wrong
+       `id_commodity` from `rows[0]`. The other five (Borase, Copper, Hydrogen, Iron, Ship
+       Ammunition) mixed in their ore or size variants.
+     - Fix, in `bot/uex/trading.py`:
+       - `rows_for_commodity` serves typed names (`/price`, `/best-route`,
+         `/commodity-history` and both alert pollers). It keeps the exact name's rows. A
+         partial name that only one commodity matches keeps them all. When several match
+         and none exactly, it returns their names, and the commands ask "which one do you
+         mean?" (`ambiguous_commodity_text`); the pollers log and skip.
+       - `rows_for_known_commodity` serves names taken from UEX's own catalog (the
+         trending/top-routes refresh, `/refinery-advisor`'s sell price): by `id_commodity`
+         when both sides have one, else the exact name. It has no partial-name leniency.
+       - `/price` now says in text when no terminal buys or sells the commodity
+         (`no_terminal_trades_text`), instead of sending an embed with no fields.
+     - Production's price and stock alerts already store an exact catalog name (PR #80), so
+       the pollers' filter always finds the exact match. It still removes the other
+       commodity's rows, which is the part that mattered.
+     - One change from aiv2: `ambiguous_commodity_text` ends a list of more than five names
+       with "and N more". aiv2's " ..." plus the sentence's own period read "Name 4 ....".
+       Logged in AI_BOT_HANDOFF.md, production -> aiv2.
+     - Live check: no catalog commodity loses all its rows, and the typed-name and id
+       filters agree on all 158 names.
+     - Tests: `tests/test_exact_commodity_lookups.py` (a fake UEX that matches by substring;
+       `/best-route` runs through its real callback over an `httpx.MockTransport`), plus
+       additions to `test_trading.py`, `test_price_command.py` and `test_refinery.py`. Each
+       change was undone one at a time (13 in all: every call site, each helper rule, the
+       empty-embed reply and the wording), and a test failed every time.
+
 ## Where to look for what
 
 Six docs, deliberately scoped so they don't duplicate each other:

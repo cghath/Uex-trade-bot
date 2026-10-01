@@ -26,7 +26,7 @@ from bot.uex.refinery import (
     select_terminals_to_show,
 )
 from bot.uex.route_presentation import add_chunked_fields
-from bot.uex.trading import best_sell_locations
+from bot.uex.trading import best_sell_locations, rows_for_known_commodity
 
 MAX_SELL_LOCATIONS = 3
 # Minimum refineries shown; every refinery in the ore's own mining system is shown even
@@ -230,6 +230,10 @@ class Refinery(commands.Cog):
                 price_rows = await self.bot.uex.get_commodities_prices(commodity_name=refined["name"])
             except UexApiError:
                 price_rows, prices_failed = [], True
+            # UEX matches commodity_name as a SUBSTRING - refined Gold's lookup also returned
+            # Golden Medmon, whose 71,000 was posted as "Gold — best sell price" (real Gold
+            # ~31,000). Only the refined commodity's own rows, by its id.
+            price_rows = rows_for_known_commodity(price_rows, refined["name"], refined.get("id"))
             top_sell = best_sell_locations(price_rows, limit=MAX_SELL_LOCATIONS)
             if top_sell:
                 lines = [f"**{r['terminal_name']}** — {r['price_sell']:.2f} aUEC/unit" for r in top_sell]

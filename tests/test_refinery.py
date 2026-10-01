@@ -849,3 +849,37 @@ def test_refinery_advisor_prices_an_ore_uex_links_only_backwards(tmp_path):
         assert "+-" not in fields["Best refineries by yield bonus"]
 
     asyncio.run(run())
+
+
+def test_refinery_advisor_prices_the_refined_commodity_itself_not_a_name_containing_it(tmp_path):
+    """Ported from aiv2 commit c4f1aa6. UEX's commodity_name filter matches substrings, so
+    refined Gold's price lookup also returned Golden Medmon - and its 71,000 was posted as
+    "Gold — best sell price" for Gold (Ore) while real Gold sold for ~31,000. The sell-price
+    section keeps only the refined commodity's own rows, by its id."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        commodities = [_raw(1, "Gold (Ore)", 33), _refined(33, "Gold"), _refined(50, "Golden Medmon")]
+        cog = _cog(
+            db, commodities=commodities, methods=_METHODS,
+            price_rows_by_commodity={
+                "Gold": [
+                    {"terminal_name": "Ashland", "id_commodity": 50, "commodity_name": "Golden Medmon",
+                     "price_sell": 71000.0, "id_terminal": 1},
+                    {"terminal_name": "CBD Lorville", "id_commodity": 33, "commodity_name": "Gold",
+                     "price_sell": 31000.0, "id_terminal": 2},
+                    {"terminal_name": "Levski", "id_commodity": 50, "commodity_name": "Golden Medmon",
+                     "price_sell": 68000.0, "id_terminal": 3},
+                ],
+            },
+        )
+        interaction = _FakeInteraction()
+
+        await cog.refinery_advisor.callback(cog, interaction, ore_1="Gold (Ore)", ore_2=None, ore_3=None)
+
+        fields = {f.name: f.value for f in interaction.followup.send.call_args.kwargs["embed"].fields}
+        sell = fields["Gold — best sell price"]
+        assert "CBD Lorville" in sell and "31000.00" in sell
+        assert "Ashland" not in sell and "71000" not in sell and "Levski" not in sell
+
+    asyncio.run(run())
