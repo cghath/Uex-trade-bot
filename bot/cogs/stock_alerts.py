@@ -27,7 +27,7 @@ from bot.delivery import DELIVERY_CHOICES, DELIVERY_DESCRIPTION, Delivery, deliv
 from bot.uex.exceptions import UexApiError, describe_uex_api_error
 from bot.uex.ships import resolve_ship
 from bot.uex.stock_alerts import compute_terminal_availability, detect_restocks, format_restock_message
-from bot.uex.trading import resolve_tradeable_commodity, unknown_commodity_message
+from bot.uex.trading import resolve_tradeable_commodity, rows_for_commodity, unknown_commodity_message
 
 logger = logging.getLogger("uexbot.stock_alerts")
 
@@ -129,6 +129,15 @@ class StockAlerts(commands.Cog):
                 continue
 
             try:
+                # UEX matches commodity_name as a SUBSTRING - a Gold watch reported Golden
+                # Medmon's restocks (a terminal stocking both could even show twice).
+                rows, others = rows_for_commodity(rows, commodity_name)
+                if others:
+                    logger.warning(
+                        "Skipping stock alerts for '%s': it matches several commodities (%s), none exactly",
+                        commodity_name, ", ".join(others),
+                    )
+                    continue
                 current = compute_terminal_availability(rows)
             except (AttributeError, KeyError, TypeError, ValueError) as exc:
                 logger.warning("Skipping stock alerts for %s: unexpected price rows (%s)", commodity_name, exc)

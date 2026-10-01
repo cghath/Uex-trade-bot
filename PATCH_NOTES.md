@@ -1,7 +1,30 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.36.
+the oldest entry below); the next new entry is 2.38.
+
+---
+
+## 2.37 - 2026-10-01 - Prices for the commodity you named
+
+**Fixed**
+- `/price` - Shows only the commodity you named. Gold, Diamond and Carbon showed another commodity's higher price: Gold's top sell was Golden Medmon's 71,000, against Gold's own ~31,000.
+- `/best-route` - Tin and Jaclium get their own routes, not Astatine's or Jaclium (Ore)'s.
+- `/refinery-advisor` - Gold (Ore)'s sell price is Gold's own, not Golden Medmon's.
+- Price and stock alerts - A Gold alert no longer goes off on Golden Medmon's price or stock.
+- `/trending`, `/top-routes` and `/commodity-history` - Each commodity uses only its own prices.
+
+**Changed**
+- `/price`, `/best-route` and `/commodity-history` - A name that matches several commodities, like "Gol", asks which one you mean.
+- `/price` - Says so in a line of text when no terminal buys or sells the commodity, instead of an empty card.
+
+---
+
+## 2.36 - 2026-10-01 - Refinery prices for every ore
+
+**Fixed**
+- `/refinery-advisor` - Shows a sell price for Taranite, Lindinium, Savrilium, Torite and Aslarite, which had none.
+- `/refinery-advisor` - A negative yield bonus reads "-3%", not "+-3%".
 
 ---
 

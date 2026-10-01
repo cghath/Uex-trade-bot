@@ -32,7 +32,7 @@ from bot.uex.supply_demand import (
 )
 from bot.uex.ships import estimate_route_cargo, resolve_ship
 from bot.uex.status import build_status_lookup, resolve_status_label
-from bot.uex.trading import best_buy_locations, best_routes, best_sell_locations
+from bot.uex.trading import best_buy_locations, best_routes, best_sell_locations, rows_for_commodity
 from bot.uex.mixed_routes import build_mixed_routes, find_hedge_cargo, requires_capital_cargo_access
 from bot.uex.multi_stop_routes import (
     MAX_LEGS,
@@ -104,6 +104,20 @@ MAX_LEGS_DESCRIPTION = "Optional: chain up to 4 hops instead of 3 - finds more p
 # trends.py and intelligence_brief.py) so it isn't copy-pasted per command surface.
 _chunk_lines = chunk_lines
 _add_chunked_fields = add_chunked_fields
+
+
+def ambiguous_commodity_text(commodity: str, names: list[str]) -> str:
+    """When a typed name matches several commodities and is none of them exactly
+    (rows_for_commodity) - /price, /best-route and /commodity-history ask instead of
+    picking one."""
+    listed = ", ".join(names[:5]) + (f" and {len(names) - 5} more" if len(names) > 5 else "")
+    return f"'{commodity}' matches more than one commodity: {listed}. Which one do you mean?"
+
+
+def no_terminal_trades_text(commodity: str) -> str:
+    """/price when UEX has rows for the commodity but no terminal currently buys or sells
+    it - it used to post an embed with no fields."""
+    return f"UEX lists {commodity}, but no terminal is buying or selling it right now."
 
 
 def _positive_int(value: object) -> int | None:
@@ -243,11 +257,21 @@ class Prices(commands.Cog):
             await interaction.followup.send(f"No price data found for '{commodity}'. Check the spelling.")
             return
 
-        commodity_display = rows[0].get("commodity_name", commodity)
-        embed = discord.Embed(title=f"{commodity_display} — Prices", color=discord.Color.blurple())
+        # UEX matches commodity_name as a SUBSTRING - /price Gold listed Golden Medmon's
+        # 71,000 (real Gold sells for ~31,000). Only the commodity asked for; a name that is
+        # several commodities asks which one.
+        rows, others = rows_for_commodity(rows, commodity)
+        if others:
+            await interaction.followup.send(ambiguous_commodity_text(commodity, others))
+            return
 
+        commodity_display = rows[0].get("commodity_name", commodity)
         top_sell = best_sell_locations(rows, limit=MAX_FIELD_ROWS)
         top_buy = best_buy_locations(rows, limit=MAX_FIELD_ROWS)
+        if not top_sell and not top_buy:
+            await interaction.followup.send(no_terminal_trades_text(commodity_display))
+            return
+        embed = discord.Embed(title=f"{commodity_display} — Prices", color=discord.Color.blurple())
         status_lookup = await self._get_status_lookup()
 
         terminal_ids = [
@@ -452,6 +476,14 @@ class Prices(commands.Cog):
 
         if not rows:
             await interaction.followup.send(f"No price data found for '{commodity}'. Check the spelling.")
+            return
+
+        # UEX matches commodity_name as a SUBSTRING - 'Tin' lists Astatine first, so taking
+        # rows[0]'s id_commodity routed Astatine for a Tin request. Only the commodity asked
+        # for goes on; a name that is several commodities asks which one.
+        rows, others = rows_for_commodity(rows, commodity)
+        if others:
+            await interaction.followup.send(ambiguous_commodity_text(commodity, others))
             return
 
         id_commodity = rows[0].get("id_commodity")

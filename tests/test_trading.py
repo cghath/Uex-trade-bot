@@ -2,7 +2,14 @@
 /commodities_prices rows (one row per terminal for a single commodity)."""
 from __future__ import annotations
 
-from bot.uex.trading import TradeRoute, best_buy_locations, best_routes, best_sell_locations
+from bot.uex.trading import (
+    TradeRoute,
+    best_buy_locations,
+    best_routes,
+    best_sell_locations,
+    rows_for_commodity,
+    rows_for_known_commodity,
+)
 
 
 def _row(**overrides) -> dict:
@@ -152,3 +159,85 @@ def test_trade_route_margin_is_zero_when_buy_price_is_zero():
         sell_price=100,
     )
     assert route.roi_pct == 0.0
+
+
+# -- only the commodity asked for: UEX's commodity_name filter is a SUBSTRING match --------
+# Ported from aiv2 commit c4f1aa6.
+
+def _named(name: str, id_commodity: int, terminal: str, **overrides) -> dict:
+    return _row(commodity_name=name, id_commodity=id_commodity, terminal_name=terminal, **overrides)
+
+
+# Shaped like the live lookups: 'Gold' also returns Golden Medmon; 'Tin' lists Astatine first.
+GOLD_LOOKUP = [
+    _named("Golden Medmon", 50, "Ashland", price_sell=71000),
+    _named("Gold", 33, "CBD Lorville", price_sell=31000),
+    _named("Golden Medmon", 50, "Levski", price_sell=68000),
+    _named("Gold", 33, "ARC-L1", price_buy=24000),
+]
+TIN_LOOKUP = [
+    _named("Astatine", 9, "Port Tressler", price_sell=2000),
+    _named("HexaPolyMesh Coating", 70, "Area 18", price_sell=900),
+    _named("Tin", 77, "Everus Harbor", price_sell=150),
+]
+
+
+def test_rows_for_commodity_keeps_only_the_exact_commodity():
+    rows, others = rows_for_commodity(GOLD_LOOKUP, "Gold")
+    assert others == []
+    assert {r["commodity_name"] for r in rows} == {"Gold"}
+    assert [r["terminal_name"] for r in rows] == ["CBD Lorville", "ARC-L1"]
+
+    rows, others = rows_for_commodity(TIN_LOOKUP, "Tin")
+    assert others == []
+    assert [r["commodity_name"] for r in rows] == ["Tin"]
+
+
+def test_rows_for_commodity_ignores_case_and_surrounding_whitespace():
+    rows, others = rows_for_commodity(GOLD_LOOKUP, "  gold ")
+    assert others == []
+    assert {r["commodity_name"] for r in rows} == {"Gold"}
+
+
+def test_rows_for_commodity_keeps_partial_typing_when_only_one_commodity_matches():
+    rows = [_named("Laranite", 5, "A", price_sell=9100), _named("Laranite", 5, "B", price_sell=9000)]
+    assert rows_for_commodity(rows, "Laranit") == (rows, [])
+
+
+def test_rows_for_commodity_names_every_candidate_when_none_matches_exactly():
+    assert rows_for_commodity(GOLD_LOOKUP, "Gol") == ([], ["Gold", "Golden Medmon"])
+    assert rows_for_commodity(TIN_LOOKUP, "ti") == ([], ["Astatine", "HexaPolyMesh Coating", "Tin"])
+
+
+def test_rows_for_commodity_keeps_rows_with_no_commodity_name():
+    unnamed = {"id_terminal": 9, "terminal_name": "Unnamed", "price_sell": 5}
+    rows, others = rows_for_commodity([*GOLD_LOOKUP, unnamed], "Gold")
+    assert others == [] and unnamed in rows and len(rows) == 3
+    assert rows_for_commodity([unnamed], "Gold") == ([unnamed], [])
+
+
+def test_rows_for_known_commodity_filters_by_id_first():
+    rows = rows_for_known_commodity(GOLD_LOOKUP, "Gold", 33)
+    assert {r["commodity_name"] for r in rows} == {"Gold"}
+    assert rows_for_known_commodity(TIN_LOOKUP, "Tin", 77) == [TIN_LOOKUP[2]]
+    # A string id (UEX sends ints, but the catalog could be re-read from JSON) still compares as the same id.
+    assert rows_for_known_commodity(GOLD_LOOKUP, "Gold", "33") == rows
+    # The id wins over the name: a row with the same name but another id is another commodity.
+    assert rows_for_known_commodity([_named("Gold", 34, "Elsewhere", price_sell=1)], "Gold", 33) == []
+
+
+def test_rows_for_known_commodity_has_no_partial_name_leniency():
+    """A catalog name is already exact: when the only rows are another commodity's, nothing is this one's."""
+    only_fuel = [_named("Hydrogen Fuel", 88, "Port Olisar", price_buy=1)]
+    assert rows_for_known_commodity(only_fuel, "Hydrogen", 87) == []
+    assert rows_for_known_commodity(only_fuel, "Hydrogen") == []
+
+
+def test_rows_for_known_commodity_falls_back_to_the_exact_name_for_rows_without_an_id():
+    rows = [
+        {"commodity_name": "Gold", "terminal_name": "A", "price_sell": 31000},
+        {"commodity_name": "Golden Medmon", "terminal_name": "B", "price_sell": 71000},
+        {"terminal_name": "C", "price_sell": 5},  # no name, no id: kept, like rows_for_commodity
+    ]
+    assert [r["terminal_name"] for r in rows_for_known_commodity(rows, "Gold", 33)] == ["A", "C"]
+    assert [r["terminal_name"] for r in rows_for_known_commodity(rows, " gold ")] == ["A", "C"]

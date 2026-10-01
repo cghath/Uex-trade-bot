@@ -306,6 +306,11 @@ date - no open item, nothing to record here.
       inventory reconciliation. aiv2 has the same client code. Tests:
       `tests/test_listing_by_id.py`, and the reconcile harness in `tests/test_inventory.py`
       now mocks the real shape. See PROJECT_CONTEXT.md entry 116
+- [ ] PR #102 - `ambiguous_commodity_text` (`bot/cogs/prices.py`) ends a list of more than five
+      names with "and N more". aiv2's version (from its own `c4f1aa6`) appends " ..." and then
+      the sentence's period, so the question reads "Name 4 .... Which one do you mean?". Test:
+      `test_ambiguous_commodity_text_lists_at_most_five_names` in `tests/test_price_command.py`.
+      See PROJECT_CONTEXT.md entry 118
 
 ## To port: aiv2 -> production
 
@@ -320,7 +325,7 @@ date - no open item, nothing to record here.
       the unmerged `feature/price-outlier-detection` branch - porting this entry likely
       means merging that branch rather than re-implementing from scratch, but check it's
       still current (and still unmerged) before assuming a fresh port is needed.
-- [ ] aiv2 commit `f2785ae` - Refinery Advisor finds sell prices for ores UEX
+- [x] aiv2 commit `f2785ae` - Refinery Advisor finds sell prices for ores UEX
       links only from the refined side, and signs negative yield bonuses ("-3%", not "+-3%"):
       new `refined_form`/`format_yield_bonus` (`bot/uex/refinery.py`), used in
       `bot/cogs/refinery.py`; 5 new tests in `tests/test_refinery.py`. Checked live: 5 of 32
@@ -329,7 +334,8 @@ date - no open item, nothing to record here.
       shows no sell price for them today. Found through aiv2 chat testing. Production's
       `bot/uex/refinery.py` and `tests/test_refinery.py` matched aiv2's before this change, so
       it ports cleanly.
-- [ ] aiv2 commit `c4f1aa6` - Price only the commodity asked for. UEX's
+      (ported to production in PR #101, PROJECT_CONTEXT.md entry 117)
+- [x] aiv2 commit `c4f1aa6` - Price only the commodity asked for. UEX's
       `/commodities_prices?commodity_name=` matches by SUBSTRING, and every lookup by name used
       the mixed rows as-is. Checked live 2026-09-29: "Gold" returns Gold + Golden Medmon, so
       `/price Gold` shows Golden Medmon's 71,000 (real Gold sells for about 31,000) and
@@ -346,3 +352,4 @@ date - no open item, nothing to record here.
       one), `test_trading.py`, `test_price_command.py`, `test_refinery.py`. Skip aiv2's chat
       price tool, its `price_summary.py` facts and the evals - production has no AI. Port the
       refinery entry above (`f2785ae`) first: both touch the refinery sell-price lookup.
+      (ported to production in PR #102, PROJECT_CONTEXT.md entry 118)

@@ -18,13 +18,15 @@ from bot.uex.refinery import (
     SPEED_LABELS,
     combine_mining_systems,
     display_terminal_name,
+    format_yield_bonus,
     high_yield_refining_methods,
     rank_refinery_terminals,
+    refined_form,
     resolve_raw_commodity,
     select_terminals_to_show,
 )
 from bot.uex.route_presentation import add_chunked_fields
-from bot.uex.trading import best_sell_locations
+from bot.uex.trading import best_sell_locations, rows_for_known_commodity
 
 MAX_SELL_LOCATIONS = 3
 # Minimum refineries shown; every refinery in the ore's own mining system is shown even
@@ -192,7 +194,7 @@ class Refinery(commands.Cog):
             lines = []
             for terminal in ranked_terminals:
                 per_commodity = ", ".join(
-                    f"{name} +{bonus}%" for name, bonus in terminal.per_commodity.items()
+                    f"{name} {format_yield_bonus(bonus)}" for name, bonus in terminal.per_commodity.items()
                 )
                 missing = [c["name"] for c in resolved if c["name"] not in terminal.per_commodity]
                 missing_note = f" (no data: {', '.join(missing)})" if missing else ""
@@ -218,18 +220,20 @@ class Refinery(commands.Cog):
 
         seen_parent_ids: set[int] = set()
         for commodity in resolved:
-            id_parent = commodity.get("id_parent")
-            if not id_parent or id_parent in seen_parent_ids:
+            # 5 ores link to their refined form only from the refined side (refined_form).
+            refined = refined_form(commodities, commodity)
+            if refined is None or refined.get("id") in seen_parent_ids:
                 continue
-            seen_parent_ids.add(id_parent)
-            refined = next((c for c in commodities if c.get("id") == id_parent), None)
-            if refined is None:
-                continue
+            seen_parent_ids.add(refined.get("id"))
             prices_failed = False
             try:
                 price_rows = await self.bot.uex.get_commodities_prices(commodity_name=refined["name"])
             except UexApiError:
                 price_rows, prices_failed = [], True
+            # UEX matches commodity_name as a SUBSTRING - refined Gold's lookup also returned
+            # Golden Medmon, whose 71,000 was posted as "Gold — best sell price" (real Gold
+            # ~31,000). Only the refined commodity's own rows, by its id.
+            price_rows = rows_for_known_commodity(price_rows, refined["name"], refined.get("id"))
             top_sell = best_sell_locations(price_rows, limit=MAX_SELL_LOCATIONS)
             if top_sell:
                 lines = [f"**{r['terminal_name']}** — {r['price_sell']:.2f} aUEC/unit" for r in top_sell]
