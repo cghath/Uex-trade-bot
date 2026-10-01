@@ -64,7 +64,7 @@ date - no open item, nothing to record here.
       deliberately does NOT fall back to the full catalog the way Marketplace's
       `traded_item_autocomplete` does, since an item missing here means it's genuinely not
       sold anywhere, not just a gap in the bot's own tracking
-- [ ] PR #58 - Add
+- [x] PR #58 - Add
       `/where-to-buy-ship`: every in-game terminal that sells or rents one ship, aUEC prices
       cheapest first, rentals grouped per star system and labelled as the 1-day rate. No
       location option or distance sort, deliberately (only 7 terminals sell ships). A buy or
@@ -76,14 +76,18 @@ date - no open item, nothing to record here.
       `get_vehicle_rental_prices_all`, each with a 12h `_ENDPOINT_CACHE_TTL` entry
       (`bot/uex/client.py`, new `bot/uex/ship_shops.py`, new `bot/cogs/ship_shops.py`,
       `bot/main.py`'s `INITIAL_COGS`, `bot/cogs/help.py`'s `CATEGORIES`, new
-      `tests/test_ship_shops.py`)
-- [ ] PR #59 - Time-limit `/ingame-item-finder`'s (and `/where-to-buy-ship`'s) autocomplete
+      `tests/test_ship_shops.py`) (ported: aiv2 34b7003, as `/ai-where-to-buy-ship` with #92's
+      shop names, plus a chat tool built on the same reply)
+- [x] PR #59 - Time-limit `/ingame-item-finder`'s (and `/where-to-buy-ship`'s) autocomplete
       so a slow or cold UEX response returns no suggestions within Discord's ~3s deadline,
       instead of silently timing out: new `bot/autocomplete.py` `gather_within()` (stops
       waiting at 2.5s without cancelling, so the fetch still fills the cache), plus a
       `cog_load` cache pre-load in both cogs. Port the item-finder half if aiv2 has
       `/ingame-item-finder`. The same PR's `ship_parts_shopping_entries` migration only
       matters if aiv2 ever ported `/ship-parts-finder`. See PROJECT_CONTEXT.md entry 82.
+      (ported: the `/where-to-buy-ship` half, `bot/autocomplete.py` and its `cog_load`
+      pre-load, in aiv2 34b7003. aiv2 has no `/ingame-item-finder` or `/ship-parts-finder`
+      yet; porting those from current production brings the rest of this PR with them)
 - [ ] PR #60 - `/ship-parts-finder`'s
       comparison text is rebuilt (new `bot/uex/ship_part_display.py`), with a Weapons
       category. Fit is now decided by the wiki's size and tags instead of UEX's catalog size
