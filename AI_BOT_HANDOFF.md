@@ -306,7 +306,7 @@ date - no open item, nothing to record here.
       inventory reconciliation. aiv2 has the same client code. Tests:
       `tests/test_listing_by_id.py`, and the reconcile harness in `tests/test_inventory.py`
       now mocks the real shape. See PROJECT_CONTEXT.md entry 116
-- [ ] PR #TBD - `ambiguous_commodity_text` (`bot/cogs/prices.py`) ends a list of more than five
+- [ ] PR #102 - `ambiguous_commodity_text` (`bot/cogs/prices.py`) ends a list of more than five
       names with "and N more". aiv2's version (from its own `c4f1aa6`) appends " ..." and then
       the sentence's period, so the question reads "Name 4 .... Which one do you mean?". Test:
       `test_ambiguous_commodity_text_lists_at_most_five_names` in `tests/test_price_command.py`.
@@ -352,4 +352,4 @@ date - no open item, nothing to record here.
       one), `test_trading.py`, `test_price_command.py`, `test_refinery.py`. Skip aiv2's chat
       price tool, its `price_summary.py` facts and the evals - production has no AI. Port the
       refinery entry above (`f2785ae`) first: both touch the refinery sell-price lookup.
-      (ported to production in PR #TBD, PROJECT_CONTEXT.md entry 118)
+      (ported to production in PR #102, PROJECT_CONTEXT.md entry 118)
