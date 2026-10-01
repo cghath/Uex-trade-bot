@@ -607,8 +607,16 @@ class UexClient:
         Cached briefly (60s) by default. Pass use_cache=False for a stock/status decision
         that can't tolerate a stale read - e.g. deciding how much of a tracked listing sold
         before cancelling or relisting it.
+
+        Always a list. An `id` lookup is answered with the one listing as a bare object
+        (or `false` when there's none), not a one-row list - checked live on 2026-10-01.
+        Every caller reads `rows[0]`, so a bare object raised `KeyError: 0` and stalled
+        inventory reconciliation; it's wrapped here instead.
         """
-        return await self._get("marketplace_listings", params=filters, use_cache=use_cache) or []
+        data = await self._get("marketplace_listings", params=filters, use_cache=use_cache)
+        if isinstance(data, dict):
+            return [data] if data else []
+        return data or []
 
     async def get_marketplace_trends(self, **filters: Any) -> list[dict[str, Any]]:
         """Marketplace items with the most negotiation activity right now. No auth required."""

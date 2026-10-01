@@ -300,6 +300,12 @@ date - no open item, nothing to record here.
       the player's own. aiv2 shows the same lines unlabelled. Tests:
       `tests/test_risk_tolerance.py`, `tests/test_backup_routes.py`. See PROJECT_CONTEXT.md
       entry 115
+- [ ] `UexClient.get_marketplace_listings` wraps UEX's bare-object answer to an `id=` lookup
+      in a list (`bot/uex/client.py`). UEX never sends a one-row list there, so every
+      `rows[0]` caller raised `KeyError: 0` once a tracked listing was live, which stalled
+      inventory reconciliation. aiv2 has the same client code. Tests:
+      `tests/test_listing_by_id.py`, and the reconcile harness in `tests/test_inventory.py`
+      now mocks the real shape. See PROJECT_CONTEXT.md entry 116
 
 ## To port: aiv2 -> production
 
