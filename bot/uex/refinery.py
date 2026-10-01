@@ -9,6 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from bot.uex.trading import resolve_raw_material_name
+
 HIGH_YIELD_RATING = 3
 
 COST_LABELS = {1: "low", 2: "medium", 3: "high"}
@@ -30,7 +32,13 @@ def resolve_raw_commodity(commodities: list[dict[str, Any]], query: str) -> dict
     substring_matches = [c for c in candidates if query_lower in (c.get("name") or "").lower()]
     if len(substring_matches) == 1:
         return substring_matches[0]
-    return None
+    # A typo sent without picking a suggestion, scored against every raw material so a
+    # non-refinable ore's typo can't land on a refinable one (resolve_raw_material_name).
+    corrected = resolve_raw_material_name(
+        query, [c["name"] for c in candidates if c.get("name")],
+        compete_with=[c["name"] for c in commodities if c.get("is_raw") and c.get("name")],
+    )
+    return next((c for c in candidates if c.get("name") == corrected), None) if corrected else None
 
 
 def refined_form(commodities: list[dict[str, Any]], raw: dict[str, Any]) -> dict[str, Any] | None:
