@@ -143,12 +143,20 @@ def cargo_item_warnings(item: _CargoItemLike, *, status_lookup: StatusLookup, pr
     return lines
 
 
-def cargo_item_line(item: _CargoItemLike) -> str:
-    """'• **Name:** N SCU · +P/SCU · **T profit**' - one line per cargo item."""
-    return (
+def cargo_item_line(item: _CargoItemLike, *, risk: bool = False) -> str:
+    """'• **Name:** N SCU · +P/SCU · **T profit**' - one line per cargo item.
+
+    `risk` adds the commodity's own cargo-risk label (format_commodity_risk), for cargo suggested beside a route with
+    no warning lines of its own: a hedge, or another commodity in a backup load. PR #96 removed the risk-tolerance
+    filter on the grounds that every route labels risky cargo, but these lines carried no label, so an illegal hedge
+    showed up looking unflagged (workflow audit 2026-09-30)."""
+    line = (
         f"• **{item.commodity_name}:** {item.quantity_scu:,.0f} SCU · "
         f"+{item.profit_per_scu:,.0f}/SCU · **{item.profit:,.0f} profit**"
     )
+    if risk and (label := format_commodity_risk(item.source)):
+        line += f" · {label}"
+    return line
 
 
 def cargo_confidences(

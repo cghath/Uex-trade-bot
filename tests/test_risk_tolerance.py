@@ -199,7 +199,7 @@ def test_top_routes_with_only_flagged_goods_still_shows_them(tmp_path, tolerance
     assert "WiDoW" in text and "Quantainium" in text
 
 
-def test_top_routes_hedge_line_can_offer_flagged_cargo(tmp_path):
+def test_top_routes_hedge_line_offers_flagged_cargo_with_its_label(tmp_path):
     from tests.test_ranked_routes_hedge import _make_cog, _route, _route_text
 
     async def run():
@@ -214,7 +214,9 @@ def test_top_routes_hedge_line_can_offer_flagged_cargo(tmp_path):
         return _route_text(interaction)
 
     text = asyncio.run(run())
-    assert "Hedge:" in text and "Cobalt" in text, text
+    hedges = [line for line in text.splitlines() if line.startswith("Hedge:")]
+    # labelled as risky, not just offered (workflow audit 2026-09-30: no label, so it looked unflagged)
+    assert hedges and "Cobalt" in hedges[0] and ILLEGAL_LABEL in hedges[0], text
 
 
 # ---- /best-route --------------------------------------------------------------------------
@@ -248,7 +250,7 @@ def test_best_route_shows_the_label_and_no_tolerance_note(tmp_path, tolerance):
 
 
 @pytest.mark.parametrize("branch", ["uex_routes", "price_rows"])
-def test_best_route_hedge_line_can_offer_flagged_cargo(tmp_path, branch):
+def test_best_route_hedge_line_offers_flagged_cargo_with_its_label(tmp_path, branch):
     from tests.test_route_send_shape import _all_embed_text, _FakeInteraction, _fallback_best_route_cog
 
     async def run():
@@ -287,7 +289,9 @@ def test_best_route_hedge_line_can_offer_flagged_cargo(tmp_path, branch):
         return _all_embed_text(interaction)
 
     text = asyncio.run(run())
-    assert "Hedge:" in text and "Cobalt" in text, text
+    hedges = [line for line in text.splitlines() if line.startswith("Hedge:")]
+    # labelled as risky, not just offered (workflow audit 2026-09-30: no label, so it looked unflagged)
+    assert hedges and "Cobalt" in hedges[0] and ILLEGAL_LABEL in hedges[0], text
 
 
 # ---- the mixed-cargo commands -------------------------------------------------------------
@@ -393,7 +397,7 @@ def test_intelligence_brief_routes_carry_flagged_cargo_with_its_label(tmp_path):
 
 # ---- a tracking thread's hedge suggestion -------------------------------------------------
 
-def test_a_tracking_threads_hedge_can_offer_flagged_cargo(tmp_path):
+def test_a_tracking_threads_hedge_offers_flagged_cargo_with_its_label(tmp_path):
     from tests.test_route_progression import (
         _create_thread_for_legs,
         _fake_thread_channel,
@@ -427,4 +431,5 @@ def test_a_tracking_threads_hedge_can_offer_flagged_cargo(tmp_path):
 
     message = asyncio.run(run())
     assert "WiDoW" in message and "this could fill it" in message, message
+    assert ILLEGAL_LABEL in message, message
     assert "risk tolerance" not in message.lower()

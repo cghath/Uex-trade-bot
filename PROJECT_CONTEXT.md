@@ -4108,6 +4108,29 @@ they're in sync).
        Run against the code from before this change, all 20 fail, each because goods were
        left out or the setting was shown. `tests/test_preference_scope.py` also fails if any
        route command's code mentions `risk_tolerance`.
+     - Gap found afterwards: the labels covered each route's own cargo but not its hedge
+       lines, so an illegal hedge showed up unflagged. Fixed in entry 115.
+115. **Hedge and backup-route cargo carry their ⚠️ cargo-risk label.** Found by a workflow
+     audit of PR #96 on 2026-09-30. Entry 114 removed the risk-tolerance filter because every
+     route labels risky cargo, but only each route's own cargo was labelled.
+     - The gap: a "Hedge:" line (`/best-route`'s two branches, `/top-routes`' ranked list, a
+       tracking thread's "this could fill it" message) and the other cargo in a backup load
+       (`_load_lines` in `bot/uex/backup_routes.py`) printed `cargo_item_line` alone: name,
+       SCU and profit. With the filter gone, an illegal hedge such as WiDoW or Neon showed
+       up with no warning anywhere. On a tracking thread that message has no other route
+       context at all.
+     - Fix: `cargo_item_line(item, risk=True)` appends `format_commodity_risk(item.source)`,
+       the same label `cargo_item_warnings` gives `/mixed-routes`' cargo, "metadata
+       unavailable" included. The hedge rows already carry the flags, since
+       `get_mixed_route_market_rows` joins `commodity_reference`. The player's own commodity
+       in a backup load ("(yours)") and the unsold-cargo reroute line stay unlabelled: that
+       cargo is already bought.
+     - Backup loads never went through the risk filter, so their gap predates PR #96. It's
+       the same promise, so it's fixed here too.
+     - Tests: PR #96's three hedge tests only checked that a flagged hedge appears; they now
+       require the label on the hedge line itself. New:
+       `test_cargo_besides_the_players_own_carries_its_risk_label` in
+       `tests/test_backup_routes.py`.
 
 ## Where to look for what
 

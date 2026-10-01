@@ -993,7 +993,7 @@ class RouteProgression(commands.Cog):
             view = HedgeReportView(cog=self, hedge_id=hedge_id, side="buy")
             view.message = await channel.send(
                 f"That shortfall left ~{shortfall_scu:,.0f} SCU of cargo space unused - while "
-                f"you're still at **{leg.terminal_name}**, this could fill it:\n{cargo_item_line(item)}",
+                f"you're still at **{leg.terminal_name}**, this could fill it:\n{cargo_item_line(item, risk=True)}",
                 view=view,
             )
         except Exception:

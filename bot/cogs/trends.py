@@ -154,7 +154,7 @@ def _build_route_field(
         if headroom_note := stock_headroom_warning(cargo.limited_by):
             value_lines.append(f"⚠️ {headroom_note}")
             for hedge_item in hedge_items or ():
-                value_lines.append(f"Hedge: {cargo_item_line(hedge_item)}")
+                value_lines.append(f"Hedge: {cargo_item_line(hedge_item, risk=True)}")
     elif not ship_vehicle:
         value_lines.append(missing_ship_line or "Cargo: unknown (set a ship with /set-trading-preferences to see haulable SCU)")
 

@@ -701,7 +701,7 @@ class Prices(commands.Cog):
                                     exclude_commodity_id=id_commodity, remaining_capacity_scu=room.capacity_scu,
                                     remaining_budget=room.budget,
                                 ):
-                                    value_lines.append(f"Hedge: {cargo_item_line(hedge_item)}")
+                                    value_lines.append(f"Hedge: {cargo_item_line(hedge_item, risk=True)}")
                             except Exception:
                                 logger.warning("Hedge suggestion unavailable for /best-route", exc_info=True)
                 elif not ship_vehicle:
@@ -969,7 +969,7 @@ class Prices(commands.Cog):
                                 exclude_commodity_id=id_commodity, remaining_capacity_scu=room.capacity_scu,
                                 remaining_budget=room.budget,
                             ):
-                                value_lines.append(f"Hedge: {cargo_item_line(hedge_item)}")
+                                value_lines.append(f"Hedge: {cargo_item_line(hedge_item, risk=True)}")
                         except Exception:
                             logger.warning("Hedge suggestion unavailable for /best-route", exc_info=True)
             elif not ship_vehicle:
