@@ -990,7 +990,8 @@ class LoadoutView(BotView):
         self.cog = cog
         self.vehicle = vehicle
         # (terminal id, name) of the player's location, or None: ties then go to the cheaper part.
-        self.origin = origin
+        # Not `origin`: that is BotView's own, the interaction grey_out edits through.
+        self.origin_terminal = origin
         self.groups = groups
         # fit_key -> that slot's candidates (ShipPartsFinder.candidates_for_port).
         self.candidates = candidates
@@ -1045,10 +1046,10 @@ class LoadoutView(BotView):
         return None
 
     def _header(self) -> list[str]:
-        if self.origin is None:
+        if self.origin_terminal is None:
             shops = "Each part at its cheapest shop; ties go to the cheaper part."
         else:
-            where = f"**{self.origin[1]}**" if self.origin[1] else "your location"
+            where = f"**{self.origin_terminal[1]}**" if self.origin_terminal[1] else "your location"
             shops = f"Each part at its cheapest shop; ties go to the shop nearest {where}."
         lines = [f"**{self.vehicle.get('name')}** recommended loadout · **{self.profile}**",
                  f"-# {PROFILE_BLURBS[self.profile][0].upper()}{PROFILE_BLURBS[self.profile][1:]}. {shops}"]

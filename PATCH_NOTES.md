@@ -1,7 +1,14 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.47.
+the oldest entry below); the next new entry is 2.48.
+
+---
+
+## 2.47 - 2026-10-02 - Idle loadouts with a location
+
+**Fixed**
+- `/ship-loadout` - A loadout made with a location now greys out its buttons once it's been left idle, the same as one made without a location, and says how to get it back. Before, its buttons kept looking live but no longer answered. Done still removes it either way.
 
 ---
 

@@ -358,6 +358,10 @@ date - no open item, nothing to record here.
 
 ## To port: aiv2 -> production
 
+- [x] aiv2's ship-loadout port (uncommitted there on 2026-10-02) - `LoadoutView` keeps the
+      location as `origin_terminal`, not `origin`, which is `BotView`'s interaction: a loadout
+      with a location never greyed out when idle (`bot/cogs/ship_parts_finder.py`).
+      (ported to production in PR #TBD, PROJECT_CONTEXT.md entry 128)
 - [x] aiv2 commit `c3c14ec` (fix #1 only) - typo-tolerant ore names in `/where-to-mine` and
       `/refinery-advisor` (`resolve_raw_material_name` in `bot/uex/trading.py`). Not logged
       here when aiv2 made it; found in a 2026-10-01 review of aiv2's log. Its other fixes are
