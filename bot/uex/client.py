@@ -652,8 +652,16 @@ class UexClient:
         return await self._post("marketplace_advertise", json_body=fields, secret_key=secret_key)
 
     async def delete_marketplace_listing(self, listing_id: int, secret_key: str) -> Any:
-        """Delete one of the calling player's own marketplace listings."""
-        return await self._delete("marketplace_listings", params={"id": listing_id}, secret_key=secret_key)
+        """Delete one of the calling player's own marketplace listings.
+
+        Sends is_production=1, which UEX's own example URL carries (as 0, "for testing"). Without
+        it, two 48h-relist deletes on 2026-10-02 were answered "ok" while listings 175615 and
+        175616 stayed live, and the relist posts were then refused as listing_already_added - the
+        same silent non-production default POST /marketplace_advertise has without its own
+        is_production (bot/cogs/marketplace.py, bot/uex/inventory.py)."""
+        return await self._delete(
+            "marketplace_listings", params={"id": listing_id, "is_production": 1}, secret_key=secret_key,
+        )
 
     async def get_marketplace_prices_history(self, **filters: Any) -> list[dict[str, Any]]:
         """One row per Marketplace listing price CHANGE (not a fixed interval) - unlike
