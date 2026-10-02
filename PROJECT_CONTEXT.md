@@ -4574,6 +4574,28 @@ they're in sync).
        (2x S3) in all four profiles, Balanced 918,172 aUEC (was 1,025,248); the Avenger Titan
        keeps its MSD-322s. Tests in `tests/test_ship_loadout.py` and
        `tests/test_ship_loadout_command.py`; 5 mutations, all caught.
+130. **Listing deletes are sent as production deletes.** Live, 2026-10-02 05:32 EDT: the 48h
+     no-interest relist deleted the owner's two helmet listings (175615, 175616) to repost
+     them lower. UEX answered both DELETEs "ok" (the client raises on anything else, entry 45),
+     and both reposts came back HTTP 409 `listing_already_added`, a status UEX's docs don't
+     list. A fresh read-only GET 35 minutes later still showed both listings live at their old
+     prices, so the DM's "it currently has no active listing" was wrong: the old listings never
+     went away.
+     - Cause, most likely: `delete_marketplace_listing` sent only `id`. UEX's own example URL
+       for this DELETE also carries `is_production` (0, "for testing"), and POST
+       /marketplace_advertise without its `is_production` was already proven to create
+       listings that never went live (`bot/cogs/marketplace.py`) - the same silent
+       non-production default. Not proven directly: that would mean deleting a real listing
+       with the owner's secret key, which isn't this session's to use.
+     - Fix: the DELETE sends `is_production=1` (`bot/uex/client.py`). One call covers all
+       three deletes: the 48h relist, `/inventory-cancel-post` and the marketplace delete
+       button.
+     - Left as found: jobs 5 and 6 are `expired` and 7 and 8 `failed` on the Pi, while the old
+       listings stay live, so a sale of either wouldn't be tracked. The owner removes them on
+       UEX (or with the bot's delete once this is live, which also proves the fix), then
+       `/inventory-post-now`.
+     - Test: `test_delete_is_sent_as_a_production_delete` in
+       `tests/test_client_write_status.py` (fails on the old client).
 
 ## Where to look for what
 

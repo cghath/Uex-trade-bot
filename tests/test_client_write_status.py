@@ -43,6 +43,30 @@ def test_delete_with_undocumented_rejection_status_raises(tmp_path):
     asyncio.run(run())
 
 
+def test_delete_is_sent_as_a_production_delete():
+    """Live, 2026-10-02: without is_production, UEX answered two deletes "ok" and both listings
+    stayed up, so the relists that followed were refused as listing_already_added."""
+    async def run():
+        seen = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            return httpx.Response(200, json={"status": "ok", "data": None})
+
+        client = UexClient("fake", base_url="https://client-test.invalid")
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        try:
+            await client.delete_marketplace_listing(listing_id=175615, secret_key="fake")
+        finally:
+            await client.aclose()
+        return seen
+
+    (request,) = asyncio.run(run())
+    assert request.method == "DELETE" and request.url.path.endswith("/marketplace_listings")
+    assert dict(request.url.params) == {"id": "175615", "is_production": "1"}
+
+
 def test_post_with_undocumented_rejection_status_raises(tmp_path):
     """Same defect class on the write side: POST /marketplace_advertise's own
     user_active_listings_limit_reached (a real documented status) must raise, not return

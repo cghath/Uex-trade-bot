@@ -1,7 +1,14 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.49.
+the oldest entry below); the next new entry is 2.50.
+
+---
+
+## 2.49 - 2026-10-02 - Deletes that delete
+
+**Fixed**
+- Personal inventory relisting, `/inventory-cancel-post` and deleting a Marketplace listing - The bot now really removes your old listing on UEX. Before, UEX said the delete worked but the listing stayed up, so a 48h relist couldn't post the lower-priced copy and told you the item had no listing when the old one was still live.
 
 ---
 
