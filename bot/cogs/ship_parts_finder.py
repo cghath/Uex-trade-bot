@@ -16,7 +16,8 @@ missing for many parts UEX really lists. Stats come from the wiki's /items/{uuid
 a part the wiki has no detail for is still shown, just without stats.
 
 Each part is shown at its cheapest shop (with that shop's distance from the player's
-location), and the list is ranked by the category's key stat - see candidates_for_port.
+location, when they give one - it's optional, and without it ties go to the cheaper part),
+and the list is ranked by the category's key stat - see candidates_for_port.
 Every fitting part is kept and paged, never cut to a display limit (the repo's "filter
 before truncating" lesson). Display labels live in bot/uex/ship_part_display.py.
 
@@ -141,7 +142,8 @@ REFRESH_HINT = "Buttons not responding? Tap **↻ Refresh**."
 EXPIRED_NOTE = (f"⏸️ Closed after {BROWSER_IDLE_SECONDS // 60} minutes idle. Tap **↻ Refresh** to pick up where you left off - "
                 "your locked-in parts are saved.")
 _REFRESH_PREFIX = "ship-parts-browse:refresh"
-REFRESH_TEMPLATE = _REFRESH_PREFIX + r":(?P<vehicle>\d+):(?P<terminal>\d+):(?P<category>.*)"
+# An empty terminal is a browser opened without a location.
+REFRESH_TEMPLATE = _REFRESH_PREFIX + r":(?P<vehicle>\d+):(?P<terminal>\d*):(?P<category>.*)"
 MAX_CUSTOM_ID_CHARS = 100  # Discord's limit
 MAX_SELECT_OPTIONS = 25  # Discord's limit
 MESSAGE_LIMIT = 2000  # Discord's limit
@@ -614,12 +616,14 @@ class PartsBrowserView(BotView):
 
     Its ↻ Refresh button outlives it: see RefreshBrowserButton."""
     def __init__(
-        self, cog: "ShipPartsFinder", vehicle: dict, origin_terminal: tuple[int, str],
+        self, cog: "ShipPartsFinder", vehicle: dict, origin_terminal: tuple[int, str] | None,
         grouped_ports: dict[str, list[ShipPort]],
     ) -> None:
         super().__init__(timeout=BROWSER_IDLE_SECONDS)
         self.cog = cog
         self.vehicle = vehicle
+        # (terminal id, name) of the player's location, or None when they didn't give one:
+        # then no part shows a distance and ties go to the cheaper part.
         self.origin_terminal = origin_terminal
         self.grouped_ports = grouped_ports
         self.category: str | None = None
@@ -686,6 +690,10 @@ class PartsBrowserView(BotView):
                          "or listed without their stats. Try again in a few minutes.")
         return notes
 
+    @property
+    def origin_id(self) -> int | None:
+        return self.origin_terminal[0] if self.origin_terminal is not None else None
+
     def text(self) -> str:
         # Always ends with how to recover, since a dead control looks exactly like a live one.
         return f"{self._body()}\n\n{EXPIRED_NOTE if self.expired else REFRESH_HINT}"
@@ -746,7 +754,7 @@ class PartsBrowserView(BotView):
         """(Re)add ↻ Refresh as the last button, carrying the current category so a refresh
         comes back to it."""
         self._remove_items(_RefreshStub)
-        self.add_item(_RefreshStub(refresh_custom_id(self.vehicle.get("id"), self.origin_terminal[0], self.category)))
+        self.add_item(_RefreshStub(refresh_custom_id(self.vehicle.get("id"), self.origin_id, self.category)))
 
     async def on_timeout(self) -> None:
         """Grey out everything but ↻ Refresh and say so, instead of leaving controls that
@@ -780,7 +788,7 @@ class PartsBrowserView(BotView):
         if self.selected_port is not None:
             try:
                 candidates = await self.cog.candidates_for_port(
-                    self.selected_port, category=category, origin_id=self.origin_terminal[0],
+                    self.selected_port, category=category, origin_id=self.origin_id,
                 )
             except (UexApiError, WikiApiError) as exc:
                 logger.info("Refresh couldn't reload %s options: %s", category, exc)
@@ -840,7 +848,7 @@ class PartsBrowserView(BotView):
         if port is not None:
             try:
                 candidates = await self.cog.candidates_for_port(
-                    port, category=self.category, origin_id=self.origin_terminal[0],
+                    port, category=self.category, origin_id=self.origin_id,
                 )
             except Exception as exc:
                 # Any failure, not only UEX's or the wiki's (audit REL-13): the message used
@@ -1223,10 +1231,11 @@ def _vehicle_id(vehicle: dict) -> int | None:
         return None
 
 
-def refresh_custom_id(id_vehicle, id_terminal, category: str | None) -> str:
-    custom_id = f"{_REFRESH_PREFIX}:{int(id_vehicle)}:{int(id_terminal)}:{category or ''}"
+def refresh_custom_id(id_vehicle, id_terminal: int | None, category: str | None) -> str:
+    terminal = "" if id_terminal is None else int(id_terminal)
+    custom_id = f"{_REFRESH_PREFIX}:{int(id_vehicle)}:{terminal}:{category or ''}"
     if len(custom_id) > MAX_CUSTOM_ID_CHARS:  # an unexpectedly long category name: reopen without it
-        custom_id = f"{_REFRESH_PREFIX}:{int(id_vehicle)}:{int(id_terminal)}:"
+        custom_id = f"{_REFRESH_PREFIX}:{int(id_vehicle)}:{terminal}:"
     return custom_id
 
 
@@ -1245,8 +1254,8 @@ class _RefreshStub(discord.ui.Button):
 
 class RefreshBrowserButton(discord.ui.DynamicItem[discord.ui.Button], template=REFRESH_TEMPLATE):
     """Handles ↻ Refresh on any browsing message, even one whose view timed out or was lost
-    in a restart: the ship, location and category ride in the button's own custom_id."""
-    def __init__(self, id_vehicle: int, id_terminal: int, category: str | None) -> None:
+    in a restart: the ship, location (if any) and category ride in the button's own custom_id."""
+    def __init__(self, id_vehicle: int, id_terminal: int | None, category: str | None) -> None:
         super().__init__(discord.ui.Button(
             label=REFRESH_LABEL, style=discord.ButtonStyle.secondary, row=4,
             custom_id=refresh_custom_id(id_vehicle, id_terminal, category),
@@ -1257,7 +1266,8 @@ class RefreshBrowserButton(discord.ui.DynamicItem[discord.ui.Button], template=R
 
     @classmethod
     async def from_custom_id(cls, interaction: discord.Interaction, item: discord.ui.Button, match, /):
-        return cls(int(match["vehicle"]), int(match["terminal"]), match["category"] or None)
+        terminal = int(match["terminal"]) if match["terminal"] else None
+        return cls(int(match["vehicle"]), terminal, match["category"] or None)
 
     async def callback(self, interaction: discord.Interaction) -> None:
         cog = interaction.client.get_cog("ShipPartsFinder")
@@ -1655,19 +1665,23 @@ class ShipPartsFinder(commands.Cog):
     )
     @app_commands.describe(
         ship="Ship name, e.g. 'Avenger Stalker' or 'Cutlass Black' - autocompletes.",
-        location="Terminal you're at - autocompletes.",
+        location="Terminal you're at, so each shop shows its distance - autocompletes. Optional.",
     )
     @app_commands.autocomplete(ship=ship_name_autocomplete, location=terminal_name_autocomplete)
-    async def ship_parts_finder(self, interaction: discord.Interaction, ship: str, location: str) -> None:
+    async def ship_parts_finder(
+        self, interaction: discord.Interaction, ship: str, location: str | None = None,
+    ) -> None:
         await interaction.response.defer(ephemeral=True)
 
-        resolved_location = await self.bot.db.resolve_terminal_id_by_name(location)
-        if resolved_location is None:
-            await interaction.followup.send(
-                f"Couldn't find a single terminal matching '{location}' - pick one from the autocomplete list.",
-                ephemeral=True,
-            )
-            return
+        resolved_location = None
+        if location:
+            resolved_location = await self.bot.db.resolve_terminal_id_by_name(location)
+            if resolved_location is None:
+                await interaction.followup.send(
+                    f"Couldn't find a single terminal matching '{location}' - pick one from the autocomplete list, "
+                    "or leave location out.", ephemeral=True,
+                )
+                return
 
         try:
             vehicles = await self.bot.uex.get_vehicles()
@@ -1727,7 +1741,9 @@ class ShipPartsFinder(commands.Cog):
             logger.warning("No usable wiki slot data for %s", vehicle.get("name"), exc_info=True)
             return f"The Star Citizen Wiki doesn't list usable component slots for **{vehicle.get('name')}** yet."
 
-    async def _build_browser(self, vehicle: dict, origin_terminal: tuple[int, str]) -> PartsBrowserView | str:
+    async def _build_browser(
+        self, vehicle: dict, origin_terminal: tuple[int, str] | None,
+    ) -> PartsBrowserView | str:
         """A fresh browsing view for one ship, or the message to show instead. Shared by the
         command and ↻ Refresh."""
         ports = await self._ports_or_message(vehicle)
@@ -1741,7 +1757,7 @@ class ShipPartsFinder(commands.Cog):
         return view
 
     async def refresh_browser(
-        self, interaction: discord.Interaction, id_vehicle: int, id_terminal: int, category: str | None,
+        self, interaction: discord.Interaction, id_vehicle: int, id_terminal: int | None, category: str | None,
     ) -> None:
         """Rebuild the browser on the clicked message: same ship, location and category."""
         await interaction.response.defer()
@@ -1760,7 +1776,7 @@ class ShipPartsFinder(commands.Cog):
                 pass
 
     async def _rebuild_browser(
-        self, interaction: discord.Interaction, id_vehicle: int, id_terminal: int, category: str | None,
+        self, interaction: discord.Interaction, id_vehicle: int, id_terminal: int | None, category: str | None,
     ) -> None:
         try:
             vehicles = await self.bot.uex.get_vehicles()
@@ -1774,7 +1790,7 @@ class ShipPartsFinder(commands.Cog):
             )
             return
         # Only the id is used downstream; the location's name isn't shown by the browser.
-        view = await self._build_browser(vehicle, (id_terminal, ""))
+        view = await self._build_browser(vehicle, (id_terminal, "") if id_terminal is not None else None)
         if isinstance(view, str):
             await interaction.followup.send(view, ephemeral=True)
             return
@@ -1834,12 +1850,13 @@ class ShipPartsFinder(commands.Cog):
         await self._post_loadout(interaction, vehicle, origin, profile.value if profile else DEFAULT_PROFILE)
 
     async def open_loadout(
-        self, interaction: discord.Interaction, vehicle: dict, origin_terminal: tuple[int, str],
+        self, interaction: discord.Interaction, vehicle: dict, origin_terminal: tuple[int, str] | None,
     ) -> None:
-        """The parts browser's "Recommend a loadout": the ship and location being browsed. A
-        browser rebuilt by ↻ Refresh has only the location's id, so its name is looked up."""
+        """The parts browser's "Recommend a loadout": the ship and location (if any) being
+        browsed. A browser rebuilt by ↻ Refresh has only the location's id, so its name is
+        looked up."""
         await interaction.response.defer(ephemeral=True, thinking=True)
-        if not origin_terminal[1]:
+        if origin_terminal is not None and not origin_terminal[1]:
             origin_terminal = (origin_terminal[0], await self._terminal_name(origin_terminal[0]))
         await self._post_loadout(interaction, vehicle, origin_terminal, DEFAULT_PROFILE)
 

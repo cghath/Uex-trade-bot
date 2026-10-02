@@ -59,6 +59,15 @@ def test_refresh_custom_id_round_trips_through_the_registered_template():
     assert asyncio.run(RefreshBrowserButton.from_custom_id(NS(), NS(), blank)).category is None
 
 
+def test_a_browser_opened_without_a_location_refreshes_without_one():
+    view = PartsBrowserView(NS(), VEHICLE, None, GROUPED)
+    assert _refresh(view).custom_id == "ship-parts-browse:refresh:100::"
+    match = RefreshBrowserButton.__discord_ui_compiled_template__.fullmatch(refresh_custom_id(100, None, "Radar"))
+    item = asyncio.run(RefreshBrowserButton.from_custom_id(NS(), NS(), match))
+    assert (item.id_vehicle, item.id_terminal, item.category) == (100, None, "Radar")
+    assert refresh_custom_id(100, None, "x" * 120) == "ship-parts-browse:refresh:100::"
+
+
 def test_an_overlong_category_is_dropped_rather_than_breaking_discords_100_char_limit():
     custom_id = refresh_custom_id(100, 5, "x" * 120)
     assert len(custom_id) <= 100 and custom_id.endswith(":")
@@ -185,6 +194,20 @@ def test_refresh_rebuilds_the_same_message_back_on_the_same_category():
     assert next(o for o in new.category_select.options if o.default).value == "Radar"
     port, kwargs = cog.candidates_for_port.await_args.args[0], cog.candidates_for_port.await_args.kwargs
     assert port is RADAR and kwargs["origin_id"] == 5
+
+
+def test_refresh_without_a_location_rebuilds_without_one():
+    async def run():
+        cog = _cog()
+        interaction = _click()
+        await cog.refresh_browser(interaction, 100, None, "Radar")
+        return cog, interaction
+
+    cog, interaction = asyncio.run(run())
+    new = interaction.edit_original_response.await_args.kwargs["view"]
+    assert new.origin_terminal is None and new.category == "Radar"
+    assert cog.candidates_for_port.await_args.kwargs["origin_id"] is None
+    assert _refresh(new).custom_id == "ship-parts-browse:refresh:100::Radar"
 
 
 def test_refresh_defers_before_its_slow_lookups():
