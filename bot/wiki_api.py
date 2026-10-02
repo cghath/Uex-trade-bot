@@ -37,14 +37,36 @@ class WikiApiError(Exception):
 
 
 class WikiDuplicateNameError(WikiApiError):
-    """The wiki lists several ships under the one exact name asked for (the Cutlass Black has a
-    second, BIS2950 row of the same name; about a dozen ships do, 2026-10-01), so the name can't
-    say whose slots to read. Its own type so the finder can say so instead of "no slots"."""
+    """The wiki lists several ships under the one exact name asked for, and none of them is
+    the plain ship the others are editions of (base_vehicle_row), so the name can't say whose
+    slots to read. On the live wiki (2026-10-02) only the five "PYAM Exec" pairs, none of them
+    a ship UEX lists. Its own type so the finder can say so instead of "no slots"."""
 
     def __init__(self, vehicle_name: str, count: int) -> None:
         super().__init__(f"the wiki lists {count} ships named {vehicle_name!r}")
         self.vehicle_name = vehicle_name
         self.count = count
+
+
+def base_vehicle_row(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Of the /vehicles rows sharing one exact name, the plain ship: the row whose
+    `class_name` every other row's extends. The Cutlass Black ('DRAK_Cutlass_Black') has a
+    second row, its Best in Show edition ('DRAK_Cutlass_Black_BIS2950'); a dozen ships UEX
+    lists had such editions on the live wiki (2026-10-02: Carrack, Cutlass Black/Blue/Red,
+    Eclipse, F8C Lightning, Hammerhead, Idris-P, Polaris, S-65 Stingray, Valkyrie, Zeus Mk II
+    CL), and UEX's plain name means the standard ship. Most editions have the same slots and
+    stock parts; the Hammerhead GS, the Idris-P TSG/FW-25 and the Zeus Collector differ, which
+    is why the base row is chosen rather than any row.
+
+    None when no single row is that base - two rows of one class_name, or the "PYAM Exec"
+    pairs ('..._Exec_Stealth' / '..._Exec_Military'), neither extending the other - so the
+    caller still declines rather than guess. A single row is its own base."""
+    if len(rows) == 1:
+        return rows[0]
+    names = [str(row.get("class_name") or "") for row in rows]
+    bases = [rows[i] for i, base in enumerate(names)
+             if base and all(other.startswith(base + "_") for j, other in enumerate(names) if j != i)]
+    return bases[0] if len(bases) == 1 else None
 
 
 class WikiUnavailableError(WikiApiError):
@@ -220,13 +242,14 @@ class WikiApiClient:
         """get_vehicle_ports plus the ship's own `port_tags` (e.g. ['AEGS_Avenger_Base']) -
         a ship-specific part like the 'Reliant Toshima Turret' carries `required_tags`
         (['MISC_Reliant_Base']) that only a ship with those tags satisfies. ([], []) when
-        no ship has that exact name; WikiDuplicateNameError when several do."""
+        no ship has that exact name. Several rows of the name resolve to the plain ship they're
+        editions of (base_vehicle_row); WikiDuplicateNameError when there's no such row."""
         rows = await self._exact_vehicle_rows(vehicle_name)
-        if len(rows) > 1:
-            raise WikiDuplicateNameError(vehicle_name, len(rows))
         if not rows:
             return [], []
-        row = rows[0]
+        row = base_vehicle_row(rows)
+        if row is None:
+            raise WikiDuplicateNameError(vehicle_name, len(rows))
         ports = row.get("ports")
         tags = row.get("port_tags")
         return (ports if isinstance(ports, list) else [],
@@ -234,8 +257,8 @@ class WikiApiClient:
 
     async def _exact_vehicle_rows(self, vehicle_name: str) -> list[dict[str, Any]]:
         """Every /vehicles list row named exactly `vehicle_name` (case-insensitive): usually
-        one, none for a ship the wiki doesn't have, several for a name the wiki uses twice (the
-        Cutlass Black has a second, BIS2950 row of the same name)."""
+        one, none for a ship the wiki doesn't have, several for a ship with editions of the
+        same name (see base_vehicle_row)."""
         body = await self._get_json("/vehicles", {"filter[name]": vehicle_name, "page[size]": 10})
         rows = self._rows(body, "/vehicles")
         target = vehicle_name.strip().lower()
@@ -248,10 +271,12 @@ class WikiApiClient:
         get_vehicle_loadout reads have `ports: null` under every hardpoint, and the gimbal's
         own item detail has its gun slot empty (checked live on the Avenger Titan, 4.10.1).
 
-        Resolved by exact name first, like get_vehicle_loadout, so [] when the name doesn't
-        resolve to exactly one ship. Two requests, so the caller caches the result."""
+        Resolved by exact name first, like get_vehicle_loadout (an edition's name to its base
+        row), so [] when the name doesn't resolve to one ship. Two requests, so the caller
+        caches the result."""
         rows = await self._exact_vehicle_rows(vehicle_name)
-        vehicle_uuid = rows[0].get("uuid") if len(rows) == 1 else None
+        row = base_vehicle_row(rows) if rows else None
+        vehicle_uuid = row.get("uuid") if row is not None else None
         if not isinstance(vehicle_uuid, str) or not _UUID_RE.fullmatch(vehicle_uuid):
             return []
         body = await self._get_json(f"/vehicles/{vehicle_uuid}")

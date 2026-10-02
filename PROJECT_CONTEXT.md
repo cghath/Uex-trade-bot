@@ -4501,6 +4501,28 @@ they're in sync).
      - Tests in `tests/test_ship_loadout_command.py` (live, idle, after a restart, someone
        else's, a refused delete) and `tests/test_ship_parts_refresh.py` (registration); 12
        mutations, all caught.
+126. **Ships the wiki lists twice now resolve to the plain ship.** The real fix for entry
+     122's known issue, on the owner's request. 12 ships UEX lists (Carrack, Cutlass
+     Black/Blue/Red, Eclipse, F8C Lightning, Hammerhead, Idris-P, Polaris, S-65 Stingray,
+     Valkyrie, Zeus Mk II CL) share their exact name with a second wiki `/vehicles` row, so
+     `/ship-parts-finder` and `/ship-loadout` showed the known-issue warning instead of slots.
+     - `base_vehicle_row` (`bot/wiki_api.py`): of the rows sharing a name, the one whose
+       `class_name` every other row's extends at a word boundary (`DRAK_Cutlass_Black` for
+       `DRAK_Cutlass_Black_BIS2950`). Both `get_vehicle_loadout` (the finder's slots) and
+       `get_vehicle_stock_ports` (the loadout's stock tree) use it. With no single such row
+       (two rows of one class name, or the five "PYAM Exec" pairs, `..._Exec_Stealth` /
+       `..._Exec_Military`, none a ship UEX lists) it still declines: `WikiDuplicateNameError`
+       and the known-issue warning, never a guess.
+     - Checked first, as the ROADMAP item asked, on the wiki list of 2026-10-01: the base
+       row is the standard ship in all 12, and the editions are named variants of it (Best
+       in Show 2950, Plat, Collector, GS, TSG, FW-25). Nine editions have identical slots and
+       stock parts; the Hammerhead GS (radar size), the Idris-P TSG (no PDCs) and FW-25
+       (cooler and turret sizes) and the Zeus Collector (8 stock parts) differ - which is why
+       the base row is picked rather than any row.
+     - Live: all 12 now build full loadouts (the Cutlass Black: 10 lines, its turret guns
+       included, 1,025,248 aUEC in Balanced). The Pi had no saved slots for any of them, so
+       the finder reads them live until the hourly reference check saves them (they were
+       marked checked with 0 slots, so within a day). 6 mutations, all caught.
 
 ## Where to look for what
 

@@ -348,6 +348,10 @@ date - no open item, nothing to record here.
       `BotView.grey_out(keep=)` in `bot/discord_ui.py`): removes the loadout message, and keeps
       working after the view goes idle or the bot restarts. Needs the loadout PRs above first.
       See PROJECT_CONTEXT.md entry 125
+- [ ] PR #111 - Ships the wiki lists twice resolve to the plain ship (`base_vehicle_row` in
+      `bot/wiki_api.py`, used by `get_vehicle_loadout` and `get_vehicle_stock_ports`): the
+      Cutlass Black, Carrack, Polaris and nine more get their slots. Tests:
+      `tests/test_wiki_api.py`. See PROJECT_CONTEXT.md entry 126
 
 ## To port: aiv2 -> production
 

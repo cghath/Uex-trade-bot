@@ -946,7 +946,9 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
   (`locked_turret_gun_ports`, entry 124), but the finder's browser still skips manned
   turrets (`TurretBase`) and the guns inside locked gimbals, so the Idris-M's turret guns
   can't be browsed there.
-- [ ] **Ships the wiki lists twice** *(complexity: Low)*: 12 ships UEX lists (Carrack,
+- [x] **Ships the wiki lists twice**: Shipped 2026-10-02 (`base_vehicle_row`,
+  PROJECT_CONTEXT.md entry 126): the base row was the standard ship in all 12. The original
+  note, kept for history: 12 ships UEX lists (Carrack,
   Cutlass Black/Blue/Red, Eclipse, F8C Lightning, Hammerhead, Idris-P, Polaris, S-65 Stingray,
   Valkyrie, Zeus Mk II CL) share their exact name with a second wiki /vehicles row (a BIS2950,
   Collector or other edition), so `/ship-parts-finder` and `/ship-loadout` can't read their
