@@ -358,7 +358,7 @@ date - no open item, nothing to record here.
 - [ ] PR #114 - `/ship-loadout` keeps every ship's stock missile racks (`STOCK_RACKS` in
       `pick_for_slot`, `bot/uex/ship_loadout.py`; the kept line shows what the rack holds in
       every profile). An empty rack slot still gets a pick. See PROJECT_CONTEXT.md entry 129
-- [ ] PR #TBD - `delete_marketplace_listing` sends `is_production=1` (`bot/uex/client.py`):
+- [ ] PR #115 - `delete_marketplace_listing` sends `is_production=1` (`bot/uex/client.py`):
       without it UEX answered deletes "ok" and the listings stayed live. Check aiv2's copy of
       the client. See PROJECT_CONTEXT.md entry 130
 
