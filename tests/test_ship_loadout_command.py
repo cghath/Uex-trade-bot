@@ -587,7 +587,7 @@ def test_a_location_sends_ties_to_the_nearest_shop_and_shows_distances(tmp_path,
     assert "**S1 Shield Generator Left** → **Rhada Twin** · 3,000 shield HP (was 2,160 shield HP stock) · 20,000 aUEC · " \
            "Shop 12 · 5.0 Gm" in text
     assert "ties go to the shop nearest **Area 18 TDD**" in text
-    assert view.origin == (99, "Area 18 TDD")
+    assert view.origin_terminal == (99, "Area 18 TDD")
     origins = {c.args[0] for c in cog.bot.uex.get_terminal_distance.await_args_list}
     assert origins == {99}
 
@@ -760,7 +760,7 @@ def test_the_browsers_button_opens_a_loadout_for_the_ship_and_location_being_bro
     assert button.row == 3 and button.label == "Recommend a loadout"
     click.response.defer.assert_awaited_once_with(ephemeral=True, thinking=True)
     text, view = _posted(thread)
-    assert view.profile == "Balanced" and view.origin == (99, "Area 18 TDD") and view.owner_id == 1
+    assert view.profile == "Balanced" and view.origin_terminal == (99, "Area 18 TDD") and view.owner_id == 1
     assert "Shop 12 · 5.0 Gm" in text, "the browser's location ranks the shops"
     assert thread.mention in click.followup.send.await_args.args[0]
 
@@ -820,6 +820,24 @@ def test_an_idle_loadout_greys_out_and_says_how_to_get_it_back():
     assert all(child.disabled for child in view.children if not isinstance(child, _LoadoutDoneStub))
     assert not next(child for child in view.children if isinstance(child, _LoadoutDoneStub)).disabled
     assert LOADOUT_EXPIRED_NOTE in view.message.edit.await_args.kwargs["content"]
+
+
+def test_a_loadout_with_a_location_still_greys_out_when_idle():
+    """The location is the view's own `origin_terminal`, never BotView's `origin` (the interaction grey_out edits
+    through): stored as `origin`, a (terminal id, name) tuple made grey_out raise AttributeError and the idle
+    loadout kept its live-looking buttons. Found porting the loadout to the AI bot (2026-10-02); the test above only
+    covered a loadout with no location."""
+    async def run():
+        view = LoadoutView(NS(), VEHICLE, (99, "Area 18 TDD"), _many_groups(2), {}, owner_id=1)
+        view.message = NS(id=7, edit=AsyncMock(), flags=NS(ephemeral=False), channel=NS(get_partial_message=lambda _id: NS(edit=AsyncMock())))
+        await view.on_timeout()
+        return view
+
+    view = asyncio.run(run())
+    assert view.origin is None and view.origin_terminal == (99, "Area 18 TDD")
+    assert all(child.disabled for child in view.children if not isinstance(child, _LoadoutDoneStub))
+    content = view.message.edit.await_args.kwargs["content"]
+    assert LOADOUT_EXPIRED_NOTE in content and "nearest **Area 18 TDD**" in content
 
 
 def test_ship_loadout_is_listed_with_the_ship_commands_in_intro():
@@ -1238,7 +1256,7 @@ def test_the_browsers_button_with_a_known_location_name_doesnt_look_it_up(tmp_pa
     cog, thread = asyncio.run(run())
     cog._terminal_name.assert_not_awaited()
     _, view = _posted(thread)
-    assert view.origin == (99, "Area 18 TDD")
+    assert view.origin_terminal == (99, "Area 18 TDD")
 
 
 def test_the_browsers_button_without_a_location_opens_a_loadout_without_one(tmp_path, monkeypatch):
@@ -1252,7 +1270,7 @@ def test_the_browsers_button_without_a_location_opens_a_loadout_without_one(tmp_
     cog, thread = asyncio.run(run())
     cog._terminal_name.assert_not_awaited()
     text, view = _posted(thread)
-    assert view.origin is None and "ties go to the cheaper part" in text and " Gm" not in text
+    assert view.origin_terminal is None and "ties go to the cheaper part" in text and " Gm" not in text
 
 
 def test_the_browsers_button_still_opens_when_the_location_name_lookup_fails(tmp_path, monkeypatch):
@@ -1264,7 +1282,7 @@ def test_the_browsers_button_still_opens_when_the_location_name_lookup_fails(tmp
         return thread
 
     text, view = _posted(asyncio.run(run()))
-    assert view.origin == (99, "") and "ties go to the shop nearest your location" in text
+    assert view.origin_terminal == (99, "") and "ties go to the shop nearest your location" in text
 
 
 def test_each_stock_part_is_looked_up_once_however_many_slots_hold_it(tmp_path, monkeypatch):

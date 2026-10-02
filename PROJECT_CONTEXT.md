@@ -4537,6 +4537,22 @@ they're in sync).
        still parse.
      - Tests in `tests/test_ship_parts_finder.py`, `tests/test_ship_parts_refresh.py` and
        `tests/test_ship_loadout_command.py`; 6 mutations, all caught.
+128. **An idle loadout with a location greys out.** `LoadoutView` (entry 122) stored the
+     player's location as `self.origin`, a (terminal id, name) tuple - but `origin` is
+     `BotView`'s own attribute, the interaction `grey_out` edits the message through
+     (`_message_editors` in `bot/discord_ui.py`). So `grey_out` called
+     `edit_original_response` on the tuple and raised AttributeError: on the idle timeout, and
+     on Done's failed-delete path. Every loadout made with a location kept its live-looking
+     buttons after they stopped answering. Done itself still worked (entry 125's DynamicItem).
+     - Found while porting the loadout to the AI bot (aiv2, 2026-10-02), where its chat tool
+       passes a location whenever the player names one. Entry 125's idle-timeout test used
+       no location, which is why the suite never saw it.
+     - Fix: the attribute is `origin_terminal`, the name `PartsBrowserView` already uses; the
+       constructor's `origin` argument and every caller are unchanged. aiv2 made the same
+       rename, so the two copies match again.
+     - Test: `test_a_loadout_with_a_location_still_greys_out_when_idle` in
+       `tests/test_ship_loadout_command.py` (fails on the old code with
+       `'tuple' object has no attribute 'edit_original_response'`).
 
 ## Where to look for what
 
