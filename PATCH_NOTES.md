@@ -1,7 +1,14 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.45.
+the oldest entry below); the next new entry is 2.46.
+
+---
+
+## 2.45 - 2026-10-02 - Every ship's parts
+
+**Fixed**
+- `/ship-parts-finder` and `/ship-loadout` - Work for the 12 ships the Star Citizen Wiki lists twice under one name, like the Cutlass Black, Carrack, Polaris, Hammerhead and Idris-P, instead of saying their parts aren't available. They use the standard ship, not a special edition.
 
 ---
 

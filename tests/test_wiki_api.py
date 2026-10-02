@@ -17,6 +17,7 @@ from bot.wiki_api import (
     WikiApiClient,
     WikiApiError,
     WikiDuplicateNameError,
+    base_vehicle_row,
     WikiUnavailableError,
 )
 
@@ -315,9 +316,10 @@ def test_vehicle_loadout_also_returns_the_ships_own_port_tags():
     assert h_none.run(lambda c: c.get_vehicle_loadout("Avenger Titan")) == ([], [])
 
 
-def test_vehicle_loadout_raises_for_a_name_the_wiki_uses_for_several_ships():
-    """The Cutlass Black has a second, BIS2950 row of the same name: never a guess, and never
-    an empty answer the finder would show as "no slots"."""
+def test_vehicle_loadout_raises_for_a_name_no_single_row_is_the_base_of():
+    """Rows of one name with no class_name to tell them apart (or the PYAM Exec pairs, whose
+    class names don't extend each other): never a guess, and never an empty answer the finder
+    would show as "no slots"."""
     rows = [_vehicle("Cutlass Black", [{"name": "a"}]), _vehicle("cutlass black ", [{"name": "b"}]),
             _vehicle("Cutlass Black PYAM Exec", [{"name": "c"}])]
     h = _Harness(lambda req, n: httpx.Response(200, json={"data": rows}))
@@ -327,6 +329,45 @@ def test_vehicle_loadout_raises_for_a_name_the_wiki_uses_for_several_ships():
     assert isinstance(caught.value, WikiApiError)
     # A substring-only match (the PYAM Exec) is still just one exact row away from resolving.
     assert h.run(lambda c: c.get_vehicle_loadout("Cutlass Black PYAM Exec")) == ([{"name": "c"}], [])
+
+
+# Live wiki class names (2026-10-02): every pair a ship UEX lists, plus the PYAM Exec kind.
+EDITIONS = {
+    "Cutlass Black": ["DRAK_Cutlass_Black", "DRAK_Cutlass_Black_BIS2950"],
+    "Carrack": ["ANVL_Carrack", "ANVL_Carrack_BIS2950"],
+    "Polaris": ["RSI_Polaris", "RSI_Polaris_Collector_Military"],
+    "Hammerhead": ["AEGS_Hammerhead_GS", "AEGS_Hammerhead"],
+    "Idris-P": ["AEGS_Idris_P_FW_25", "AEGS_Idris_P", "AEGS_Idris_P_TSG"],
+    "F8C Lightning": ["ANVL_Lightning_F8C_Plat", "ANVL_Lightning_F8C"],
+    "Zeus Mk II CL": ["RSI_Zeus_CL", "RSI_Zeus_CL_Collector_Indust"],
+}
+
+
+@pytest.mark.parametrize("name,class_names", EDITIONS.items(), ids=list(EDITIONS))
+def test_a_ship_with_editions_resolves_to_its_plain_row(name, class_names):
+    rows = [{"uuid": f"v-{c}", "name": name, "class_name": c} for c in class_names]
+    base = min(class_names, key=len)
+    assert base_vehicle_row(rows)["class_name"] == base, "whatever order the wiki lists them in"
+    assert base_vehicle_row(list(reversed(rows)))["class_name"] == base
+
+
+def test_no_base_row_means_no_guess():
+    pyam = [{"class_name": "DRAK_Corsair_Exec_Military"}, {"class_name": "DRAK_Corsair_Exec_StealthIndustrial"}]
+    assert base_vehicle_row(pyam) is None, "neither extends the other"
+    assert base_vehicle_row([{"class_name": "X"}, {"class_name": "X"}]) is None, "two rows of one class name"
+    assert base_vehicle_row([{"class_name": "X"}, {}]) is None, "a row with no class name can't be placed"
+    assert base_vehicle_row([{}, {"class_name": "_Edition"}]) is None, "nor be the base"
+    # A prefix only counts at a word boundary: 'RSI_Zeus' isn't the base of 'RSI_ZeusX'.
+    assert base_vehicle_row([{"class_name": "RSI_Zeus"}, {"class_name": "RSI_ZeusX"}]) is None
+    assert base_vehicle_row([{"class_name": "Only"}]) == {"class_name": "Only"}
+
+
+def test_vehicle_loadout_reads_the_plain_ships_slots_not_an_editions():
+    rows = [dict(_vehicle("Cutlass Black", [{"name": "edition"}]), class_name="DRAK_Cutlass_Black_BIS2950"),
+            dict(_vehicle("Cutlass Black", [{"name": "plain"}]), class_name="DRAK_Cutlass_Black",
+                 port_tags=["DRAK_Cutlass_Base"])]
+    h = _Harness(lambda req, n: httpx.Response(200, json={"data": rows}))
+    assert h.run(lambda c: c.get_vehicle_loadout("Cutlass Black")) == ([{"name": "plain"}], ["DRAK_Cutlass_Base"])
 
 
 # -- get_vehicle_stock_ports (/ship-loadout's nested stock items) -------------------------------
@@ -353,9 +394,18 @@ def test_vehicle_stock_ports_reads_the_single_vehicle_endpoint_by_the_exact_rows
     assert h.requests[1].url.path.endswith(f"/vehicles/{VEHICLE_UUID}")
 
 
+def test_vehicle_stock_ports_reads_the_plain_ship_of_a_name_with_editions():
+    nested = [{"name": "hardpoint_power_plant", "equipped_item_uuid": "pp"}]
+    rows = [{"uuid": OTHER_UUID, "name": "Cutlass Black", "class_name": "DRAK_Cutlass_Black_BIS2950"},
+            {"uuid": VEHICLE_UUID, "name": "Cutlass Black", "class_name": "DRAK_Cutlass_Black"}]
+    h = _Harness(_stock_handler({"data": {"uuid": VEHICLE_UUID, "ports": nested}}, rows=rows))
+    assert h.run(lambda c: c.get_vehicle_stock_ports("Cutlass Black")) == nested
+    assert h.requests[1].url.path.endswith(f"/vehicles/{VEHICLE_UUID}")
+
+
 def test_vehicle_stock_ports_is_empty_without_one_exact_ship_and_never_requests_a_bad_uuid():
     titan = {"uuid": VEHICLE_UUID, "name": "Cutlass Black"}
-    # Two rows of one name (the Cutlass Black and its BIS2950 edition): no guess.
+    # Two rows of one name and nothing to tell them apart: no guess.
     h_two = _Harness(_stock_handler({}, rows=[titan, dict(titan, uuid=OTHER_UUID)]))
     assert h_two.run(lambda c: c.get_vehicle_stock_ports("Cutlass Black")) == []
     for bad in (None, "../items", 7):

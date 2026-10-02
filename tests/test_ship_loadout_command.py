@@ -641,8 +641,9 @@ def test_a_ship_with_no_supported_slots_is_said(tmp_path, monkeypatch):
 
 
 def test_a_ship_the_wiki_lists_twice_is_warned_about_not_shown_as_slotless(tmp_path, monkeypatch):
-    """The Cutlass Black: the wiki has a second, BIS2950 row of that exact name (about a dozen
-    ships do), so its slots can't be told apart. Said as a known issue, not "no slots"."""
+    """A name the wiki uses for several ships with no plain one among them (the PYAM Exec
+    pairs; a ship with editions, like the Cutlass Black, resolves - base_vehicle_row): its
+    slots can't be told apart. Said as a known issue, not "no slots"."""
     async def run():
         cog, thread = await _cog(tmp_path, monkeypatch, ports=[])
         cog._wiki.get_vehicle_loadout = AsyncMock(side_effect=WikiDuplicateNameError("Avenger Titan", 2))
