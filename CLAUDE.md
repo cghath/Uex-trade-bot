@@ -24,6 +24,8 @@ checklist. The two mistakes that mattered most, in short:
   `CREATE TABLE IF NOT EXISTS` there, not just a query that assumes the table exists
 - This session's branch workflow: PRs target `TestBranch`, not `main` — see conversation
   history / the user for current specifics if picking this up fresh
+- `main` is caught up from `TestBranch` only after an audit covers every commit being
+  synced. `docs/AUDIT_LOG.md` says what's audited; record every new audit and sync there
 
 ## Context discipline
 

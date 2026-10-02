@@ -4504,7 +4504,7 @@ they're in sync).
 
 ## Where to look for what
 
-Six docs, deliberately scoped so they don't duplicate each other:
+Seven docs, deliberately scoped so they don't duplicate each other:
 
 | Doc | Answers |
 |---|---|
@@ -4514,6 +4514,7 @@ Six docs, deliberately scoped so they don't duplicate each other:
 | `PROJECT_CONTEXT.md` (this doc) | *What happened and why* - history, hard-won API knowledge, current state |
 | `ROADMAP.md` | *What's next* - completed features and the backlog of ideas |
 | `AI_BOT_HANDOFF.md` | *What still needs porting* to the separate AI-bot project - a live checklist, not history |
+| `docs/AUDIT_LOG.md` | *Which commits have been audited* - `main` is only synced up to an audited commit |
 
 Standalone troubleshooting write-ups have been folded into `CONTRIBUTING.md` rather than kept
 as separate files - point-in-time incident logs drift out of date and end up contradicting the

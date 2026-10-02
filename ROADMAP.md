@@ -22,6 +22,14 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
   Sellability Ratings, direct UEX links, balanced price recommendations, hard manual floors,
   automatic no-interest relisting (5% lower every 48h, pausing on open negotiations) down to
   the floor, and explicit handling for ambiguous sale quantities.
+- [x] **Ship Parts and Loadouts**: `/ship-parts-finder` browses a ship's component and weapon
+  slots, lists only parts that really fit and are sold, ranked by each slot's key stat with
+  the nearest shop, and keeps a private shopping list. `/ship-loadout` (and the finder's
+  "Recommend a loadout" button) picks a part for every slot for a Balanced, Stealth, Tank or
+  Budget build, keeps stock where nothing beats it, never recommends scatterguns, ranks guns
+  within 5% DPS by alpha, keeps stock PDCs, reaches the guns inside locked and manned
+  turrets, shows the total cost and power pips, and saves every purchase to the list in one
+  click (PROJECT_CONTEXT.md entries 122-125).
 
 ## Backlog & Ideas
 
