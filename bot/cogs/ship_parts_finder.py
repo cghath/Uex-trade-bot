@@ -962,8 +962,8 @@ class _PartSelect(discord.ui.Select):
 class LoadoutView(BotView):
     """/ship-loadout's message, also opened by the parts browser's "Recommend a loadout": one
     recommended part per group of identical slots for a profile (bot/uex/ship_loadout.py),
-    with buttons to switch profile, page through a big ship, and add every purchase to the
-    private shopping list.
+    with buttons to switch profile, page through a big ship, add every purchase to the
+    private shopping list, and remove the message once the player is done with it.
 
     Every slot's candidates and stock parts are loaded once, when it opens. A profile switch
     only re-picks from them, so it answers at once with no lookups. Posted in the player's
@@ -1123,6 +1123,23 @@ class LoadoutView(BotView):
     @discord.ui.button(label="Add all to shopping list", style=discord.ButtonStyle.success, row=1)
     async def add_all_button(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
         await self.add_all(interaction)
+
+    async def done(self, interaction: discord.Interaction) -> None:
+        """Remove the loadout message once the player has what they need from it (the owner's
+        call): parts already added stay on the shopping list, which is a message of its own.
+        The view stops first, so the idle timeout never tries to edit a message that's gone.
+        If Discord won't delete it, the buttons grey out instead, as when it goes idle."""
+        self.stop()
+        await interaction.response.defer()
+        try:
+            await interaction.message.delete()
+        except discord.HTTPException:
+            logger.warning("Could not remove a ship loadout message", exc_info=True)
+            await self.grey_out()
+
+    @discord.ui.button(label="Done", style=discord.ButtonStyle.secondary, row=1)
+    async def done_button(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        await self.done(interaction)
 
     async def on_timeout(self) -> None:
         """Grey every button out and say how to get the loadout back."""

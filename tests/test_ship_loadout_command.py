@@ -366,6 +366,64 @@ def test_the_power_line_is_each_profiles_total_pips_never_a_draw_warning(tmp_pat
         assert "full load" not in text and "You assign power" not in text
 
 
+# -- done --------------------------------------------------------------------------------------
+
+def _done_click(thread, *, user_id=1, delete=None):
+    click = _interaction(thread, user_id=user_id)
+    click.message = NS(delete=delete or AsyncMock())
+    click.response.type = discord.InteractionResponseType.deferred_message_update
+    return click
+
+
+def test_done_removes_the_loadout_message_and_stops_its_buttons(tmp_path, monkeypatch):
+    async def run():
+        cog, thread = await _cog(tmp_path, monkeypatch)
+        await _run_command(cog, thread)
+        _, view = _posted(thread)
+        click = _done_click(thread)
+        assert await view.interaction_check(click)
+        await view.done_button.callback(click)
+        return view, click
+
+    view, click = asyncio.run(run())
+    click.message.delete.assert_awaited_once()
+    assert view.is_finished(), "stopped, so the idle timeout never edits a deleted message"
+    assert view.done_button.row == view.add_all_button.row
+
+
+def test_only_the_player_who_opened_the_loadout_can_remove_it(tmp_path, monkeypatch):
+    async def run():
+        cog, thread = await _cog(tmp_path, monkeypatch)
+        await _run_command(cog, thread)
+        _, view = _posted(thread)
+        click = _done_click(thread, user_id=2)
+        if await view.interaction_check(click):
+            await view.done_button.callback(click)
+        return view, click
+
+    view, click = asyncio.run(run())
+    click.message.delete.assert_not_awaited()
+    assert not view.is_finished()
+    assert "/ship-loadout" in click.response.send_message.await_args.args[0]
+
+
+def test_a_message_discord_wont_delete_has_its_buttons_greyed_out(tmp_path, monkeypatch):
+    async def run():
+        cog, thread = await _cog(tmp_path, monkeypatch)
+        await _run_command(cog, thread)
+        _, view = _posted(thread)
+        view.message = None  # the click's own edit is tried first; the fake message can't stand in
+        refused = AsyncMock(side_effect=discord.HTTPException(NS(status=403, reason="Forbidden"), "no"))
+        click = _done_click(thread, delete=refused)
+        assert await view.interaction_check(click)
+        await view.done_button.callback(click)
+        return view, click
+
+    view, click = asyncio.run(run())
+    click.edit_original_response.assert_awaited_once()
+    assert all(child.disabled for child in view.children if hasattr(child, "disabled"))
+
+
 # -- scatterguns -------------------------------------------------------------------------------
 
 def test_a_scattergun_for_sale_is_never_recommended_in_any_profile(tmp_path, monkeypatch):

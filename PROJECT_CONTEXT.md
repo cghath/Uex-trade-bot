@@ -4477,6 +4477,15 @@ they're in sync).
      - 17 mutations, each undone in turn, all caught.
      - Not changed: `/ship-parts-finder` still doesn't list guns inside locked or manned
        turrets (ROADMAP.md).
+125. **`/ship-loadout`: a Done button.** The owner's request after using the live Idris-M
+     loadout: once the parts are on the shopping list, the loadout message has done its job
+     but sat in the private ship parts thread until it went idle (30 minutes), and a player
+     can't delete a bot's message themselves. `LoadoutView.done` (row 1, beside "Add all to
+     shopping list") stops the view first, so the idle timeout never edits a message that's
+     gone, then deletes the message; anything already added stays on the list, a message of
+     its own. If Discord refuses the delete, the buttons grey out instead, as when it goes
+     idle. Owner-only, like every loadout button. After the idle timeout it's greyed out with
+     the rest. Tests in `tests/test_ship_loadout_command.py`; 5 mutations, all caught.
 
 ## Where to look for what
 
