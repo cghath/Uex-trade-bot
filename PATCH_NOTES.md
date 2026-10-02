@@ -1,7 +1,14 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.44.
+the oldest entry below); the next new entry is 2.45.
+
+---
+
+## 2.44 - 2026-10-01 - Done with a loadout
+
+**Added**
+- `/ship-loadout` - A Done button removes the loadout message once you're finished with it, even after its other buttons have greyed out from sitting idle or a bot restart. Anything you added to your shopping list stays there.
 
 ---
 

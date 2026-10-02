@@ -4477,6 +4477,30 @@ they're in sync).
      - 17 mutations, each undone in turn, all caught.
      - Not changed: `/ship-parts-finder` still doesn't list guns inside locked or manned
        turrets (ROADMAP.md).
+125. **`/ship-loadout`: a Done button.** The owner's request after using the live Idris-M
+     loadout: once the parts are on the shopping list, the loadout message has done its job
+     but sat in the private ship parts thread until it went idle (30 minutes), and a player
+     can't delete a bot's message themselves. Done (row 1, beside "Add all to shopping
+     list") deletes the message; anything already added stays on the list, a message of its
+     own. Owner-only, like every loadout button.
+     - The first version was an ordinary view button, and the owner spotted the gap before
+       merge: it greyed out with the rest at the idle timeout, and stopped answering after a
+       restart - exactly the stale messages it exists to clear. Done now follows the
+       browser's ↻ Refresh pattern (`RefreshBrowserButton`): a non-dispatchable
+       `_LoadoutDoneStub` in the view, and one `LoadoutDoneButton` DynamicItem registered at
+       `cog_load`, with the owner's id in its custom_id (`ship-loadout:done:<owner>`). Not a
+       DynamicItem inside the view itself: discord.py unregisters a view's DynamicItem
+       patterns bot-wide when that view closes.
+     - The idle timeout greys out everything but Done (`BotView.grey_out` gained `keep=`) and
+       says "**Done** still removes this message." The cog tracks live loadouts by message id
+       (`_loadouts`, set in `_post_loadout`, dropped at timeout or Done), so Done stops a live
+       view before deleting its message and its timeout never edits a message that's gone.
+       If Discord refuses the delete, a live view greys out (Done still works) and the player
+       is told to try again. A loadout posted before a restart has no live view; Done just
+       deletes it.
+     - Tests in `tests/test_ship_loadout_command.py` (live, idle, after a restart, someone
+       else's, a refused delete) and `tests/test_ship_parts_refresh.py` (registration); 12
+       mutations, all caught.
 
 ## Where to look for what
 

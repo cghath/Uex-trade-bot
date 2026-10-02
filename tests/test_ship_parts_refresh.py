@@ -10,7 +10,8 @@ from discord.ui.view import ViewStore
 
 from bot.cogs import ship_parts_finder
 from bot.cogs.ship_parts_finder import (
-    EXPIRED_NOTE, REFRESH_HINT, PartsBrowserView, RefreshBrowserButton, ShipPartsFinder, _RefreshStub,
+    EXPIRED_NOTE, REFRESH_HINT, LoadoutDoneButton, PartsBrowserView, RefreshBrowserButton, ShipPartsFinder,
+    _RefreshStub,
     refresh_custom_id,
 )
 from bot.uex.exceptions import UexApiError
@@ -87,7 +88,8 @@ def test_the_cog_registers_and_unregisters_the_refresh_handler():
     cog = ShipPartsFinder(bot, wiki_client=NS(aclose=AsyncMock()), start_refresh=False)
     asyncio.run(cog.cog_load())
     cog.cog_unload()
-    assert calls == [("add", (RefreshBrowserButton,)), ("remove", (RefreshBrowserButton,))]
+    assert calls == [("add", (RefreshBrowserButton, LoadoutDoneButton)),
+                     ("remove", (RefreshBrowserButton, LoadoutDoneButton))]
 
 
 def test_the_button_hands_the_click_to_the_cog():

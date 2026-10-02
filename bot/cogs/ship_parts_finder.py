@@ -155,7 +155,11 @@ LOADOUT_IDLE_SECONDS = BROWSER_IDLE_SECONDS
 # one, a turret holding gimbals two (the Perseus's remote turrets).
 MAX_MOUNT_DEPTH = 3
 LOADOUT_EXPIRED_NOTE = (f"⏸️ Closed after {LOADOUT_IDLE_SECONDS // 60} minutes idle. Run `/ship-loadout` again, or "
-                        "**Recommend a loadout** in the parts browser - anything you added to your list is saved.")
+                        "**Recommend a loadout** in the parts browser - anything you added to your list is saved. "
+                        "**Done** still removes this message.")
+# Done on a loadout message: handled by LoadoutDoneButton, which outlives the view.
+_LOADOUT_DONE_PREFIX = "ship-loadout:done"
+LOADOUT_DONE_TEMPLATE = _LOADOUT_DONE_PREFIX + r":(?P<owner>\d+)"
 WIKI_SILENT_FOR_SLOT = "the Star Citizen Wiki didn't respond for this slot's parts - try again in a few minutes"
 # Wiki detail fields no display or fit check reads - dropped before caching, so a full
 # cache stays small on the Pi.
@@ -962,8 +966,8 @@ class _PartSelect(discord.ui.Select):
 class LoadoutView(BotView):
     """/ship-loadout's message, also opened by the parts browser's "Recommend a loadout": one
     recommended part per group of identical slots for a profile (bot/uex/ship_loadout.py),
-    with buttons to switch profile, page through a big ship, and add every purchase to the
-    private shopping list.
+    with buttons to switch profile, page through a big ship, add every purchase to the
+    private shopping list, and remove the message once the player is done with it.
 
     Every slot's candidates and stock parts are loaded once, when it opens. A profile switch
     only re-picks from them, so it answers at once with no lookups. Posted in the player's
@@ -1001,6 +1005,7 @@ class LoadoutView(BotView):
         self.picks: list[SlotPick] = []
         self.pages: list[list[str]] = [[]]
         self.page = 0
+        self.add_item(_LoadoutDoneStub(owner_id))
         self.repick()
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
@@ -1125,9 +1130,65 @@ class LoadoutView(BotView):
         await self.add_all(interaction)
 
     async def on_timeout(self) -> None:
-        """Grey every button out and say how to get the loadout back."""
+        """Grey every button out but Done, which still works (LoadoutDoneButton), and say how
+        to get the loadout back."""
         self.expired = True
-        await self.grey_out(content=self.text())
+        if self.message is not None:
+            getattr(self.cog, "_loadouts", {}).pop(self.message.id, None)
+        await self.grey_out(content=self.text(), keep=(_LoadoutDoneStub,))
+
+
+def loadout_done_custom_id(owner_id: int) -> str:
+    return f"{_LOADOUT_DONE_PREFIX}:{int(owner_id)}"
+
+
+class _LoadoutDoneStub(discord.ui.Button):
+    """Done as it sits in a live LoadoutView. Not dispatchable, like _RefreshStub: every click
+    goes to LoadoutDoneButton, registered once at startup, so Done still removes the message
+    after the loadout goes idle or the bot restarts - the times a player most needs it, since
+    they can't delete a bot's message themselves."""
+    def __init__(self, owner_id: int) -> None:
+        super().__init__(label="Done", style=discord.ButtonStyle.secondary, row=1,
+                         custom_id=loadout_done_custom_id(owner_id))
+
+    def is_dispatchable(self) -> bool:
+        return False
+
+
+class LoadoutDoneButton(discord.ui.DynamicItem[discord.ui.Button], template=LOADOUT_DONE_TEMPLATE):
+    """Done on any loadout message (the owner's call): removes it once the player has what they
+    need. Parts already added stay on the shopping list, a message of its own. Who may press it
+    rides in the button's own custom_id, so it works with or without a live view."""
+    def __init__(self, owner_id: int) -> None:
+        super().__init__(discord.ui.Button(label="Done", style=discord.ButtonStyle.secondary, row=1,
+                                           custom_id=loadout_done_custom_id(owner_id)))
+        self.owner_id = owner_id
+
+    @classmethod
+    async def from_custom_id(cls, interaction: discord.Interaction, item: discord.ui.Button, match, /):
+        return cls(int(match["owner"]))
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        """A live view is stopped first, so its idle timeout never edits a message that's gone.
+        If Discord won't delete the message, a live view greys out (Done still works) and the
+        player is told."""
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message(
+                "This loadout belongs to another player - run `/ship-loadout` for your own.", ephemeral=True)
+            return
+        cog = interaction.client.get_cog("ShipPartsFinder")
+        live = getattr(cog, "_loadouts", {}).pop(interaction.message.id, None)
+        if live is not None:
+            live.stop()
+        await interaction.response.defer()
+        try:
+            await interaction.message.delete()
+        except discord.HTTPException:
+            logger.warning("Could not remove a ship loadout message", exc_info=True)
+            if live is not None:
+                await live.grey_out(keep=(_LoadoutDoneStub,))
+            await interaction.followup.send(
+                "Discord wouldn't remove that message just now - try **Done** again in a minute.", ephemeral=True)
 
 
 class _ProfileButton(discord.ui.Button):
@@ -1221,15 +1282,17 @@ class ShipPartsFinder(commands.Cog):
         # id_vehicle -> (expiry, port path -> stock item uuid, guns inside locked turrets) for
         # /ship-loadout: see _vehicle_stock_tree.
         self._stock_trees: dict[int, tuple[float, dict[str, str], list[ShipPort]]] = {}
+        # Live loadout views by message id, so Done can stop the one it removes.
+        self._loadouts: dict[int, LoadoutView] = {}
         if start_refresh:
             self.refresh_reference.start()
 
     async def cog_load(self) -> None:
         self.bot.add_view(ShipPartsShoppingView(self.shopping))
-        self.bot.add_dynamic_items(RefreshBrowserButton)
+        self.bot.add_dynamic_items(RefreshBrowserButton, LoadoutDoneButton)
 
     def cog_unload(self) -> None:
-        self.bot.remove_dynamic_items(RefreshBrowserButton)
+        self.bot.remove_dynamic_items(RefreshBrowserButton, LoadoutDoneButton)
         self.refresh_reference.cancel()
         try:
             asyncio.get_running_loop().create_task(self._wiki.aclose())
@@ -1815,6 +1878,7 @@ class ShipPartsFinder(commands.Cog):
             return
         try:
             view.message = await thread.send(content=view.text(), view=view, allowed_mentions=NO_MENTIONS)
+            self._loadouts[view.message.id] = view
         except discord.HTTPException:
             logger.exception("Could not post a ship loadout in thread %s", thread.id)
             view.stop()

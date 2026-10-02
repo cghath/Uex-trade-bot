@@ -117,11 +117,12 @@ class BotView(discord.ui.View):
     async def on_timeout(self) -> None:
         await self.grey_out()
 
-    async def grey_out(self, **edit_kwargs: Any) -> bool:
-        """Disable every control and show that on the message, along with any other message
+    async def grey_out(self, *, keep: tuple[type, ...] = (), **edit_kwargs: Any) -> bool:
+        """Disable every control - but any of a type in `keep`, one that works without the view
+        (a DynamicItem's stub) - and show that on the message, along with any other message
         fields passed (e.g. a note in `content`). True if the message was edited."""
         for child in self.children:
-            if hasattr(child, "disabled"):
+            if hasattr(child, "disabled") and not isinstance(child, keep):
                 child.disabled = True
         for edit in self._message_editors():
             try:
