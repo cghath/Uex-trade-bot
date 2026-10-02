@@ -1241,6 +1241,20 @@ def test_the_browsers_button_with_a_known_location_name_doesnt_look_it_up(tmp_pa
     assert view.origin == (99, "Area 18 TDD")
 
 
+def test_the_browsers_button_without_a_location_opens_a_loadout_without_one(tmp_path, monkeypatch):
+    async def run():
+        cog, thread = await _cog(tmp_path, monkeypatch)
+        cog._terminal_name = AsyncMock(return_value="looked up")
+        browser = PartsBrowserView(cog, VEHICLE, None, {"Radar": [ShipPort("hp", "Radar", 1, 1)]})
+        await browser.loadout_button.callback(_interaction(thread))
+        return cog, thread
+
+    cog, thread = asyncio.run(run())
+    cog._terminal_name.assert_not_awaited()
+    text, view = _posted(thread)
+    assert view.origin is None and "ties go to the cheaper part" in text and " Gm" not in text
+
+
 def test_the_browsers_button_still_opens_when_the_location_name_lookup_fails(tmp_path, monkeypatch):
     async def run():
         cog, thread = await _cog(tmp_path, monkeypatch)

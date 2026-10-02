@@ -614,6 +614,55 @@ def test_command_posts_the_browsing_view_inside_the_thread_not_ephemeral_elsewhe
     assert thread.mention in pointer.args[0] and pointer.kwargs["ephemeral"] is True
 
 
+def test_location_is_optional():
+    params = {p.name: p for p in ShipPartsFinder.ship_parts_finder.parameters}
+    assert params["ship"].required and not params["location"].required
+    assert str(params["location"].description).endswith("Optional.")
+
+
+def test_command_without_a_location_opens_the_browser_with_no_origin(tmp_path, monkeypatch):
+    """Left out, no terminal is looked up and the browser has no origin: parts load without
+    distances, and ties go to the cheaper part."""
+    async def run():
+        db_real = Database(tmp_path / "cmd.sqlite", Fernet(Fernet.generate_key()))
+        await db_real.init()
+        await db_real.replace_ship_parts_reference(1, "Cutlass Black", [
+            {"name": "hardpoint_power_plant", "port_type": "PowerPlant", "size_min": 1, "size_max": 1},
+        ])
+        db_real.resolve_terminal_id_by_name = AsyncMock()
+        thread = FakeThread()
+        monkeypatch.setattr(ship_parts_finder.discord, "TextChannel", FakeChannel)
+        uex = NS(get_vehicles=AsyncMock(return_value=[{"id": 1, "name": "Cutlass Black"}]))
+        cog = ShipPartsFinder(NS(db=db_real, uex=uex), wiki_client=NS(), start_refresh=False)
+        cog.bot = NS(db=db_real, uex=uex)
+        await cog.ship_parts_finder.callback(cog, _interaction(FakeChannel(thread), user_id=1), "Cutlass Black")
+        return db_real, thread
+
+    db, thread = asyncio.run(run())
+    db.resolve_terminal_id_by_name.assert_not_awaited()
+    view = thread.send.await_args_list[-1].kwargs["view"]
+    assert isinstance(view, ship_parts_finder.PartsBrowserView)
+    assert view.origin_terminal is None and view.origin_id is None
+
+
+def test_a_browser_without_a_location_loads_parts_without_one():
+    async def run():
+        seen = {}
+
+        async def candidates(port, *, category=None, limit=None, origin_id="unset"):
+            seen["origin_id"] = origin_id
+            return [_detail("PowerBolt")]
+
+        port = ShipPort(name="hardpoint_power_plant", port_type="PowerPlant", size_min=1, size_max=1)
+        view = ship_parts_finder.PartsBrowserView(NS(candidates_for_port=candidates), {"id": 100, "name": "Avenger Stalker"},
+                                                    None, {"Power Plants": [port]})
+        await view.show_category(_component_interaction(), "Power Plants")
+        return view, seen
+
+    view, seen = asyncio.run(run())
+    assert seen["origin_id"] is None and [c["name"] for c in view.candidates] == ["PowerBolt"]
+
+
 # -- audit fixes: deferred category select, multi-slot, distance wiring, selected marker ----
 
 def _component_interaction(*, user_id=1):

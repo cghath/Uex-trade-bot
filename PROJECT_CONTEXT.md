@@ -4523,6 +4523,20 @@ they're in sync).
        included, 1,025,248 aUEC in Balanced). The Pi had no saved slots for any of them, so
        the finder reads them live until the hourly reference check saves them (they were
        marked checked with 0 slots, so within a day). 6 mutations, all caught.
+127. **`/ship-parts-finder`'s location is optional.** On the owner's request, the same as
+     `/ship-loadout`'s has been since entry 122. Location only ever did one thing in the
+     finder: each part's cheapest shop shows its distance from you, and ties between equally
+     good parts go to the nearer shop (a fix from the finder's pre-merge audit; see the
+     module docstring). Without it no distances show
+     and ties go to the cheaper part - the ranking itself is unchanged.
+     - `PartsBrowserView.origin_terminal` may be None (`origin_id` reads it), and so may
+       `open_loadout`'s, so "Recommend a loadout" opens a loadout without a location.
+     - ↻ Refresh carries no location as an empty terminal in its custom_id
+       (`ship-parts-browse:refresh:100::Radar`; `REFRESH_TEMPLATE`'s terminal is now `\d*`),
+       so it works after a restart too. Buttons already posted, which carry a terminal id,
+       still parse.
+     - Tests in `tests/test_ship_parts_finder.py`, `tests/test_ship_parts_refresh.py` and
+       `tests/test_ship_loadout_command.py`; 6 mutations, all caught.
 
 ## Where to look for what
 

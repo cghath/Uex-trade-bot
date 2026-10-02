@@ -1,7 +1,14 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.46.
+the oldest entry below); the next new entry is 2.47.
+
+---
+
+## 2.46 - 2026-10-02 - Browse parts from anywhere
+
+**Changed**
+- `/ship-parts-finder` - Location is optional now. Give it and each shop shows how far it is from you; leave it out and the parts are listed the same way, just without distances.
 
 ---
 

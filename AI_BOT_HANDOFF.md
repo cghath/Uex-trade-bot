@@ -352,6 +352,9 @@ date - no open item, nothing to record here.
       `bot/wiki_api.py`, used by `get_vehicle_loadout` and `get_vehicle_stock_ports`): the
       Cutlass Black, Carrack, Polaris and nine more get their slots. Tests:
       `tests/test_wiki_api.py`. See PROJECT_CONTEXT.md entry 126
+- [ ] PR #TBD - `/ship-parts-finder`'s `location` is optional (`bot/cogs/ship_parts_finder.py`:
+      `PartsBrowserView.origin_terminal`/`origin_id` may be None, and ↻ Refresh's custom_id
+      carries an empty terminal). Without it no distances show. See PROJECT_CONTEXT.md entry 127
 
 ## To port: aiv2 -> production
 
