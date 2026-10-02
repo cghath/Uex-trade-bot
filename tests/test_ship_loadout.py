@@ -12,6 +12,7 @@ from bot.uex.ship_loadout import (
     NOTHING_SOLD,
     ONLY_SCATTERGUNS,
     POINT_DEFENSE,
+    STOCK_RACKS,
     PROFILE_BLURBS,
     PROFILES,
     STEALTH,
@@ -162,7 +163,6 @@ def _group(category, stock=None, *, port=None, count=1, stock_unknown=False, nam
     ("Quantum Drives", EXPEDITION, _qd("Atlas", 230000000), _qd("Rush", 150000000)),
     ("Radar", ECOUTER, _radar("Surveyor", 1500), _radar("Cobb", 900)),
     ("Guns", OMNISKY, _gun("Mantis GT-220 Gatling", 853.3), _gun("CF-227 Badger Repeater", 400)),
-    ("Missile Racks", MSD_322, _rack("MSD-423 Missile Rack", 2, 4), _rack("MSD-313 Missile Rack", 1, 3)),
 ])
 def test_balanced_buys_the_best_key_stat_over_a_weaker_stock_part(category, stock, better, worse):
     pick = pick_for_slot(_group(category, stock), [_sold(worse, 100), _sold(better, 9000)], BALANCED)
@@ -452,6 +452,36 @@ def test_a_pdc_slot_keeps_its_stock_turret_in_every_profile(profile):
                                         "incoming missiles and never runs out of ammo")
 
 
+# -- Missile racks: the ship's own are kept ---------------------------------------------------
+
+# Live wiki 4.10.1 (2026-10-02): the Cutlass Black's two S4 rack slots hold the MSD-442 (4x S2);
+# the rack rank (missile size first) swapped them for the MSD-414 (1x S4), the owner's catch.
+MSD_442 = _rack("MSD-442 Missile Rack", 2, 4, size=4)
+MSD_414 = _rack("MSD-414 Missile Rack", 4, 1, size=4)
+MSD_423 = _rack("MSD-423 Missile Rack", 3, 2, size=4)
+RACK_PORT = _port("hardpoint_missilerack_left", "MissileLauncher", 4)
+
+
+@pytest.mark.parametrize("profile", PROFILES)
+def test_a_missile_rack_keeps_the_ships_own_in_every_profile(profile):
+    group = _group("Missile Racks", MSD_442, port=RACK_PORT, count=2)
+    pick = pick_for_slot(group, [_sold(MSD_414, 17846), _sold(MSD_423, 11899)], profile)
+    assert pick.part is None and pick.keeps_stock and pick.reason == STOCK_RACKS
+    # What it holds, whatever the profile ranks by (not Tank's component HP).
+    assert pick_line(pick, profile).endswith(f"keep stock **MSD-442 Missile Rack** (4x S2 missiles) - {STOCK_RACKS}")
+
+
+def test_a_rack_whose_stock_part_is_unknown_is_still_kept_never_swapped_blind():
+    pick = pick_for_slot(_group("Missile Racks", None, port=RACK_PORT, stock_unknown=True), [_sold(MSD_414, 1)], BALANCED)
+    assert pick.part is None and pick.reason == STOCK_RACKS
+    assert pick_line(pick, BALANCED).endswith(f"keep stock - {STOCK_RACKS}")
+
+
+def test_an_empty_rack_slot_still_gets_the_best_rack():
+    pick = pick_for_slot(_group("Missile Racks", port=RACK_PORT), [_sold(MSD_442, 8350), _sold(MSD_414, 17846)], BALANCED)
+    assert pick.part["name"] == "MSD-414 Missile Rack"
+
+
 def test_a_pdc_slot_is_known_by_its_stock_part_or_its_slot_tag():
     plain_port = _port("hardpoint_turret_top", "Turret", 2)
     assert is_point_defense(_group("Turrets", SWARM, port=plain_port))
@@ -504,7 +534,8 @@ def test_stealth_guns_still_go_by_dps():
 
 
 def test_stealth_missile_racks_with_no_emission_fall_back_to_the_key_stat():
-    pick = pick_for_slot(_group("Missile Racks", MSD_322), [_sold(_rack("MSD-423", 2, 4), 1)], STEALTH)
+    # An empty rack slot: one with a stock rack keeps it.
+    pick = pick_for_slot(_group("Missile Racks"), [_sold(_rack("MSD-423", 2, 4), 1)], STEALTH)
     assert pick.part["name"] == "MSD-423"
 
 

@@ -4553,6 +4553,27 @@ they're in sync).
      - Test: `test_a_loadout_with_a_location_still_greys_out_when_idle` in
        `tests/test_ship_loadout_command.py` (fails on the old code with
        `'tuple' object has no attribute 'edit_original_response'`).
+129. **Loadouts keep every ship's stock missile racks.** The owner's call after entry 126's
+     deploy: "keep the 4x S2 racks on the cutlass", then, offered the choice, for every ship
+     rather than the Cutlass alone. The rack rank (`_rack_rank`: missile size x 100 + count)
+     put the one-missile rack first at every slot size - sold racks surveyed live on
+     2026-10-02: S4 slots MSD-414 (1x S4), MSD-481, MSD-423 (2x S3), MSD-442 (4x S2); S5
+     MSD-515 (1x S5) down to MSD-582 (8x S2); S6 MSD-625 (2x S5) down to MSD-616 - so the
+     Cutlass Black's 4x S2 racks became 1x S4 and most ships' multi-missile racks went the same
+     way. More smaller missiles or fewer bigger ones is the player's call, which no rank makes.
+     - `pick_for_slot` (`bot/uex/ship_loadout.py`): a Missile Racks slot with a stock rack, or
+       one whose stock couldn't be loaded, keeps it in every profile (`STOCK_RACKS`), the same
+       shape as the PDC rule (entry 123). A rack slot that comes empty still gets the best
+       rack. The kept line shows what the rack holds ("4x S2 missiles") whatever the profile
+       ranks by, not Tank's component HP.
+     - Why not "more missiles first": the wiki lists the MSD-481 (an S4 rack, 8x S1 by its
+       name) as 8x S3, its missile ports sized 1-3, so that rank would have swapped the
+       Cutlass's racks for it. The MSD-616 shows as 18x S2. The finder's own rack list still
+       ranks by missile size; only the loadout keeps stock.
+     - Live (read-only build): the Cutlass Black keeps its 2x MSD-442 (4x S2) and 4x MSD-423
+       (2x S3) in all four profiles, Balanced 918,172 aUEC (was 1,025,248); the Avenger Titan
+       keeps its MSD-322s. Tests in `tests/test_ship_loadout.py` and
+       `tests/test_ship_loadout_command.py`; 5 mutations, all caught.
 
 ## Where to look for what
 

@@ -25,7 +25,7 @@ from bot.cogs.ship_parts_finder import (
 )
 from bot.db.database import Database
 from bot.uex.ship_loadout import (
-    NO_STATS, NOTHING_BEATS_STOCK, NOTHING_SOLD, PROFILES, STOCK_IS_BEST, STOCK_UNKNOWN, LoadoutSlot, group_slots,
+    NO_STATS, NOTHING_BEATS_STOCK, PROFILES, STOCK_IS_BEST, STOCK_RACKS, STOCK_UNKNOWN, LoadoutSlot, group_slots,
     purchases,
 )
 from bot.uex.ship_parts import ShipPort
@@ -197,7 +197,7 @@ def test_the_command_posts_a_balanced_loadout_in_the_private_thread(tmp_path, mo
     assert "**2x S1 Cooler** → **Glacier** · 40 cooling segments (was 34 cooling segments stock)" in text
     assert "**S1 Shield Generator Left** → **5SA 'Rhada'** · 3,000 shield HP (was 2,160 shield HP stock)" in text
     assert _line(text, "S3 Left Wing Missile Rack").endswith(f"keep stock **MSD-322 Missile Rack** (2x S2 missiles) - "
-                                                        f"{NOTHING_SOLD}")
+                                                        f"{STOCK_RACKS}")
     # 2x 69,137 + 60,500 + 2x 50,000 + 15,000
     assert "**Total: 313,774 aUEC** for 6 parts" in text
     assert "Gm" not in text and "ties go to the cheaper part" in text, "no location: no distances, cheapest wins ties"
@@ -1117,15 +1117,18 @@ def test_parts_the_wiki_answered_for_without_stats_say_so_not_that_it_didnt_resp
     mystery = {"uuid": "mystery-rack", "name": "Mystery Rack", "type": "MissileLauncher", "sub_type": "MissileRack",
                "size": 3, "tags": [], "required_tags": []}
     monkeypatch.setattr(sys.modules[__name__], "SOLD", [*SOLD, (13, mystery, "Missile Racks", 4000, 11)])
+    # The rack slot comes empty here: one with a stock rack keeps it (STOCK_RACKS) before any part is rated.
+    rack = PORTS[-1]["name"]
+    ports = [*PORTS[:-1], {**PORTS[-1], "equipped_uuid": None}]
+    tree = [row for row in STOCK_TREE if row["name"] != rack]
 
     async def run():
-        cog, thread = await _cog(tmp_path, monkeypatch)
+        cog, thread = await _cog(tmp_path, monkeypatch, wiki=_wiki(stock_tree=tree), ports=ports)
         await _run_command(cog, thread)
         return thread
 
     text, _ = _posted(asyncio.run(run()))
-    assert _line(text, "S3 Left Wing Missile Rack").endswith(f"keep stock **MSD-322 Missile Rack** (2x S2 missiles) - "
-                                                        f"{NO_STATS}")
+    assert _line(text, "S3 Left Wing Missile Rack").endswith(f"nothing to recommend - {NO_STATS}")
     assert WIKI_SILENT_FOR_SLOT not in text
 
 
