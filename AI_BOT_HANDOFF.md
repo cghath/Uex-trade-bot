@@ -342,7 +342,7 @@ date - no open item, nothing to record here.
       `_vehicle_stock_tree`), guns within 5% DPS ranked by alpha (`DPS_BAND`,
       `gun_at_least_as_good`, `_rank_guns`), and label fixes in `format_port_label` and
       `SlotGroup.label`. Needs PRs #106 and #107 above first. See PROJECT_CONTEXT.md entry 124
-- [ ] PR #TBD - `/ship-loadout` Done button (`LoadoutView.done` in
+- [ ] PR #109 - `/ship-loadout` Done button (`LoadoutView.done` in
       `bot/cogs/ship_parts_finder.py`): removes the loadout message, greying out its buttons if
       Discord won't delete it. Needs the loadout PRs above first. See PROJECT_CONTEXT.md entry 125
 
