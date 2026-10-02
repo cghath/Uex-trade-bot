@@ -355,6 +355,9 @@ date - no open item, nothing to record here.
 - [ ] PR #112 - `/ship-parts-finder`'s `location` is optional (`bot/cogs/ship_parts_finder.py`:
       `PartsBrowserView.origin_terminal`/`origin_id` may be None, and ↻ Refresh's custom_id
       carries an empty terminal). Without it no distances show. See PROJECT_CONTEXT.md entry 127
+- [ ] PR #114 - `/ship-loadout` keeps every ship's stock missile racks (`STOCK_RACKS` in
+      `pick_for_slot`, `bot/uex/ship_loadout.py`; the kept line shows what the rack holds in
+      every profile). An empty rack slot still gets a pick. See PROJECT_CONTEXT.md entry 129
 
 ## To port: aiv2 -> production
 

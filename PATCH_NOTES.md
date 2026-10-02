@@ -1,7 +1,14 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.48.
+the oldest entry below); the next new entry is 2.49.
+
+---
+
+## 2.48 - 2026-10-02 - Your missile racks stay
+
+**Changed**
+- `/ship-loadout` - Keeps your ship's own missile racks instead of swapping them for racks with fewer, bigger missiles, like the Cutlass Black's 4x S2 racks becoming 1x S4. More missiles or bigger ones is your call. A rack slot that comes empty still gets a recommendation.
 
 ---
 

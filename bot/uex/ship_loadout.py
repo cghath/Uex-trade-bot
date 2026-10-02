@@ -20,6 +20,11 @@ The owner's decisions (2026-10-01):
 - A point-defense (PDC) slot always keeps its stock turret, the M2C "Swarm" on every ship that
   has one: it shoots down incoming missiles and never runs out of ammo, which the turret rank
   (the gun size it holds) can't see - it had the Perseus swapping six for the Pepperbox.
+- Missile racks keep the ship's own (2026-10-02): ranked by missile size, the one-missile rack
+  won every slot size, swapping the Cutlass Black's 4x S2 racks for 1x S4 and most ships'
+  multi-missile racks the same way. More smaller missiles or fewer bigger ones is the
+  player's call, which the rack rank can't make. A rack slot that comes empty still gets a
+  pick.
 - Where the stock part is already the best pick, the slot says "keep stock" instead of
   suggesting a purchase.
 - A gun hardpoint keeps whatever mount the ship comes with: under a stock gimbal, the pick is a
@@ -53,6 +58,7 @@ DEFAULT_PROFILE = BALANCED
 SHIELDS_CATEGORY = "Shield Generators"
 COOLERS_CATEGORY = "Coolers"
 POWER_PLANTS_CATEGORY = "Power Plants"
+MISSILE_RACKS_CATEGORY = "Missile Racks"
 
 # Why a slot buys nothing. Shown to the player, so plain words.
 STOCK_IS_BEST = "stock is already the best pick"
@@ -66,6 +72,7 @@ ONLY_SCATTERGUNS = "the only guns sold for it are scatterguns"
 # patch's weapon damage changes (ROADMAP.md).
 DPS_BAND = 0.05
 POINT_DEFENSE = "point defense: it shoots down incoming missiles and never runs out of ammo"
+STOCK_RACKS = "missile racks keep the ship's own: more missiles or bigger ones is your call"
 
 # What each profile favours, under the loadout's title and in /ship-loadout's profile choices.
 # Player-facing, so the stat is named rather than called the "key stat" (a code term).
@@ -456,6 +463,8 @@ def pick_for_slot(group: SlotGroup, candidates: list[dict], profile: str) -> Slo
         raise ValueError(f"unknown loadout profile: {profile!r}")
     if is_point_defense(group) and (group.stock is not None or group.stock_unknown):
         return SlotPick(group, None, POINT_DEFENSE)
+    if group.category == MISSILE_RACKS_CATEGORY and (group.stock is not None or group.stock_unknown):
+        return SlotPick(group, None, STOCK_RACKS)
     stock = group.stock
     rated = [c for c in candidates if key_stat(c) is not None]
     if not rated:
@@ -641,8 +650,12 @@ def pick_line(pick: SlotPick, profile: str, *, reason: str | None = None) -> str
             return f"{head} · nothing to recommend - {why}"
         name = group.stock.get("name") if isinstance(group.stock, dict) else None
         text = f"keep stock **{name}**" if name else "keep stock"
-        # A PDC's turret rank (the gun size it holds) isn't why it's kept, so it isn't shown.
-        shown = shown_stat(group.stock, group.category, profile) if why != POINT_DEFENSE else None
+        # A PDC's turret rank (the gun size it holds) isn't why it's kept, so it isn't shown. A
+        # kept rack shows what it holds ('4x S2 missiles'), not the profile's figure (Tank's HP).
+        if why == POINT_DEFENSE:
+            shown = None
+        else:
+            shown = shown_stat(group.stock, group.category, BALANCED if why == STOCK_RACKS else profile)
         if shown is not None:
             text += f" ({shown[1]})"
         return f"{head} · {text} - {why}"
