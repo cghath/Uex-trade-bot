@@ -20,8 +20,8 @@ from discord import app_commands
 from bot.cogs import ship_parts_finder
 from bot.cogs.help import CATEGORIES
 from bot.cogs.ship_parts_finder import (
-    LOADOUT_EXPIRED_NOTE, MESSAGE_LIMIT, WIKI_SILENT_FOR_SLOT, LoadoutView, PartsBrowserView, ShipPartsFinder,
-    _LoadoutPageButton, _ProfileButton,
+    LOADOUT_EXPIRED_NOTE, MAX_CUSTOM_ID_CHARS, MESSAGE_LIMIT, WIKI_SILENT_FOR_SLOT, LoadoutDoneButton, LoadoutView,
+    PartsBrowserView, ShipPartsFinder, _LoadoutDoneStub, _LoadoutPageButton, _ProfileButton, loadout_done_custom_id,
 )
 from bot.db.database import Database
 from bot.uex.ship_loadout import (
@@ -368,27 +368,42 @@ def test_the_power_line_is_each_profiles_total_pips_never_a_draw_warning(tmp_pat
 
 # -- done --------------------------------------------------------------------------------------
 
-def _done_click(thread, *, user_id=1, delete=None):
-    click = _interaction(thread, user_id=user_id)
-    click.message = NS(delete=delete or AsyncMock())
+def _done_click(cog, view, *, user_id=1, delete=None, message_id=None):
+    click = _interaction(None, user_id=user_id)
+    click.client = NS(get_cog=lambda name: cog if name == "ShipPartsFinder" else None)
+    click.message = NS(id=view.message.id if message_id is None else message_id, delete=delete or AsyncMock())
     click.response.type = discord.InteractionResponseType.deferred_message_update
     return click
 
 
-def test_done_removes_the_loadout_message_and_stops_its_buttons(tmp_path, monkeypatch):
+async def _press_done(view, click):
+    """A click on Done as discord.py dispatches it: through the handler registered at startup."""
+    stub = next(child for child in view.children if isinstance(child, _LoadoutDoneStub))
+    match = LoadoutDoneButton.__discord_ui_compiled_template__.fullmatch(stub.custom_id)
+    await (await LoadoutDoneButton.from_custom_id(click, stub, match)).callback(click)
+
+
+def _editable(message):
+    """The fake thread's message lacks what a timeout's edit reads off a real one."""
+    message.flags = NS(ephemeral=False)
+    message.channel = NS(get_partial_message=lambda _id: NS(edit=AsyncMock()))
+    return message
+
+
+def test_done_removes_the_loadout_message_and_stops_its_view(tmp_path, monkeypatch):
     async def run():
         cog, thread = await _cog(tmp_path, monkeypatch)
         await _run_command(cog, thread)
         _, view = _posted(thread)
-        click = _done_click(thread)
-        assert await view.interaction_check(click)
-        await view.done_button.callback(click)
-        return view, click
+        assert cog._loadouts == {view.message.id: view}
+        click = _done_click(cog, view)
+        await _press_done(view, click)
+        return cog, view, click
 
-    view, click = asyncio.run(run())
+    cog, view, click = asyncio.run(run())
     click.message.delete.assert_awaited_once()
     assert view.is_finished(), "stopped, so the idle timeout never edits a deleted message"
-    assert view.done_button.row == view.add_all_button.row
+    assert cog._loadouts == {}
 
 
 def test_only_the_player_who_opened_the_loadout_can_remove_it(tmp_path, monkeypatch):
@@ -396,9 +411,8 @@ def test_only_the_player_who_opened_the_loadout_can_remove_it(tmp_path, monkeypa
         cog, thread = await _cog(tmp_path, monkeypatch)
         await _run_command(cog, thread)
         _, view = _posted(thread)
-        click = _done_click(thread, user_id=2)
-        if await view.interaction_check(click):
-            await view.done_button.callback(click)
+        click = _done_click(cog, view, user_id=2)
+        await _press_done(view, click)
         return view, click
 
     view, click = asyncio.run(run())
@@ -407,21 +421,63 @@ def test_only_the_player_who_opened_the_loadout_can_remove_it(tmp_path, monkeypa
     assert "/ship-loadout" in click.response.send_message.await_args.args[0]
 
 
-def test_a_message_discord_wont_delete_has_its_buttons_greyed_out(tmp_path, monkeypatch):
+def test_done_still_works_once_the_loadout_has_gone_idle(tmp_path, monkeypatch):
     async def run():
         cog, thread = await _cog(tmp_path, monkeypatch)
         await _run_command(cog, thread)
         _, view = _posted(thread)
-        view.message = None  # the click's own edit is tried first; the fake message can't stand in
+        _editable(view.message)
+        await view.on_timeout()
+        after_idle = dict(cog._loadouts)
+        click = _done_click(cog, view)
+        await _press_done(view, click)
+        return after_idle, view, click
+
+    after_idle, view, click = asyncio.run(run())
+    done = next(child for child in view.children if isinstance(child, _LoadoutDoneStub))
+    assert not done.disabled and all(child.disabled for child in view.children if child is not done)
+    assert "**Done** still removes this message." in view.message.edit.await_args.kwargs["content"]
+    assert after_idle == {}, "an idle view is forgotten as it closes"
+    click.message.delete.assert_awaited_once()
+
+
+def test_done_works_on_a_loadout_posted_before_a_restart(tmp_path, monkeypatch):
+    async def run():
+        cog, thread = await _cog(tmp_path, monkeypatch)
+        await _run_command(cog, thread)
+        _, view = _posted(thread)
+        restarted = ShipPartsFinder(cog.bot, wiki_client=cog._wiki, start_refresh=False)  # no live views
+        click = _done_click(restarted, view)
+        await _press_done(view, click)
+        return click
+
+    asyncio.run(run()).message.delete.assert_awaited_once()
+
+
+def test_a_message_discord_wont_delete_greys_out_but_keeps_done(tmp_path, monkeypatch):
+    async def run():
+        cog, thread = await _cog(tmp_path, monkeypatch)
+        await _run_command(cog, thread)
+        _, view = _posted(thread)
+        _editable(view.message)
         refused = AsyncMock(side_effect=discord.HTTPException(NS(status=403, reason="Forbidden"), "no"))
-        click = _done_click(thread, delete=refused)
-        assert await view.interaction_check(click)
-        await view.done_button.callback(click)
+        click = _done_click(cog, view, delete=refused)
+        await _press_done(view, click)
         return view, click
 
     view, click = asyncio.run(run())
-    click.edit_original_response.assert_awaited_once()
-    assert all(child.disabled for child in view.children if hasattr(child, "disabled"))
+    done = next(child for child in view.children if isinstance(child, _LoadoutDoneStub))
+    assert not done.disabled and all(child.disabled for child in view.children if child is not done)
+    view.message.edit.assert_awaited_once()
+    assert "try **Done** again" in click.followup.send.await_args.args[0]
+
+
+def test_done_is_registered_once_and_never_dispatched_by_the_view():
+    custom_id = loadout_done_custom_id(2**63)
+    assert len(custom_id) <= MAX_CUSTOM_ID_CHARS
+    match = LoadoutDoneButton.__discord_ui_compiled_template__.fullmatch(custom_id)
+    assert asyncio.run(LoadoutDoneButton.from_custom_id(NS(), NS(), match)).owner_id == 2**63
+    assert not _LoadoutDoneStub(1).is_dispatchable()
 
 
 # -- scatterguns -------------------------------------------------------------------------------
@@ -760,7 +816,8 @@ def test_an_idle_loadout_greys_out_and_says_how_to_get_it_back():
         return view
 
     view = asyncio.run(run())
-    assert all(child.disabled for child in view.children)
+    assert all(child.disabled for child in view.children if not isinstance(child, _LoadoutDoneStub))
+    assert not next(child for child in view.children if isinstance(child, _LoadoutDoneStub)).disabled
     assert LOADOUT_EXPIRED_NOTE in view.message.edit.await_args.kwargs["content"]
 
 
