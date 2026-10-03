@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 
 import discord
 
-from bot.discord_ui import BotView
+from bot.discord_ui import BotLayoutView, BotView
 from bot.uex.blueprint_crafting import Recipe, aggregate
 
 if TYPE_CHECKING:
@@ -343,39 +343,93 @@ class CraftConfigView(BotView):
         await self.update(interaction)
 
 
+def mined_materials(recipe: Recipe) -> list[str]:
+    """The recipe's first five distinct ores, each of which gets a Mine button."""
+    seen, names = set(), []
+    for item in recipe.inputs:
+        if item.ore_uuid and item.ore_uuid not in seen and len(seen) < 5:
+            seen.add(item.ore_uuid)
+            names.append(item.name)
+    return names
+
+
+async def open_craft_config(cog: "Blueprints", recipe: Recipe, count: int, interaction: discord.Interaction) -> None:
+    await interaction.response.defer(ephemeral=True)
+    options = await cog.quality_options(recipe)
+    view = CraftConfigView(cog, recipe, count, options)
+    view.message = await interaction.followup.send(
+        view.text(), view=view, ephemeral=True, allowed_mentions=NO_MENTIONS, wait=True,
+    )
+
+
+async def add_default_plan(cog: "Blueprints", recipe: Recipe, count: int, interaction: discord.Interaction) -> None:
+    try:
+        plan = recipe.plan(count, {}, {})
+    except ValueError:
+        await interaction.response.send_message("Configure the required material choices first.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    await cog.shopping.add(interaction, plan)
+
+
 class CraftLaunchView(BotView):
+    """The crafting buttons under /blueprint-search's text-only reply (the fallback when its
+    layout doesn't fit or Discord refuses it)."""
+
     def __init__(self, cog: "Blueprints", recipe: Recipe, count: int) -> None:
         super().__init__(timeout=900)
         self.cog, self.recipe, self.count = cog, recipe, count
-        seen = set()
-        for item in recipe.inputs:
-            if item.ore_uuid and item.ore_uuid not in seen and len(seen) < 5:
-                seen.add(item.ore_uuid)
-                self.add_item(MineButton(cog, item.name))
+        for material in mined_materials(recipe):
+            self.add_item(MineButton(cog, material))
 
     @discord.ui.button(label="Configure crafting", style=discord.ButtonStyle.primary, row=0)
     async def configure(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
-        await interaction.response.defer(ephemeral=True)
-        options = await self.cog.quality_options(self.recipe)
-        view = CraftConfigView(self.cog, self.recipe, self.count, options)
-        view.message = await interaction.followup.send(
-            view.text(), view=view, ephemeral=True, allowed_mentions=NO_MENTIONS, wait=True,
-        )
+        await open_craft_config(self.cog, self.recipe, self.count, interaction)
 
     @discord.ui.button(label="Add to shopping list", style=discord.ButtonStyle.success, row=0)
     async def add_default(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
-        try:
-            plan = self.recipe.plan(self.count, {}, {})
-        except ValueError:
-            await interaction.response.send_message("Configure the required material choices first.", ephemeral=True)
-            return
-        await interaction.response.defer(ephemeral=True)
-        await self.cog.shopping.add(interaction, plan)
+        await add_default_plan(self.cog, self.recipe, self.count, interaction)
+
+
+class BlueprintResultView(BotLayoutView):
+    """/blueprint-search's reply as one layout (the owner's pick, 2026-10-03): `blocks` is the
+    header then one text block per giver, divided by lines; then the crafting line with its
+    Configure crafting button beside it, and the shopping-list and Mine buttons under it.
+    Without a recipe, `crafting` says crafting is unavailable and there are no buttons."""
+
+    def __init__(self, cog: "Blueprints", blocks: tuple[str, ...], crafting: str, recipe: Recipe | None,
+                 count: int) -> None:
+        super().__init__(timeout=900)
+        self.cog, self.recipe, self.count = cog, recipe, count
+        container = discord.ui.Container(accent_colour=discord.Colour.blurple())
+        container.add_item(discord.ui.TextDisplay(blocks[0]))
+        for block in blocks[1:]:
+            container.add_item(discord.ui.Separator())
+            container.add_item(discord.ui.TextDisplay(block))
+        container.add_item(discord.ui.Separator())
+        if recipe is None:
+            container.add_item(discord.ui.TextDisplay(crafting))
+        else:
+            configure = discord.ui.Button(label="Configure crafting", style=discord.ButtonStyle.primary)
+            configure.callback = self.configure
+            container.add_item(discord.ui.Section(discord.ui.TextDisplay(crafting), accessory=configure))
+            add = discord.ui.Button(label="Add to shopping list", style=discord.ButtonStyle.success)
+            add.callback = self.add_default
+            buttons = [add, *(MineButton(cog, material, row=None) for material in mined_materials(recipe))]
+            for start in range(0, len(buttons), 5):  # Discord's five buttons to a row
+                container.add_item(discord.ui.ActionRow(*buttons[start:start + 5]))
+        self.add_item(container)
+
+    async def configure(self, interaction: discord.Interaction) -> None:
+        await open_craft_config(self.cog, self.recipe, self.count, interaction)
+
+    async def add_default(self, interaction: discord.Interaction) -> None:
+        await add_default_plan(self.cog, self.recipe, self.count, interaction)
 
 
 class MineButton(discord.ui.Button):
-    def __init__(self, cog: "Blueprints", material: str) -> None:
-        super().__init__(label=f"Mine {material}"[:80], style=discord.ButtonStyle.secondary, row=1)
+    def __init__(self, cog: "Blueprints", material: str, *, row: int | None = 1) -> None:
+        super().__init__(label=f"Mine {material}"[:80], style=discord.ButtonStyle.secondary, row=row)
         self.cog, self.material = cog, material
 
     async def callback(self, interaction: discord.Interaction) -> None:

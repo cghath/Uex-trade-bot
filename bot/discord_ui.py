@@ -3,7 +3,8 @@
 - BotView / BotModal: the base class for every view and modal in this bot. When a button,
   menu or form handler raises, they tell the player it failed instead of leaving them on
   "thinking..." or a click that seems to do nothing, and a view greys out its controls when
-  it times out. `on_app_command_error` does the same for
+  it times out. BotLayoutView is BotView for a reply built from Discord's layout components
+  (a container of text, dividers and sections; discord.py's LayoutView). `on_app_command_error` does the same for
   slash commands; bot/main.py registers it on the command tree.
 - AlertRemovePickerView: a paginated dropdown for removing an alert by picking it from a
   menu instead of having to already know (and type) its numeric id. Used by every alert
@@ -82,8 +83,9 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
     await tell_player_it_failed(interaction, message)
 
 
-class BotView(discord.ui.View):
-    """Base class for every view in this bot.
+class _BotViewBehaviour:
+    """What every view in this bot does, whether it's a classic view (BotView) or a layout
+    (BotLayoutView):
 
     - A failing button or menu tells the player, instead of discord.py's default of only
       logging it.
@@ -120,8 +122,9 @@ class BotView(discord.ui.View):
     async def grey_out(self, *, keep: tuple[type, ...] = (), **edit_kwargs: Any) -> bool:
         """Disable every control - but any of a type in `keep`, one that works without the view
         (a DynamicItem's stub) - and show that on the message, along with any other message
-        fields passed (e.g. a note in `content`). True if the message was edited."""
-        for child in self.children:
+        fields passed (e.g. a note in `content`). True if the message was edited. Every control
+        counts, including one nested in a layout's container or section."""
+        for child in self.walk_children():
             if hasattr(child, "disabled") and not isinstance(child, keep):
                 child.disabled = True
         for edit in self._message_editors():
@@ -147,6 +150,16 @@ class BotView(discord.ui.View):
     async def on_error(self, interaction: discord.Interaction, error: Exception, item: discord.ui.Item[Any], /) -> None:
         logger.error("Unhandled error in %s for %r", type(self).__name__, item, exc_info=error)
         await tell_player_it_failed(interaction)
+
+
+class BotView(_BotViewBehaviour, discord.ui.View):
+    """Base class for every classic view (buttons and menus under a message) in this bot."""
+
+
+class BotLayoutView(_BotViewBehaviour, discord.ui.LayoutView):
+    """Base class for every reply built from layout components: the whole message is the view,
+    so it can't also carry `content` or an embed. Discord allows 40 components and 4,000
+    characters of text in one (discord.py raises ValueError past 40; check content_length())."""
 
 
 class BotModal(discord.ui.Modal):

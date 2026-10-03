@@ -4715,6 +4715,57 @@ they're in sync).
        Tank, with the note; Budget keeps the nose Mantis.
      - Re-check `ARMOR_REFERENCE` with the gun rules after the combat patch (ROADMAP.md).
      - Tests in `tests/test_ship_loadout.py`; 9 mutations, all caught.
+136. **The item and blueprint lookups answer in Discord's layout components: shared facts
+     said once, crafting behind its button.** The owner's presentation pass (2026-10-03):
+     "make the messages look much easier on the eyes", one section at a time, mockups first.
+     They chose the lookups (`/ingame-item-finder` 23 uses, `/blueprint-search` 14, from
+     `command_usage_by_user` on the Pi). The canvas showed today's real reply against three
+     options each, then the R97 Shotgun's 30 contracts. The owner picked C, the
+     layout-component version, for both.
+     - **Layout components** (discord.py 2.6+'s `LayoutView`): a `Container` with the embeds'
+       blurple accent, holding `TextDisplay`s (full markdown: `##`/`###` headings, `-#` small
+       print, lists), `Separator`s, a `Section` that puts a button beside its text, and
+       `ActionRow`s. The whole message is the view, so no `content` or embed goes with it.
+       Discord's limits are 40 components (discord.py raises `ValueError`) and 4,000 characters of
+       text (`content_length()`). There are no columns, so the mockup's side-by-side nearest and
+       cheapest stack instead.
+     - **`BotLayoutView`** (`bot/discord_ui.py`) shares BotView's behaviour through
+       `_BotViewBehaviour`. `grey_out` now walks nested children (`walk_children`), since a
+       layout's buttons sit inside its container. The every-view tests (`tests/bot_views.py`,
+       `test_failed_interactions.py`) cover layouts too: a `LayoutView` isn't a `View`.
+     - **`/blueprint-search`:** `summarize_contracts` (`bot/uex/blueprints.py`, replacing
+       `group_line`) says once what every contract shares. One lead sentence carries the most
+       common pool and reward chance ("Each always grants one of the 10 blueprints in its pool
+       unless noted; the odds of getting this one aren't published." - still never a
+       per-blueprint figure), plus the star system when every contract agrees. Per giver with two
+       or more contracts, it gives one rank, one system, or all illegal. Each contract keeps a
+       bold title over a small line of what differs: its rank, rep (now with commas), and an
+       odd pool or chance. Dropped: the blueprint id, the build number (now "game 4.10.1") and
+       "x2 variants" (internal variant ids). The R97 Shotgun went from 4,513 to about 2,400
+       characters.
+     - **Crafting details** (the owner's call): out of the reply. A "Crafting" line sits beside
+       the Configure crafting button, which shows the full recipe (materials, quantities scaled
+       to the copies, stat changes); it reads "Crafting N copies" for more than one.
+     - **Fit:** the layout goes only when the whole list fits; otherwise the existing text pages
+       go, in the same new wording, with "Showing X of Y contracts". A refused or oversized
+       layout falls back to the same text. On a copy of the 2026-10-03 snapshot, all 679
+       blueprints fit: the most text was 2,985 characters (Parallax Rifle Battery) and the most
+       components 32 (R97 Shotgun Magazine, 46 contracts from 9 givers).
+     - **`/ingame-item-finder`:** a header with the shop count and origin, then the answer
+       first: "Nearest", and "Cheapest" (the nearest shop at the lowest price, naming its system
+       when it isn't the player's). Then each system's shops. When every shop in a system
+       charges the same, the price (and a shared vendor) goes in the heading once and the shops
+       share a line: Pyro's ten P4-AR shops at 4,138. Prices drop the repeated "aUEC" and
+       distances drop the ".0". `format_item_listing_line` gives way to `item_header`,
+       `highlights_block`, `system_block`, `item_footer` and `distance_text`. Shop lines stay
+       proportional text, never a monospace table (the truncated-place bug, kept as a test).
+     - Not yet seen in Discord: no local bot run (the dev guild is shared with the Pi), so the
+       first real use is the smoke test. Rendered offline from real data (a copy of the Pi's
+       backup, live wiki and UEX reads) before shipping.
+     - Tests in `tests/test_blueprints.py`, `test_blueprints_cog.py`,
+       `test_blueprint_crafting_cog.py`, `test_item_finder.py`, `test_expired_views.py` and
+       `test_failed_interactions.py`. 22 mutations, all caught. One was caught only by
+       accident (one button row for six buttons) and now has its own test.
 
 ## Where to look for what
 

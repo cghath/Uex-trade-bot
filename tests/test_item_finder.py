@@ -6,9 +6,20 @@ import asyncio
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock
 
+import discord
+
 from bot.cogs.item_finder import ItemFinder, MAX_RESULTS_SHOWN, sold_item_name_autocomplete
 from bot.uex.exceptions import UexApiError
-from bot.uex.item_finder import ItemListing, format_item_listing_line, rank_item_listings, split_place_and_vendor
+from bot.uex.item_finder import (
+    ItemListing,
+    distance_text,
+    highlights_block,
+    item_footer,
+    item_header,
+    rank_item_listings,
+    split_place_and_vendor,
+    system_block,
+)
 
 
 def _row(id_terminal, terminal_name, price_buy, **overrides):
@@ -140,69 +151,67 @@ def test_rank_item_listings_carries_the_place_vendor_system_and_price_through():
 
 # -- format_item_listing_line -----------------------------------------------------------
 
-def test_format_item_listing_line_shows_place_vendor_price_and_distance():
-    listing = _listing(1, "GrimHEX", 1500, vendor_label="Skutters", distance_gm=3.25)
-    line = format_item_listing_line(listing)
-    assert "**GrimHEX**" in line
-    assert "(Skutters)" in line
-    assert "1,500 aUEC" in line
-    assert "3.2 Gm" in line
+def test_distance_text_rounds_and_says_plainly_what_it_doesnt_know():
+    assert distance_text(_listing(1, "X", 100, distance_gm=3.25)) == "3.2 Gm"
+    assert distance_text(_listing(1, "X", 100, distance_gm=23.0)) == "23 Gm", "no trailing .0"
+    assert distance_text(_listing(1, "X", 100, distance_gm=0.0)) == "here"
+    unknown = _listing(1, "X", 100, star_system_name="Pyro", distance_gm=None)
+    assert distance_text(unknown) == "distance unknown"
+    assert distance_text(unknown, origin_star_system="Stanton") == "distance unknown"
+    assert distance_text(unknown, origin_star_system="Pyro") == "same system"
 
 
-def test_format_item_listing_line_zero_distance_says_here():
-    listing = _listing(1, "X", 100, distance_gm=0.0)
-    assert "here" in format_item_listing_line(listing)
+def test_a_system_lists_each_shop_with_its_place_vendor_price_and_distance():
+    block = system_block("Stanton", [
+        _listing(1, "GrimHEX", 1500, vendor_label="Skutters", distance_gm=3.25),
+        _listing(2, "Mystery Shop", 1600, vendor_label=None, distance_gm=9.0),
+    ])
+    assert block.split("\n") == ["### Stanton", "- **GrimHEX** (Skutters) · 1,500 · 3.2 Gm", "- **Mystery Shop** · 1,600 · 9 Gm"]
 
 
-def test_format_item_listing_line_unknown_distance_with_no_origin_system_says_so_plainly():
-    listing = _listing(1, "X", 100, star_system_name="Pyro", distance_gm=None)
-    line = format_item_listing_line(listing)
-    assert line.endswith("unknown")
-    assert "same system" not in line
+def test_shops_at_one_price_share_a_line_under_a_heading_that_says_the_price_once():
+    """Real data, 2026-10-03: every Pyro shop sold the P4-AR at 4,138, ten lines saying the same price."""
+    same = [_listing(i, place, 4138, vendor_label="Guns", star_system_name="Pyro", distance_gm=d)
+            for i, (place, d) in enumerate([("Megumi Refueling", 38.0), ("Checkmate", 64.0), ("Gaslight", None)])]
+    assert system_block("Pyro", same).split("\n") == [
+        "### Pyro · all 4,138 (Guns)", "Megumi Refueling 38 Gm · Checkmate 64 Gm · Gaslight (distance unknown)"]
+    mixed_vendors = [same[0], _listing(9, "Checkmate", 4138, vendor_label="Ammo", star_system_name="Pyro", distance_gm=64.0)]
+    assert system_block("Pyro", mixed_vendors).split("\n") == [
+        "### Pyro · all 4,138", "Megumi Refueling (Guns) 38 Gm · Checkmate (Ammo) 64 Gm"]
+    assert system_block("Pyro", same[:1]).startswith("### Pyro\n- "), "one shop isn't a shared price"
 
 
-def test_format_item_listing_line_unknown_distance_in_the_players_own_system_says_so():
-    listing = _listing(1, "X", 100, star_system_name="Stanton", distance_gm=None)
-    line = format_item_listing_line(listing, origin_star_system="Stanton")
-    assert "same system" in line
+def test_a_long_place_or_vendor_is_never_truncated_and_two_similar_ones_stay_distinct():
+    """Real bug, caught live: a fixed-width table column truncated two DIFFERENT real places
+    to identical text, and once widened, Discord wrapped the rows and broke the columns
+    anyway. Plain proportional text has neither problem, in a list or on a shared line."""
+    alpha = _listing(1, "People's Service Station Alpha", 100, vendor_label="Weapons and Armor")
+    lambda_ = _listing(2, "People's Service Station Lambda", 200, vendor_label="Weapons and Armor")
+    listed = system_block("Nyx", [alpha, lambda_]).split("\n")[1:]
+    assert listed[0] != listed[1] and "Alpha" in listed[0] and "Lambda" in listed[1]
+    assert all("Weapons and Armor" in line and "…" not in line for line in listed)
+    shared = system_block("Nyx", [alpha, ItemListing(**{**lambda_.__dict__, "price_buy": 100})]).split("\n")[1]
+    assert "People's Service Station Alpha" in shared and "People's Service Station Lambda" in shared
 
 
-def test_format_item_listing_line_unknown_distance_in_a_different_system_says_plain_unknown():
-    listing = _listing(1, "X", 100, star_system_name="Pyro", distance_gm=None)
-    line = format_item_listing_line(listing, origin_star_system="Stanton")
-    assert line.endswith("unknown")
-    assert "same system" not in line
+def test_the_answer_comes_first_nearest_and_cheapest():
+    near = _listing(1, "ARC-L1", 4737, vendor_label="Live Fire Weapons", distance_gm=3.0)
+    cheap = _listing(2, "Megumi Refueling", 4138, vendor_label="Guns", star_system_name="Pyro", distance_gm=38.0)
+    tied = _listing(3, "Checkmate", 4138, vendor_label="Guns", star_system_name="Pyro", distance_gm=64.0)
+    assert highlights_block([near, cheap, tied], origin_star_system="Stanton").split("\n") == [
+        "**Nearest** · ARC-L1 (Live Fire Weapons) · 4,737 · 3 Gm",
+        "**Cheapest** · Megumi Refueling (Guns), Pyro · 4,138 · 38 Gm",
+    ], "the cheapest is the nearest of the shops at the lowest price, and names its system when it isn't yours"
+    assert highlights_block([cheap, near], origin_star_system="Pyro") == \
+        "**Nearest and cheapest** · Megumi Refueling (Guns) · 4,138 · 38 Gm"
 
 
-def test_format_item_listing_line_no_vendor_omits_the_parenthetical():
-    listing = _listing(1, "Mystery Shop", 100, vendor_label=None)
-    line = format_item_listing_line(listing)
-    assert "**Mystery Shop**" in line
-    assert "(" not in line
-
-
-def test_format_item_listing_line_never_truncates_a_long_place_or_vendor():
-    """Real bug, caught live: a fixed-width table column either truncated two DIFFERENT
-    real places down to identical displayed text, or - once widened to fix that - got wide
-    enough that Discord wrapped it inside an embed field and broke column alignment
-    anyway. Plain text has neither failure mode: a long name just appears in full."""
-    listing = _listing(
-        1, "People's Service Station Lambda", 100, vendor_label="Weapons and Armor",
-    )
-    line = format_item_listing_line(listing)
-    assert "People's Service Station Lambda" in line
-    assert "Weapons and Armor" in line
-    assert "…" not in line
-
-
-def test_format_item_listing_line_two_different_long_places_stay_distinguishable():
-    listing_a = _listing(1, "People's Service Station Alpha", 100, vendor_label="Weapons and Armor")
-    listing_b = _listing(2, "People's Service Station Lambda", 100, vendor_label="Weapons and Armor")
-    line_a = format_item_listing_line(listing_a)
-    line_b = format_item_listing_line(listing_b)
-    assert line_a != line_b
-    assert "Alpha" in line_a
-    assert "Lambda" in line_b
+def test_the_header_counts_shops_and_the_footer_says_how_many_were_left_out():
+    assert item_header("P4-AR Rifle", 16, "Area 18 (Cubby Blast)") == \
+        "## P4-AR Rifle\n-# 16 shops sell it · prices in aUEC · from Area 18 (Cubby Blast)"
+    assert "1 shop sells it" in item_header("X", 1, "Y")
+    assert item_footer(0) == "-# UEX prices, up to 24h old"
+    assert item_footer(1).endswith("1 more shop not shown") and item_footer(5).endswith("5 more shops not shown")
 
 
 # -- sold_item_name_autocomplete ---------------------------------------------------------
@@ -282,6 +291,21 @@ class _FakeInteraction:
         self.followup = NS(send=AsyncMock())
 
 
+def _blocks(interaction) -> list[str]:
+    """The reply's text blocks, in order: header, nearest/cheapest, the systems, footer."""
+    view = interaction.followup.send.call_args.kwargs["view"]
+    assert isinstance(view, discord.ui.LayoutView) and view.content_length() <= 4000
+    return [item.content for item in view.walk_children() if isinstance(item, discord.ui.TextDisplay)]
+
+
+def _system_lines(interaction, system: str) -> list[str]:
+    """One system's lines under its heading (the heading itself left out)."""
+    lines = _blocks(interaction)[2].split("\n")
+    start = next(i for i, line in enumerate(lines) if line == f"### {system}" or line.startswith(f"### {system} · "))
+    end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("### ")), len(lines))
+    return [line for line in lines[start + 1:end] if line]
+
+
 def _cog(*, resolved_terminal, catalog, items_prices, distance_by_pair=None, origin_star_system=None):
     """distance_by_pair: {(origin, destination): {"distance": float}} - AsyncMock side
     effect keyed on the actual (origin, destination) args get_terminal_distance is called
@@ -325,13 +349,14 @@ def test_ingame_item_finder_happy_path_sorts_closest_first_grouped_by_system():
 
     interaction = asyncio.run(run())
     interaction.response.defer.assert_awaited_once()
-    embed = interaction.followup.send.call_args.kwargs["embed"]
-    assert "P4-AR" in embed.title
-    stanton_field = next(f for f in embed.fields if f.name == "Stanton")
-    lines = stanton_field.value.splitlines()
-    assert lines[0].startswith("**Near Armory**"), "closest terminal must be listed first"
-    assert "1,300 aUEC" in lines[0] and "2.0 Gm" in lines[0]
-    assert "1,200 aUEC" in lines[1] and "50.0 Gm" in lines[1]
+    header, picks, _, footer = _blocks(interaction)
+    assert header.startswith("## P4-AR\n-# 2 shops sell it")
+    assert picks.split("\n") == ["**Nearest** · Near Armory · 1,300 · 2 Gm", "**Cheapest** · Far Armory · 1,200 · 50 Gm"]
+    lines = _system_lines(interaction, "Stanton")
+    assert lines[0].startswith("- **Near Armory**"), "closest terminal must be listed first"
+    assert "1,300" in lines[0] and "2 Gm" in lines[0]
+    assert "1,200" in lines[1] and "50 Gm" in lines[1]
+    assert footer == "-# UEX prices, up to 24h old"
 
 
 def test_ingame_item_finder_groups_results_into_one_field_per_star_system():
@@ -352,13 +377,10 @@ def test_ingame_item_finder_groups_results_into_one_field_per_star_system():
         return interaction
 
     interaction = asyncio.run(run())
-    embed = interaction.followup.send.call_args.kwargs["embed"]
-    field_names = [f.name for f in embed.fields]
-    assert field_names == ["Stanton", "Pyro"], "the origin's own system must be the first group"
-    stanton_field = next(f for f in embed.fields if f.name == "Stanton")
-    pyro_field = next(f for f in embed.fields if f.name == "Pyro")
-    assert "Stanton Shop" in stanton_field.value
-    assert "Pyro Shop" in pyro_field.value
+    headings = [line for line in _blocks(interaction)[2].split("\n") if line.startswith("### ")]
+    assert headings == ["### Stanton", "### Pyro"], "the origin's own system must be the first group"
+    assert "Stanton Shop" in "\n".join(_system_lines(interaction, "Stanton"))
+    assert "Pyro Shop" in "\n".join(_system_lines(interaction, "Pyro"))
 
 
 def test_ingame_item_finder_real_bug_grim_hex_same_system_unknown_distance_still_shown():
@@ -386,11 +408,10 @@ def test_ingame_item_finder_real_bug_grim_hex_same_system_unknown_distance_still
         return interaction
 
     interaction = asyncio.run(run())
-    embed = interaction.followup.send.call_args.kwargs["embed"]
-    stanton_field = next(f for f in embed.fields if f.name == "Stanton")
-    assert "GrimHEX" in stanton_field.value
-    assert "Skutters" in stanton_field.value
-    assert "same system" in stanton_field.value
+    stanton = "\n".join(_system_lines(interaction, "Stanton"))
+    assert "GrimHEX" in stanton
+    assert "Skutters" in stanton
+    assert "same system" in stanton
 
 
 def test_ingame_item_finder_shows_vendor_for_two_shops_at_the_same_place():
@@ -414,9 +435,7 @@ def test_ingame_item_finder_shows_vendor_for_two_shops_at_the_same_place():
         return interaction
 
     interaction = asyncio.run(run())
-    embed = interaction.followup.send.call_args.kwargs["embed"]
-    stanton_field = next(f for f in embed.fields if f.name == "Stanton")
-    lines = stanton_field.value.splitlines()
+    lines = _system_lines(interaction, "Stanton")
     assert len(lines) == 2
     assert all("Checkmate" in line for line in lines), "both lines share the same place"
     assert "Guns" in lines[0] and "Sharp Shooters" not in lines[0]
@@ -448,13 +467,13 @@ def test_ingame_item_finder_long_similar_place_names_stay_distinguishable():
         return interaction
 
     interaction = asyncio.run(run())
-    embed = interaction.followup.send.call_args.kwargs["embed"]
-    nyx_field = next(f for f in embed.fields if f.name == "Nyx")
-    lines = nyx_field.value.splitlines()
-    assert len(lines) == 4
-    assert len(set(lines)) == 4, "four different real places must render as four distinct lines"
+    # All four charge 9,519, so they share one line under "### Nyx · all 9,519 (Weapons and Armor)".
+    (line,) = _system_lines(interaction, "Nyx")
+    shops = line.split(" · ")
+    assert len(shops) == 4
+    assert len(set(shops)) == 4, "four different real places must render as four distinct entries"
     for suffix in ["Alpha", "Delta", "Theta", "Lambda"]:
-        assert any(suffix in line for line in lines), f"{suffix} must still be visible, not truncated away"
+        assert any(suffix in shop for shop in shops), f"{suffix} must still be visible, not truncated away"
 
 
 def test_ingame_item_finder_unknown_location_says_so_and_makes_no_other_calls():
@@ -484,7 +503,7 @@ def test_ingame_item_finder_unknown_item_says_so():
     interaction = asyncio.run(run())
     message = interaction.followup.send.call_args.args[0]
     assert "Nonexistent Gun" in message
-    assert "embed" not in interaction.followup.send.call_args.kwargs
+    assert "view" not in interaction.followup.send.call_args.kwargs
 
 
 def test_ingame_item_finder_no_listings_says_so():
@@ -519,9 +538,8 @@ def test_ingame_item_finder_origin_terminal_itself_never_gets_a_live_distance_ca
 
     cog, interaction = asyncio.run(run())
     cog.bot.uex.get_terminal_distance.assert_not_awaited()
-    embed = interaction.followup.send.call_args.kwargs["embed"]
-    stanton_field = next(f for f in embed.fields if f.name == "Stanton")
-    assert "here" in stanton_field.value
+    assert "here" in "\n".join(_system_lines(interaction, "Stanton"))
+    assert _blocks(interaction)[1].startswith("**Nearest and cheapest**")
 
 
 def test_ingame_item_finder_a_cross_system_distance_lookup_failure_still_shows_the_listing():
@@ -546,11 +564,9 @@ def test_ingame_item_finder_a_cross_system_distance_lookup_failure_still_shows_t
         return interaction
 
     interaction = asyncio.run(run())
-    embed = interaction.followup.send.call_args.kwargs["embed"]
-    pyro_field = next(f for f in embed.fields if f.name == "Pyro")
-    lines = pyro_field.value.splitlines()
+    lines = _system_lines(interaction, "Pyro")
     assert "Normal Shop" in lines[0], "the successfully-measured shop must sort first"
-    assert lines[1].endswith("unknown")
+    assert lines[1].endswith("distance unknown")
 
 
 def test_ingame_item_finder_truncates_and_discloses_omitted_count():
@@ -570,7 +586,26 @@ def test_ingame_item_finder_truncates_and_discloses_omitted_count():
         return interaction
 
     interaction = asyncio.run(run())
-    embed = interaction.followup.send.call_args.kwargs["embed"]
-    stanton_field = next(f for f in embed.fields if f.name == "Stanton")
-    assert len(stanton_field.value.splitlines()) == MAX_RESULTS_SHOWN
-    assert "5 more shop(s) omitted" in embed.footer.text
+    assert len(_system_lines(interaction, "Stanton")) == MAX_RESULTS_SHOWN
+    assert _blocks(interaction)[-1].endswith("5 more shops not shown")
+
+
+def test_ingame_item_finder_a_refused_layout_falls_back_to_the_same_facts_as_text():
+    async def run():
+        cog = _cog(
+            resolved_terminal=(1, "Area18 TDD"), catalog=[{"id": 5, "name": "P4-AR"}],
+            items_prices=[_row(10, "Near Armory", 1300, item_name="P4-AR", star_system_name="Stanton")],
+            distance_by_pair={(1, 10): {"distance": 2.0}}, origin_star_system="Stanton",
+        )
+        interaction = _FakeInteraction()
+        refused = discord.HTTPException(NS(status=400, reason="Bad Request"), "Invalid Form Body")
+        interaction.followup.send.side_effect = [refused, None]
+
+        await cog.ingame_item_finder.callback(cog, interaction, item="P4-AR", location="Area18 TDD")
+        return interaction
+
+    interaction = asyncio.run(run())
+    first, second = interaction.followup.send.call_args_list
+    assert "view" in first.kwargs and "view" not in second.kwargs
+    text = second.kwargs["content"]
+    assert text.startswith("## P4-AR") and "Near Armory" in text and "UEX prices" in text

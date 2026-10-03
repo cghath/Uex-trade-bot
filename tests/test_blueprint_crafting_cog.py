@@ -8,7 +8,14 @@ from unittest.mock import AsyncMock
 
 import discord
 
-from bot.cogs.blueprint_planner import ChoiceSelect, CraftConfigView, CraftLaunchView, MineButton, QualitySelect
+from bot.cogs.blueprint_planner import (
+    BlueprintResultView,
+    ChoiceSelect,
+    CraftConfigView,
+    CraftLaunchView,
+    MineButton,
+    QualitySelect,
+)
 from bot.uex.blueprint_crafting import Group, Recipe, UNAVAILABLE
 from tests.test_blueprints_cog import FakeWiki, _make
 
@@ -28,11 +35,13 @@ def test_craft_quantity_is_rendered_and_three_actual_aspects_get_independent_con
         return cog, result
 
     cog, result = asyncio.run(run())
-    assert result.recipe is not None and "Craft 5" in "\n".join(result.pages)
-    assert "0.20 SCU" in "\n".join(result.pages), "frame quantity scales from .04 to .20"
+    # The reply only says how many copies; the materials live behind Configure crafting (2026-10-03).
+    assert result.recipe is not None and "**Crafting 5 copies**" in result.crafting
+    assert "**Crafting 5 copies**" in "\n".join(result.pages) and "SCU" not in "\n".join(result.pages)
     recipe = result.recipe
     quality = {item.path: (325, 521, 1000) for item in recipe.inputs if item.ore_uuid}
     view = CraftConfigView(cog, recipe, 5, quality)
+    assert "Craft 5" in view.text() and "0.20 SCU" in view.text(), "frame quantity scales from .04 to .20"
     controls = [child for child in view.children if isinstance(child, QualitySelect)]
     assert len(controls) == 3
     assert {control.path for control in controls} == {item.path for item in recipe.inputs}
@@ -62,6 +71,70 @@ def test_recipe_failure_message_does_not_replace_contract_result(tmp_path):
     result = asyncio.run(run())
     assert result.status == "found" and UNAVAILABLE in "\n".join(result.pages)
     assert "contract" in "\n".join(result.pages).lower()
+
+
+def test_the_layout_puts_configure_crafting_beside_its_line_and_every_other_button_under_it(tmp_path):
+    async def run():
+        cog, _ = await _make(tmp_path, FakeWiki(), seed=True)
+        cog._client.get_blueprint_detail = AsyncMock(return_value=_detail())
+        result = await cog.search("Killshot Rifle")
+        sent = []
+
+        async def send(**kwargs):
+            sent.append(kwargs)
+            return NS(id=1)
+
+        await cog.deliver(send, result)
+        return result, sent
+
+    result, (kwargs,) = asyncio.run(run())
+    view = kwargs["view"]
+    assert isinstance(view, BlueprintResultView) and "content" not in kwargs and "embed" not in kwargs
+    (section,) = [item for item in view.walk_children() if isinstance(item, discord.ui.Section)]
+    assert section.accessory.label == "Configure crafting" and "**Crafting**" in section.children[0].content
+    rows = [item for item in view.walk_children() if isinstance(item, discord.ui.ActionRow)]
+    labels = [button.label for row in rows for button in row.children]
+    assert labels[0] == "Add to shopping list" and all(label.startswith("Mine ") for label in labels[1:])
+    assert all(len(row.children) <= 5 for row in rows)
+    assert view.content_length() <= 4000 and "Craft 1" not in "".join(
+        item.content for item in view.walk_children() if isinstance(item, discord.ui.TextDisplay))
+
+
+def test_a_layout_greys_out_every_nested_button_when_it_times_out(tmp_path):
+    async def run():
+        cog, _ = await _make(tmp_path, FakeWiki(), seed=True)
+        recipe = Recipe.parse(_detail())
+        view = BlueprintResultView(cog, ("## Rifle",), "**Crafting**\nSee the materials.", recipe, 1)
+        view.message = NS(id=1, flags=NS(ephemeral=False), edit=AsyncMock(),
+                          channel=NS(get_partial_message=lambda _id: NS(edit=AsyncMock())))
+        await view.on_timeout()
+        return view
+
+    view = asyncio.run(run())
+    buttons = [item for item in view.walk_children() if isinstance(item, discord.ui.Button)]
+    assert len(buttons) >= 3 and all(button.disabled for button in buttons)
+    view.message.edit.assert_awaited_once()
+
+
+def test_more_buttons_than_fit_one_row_wrap_to_a_second(tmp_path):
+    async def run():
+        cog, _ = await _make(tmp_path, FakeWiki(), seed=True)
+        recipe = NS(inputs=[NS(ore_uuid=f"ore-{i}", name=f"Ore {i}") for i in range(6)])
+        return BlueprintResultView(cog, ("## Rifle",), "**Crafting**", recipe, 1)
+
+    view = asyncio.run(run())
+    rows = [item for item in view.walk_children() if isinstance(item, discord.ui.ActionRow)]
+    assert [len(row.children) for row in rows] == [5, 1], "Add to shopping list and five Mine buttons (the cap)"
+
+
+def test_without_a_recipe_the_layout_says_so_and_has_no_buttons(tmp_path):
+    async def run():
+        cog, _ = await _make(tmp_path, FakeWiki(), seed=True)
+        return BlueprintResultView(cog, ("## Rifle",), f"-# {UNAVAILABLE}", None, 1)
+
+    view = asyncio.run(run())
+    assert not [item for item in view.walk_children() if isinstance(item, discord.ui.Button)]
+    assert any(UNAVAILABLE in item.content for item in view.walk_children() if isinstance(item, discord.ui.TextDisplay))
 
 
 def test_mining_buttons_reuse_the_existing_deterministic_lookup_without_a_prompt():

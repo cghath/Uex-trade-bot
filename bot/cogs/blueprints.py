@@ -27,28 +27,31 @@ from discord.ext import commands, tasks
 from bot.uex.blueprints import (
     BlueprintIndex,
     BlueprintMission,
+    contracts_header,
     describe_chance,
-    group_line,
+    first_contracts,
+    giver_block,
     group_missions,
     parse_chances,
     parse_missions,
     snapshot_is_current,
+    summarize_contracts,
     sync_result_is_plausible,
 )
-from bot.uex.route_presentation import add_chunked_fields, chunk_lines
+from bot.uex.route_presentation import chunk_lines
 from bot.wiki_api import WikiApiClient, WikiApiError
 from bot.uex.blueprint_crafting import Recipe, UNAVAILABLE, craft_count, obtainable_qualities
-from bot.cogs.blueprint_planner import CraftLaunchView, ShoppingView, ShoppingService
+from bot.cogs.blueprint_planner import BlueprintResultView, CraftLaunchView, ShoppingView, ShoppingService
 
 logger = logging.getLogger("uexbot.blueprints")
 
 REFRESH_HOURS = 12  # the API itself caches responses for 12h, so checking more often gains nothing
 DETAIL_CACHE_SECONDS = 6 * 3600
 DETAIL_CACHE_MAX = 300
-MAX_EMBED_FIELDS = 25
+# Discord's text limit for one layout reply, across all its text. A result over it goes as text pages.
+LAYOUT_TEXT_LIMIT = 4000
 TEXT_PAGE_LIMIT = 1900  # under Discord's 2000-char message cap
 MAX_TEXT_PAGES = 5
-POOL_DISCLOSURE = "A contract rewards a blueprint from its pool; the odds of each item in the pool aren't published."
 # The longest real blueprint name is well under this; anything longer is not a name, and a player's raw query
 # is echoed back in "no match"/"which one?" replies, so it is bounded and made mention-safe first.
 MAX_QUERY_CHARS = 100
@@ -74,12 +77,14 @@ class SnapshotRejected(Exception):
 @dataclass(frozen=True)
 class SearchResult:
     """`pages` is ALWAYS the complete plain-text rendering (each page fits one Discord message), so
-    it doubles as the fallback when the embed is too large or its send fails. `embed` exists only
-    for a `found` result that fit Discord's limits."""
+    it doubles as the fallback when the layout is too large or its send fails. `blocks` (the
+    layout's header, then one per giver) and `crafting` exist only for a `found` result whose
+    whole list fits one layout."""
     status: Literal["found", "ambiguous", "none", "unavailable"]
     pages: tuple[str, ...]
     name: str | None = None
-    embed: discord.Embed | None = None
+    blocks: tuple[str, ...] = ()
+    crafting: str = ""
     # Structured extras so callers never have to parse `pages` back apart: for
     # "ambiguous" the ranked candidate names and how many more matched; for "none" the near-miss
     # suggestions (possibly empty).
@@ -287,51 +292,36 @@ class Blueprints(commands.Cog):
         chances: dict[str, float], state, recipe: Recipe | None = None, craft_quantity: int = 1,
     ) -> SearchResult:
         groups = group_missions(missions)
-        entries: list[tuple[str, str]] = []  # (giver, line), in display order
-        for group in groups:
-            chance_text = describe_chance([chances.get(uuid) for uuid in group.mission_uuids])
-            entries.append((group.giver, group_line(group, chance_text)))
-        by_giver: dict[str, list[str]] = {}
-        for giver, line in entries:
-            by_giver.setdefault(giver, []).append(line)
-
-        contracts = len(missions)
-        summary = (
-            f"**{name}** can be awarded by {contracts} contract{'s' if contracts != 1 else ''} "
-            f"({len(groups)} distinct) from {len(by_giver)} giver{'s' if len(by_giver) != 1 else ''}."
-        )
-        if corrected_from:
-            summary = f"Showing results for **{name}** (you typed “{corrected_from}”).\n" + summary
-        footer = POOL_DISCLOSURE
-        if state is not None:
-            footer += f"\nStar Citizen Wiki API · game {state.game_version} · synced {state.synced_at:%Y-%m-%d}"
-
-        crafting = "\n".join(recipe.lines(craft_quantity)) if recipe is not None else UNAVAILABLE
-        crafting = discord.utils.escape_mentions(crafting)
-        if len(crafting) > 2400:
-            crafting = crafting[:2300] + "\nFull crafting details are available in Configure crafting."
+        summary = summarize_contracts(
+            groups, [describe_chance([chances.get(uuid) for uuid in group.mission_uuids]) for group in groups])
+        header = discord.utils.escape_mentions(
+            contracts_header(name, summary, state.game_version if state is not None else None, corrected_from))
+        # The crafting details live behind Configure crafting (the owner's call, 2026-10-03): the
+        # reply only says where to find them, and how many copies when it's more than one.
+        if recipe is None:
+            crafting = layout_crafting = f"-# {UNAVAILABLE}"
+        else:
+            title = "**Crafting**" if craft_quantity == 1 else f"**Crafting {craft_quantity:,} copies**"
+            layout_crafting = f"{title}\nSee the materials and how their quality changes the stats."
+            crafting = (f"{title}\nTo see the materials and how their quality changes the stats, "
+                        "use **Configure crafting** below.")
 
         def assemble(shown: int) -> list[str]:
-            lines = [summary, "", crafting]
-            omitted = len(entries) - shown
+            lines = header.split("\n")
+            omitted = summary.count - shown
             if omitted:
                 lines.append(
-                    f"Showing {shown} of {len(entries)} contract groups - {omitted} more didn't fit in Discord. "
+                    f"Showing {shown} of {summary.count} contracts - {omitted} more didn't fit in Discord. "
                     "Search a more specific name to narrow it down."
                 )
-            lines.append("")
-            current_giver = None
-            for giver, line in entries[:shown]:
-                if giver != current_giver:
-                    lines.append(f"**{giver}**")
-                    current_giver = giver
-                lines.append(line)
-            lines.extend(["", footer])
+            for section in first_contracts(summary.givers, shown):
+                lines.extend(["", *discord.utils.escape_mentions(giver_block(section)).split("\n")])
+            lines.extend(["", *crafting.split("\n")])
             return chunk_lines(lines, TEXT_PAGE_LIMIT)
 
         # Everything if it fits; otherwise the LARGEST prefix of the list that fits, with an explicit "showing X
         # of Y". Never silently drop the middle: the summary claims what was shown.
-        shown = len(entries)
+        shown = summary.count
         pages = assemble(shown)
         if len(pages) > MAX_TEXT_PAGES:
             low, high = 0, shown - 1
@@ -343,35 +333,35 @@ class Blueprints(commands.Cog):
                     high = mid - 1
             shown = low
             pages = assemble(shown)
-        omitted = len(entries) - shown
+        omitted = summary.count - shown
 
-        embed = discord.Embed(title=f"Blueprint: {name}"[:256], description=(summary + "\n\n" + crafting)[:4096], color=discord.Color.blurple())
-        embed.set_footer(text=footer[:2048])
-        fits = True
-        for giver, lines in by_giver.items():
-            if len(embed.fields) + len(chunk_lines(lines)) > MAX_EMBED_FIELDS or not add_chunked_fields(embed, name=giver, lines=lines):
-                fits = False
-                break
-        # An embed only ever shows the full list; if any group was cut from the text pages the embed can't
-        # have fit either (it is far tighter), so a truncated result is always delivered as text with its notice.
-        use_embed = fits and len(embed) <= 6000 and omitted == 0
-        return SearchResult("found", tuple(pages), name, embed if use_embed else None, omitted=omitted, recipe=recipe, craft_quantity=craft_quantity)
+        blocks = (header, *(discord.utils.escape_mentions(giver_block(section)) for section in summary.givers))
+        # The layout only ever shows the whole list; a result cut short as text goes as text, with its notice.
+        fits = omitted == 0 and sum(map(len, blocks)) + len(layout_crafting) <= LAYOUT_TEXT_LIMIT
+        return SearchResult("found", tuple(pages), name, blocks if fits else (), layout_crafting if fits else "",
+                            omitted=omitted, recipe=recipe, craft_quantity=craft_quantity)
 
     async def deliver(self, send: Callable[..., Awaitable], result: SearchResult) -> None:
         """Send a result via `send` (a followup.send with wait=True, or a channel.send - either
         returns the message, which the craft buttons need to grey out when they expire).
-        Prefers the embed; if none fits, or Discord rejects it, sends the complete text pages
-        instead - same facts, same disclosures."""
+        Prefers the layout; if it doesn't fit (Discord's 40 components or 4,000 characters), or
+        Discord rejects it, sends the complete text pages instead - same facts, same disclosures."""
+        if result.blocks:
+            try:
+                layout = BlueprintResultView(self, result.blocks, result.crafting, result.recipe, result.craft_quantity)
+                if layout.content_length() > LAYOUT_TEXT_LIMIT:
+                    raise ValueError(f"{layout.content_length()} characters")
+            except ValueError as exc:
+                logger.warning("Blueprint layout doesn't fit (%s); sending text", exc)
+            else:
+                try:
+                    layout.message = await send(view=layout, allowed_mentions=_NO_MENTIONS)
+                    return
+                except discord.HTTPException as exc:
+                    layout.stop()
+                    logger.warning("Blueprint layout send failed (%s); falling back to text", exc)
         view = CraftLaunchView(self, result.recipe, result.craft_quantity) if result.recipe else None
         extras = {"view": view} if view else {}
-        if result.embed is not None:
-            try:
-                sent = await send(embed=result.embed, allowed_mentions=_NO_MENTIONS, **extras)
-                if view is not None:
-                    view.message = sent
-                return
-            except discord.HTTPException as exc:
-                logger.warning("Blueprint embed send failed (%s); falling back to text", exc)
         for index, page in enumerate(result.pages):
             last = index == len(result.pages) - 1
             sent = await send(content=page, allowed_mentions=_NO_MENTIONS, **(extras if last else {}))
