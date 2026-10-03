@@ -4596,6 +4596,44 @@ they're in sync).
        `/inventory-post-now`.
      - Test: `test_delete_is_sent_as_a_production_delete` in
        `tests/test_client_write_status.py` (fails on the old client).
+131. **Alerts can only ping their owner; the bot never pings @everyone or a role.** The 2026-10-03
+     range audit's REL-2 (`docs/audits/2026-10-03-range-audit-0e8818b.md`, local): a "Post in
+     this channel" marketplace alert (new in entry 105's delivery choice) put the listing title
+     and seller name - text any UEX player writes - into message content, and nothing set
+     `allowed_mentions`, so a title like `Laranite @everyone <@&999>` would have pinged the
+     server, the role and anyone named. Replies that echo what a player typed (an alert's
+     keyword, a ship name) had the same gap.
+     - `bot/delivery.py`: `send_dm` and `send_to_channel_or_dm` (and so `send_alert` and the
+       scanner) default to `owner_only_mentions(user_id)` - only the alert's owner can be
+       pinged. A caller's own `allowed_mentions` is kept.
+     - `bot/main.py`: the bot-wide default is `AllowedMentions(everyone=False, roles=False)`,
+       covering every send and interaction reply that doesn't set its own. No feature pings a
+       role or @everyone on purpose (checked: no role mentions anywhere in `bot/`).
+     - Tests: `tests/test_alert_mentions.py`; three older delivery tests now read the content
+       and ignore the new keyword. 5 mutations, all caught.
+132. **A listing delete reads the listing back before anything treats it as gone.** The 2026-10-03
+     range audit's REL-1 (P1 while entry 130's fix is unproven live) and MSG-1: entry 130 only
+     changed the request (`is_production=1`). If that guess is wrong, the 2026-10-02 incident
+     repeats exactly - the 48h relist expires the job, releases the reservation, posts a copy
+     UEX refuses, stops tracking the still-live listing (a sale never reconciles) and DMs "no
+     active listing". `/inventory-cancel-post` and the marketplace delete button released stock
+     and said "deleted" on the same bare "ok".
+     - `UexClient.delete_marketplace_listing` (`bot/uex/client.py`) now reads the listing back
+       after the DELETE (`use_cache=False`; UEX documents `/marketplace_listings` as uncached
+       and realtime) and once more after `DELETE_RECHECK_SECONDS` (3), returning True once
+       it's gone, False if UEX still lists it. In the client, not the callers, so no caller
+       can skip it - this codebase's recurring sibling-call-site bug shape.
+     - Still listed: the relist keeps the job `listed` (so a sale still reconciles), pauses
+       auto-relist (`disable_auto_relist`, no 5-minute retry loop) and DMs the player that it's
+       still for sale at its price, with how to relist by hand; the cancel and the delete
+       button change nothing and say UEX still shows it. A failed read-back is a UexApiError,
+       which every caller already handles without touching local state.
+     - The relist's "no active listing" DM is now true (the listing was read back gone), and
+       PATCH 2.49's claim that the fix works is softened to what's known.
+     - Tests: a no-op delete through the real relist path (`tests/test_inventory.py`,
+       `_setup_reconcile(delete_noop=True)`), the read-back's retry and freshness
+       (`tests/test_client_write_status.py`), the cancel (`tests/test_personal_inventory.py`)
+       and the delete button (`tests/test_listing_pickers.py`). 7 mutations, all caught.
 
 ## Where to look for what
 

@@ -57,7 +57,11 @@ class UexBot(commands.Bot):
         # bot always sees its own. Asking for Message Content made startup fail on any bot
         # that didn't also switch it on in the Developer Portal, which README says it needn't.
         intents = discord.Intents.default()
-        super().__init__(command_prefix="!uex-unused-", intents=intents)
+        # Never @everyone, @here or a role, whatever ends up in a message: replies echo what
+        # players type, and alerts carry text other players wrote (audit REL-2). A send that
+        # should ping only its owner narrows this further (bot/delivery.py).
+        super().__init__(command_prefix="!uex-unused-", intents=intents,
+                         allowed_mentions=discord.AllowedMentions(everyone=False, roles=False))
         self.config = config
         # Every slash command answers when it fails, instead of leaving "thinking..." up.
         self.tree.error(on_app_command_error)

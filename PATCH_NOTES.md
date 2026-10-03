@@ -1,14 +1,29 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.50.
+the oldest entry below); the next new entry is 2.52.
+
+---
+
+## 2.51 - 2026-10-03 - Deleted means gone
+
+**Fixed**
+- Personal inventory relisting, `/inventory-cancel-post` and `/marketplace-delete-listing` - After deleting a listing, the bot checks UEX actually removed it before relisting, releasing your stock or saying it's deleted. If UEX still shows it, the bot says so, keeps tracking it so a sale still counts, and pauses relisting it until you sort it out.
+
+---
+
+## 2.50 - 2026-10-03 - No surprise pings
+
+**Fixed**
+- Alerts posted in a channel - Only ping you, the alert's owner. A Marketplace listing whose title or seller name contained @everyone, a role or someone else's name could have pinged them too.
+- The bot never pings @everyone, @here or a role, whatever text ends up in its messages.
 
 ---
 
 ## 2.49 - 2026-10-02 - Deletes that delete
 
 **Fixed**
-- Personal inventory relisting, `/inventory-cancel-post` and deleting a Marketplace listing - The bot now really removes your old listing on UEX. Before, UEX said the delete worked but the listing stayed up, so a 48h relist couldn't post the lower-priced copy and told you the item had no listing when the old one was still live.
+- Personal inventory relisting, `/inventory-cancel-post` and deleting a Marketplace listing - The bot now sends deletes to UEX as real (production) deletes, the likely reason they didn't work. Before, UEX said the delete worked but the listing stayed up, so a 48h relist couldn't post the lower-priced copy and told you the item had no listing when the old one was still live. 2.51 makes the bot check it.
 
 ---
 

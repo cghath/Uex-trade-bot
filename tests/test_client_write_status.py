@@ -62,9 +62,48 @@ def test_delete_is_sent_as_a_production_delete():
             await client.aclose()
         return seen
 
-    (request,) = asyncio.run(run())
-    assert request.method == "DELETE" and request.url.path.endswith("/marketplace_listings")
+    (request,) = [r for r in asyncio.run(run()) if r.method == "DELETE"]
+    assert request.url.path.endswith("/marketplace_listings")
     assert dict(request.url.params) == {"id": "175615", "is_production": "1"}
+
+
+def _read_back_client(still_listed_reads: int):
+    """DELETE answers ok; the first `still_listed_reads` reads of listing 175615 still show it."""
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.method == "DELETE":
+            return httpx.Response(200, json={"status": "ok", "data": None})
+        reads = sum(1 for r in seen if r.method == "GET")
+        live = [{"id": 175615}] if reads <= still_listed_reads else []
+        return httpx.Response(200, json={"status": "ok", "data": live})
+
+    client = UexClient("fake", base_url="https://client-test.invalid")
+    return client, handler, seen
+
+
+@pytest.mark.parametrize("still_listed_reads, gone", [(0, True), (1, True), (2, False)])
+def test_a_delete_reads_the_listing_back_before_calling_it_gone(monkeypatch, still_listed_reads, gone):
+    """2026-10-02: a DELETE answered "ok" while the listing stayed live. The delete now reads the
+    listing back (fresh, never cached), once more after a short wait (audit REL-1)."""
+    monkeypatch.setattr("bot.uex.client.DELETE_RECHECK_SECONDS", 0)
+
+    async def run():
+        client, handler, seen = _read_back_client(still_listed_reads)
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        try:
+            result = await client.delete_marketplace_listing(listing_id=175615, secret_key="fake")
+        finally:
+            await client.aclose()
+        return result, seen
+
+    result, seen = asyncio.run(run())
+    assert result is gone
+    reads = [r for r in seen if r.method == "GET"]
+    assert len(reads) == min(still_listed_reads + 1, 2)
+    assert all(dict(r.url.params) == {"id": "175615"} for r in reads)
 
 
 def test_post_with_undocumented_rejection_status_raises(tmp_path):
