@@ -35,6 +35,7 @@ from bot.config import Config
 from bot.db.database import Database
 from bot.discord_ui import (
     UNEXPECTED_ERROR_MESSAGE,
+    BotLayoutView,
     BotModal,
     BotView,
     on_app_command_error,
@@ -125,6 +126,9 @@ def test_every_view_and_modal_in_the_bot_answers_when_it_fails():
     modals = [c for c in _all_subclasses(discord.ui.Modal) if c.__module__.startswith("bot.")]
     assert len(views) > 20 and len(modals) > 5
     assert [c.__name__ for c in views if not issubclass(c, BotView)] == []
+    # A layout (discord.ui.LayoutView) isn't a discord.ui.View, so it's listed on its own.
+    layouts = [c for c in _all_subclasses(discord.ui.LayoutView) if c.__module__.startswith("bot.")]
+    assert layouts and [c.__name__ for c in layouts if not issubclass(c, BotLayoutView)] == []
     assert [c.__name__ for c in modals if not issubclass(c, BotModal)] == []
 
 

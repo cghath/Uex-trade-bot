@@ -1,7 +1,16 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.55.
+the oldest entry below); the next new entry is 2.56.
+
+---
+
+## 2.55 - 2026-10-03 - Easier-to-read lookups
+
+**Changed**
+- `/blueprint-search` - A cleaner layout: headings, divider lines, and each contract's name in bold with its details in small print below. What every contract shares - the reward pool, the star system, a giver's rank - is said once instead of on every line.
+- `/blueprint-search` - The crafting details moved behind the **Configure crafting** button, which now sits beside a short Crafting line. The blueprint ID and the long game build number are gone.
+- `/ingame-item-finder` - A cleaner layout with the answer first: the nearest shop and the cheapest. When every shop in a star system charges the same, the price is said once and the shops share a line.
 
 ---
 

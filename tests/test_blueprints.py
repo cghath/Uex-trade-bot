@@ -17,14 +17,18 @@ import pytest
 from bot.uex.blueprints import (
     BlueprintIndex,
     BlueprintRef,
+    MissionGroup,
+    contracts_header,
     describe_chance,
-    group_line,
+    first_contracts,
+    giver_block,
     group_missions,
     normalize_name,
     parse_chances,
     parse_mission,
     parse_missions,
     snapshot_is_current,
+    summarize_contracts,
     sync_result_is_plausible,
 )
 
@@ -351,18 +355,95 @@ def test_identical_looking_missions_collapse_but_a_different_pool_stays_separate
     assert len(collapsed) == 1 and len(collapsed[0].mission_uuids) == 2
 
 
-def test_group_line_carries_pool_chance_rank_and_warnings_in_one_line():
-    missions = parse_missions(_missions_rows())
-    illegal = next(g for g in group_missions(missions) if g.illegal)
-    line = group_line(illegal, "always grants one")
-    assert "ILLEGAL" in line and "always grants one" in line and f"pool of {illegal.pool_size}" in line
-    assert "\n" not in line and line.startswith("• **")
+def _group(title, giver, *, rank="Neutral", rep=100, pool=10, systems=("Nyx",), illegal=False):
+    return MissionGroup(title=title, giver=giver, rank_name=rank, rank_index=0, reward_scope=None, illegal=illegal,
+                        reputation=rep, star_systems=systems, pool_size=pool, mission_uuids=(title,))
 
 
-def test_group_line_never_invents_missing_facts():
-    missions = parse_missions(_missions_rows())
-    unknown_rep = next(g for g in group_missions(missions) if g.reputation is None)
-    line = group_line(unknown_rep, None)
-    assert "reward chance unavailable" in line and "rep" not in line
-    no_rank = next(g for g in group_missions(missions) if g.rank_name is None)
-    assert "needs" not in group_line(no_rank, None)
+def test_what_every_contract_shares_is_said_once_and_each_line_keeps_only_what_differs():
+    """The owner's pick (2026-10-03), from the R97 Shotgun's real list: the same pool, chance, rank and system
+    were repeated on all 30 lines."""
+    groups = [
+        _group("Bounty Easy", "Bounty Hunters Guild", rank="Probationary Guild Member", rep=1000),
+        _group("High-Risk Bounty", "Bounty Hunters Guild", rank="Probationary Guild Member", rep=250, pool=11),
+        _group("Pilot in Distress", "Citizens for Prosperity", rank="Neutral"),
+        _group("Convoy Caught", "Citizens for Prosperity", rank="Sr. Contractor", rep=200),
+        _group("Reduce Population", "Highpoint", rank="Neutral"),
+        _group("A Well Deserved Break", "Vaughn", rank="Jr. Contractor", illegal=True),
+        _group("End of a Salamander", "Vaughn", rank="Veteran Contractor", illegal=True),
+    ]
+    chances = ["always grants one", "75% chance to grant one", *["always grants one"] * 5]
+    summary = summarize_contracts(groups, chances)
+    assert summary.count == 7 and summary.system == "Nyx"
+    assert summary.lead == ("Each always grants one of the 10 blueprints in its pool unless noted; "
+                            "the odds of getting this one aren't published.")
+    bounty, citizens, highpoint, vaughn = summary.givers
+    assert bounty.shared == "Needs Probationary Guild Member"
+    assert bounty.contracts == (("Bounty Easy", "+1,000 rep"), ("High-Risk Bounty", "+250 rep · pool of 11 · 75% chance"))
+    assert citizens.shared == "" and citizens.contracts[1] == ("Convoy Caught", "Needs Sr. Contractor · +200 rep")
+    assert highpoint.shared == "" and highpoint.contracts == (("Reduce Population", "Needs Neutral · +100 rep"),), \
+        "one contract's facts stay on its line: moving them to the giver saves nothing"
+    assert vaughn.shared == "Illegal" and "illegal" not in " ".join(d for _, d in vaughn.contracts)
+
+
+def test_star_systems_are_said_per_giver_or_per_line_when_contracts_disagree():
+    groups = [
+        _group("A", "Shubin", systems=("Pyro",)), _group("B", "Shubin", systems=("Pyro",)),
+        _group("C", "Foxwell", systems=("Nyx", "Pyro")), _group("D", "Foxwell", rank="Contractor", systems=("Stanton",)),
+    ]
+    summary = summarize_contracts(groups, ["always grants one"] * 4)
+    shubin, foxwell = summary.givers
+    assert summary.system is None and shubin.shared == "Needs Neutral · Pyro"
+    assert foxwell.contracts == (("C", "Needs Neutral · +100 rep · Nyx, Pyro"), ("D", "Needs Contractor · +100 rep · Stanton"))
+
+
+def test_the_reward_is_said_once_in_plain_words_for_every_kind_of_chance():
+    one = [_group("A", "G")]
+    assert summarize_contracts(one, ["always grants one"]).lead == \
+        "It always grants one of the 10 blueprints in its pool; the odds of getting this one aren't published."
+    assert summarize_contracts(one, ["25% chance to grant one"]).lead.startswith("It has a 25% chance to grant one of the 10")
+    varied = summarize_contracts(one, ["25%-100% chance to grant one (varies by variant)"]).lead
+    assert varied.startswith("It has a 25%-100% chance (varies by variant) to grant one of the 10")
+    unknown = summarize_contracts(one, [None]).lead
+    assert unknown.startswith("It can grant one of the 10") and unknown.endswith("The reward chance is unavailable.")
+    assert summarize_contracts([_group("A", "G", pool=1)], ["always grants one"]).lead == "It always grants this blueprint."
+    assert "1/" not in varied and "odds" in varied, "a pool's per-blueprint weights are never claimed"
+
+
+def test_the_summary_never_invents_missing_facts():
+    groups = group_missions(parse_missions(_missions_rows()))
+    unknown_rep = next(g for g in groups if g.reputation is None)
+    no_rank = next(g for g in groups if g.rank_name is None)
+    for group in (unknown_rep, no_rank):
+        summary = summarize_contracts([group], [None])
+        (giver,) = summary.givers
+        ((_, details),) = giver.contracts
+        assert "unavailable" in summary.lead and "always" not in summary.lead
+        if group is unknown_rep:
+            assert "rep" not in details
+        if group is no_rank:
+            assert "Needs" not in details and "Needs" not in giver.shared
+
+
+def test_the_header_and_a_giver_read_as_headings_with_small_print_under_them():
+    groups = [_group("Bounty Easy", "Bounty Hunters Guild", rep=1000), _group("Bounty Hard", "Bounty Hunters Guild", rep=2000)]
+    summary = summarize_contracts(groups, ["always grants one"] * 2)
+    header = contracts_header("R97 Shotgun", summary, "4.10.1-LIVE.12660092", corrected_from="r97 shotgn")
+    assert header.split("\n") == [
+        "## R97 Shotgun",
+        "Showing results for **R97 Shotgun** (you typed “r97 shotgn”).",
+        "-# Blueprint · 2 contracts from 1 giver, all in Nyx · Star Citizen Wiki, game 4.10.1",
+        f"-# {summary.lead}",
+    ]
+    assert giver_block(summary.givers[0]).split("\n") == [
+        "### Bounty Hunters Guild · 2 contracts", "-# Needs Neutral",
+        "**Bounty Easy**", "-# +1,000 rep", "**Bounty Hard**", "-# +2,000 rep",
+    ]
+
+
+def test_a_reply_cut_short_keeps_the_first_contracts_still_grouped_by_giver():
+    groups = [_group("A1", "A"), _group("A2", "A"), _group("B1", "B"), _group("C1", "C")]
+    givers = summarize_contracts(groups, ["always grants one"] * 4).givers
+    kept = first_contracts(givers, 3)
+    assert [(g.giver, [title for title, _ in g.contracts]) for g in kept] == [("A", ["A1", "A2"]), ("B", ["B1"])]
+    assert first_contracts(givers, 0) == []

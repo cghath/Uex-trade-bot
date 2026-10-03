@@ -23,6 +23,7 @@ from __future__ import annotations
 import math
 import re
 import unicodedata
+from collections import Counter
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -495,19 +496,130 @@ def group_missions(missions: Iterable[BlueprintMission]) -> list[MissionGroup]:
     return sorted(groups, key=lambda g: (g.giver.lower(), g.rank_index if g.rank_index is not None else -1, g.title.lower()))
 
 
-def group_line(group: MissionGroup, chance_text: str | None) -> str:
-    """One player-facing line for a group, identical in the embed and the plain-text fallback."""
-    parts = [f"**{group.title}**"]
-    if group.rank_name:
-        parts.append(f"needs {group.rank_name}")
-    parts.append(f"pool of {group.pool_size}")
-    parts.append(chance_text or "reward chance unavailable")
-    if group.reputation:
-        parts.append(f"+{group.reputation} rep")
-    if group.star_systems:
-        parts.append("/".join(group.star_systems))
-    if group.illegal:
-        parts.append("ILLEGAL")
-    if len(group.mission_uuids) > 1:
-        parts.append(f"x{len(group.mission_uuids)} variants")
-    return "• " + " · ".join(parts)
+NO_CHANCE = "reward chance unavailable"
+
+
+@dataclass(frozen=True)
+class GiverContracts:
+    """One giver's contracts as the reply lists them: what every one of them shares, said once
+    (`shared`), then each contract's title with only what is left (`details`)."""
+    giver: str
+    shared: str
+    contracts: tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True)
+class ContractSummary:
+    """Every contract group for one blueprint, with what they share said once - the owner's
+    pick (2026-10-03). The old one line per contract repeated the same pool, chance, rank and
+    star system on every line: 30 times over for the R97 Shotgun."""
+    count: int
+    system: str | None  # the star system(s) of every contract, when they all agree
+    lead: str  # the reward, said once
+    givers: tuple[GiverContracts, ...]
+
+
+def _systems(group: MissionGroup) -> str | None:
+    return ", ".join(group.star_systems) or None
+
+
+def _reward_lead(count: int, pool: int, chance: str, noted: bool) -> str:
+    """'Each always grants one of the 10 blueprints in its pool; the odds of getting this one
+    aren't published.' Never a per-blueprint figure: the pool's weights aren't published."""
+    if chance == "always grants one":
+        verb = "always grants"
+    elif chance == NO_CHANCE:
+        verb = "can grant"
+    else:
+        core, _, varies = chance.partition(" (")
+        verb = f"has a {core.removesuffix(' to grant one')}" + (f" ({varies}" if varies else "") + " to grant"
+    target = "this blueprint" if pool == 1 else f"one of the {pool} blueprints in its pool"
+    lead = f"{'Each' if count > 1 else 'It'} {verb} {target}{' unless noted' if noted else ''}"
+    lead += "; the odds of getting this one aren't published." if pool != 1 else "."
+    return lead + (" The reward chance is unavailable." if chance == NO_CHANCE else "")
+
+
+def _capitalized(text: str) -> str:
+    return text[:1].upper() + text[1:]
+
+
+def summarize_contracts(groups: Sequence[MissionGroup], chances: Sequence[str | None]) -> ContractSummary:
+    """`chances[i]` is groups[i]'s describe_chance (None when unknown). Said once for every
+    contract: the most common pool and chance, and the star system when all share it. Said once
+    per giver with two or more contracts: one rank, one system, or all illegal. Each line keeps
+    only what differs."""
+    chance_of = [chance or NO_CHANCE for chance in chances]
+    pool = Counter(g.pool_size for g in groups).most_common(1)[0][0]
+    chance = Counter(chance_of).most_common(1)[0][0]
+    every_system = {_systems(g) for g in groups}
+    system = next(iter(every_system)) if len(every_system) == 1 else None
+    by_giver: dict[str, list[int]] = {}
+    for index, group in enumerate(groups):
+        by_giver.setdefault(group.giver, []).append(index)
+    givers = []
+    for giver, indexes in by_giver.items():
+        members = [groups[i] for i in indexes]
+        several = len(members) > 1  # moving one contract's facts up to its giver saves nothing
+        ranks = {g.rank_name for g in members}
+        rank_shared = several and len(ranks) == 1 and None not in ranks
+        giver_systems = {_systems(g) for g in members}
+        systems_shared = several and system is None and len(giver_systems) == 1 and None not in giver_systems
+        illegal_shared = several and all(g.illegal for g in members)
+        shared = [f"Needs {members[0].rank_name}"] if rank_shared else []
+        shared += [_systems(members[0])] if systems_shared else []
+        shared += ["Illegal"] if illegal_shared else []
+        contracts = []
+        for i in indexes:
+            g = groups[i]
+            bits = [f"Needs {g.rank_name}"] if g.rank_name and not rank_shared else []
+            bits += [f"+{g.reputation:,} rep"] if g.reputation else []
+            bits += [f"pool of {g.pool_size}"] if g.pool_size != pool else []
+            bits += [chance_of[i].removesuffix(" to grant one")] if chance_of[i] != chance else []
+            bits += [_systems(g)] if system is None and not systems_shared and _systems(g) else []
+            bits += ["illegal"] if g.illegal and not illegal_shared else []
+            contracts.append((g.title, _capitalized(" · ".join(bits))))
+        givers.append(GiverContracts(giver, " · ".join(shared), tuple(contracts)))
+    noted = any(g.pool_size != pool for g in groups) or any(c != chance for c in chance_of)
+    return ContractSummary(len(groups), system, _reward_lead(len(groups), pool, chance, noted), tuple(givers))
+
+
+def _plural(count: int, word: str) -> str:
+    return f"{count} {word}{'' if count == 1 else 's'}"
+
+
+def contracts_header(name: str, summary: ContractSummary, game_version: str | None,
+                     corrected_from: str | None = None) -> str:
+    """The reply's top block: the blueprint, how many contracts and givers, and the reward said once."""
+    lines = [f"## {name}"]
+    if corrected_from:
+        lines.append(f"Showing results for **{name}** (you typed “{corrected_from}”).")
+    where = f", all in {summary.system}" if summary.system else ""
+    source = f" · Star Citizen Wiki, game {game_version.split('-')[0]}" if game_version else ""
+    lines.append(f"-# Blueprint · {_plural(summary.count, 'contract')} from "
+                 f"{_plural(len(summary.givers), 'giver')}{where}{source}")
+    lines.append(f"-# {summary.lead}")
+    return "\n".join(lines)
+
+
+def giver_block(section: GiverContracts) -> str:
+    """One giver: a heading, what all its contracts share, then each contract's title in bold
+    over a small line of what's left."""
+    lines = [f"### {section.giver} · {_plural(len(section.contracts), 'contract')}"]
+    if section.shared:
+        lines.append(f"-# {section.shared}")
+    for title, details in section.contracts:
+        lines.append(f"**{title}**")
+        if details:
+            lines.append(f"-# {details}")
+    return "\n".join(lines)
+
+
+def first_contracts(givers: Sequence[GiverContracts], shown: int) -> list[GiverContracts]:
+    """The first `shown` contracts, in order, still grouped by giver (for a reply cut short)."""
+    kept = []
+    for section in givers:
+        if shown <= 0:
+            break
+        kept.append(GiverContracts(section.giver, section.shared, section.contracts[:shown]))
+        shown -= len(section.contracts)
+    return kept

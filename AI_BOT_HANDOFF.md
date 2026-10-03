@@ -403,6 +403,14 @@ date - no open item, nothing to record here.
       no DPS loss), and the "can't get through heavy-fighter armor" note in `stat_vs_stock`.
       See PROJECT_CONTEXT.md entry 135
       (ported to aiv2 in commit `02f3635`)
+- [ ] PR #123 - `/blueprint-search` and `/ingame-item-finder` as layout-component replies:
+      `BotLayoutView`/`_BotViewBehaviour` (`bot/discord_ui.py`; `grey_out` walks nested
+      children), `summarize_contracts`/`contracts_header`/`giver_block`/`first_contracts`
+      (`bot/uex/blueprints.py`, replacing `group_line`), `BlueprintResultView`
+      (`bot/cogs/blueprint_planner.py`), and `item_header`/`highlights_block`/`system_block`/
+      `item_footer`/`distance_text` (`bot/uex/item_finder.py`, replacing
+      `format_item_listing_line`). `SearchResult.embed` became `blocks`/`crafting`: check
+      anything in aiv2 that reads it, such as a chat tool. See PROJECT_CONTEXT.md entry 136
 
 ## To port: aiv2 -> production
 
