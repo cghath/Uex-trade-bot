@@ -4634,6 +4634,26 @@ they're in sync).
        `_setup_reconcile(delete_noop=True)`), the read-back's retry and freshness
        (`tests/test_client_write_status.py`), the cancel (`tests/test_personal_inventory.py`)
        and the delete button (`tests/test_listing_pickers.py`). 7 mutations, all caught.
+133. **Alerts reach players with closed DMs, and a new marketplace alert skips what's already
+     listed.** The 2026-10-03 range audit's UX-1, UX-2, UX-3 and MSG-6.
+     - **UX-1, closed DMs:** entry 105 made DM the default for every alert, and a DM Discord
+       refuses (50007) counted as settled, so the alert never arrived; a one-shot price alert
+       was even deactivated. The owner chose a channel fallback (over a DM check at creation):
+       `send_alert` (`bot/delivery.py`) now posts a refused DM alert in the channel it was set
+       in, pinging only its owner, with a note pointing at `/test-dm`. A temporary DM failure
+       still waits for the next poll instead. `send_to_channel` is split out of
+       `send_to_channel_or_dm` for this. Confirmations say "I'll DM you (or post here if your
+       DMs are closed)".
+     - **UX-2, "new" listings that weren't:** a new marketplace alert had no baseline, so its
+       first polls announced every listing already up, five per poll - now possibly in a
+       public channel (entry 105). `marketplace_alerts.baseline_done` (additive column;
+       existing alerts migrate to 1, since they'd been polling; new ones insert 0) makes the
+       first poll record what's listed, silently, via `mark_marketplace_alert_baseline` - even
+       when nothing matches yet, or the first real listing would be swallowed later.
+     - **UX-3 / MSG-6:** `/test-dm` named a `scope:` option that no longer exists; the
+       marketplace alert description still said "DM me".
+     - Tests: `tests/test_alert_dm_fallback.py` (including the column migration on an old-layout
+       database). 7 mutations, all caught.
 
 ## Where to look for what
 
