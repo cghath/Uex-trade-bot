@@ -342,8 +342,11 @@ def format_part_block(detail: dict, *, shared: list[str], selected: bool = False
     second = [f"{price:,.0f} aUEC" if price else "no shop price on record"]
     if shop:
         second.append(shop)
-    distance = _number(detail.get("_distance_gm"))
-    second.append(f"{distance:.1f} Gm" if distance is not None else "distance unknown")
+    # No _distance_gm at all means no location was given (2026-10-03 audit MSG-5): say nothing,
+    # rather than "distance unknown", which reads as UEX missing data.
+    if "_distance_gm" in detail:
+        distance = _number(detail.get("_distance_gm"))
+        second.append(f"{distance:.1f} Gm" if distance is not None else "distance unknown")
 
     lines = [first, " · ".join(second)]
     own = [text for _, text in part_stats(detail) if text not in shared]

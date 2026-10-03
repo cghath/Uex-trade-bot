@@ -1,7 +1,17 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.53.
+the oldest entry below); the next new entry is 2.54.
+
+---
+
+## 2.53 - 2026-10-03 - Sharper loadout picks
+
+**Fixed**
+- `/ship-loadout` - A gun slot no longer says "stock is already the best pick" when a sold gun beats the stock one by the alpha rule (within 5% DPS, more alpha).
+- `/ship-loadout` - When parts tie on their main stat, like the 7SA Concord, 6SA Arbiter and 5SA Rhada shields (all 3,000 shield HP), the better grade wins - faster shield regen, tougher component - instead of whichever shop was nearer or cheaper. Budget still picks the cheapest.
+- `/ship-loadout` - Budget no longer suggests buying a shop copy of the part you already have.
+- `/ship-parts-finder` - Without a location, parts no longer say "distance unknown".
 
 ---
 

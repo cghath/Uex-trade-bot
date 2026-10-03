@@ -4654,6 +4654,32 @@ they're in sync).
        marketplace alert description still said "DM me".
      - Tests: `tests/test_alert_dm_fallback.py` (including the column migration on an old-layout
        database). 7 mutations, all caught.
+134. **Loadout picks: guns that beat stock head to head, no paid copies of the fitted part, the
+     better grade on a tie, and no "distance unknown" without a location.** The 2026-10-03 range
+     audit's LOGIC-1, LOGIC-3 and MSG-5, plus a side finding of the PvP/PvE research pass.
+     - **LOGIC-1:** a gun slot compared stock only with the top of `_rank_guns`, whose 5% band
+       is anchored on the best *sold* gun. The band isn't transitive, so with the stock gun
+       not sold (e.g. stock 1,050 DPS / 10 alpha; sold 1,000 / 20 and 955 / 100) the slot said
+       "stock is already the best pick" while the 1,000 / 20 gun beats stock by the owner's own
+       rule (3,084 of 200,000 random trials). `pick_for_slot` now ranks only the sold guns that
+       beat stock head to head (`gun_at_least_as_good` both ways), keeping stock when none do.
+     - **LOGIC-3:** Budget had no `same_part` guard, so a shop copy of the fitted part (another
+       uuid, slightly different stats) was a paid "upgrade". Excluded now.
+     - **Grade tie (research):** one line's grades share a key stat on the live wiki (4.10.1):
+       7SA Concord (A), 6SA Arbiter (B), 5SA Rhada (C) all 3,000 shield HP; power plants at 16
+       segments across classes. The shop broke the tie, so Balanced bought the Avenger Titan
+       two C-grade Rhadas. `tiebreak_key` (shield regen, then component HP; the better grade
+       wins both in every line checked) now orders candidates before the shop; it never
+       counts against stock, so a same-stat better grade isn't worth buying over stock. Live:
+       the Titan's Balanced shields are now the 7SA Concord; Budget still takes the Rhada.
+     - **MSG-5:** without a location, every finder part said "distance unknown" (entry 127's
+       slip; PATCH 2.46 promised "just without distances"). `format_part_block` now leaves the
+       distance out when no `_distance_gm` key exists (no location), and keeps "distance
+       unknown" for a location UEX couldn't measure from.
+     - Not changed, by the owner's call: LOGIC-2 (Budget's gun floor is DPS only) waits for
+       research on whether the 5% band is wide enough given real armor thresholds.
+     - Tests in `tests/test_ship_loadout.py` and `tests/test_ship_part_display.py`; 6
+       mutations, all caught.
 
 ## Where to look for what
 

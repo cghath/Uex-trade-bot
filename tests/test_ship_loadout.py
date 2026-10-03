@@ -427,6 +427,64 @@ def test_a_gun_label_says_turret_once_and_never_gun_twice():
     assert railgun.label == "S10 Nose Railgun", "not 'Nose Railgun Gun'"
 
 
+# -- 2026-10-03 range audit -----------------------------------------------------------------
+
+@pytest.mark.parametrize("profile", [BALANCED, STEALTH, TANK])
+def test_a_gun_that_beats_stock_on_alpha_is_bought_even_when_the_top_sold_gun_loses_to_stock(profile):
+    """LOGIC-1: the stock gun (not sold) out-DPSes the top-ranked sold gun, but another sold gun
+    is within 5% of stock's DPS with more alpha - it beats stock by the owner's own rule."""
+    stock = _gun("Stock Gun", 1050, alpha=10)
+    lead, band = _gun("Lead Gun", 1000, alpha=20), _gun("Band Gun", 955, alpha=100)
+    pick = pick_for_slot(_group("Guns", stock), [_sold(lead, 100), _sold(band, 100)], profile)
+    assert pick.part is not None and pick.part["name"] == "Lead Gun"
+
+
+def test_a_gun_slot_keeps_stock_when_no_sold_gun_beats_it_head_to_head():
+    stock = _gun("Stock Gun", 1050, alpha=10)
+    pick = pick_for_slot(_group("Guns", stock), [_sold(_gun("Band Gun", 955, alpha=100), 1)], BALANCED)
+    assert pick.part is None and pick.reason == STOCK_IS_BEST
+
+
+def test_a_gun_only_as_good_as_stock_is_not_bought():
+    twin = _gun("Twin Gun", 1050, alpha=10)
+    pick = pick_for_slot(_group("Guns", _gun("Stock Gun", 1050, alpha=10)), [_sold(twin, 1)], BALANCED)
+    assert pick.part is None and pick.reason == STOCK_IS_BEST
+
+
+def test_budget_never_buys_a_shop_copy_of_the_fitted_part():
+    """LOGIC-3: the shop's copy of the stock part can carry another uuid and better stats; the
+    other profiles call it stock, so Budget mustn't sell it as an upgrade."""
+    shop_copy = {**ENDURANCE, "uuid": "another-uuid", "power_plant": {"power_segment_generation": 16}}
+    pick = pick_for_slot(_group("Power Plants", ENDURANCE), [_sold(shop_copy, 8000)], BUDGET)
+    assert pick.part is None and pick.reason == NOTHING_BEATS_STOCK
+
+
+def _graded_shield(name, grade, regen, health):
+    detail = _shield(name, 3000, health=health)
+    detail["grade"] = grade
+    detail["shield"]["regen_rate"] = regen
+    return detail
+
+
+# Live wiki 4.10.1: one line, three grades, the same 3,000 shield HP.
+CONCORD = _graded_shield("7SA 'Concord'", "A", 660, 200)
+ARBITER = _graded_shield("6SA 'Arbiter'", "B", 600, 170)
+RHADA = _graded_shield("5SA 'Rhada'", "C", 570, 150)
+
+
+@pytest.mark.parametrize("profile", [BALANCED, TANK])
+def test_a_tie_on_the_key_stat_goes_to_the_better_grade_not_the_nearer_shop(profile):
+    """The research pass's side finding: the shop broke the tie, so Balanced could buy the C.
+    (Budget rightly takes the cheapest per shield HP, and Stealth goes by EM first.)"""
+    sold = [_sold(RHADA, 1000, distance=1.0), _sold(ARBITER, 5000, distance=2.0), _sold(CONCORD, 9000, distance=40.0)]
+    assert pick_for_slot(_group("Shield Generators"), sold, profile).part["name"] == "7SA 'Concord'"
+
+
+def test_a_better_grade_with_the_same_key_stat_is_not_worth_buying_over_stock():
+    pick = pick_for_slot(_group("Shield Generators", RHADA), [_sold(CONCORD, 9000)], BALANCED)
+    assert pick.part is None and pick.reason == STOCK_IS_BEST
+
+
 # -- Point defense: a PDC slot keeps its stock turret -------------------------------------------
 
 # Live wiki 4.10.1: every stock PDC is the M2C "Swarm"; the Pepperbox is a PDCTurret too, but its
