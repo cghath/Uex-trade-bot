@@ -21,8 +21,8 @@ any `main` sync under **Syncs to main**. Audit reports stay local (`docs/audits/
 - **Open findings from the last audit:** 37, none P0. REL-1 is P1 until the listing-delete fix
   (production PR #115) is proven live; REL-2, REL-3, UX-1, UX-2, LOGIC-1 and MSG-1 to MSG-4 are P2.
   Fixing them adds new commits, which the next audit covers.
-- **`main`:** at `865a3b3` (production PR #95, 2026-09-30). Everything up to `0e8818b` may now be
-  synced; whether to sync before the P1/P2 fixes land is the owner's call.
+- **`main`:** at `865a3b3` (production PR #95, 2026-09-30). Everything up to `0e8818b` is audited,
+  but the owner holds the sync until the audit's findings are fixed (2026-10-03).
 
 ## Audits
 
