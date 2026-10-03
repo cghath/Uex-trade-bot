@@ -1,7 +1,16 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.52.
+the oldest entry below); the next new entry is 2.53.
+
+---
+
+## 2.52 - 2026-10-03 - Alerts that arrive
+
+**Fixed**
+- `/alert-add`, `/stock-alert-add` and `/marketplace-alert-add` - An alert set to DM you now reaches you even with your DMs closed: it's posted in the channel you set it in, pinging only you. Before, it was lost, and a price alert was used up without ever arriving.
+- `/marketplace-alert-add` - A new alert no longer announces the listings that were already up as "new" - only listings posted after you set it.
+- `/test-dm` - No longer mentions an option that no longer exists.
 
 ---
 

@@ -4,10 +4,10 @@ Motivated by a real, recurring problem with Discord bots in general: whether a b
 actually reaches a given user depends on THEIR Discord settings (a per-server "Allow direct
 messages from server members" toggle, or having blocked the bot outright), not anything the
 bot does - and the failure looks identical from the bot's side either way (Discord just
-returns a 403 Forbidden). This bot now has two DM-only delivery paths (Marketplace alerts, and
-a Personal-scope /stock-alert-add) where a silently-failing DM means the user never finds out
-their alert is dead. /test-dm lets someone check that channel actually works *before*
-depending on it, rather than discovering it during a real alert.
+returns a 403 Forbidden). Every alert DMs by default (/alert-add, /stock-alert-add,
+/marketplace-alert-add); a refused DM now falls back to the alert's channel (bot/delivery.py),
+but a player still wants to know their DMs work. /test-dm checks that *before* depending on
+it, rather than discovering it during a real alert.
 
 /command-usage is owner-only: a running count of real command usage (bot.uex.main's
 on_app_command_completion listener feeds command_usage_by_user), specifically to inform
@@ -59,8 +59,8 @@ class Diagnostics(commands.Cog):
             # answer for whether those will reach this user too.
             await interaction.user.send(
                 "This is a test DM from the UEX Trading Bot. If you're reading this, DMs from "
-                "this bot reach you - any Personal-scope alert (/stock-alert-add ... scope: "
-                "Personal) or Marketplace alert (/marketplace-alert-add) will get through too."
+                "this bot reach you - any alert set to DM you (the default for /alert-add, "
+                "/stock-alert-add and /marketplace-alert-add) will get through too."
             )
         except discord.Forbidden:
             await interaction.followup.send(
@@ -69,8 +69,8 @@ class Diagnostics(commands.Cog):
                 "messages from server members\" turned off for this server (right-click the "
                 "server icon → Privacy Settings, or Server Settings → Privacy Settings depending "
                 "on your client), or you've blocked this bot specifically. Fix whichever applies "
-                "and run /test-dm again - anything DM-only (Personal-scope stock alerts, "
-                "Marketplace alerts) needs this to actually work for you.",
+                "and run /test-dm again. Until then, an alert set to DM you is posted in the "
+                "channel you set it in instead, with a ping.",
                 ephemeral=True,
             )
             return
@@ -82,8 +82,8 @@ class Diagnostics(commands.Cog):
             return
 
         await interaction.followup.send(
-            "Sent! If it showed up in your DMs, this bot can reach you there - Personal-scope "
-            "stock alerts and Marketplace alerts will work fine.",
+            "Sent! If it showed up in your DMs, this bot can reach you there - alerts set to "
+            "DM you will arrive.",
             ephemeral=True,
         )
 

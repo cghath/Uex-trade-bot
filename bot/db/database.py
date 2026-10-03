@@ -123,7 +123,10 @@ CREATE TABLE IF NOT EXISTS marketplace_alerts (
     -- Where it arrives, as on price_alerts. Rows from before the option existed were DMs.
     scope TEXT NOT NULL DEFAULT 'personal' CHECK (scope IN ('personal', 'global')),
     guild_id INTEGER,
-    channel_id INTEGER
+    channel_id INTEGER,
+    -- 0 until the poller first records what's already listed, without announcing it
+    -- (audit UX-2). Alerts from before the column existed had already been polling: 1.
+    baseline_done INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE INDEX IF NOT EXISTS idx_marketplace_alerts_active ON marketplace_alerts (active);
@@ -1317,6 +1320,9 @@ class Database:
             "ALTER TABLE ship_parts_reference ADD COLUMN editable INTEGER NOT NULL DEFAULT 1",
             "ALTER TABLE ship_parts_reference ADD COLUMN required_tags TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE ship_parts_reference ADD COLUMN equipped_uuid TEXT NOT NULL DEFAULT ''",
+            # A new marketplace alert's first poll records what's already listed rather than
+            # announcing it (audit UX-2); existing alerts had already been polling, hence 1.
+            "ALTER TABLE marketplace_alerts ADD COLUMN baseline_done INTEGER NOT NULL DEFAULT 1",
         ]
         for statement in migrations:
             try:
@@ -2930,8 +2936,9 @@ class Database:
         async with self.connect() as db:
             cursor = await db.execute(
                 """INSERT INTO marketplace_alerts
-                   (user_id, keyword, operation, target_price, min_quality, max_quality, scope, guild_id, channel_id)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   (user_id, keyword, operation, target_price, min_quality, max_quality, scope, guild_id, channel_id,
+                    baseline_done)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""",
                 (user_id, keyword, operation, target_price, min_quality, max_quality, scope, guild_id, channel_id),
             )
             await db.commit()
@@ -2969,6 +2976,17 @@ class Database:
             )
             rows = await cursor.fetchall()
             return {row["listing_id"] for row in rows}
+
+    async def mark_marketplace_alert_baseline(self, alert_id: int, listing_ids: list[int]) -> None:
+        """A new alert's first look: every listing already up is seen, so only listings posted
+        after it notify (audit UX-2). One transaction, so a crash can't leave it half-done."""
+        async with self.connect() as db:
+            await db.executemany(
+                "INSERT OR IGNORE INTO marketplace_alert_seen_listings (alert_id, listing_id) VALUES (?, ?)",
+                [(alert_id, listing_id) for listing_id in listing_ids],
+            )
+            await db.execute("UPDATE marketplace_alerts SET baseline_done = 1 WHERE id = ?", (alert_id,))
+            await db.commit()
 
     async def mark_marketplace_listing_seen(self, alert_id: int, listing_id: int) -> None:
         async with self.connect() as db:

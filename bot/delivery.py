@@ -44,7 +44,11 @@ def delivery_scope(choice: app_commands.Choice[str] | None) -> str:
 
 def delivery_note(scope: str) -> str:
     """How an alert's confirmation says where it'll arrive."""
-    return "I'll post here and ping you" if scope == "global" else "I'll DM you"
+    return "I'll post here and ping you" if scope == "global" else "I'll DM you (or post here if your DMs are closed)"
+
+
+# Added to an alert posted in its channel because the owner's DMs refused it (send_alert).
+DM_FALLBACK_NOTE = "-# I couldn't DM you, so it's here. `/test-dm` checks your DM settings."
 
 
 def delivery_label(alert: dict[str, Any]) -> str:
@@ -130,6 +134,21 @@ async def send_dm(bot: Any, user_id: int, content: str | None = None, *, label: 
         return outcome
 
 
+async def send_to_channel(bot: Any, channel_id: int | None, content: str | None = None, *, label: str,
+                          **send_kwargs: Any) -> Delivery | None:
+    """Post in one channel; None when the bot can't see that channel at all."""
+    channel = bot.get_channel(channel_id) if channel_id is not None else None
+    if channel is None:
+        return None
+    try:
+        await channel.send(content, **send_kwargs)
+        return Delivery.DELIVERED
+    except _SEND_ERRORS as exc:
+        outcome = classify_send_error(exc)
+        logger.warning("Couldn't post %s to channel %s (%s): %s", label, channel_id, outcome.value, exc)
+        return outcome
+
+
 async def send_to_channel_or_dm(bot: Any, channel_id: int | None, user_id: int, content: str | None = None, *,
                                 label: str, **send_kwargs: Any) -> Delivery:
     """Post in the channel, falling back to a DM when the channel can't be resolved or
@@ -138,16 +157,9 @@ async def send_to_channel_or_dm(bot: Any, channel_id: int | None, user_id: int, 
     work as things stand. Only `user_id` can be pinged unless the caller passes its own
     `allowed_mentions`."""
     send_kwargs.setdefault("allowed_mentions", owner_only_mentions(user_id))
-    channel_outcome = None
-    channel = bot.get_channel(channel_id) if channel_id is not None else None
-    if channel is not None:
-        try:
-            await channel.send(content, **send_kwargs)
-            return Delivery.DELIVERED
-        except _SEND_ERRORS as exc:
-            channel_outcome = classify_send_error(exc)
-            logger.warning("Couldn't post %s to channel %s (%s) - trying a DM: %s",
-                           label, channel_id, channel_outcome.value, exc)
+    channel_outcome = await send_to_channel(bot, channel_id, content, label=label, **send_kwargs)
+    if channel_outcome is Delivery.DELIVERED:
+        return channel_outcome
     dm_outcome = await send_dm(bot, user_id, content, label=label, **send_kwargs)
     if dm_outcome is Delivery.DELIVERED:
         return dm_outcome
@@ -162,8 +174,18 @@ async def send_alert(bot: Any, alert: dict[str, Any], body: str, *, label: str, 
 
     - 'global': posts in the channel the alert was set in and pings the owner there,
       falling back to a DM (send_to_channel_or_dm).
-    - Anything else, including no scope at all: a DM."""
+    - Anything else, including no scope at all: a DM, falling back to the alert's channel with
+      a ping when Discord refuses the DM outright - closed DMs used to lose the alert
+      silently, a price alert even being used up (audit UX-1, the owner's choice). A
+      temporary DM failure is retried next poll instead."""
+    user_id = alert["user_id"]
     if alert.get("scope") == "global" and alert.get("channel_id") is not None:
-        return await send_to_channel_or_dm(bot, alert["channel_id"], alert["user_id"],
-                                           f"<@{alert['user_id']}> {body}", label=label, **send_kwargs)
-    return await send_dm(bot, alert["user_id"], f"Your {body}", label=label, **send_kwargs)
+        return await send_to_channel_or_dm(bot, alert["channel_id"], user_id, f"<@{user_id}> {body}",
+                                           label=label, **send_kwargs)
+    outcome = await send_dm(bot, user_id, f"Your {body}", label=label, **send_kwargs)
+    if outcome is not Delivery.UNDELIVERABLE or alert.get("channel_id") is None:
+        return outcome
+    send_kwargs.setdefault("allowed_mentions", owner_only_mentions(user_id))
+    fallback = await send_to_channel(bot, alert["channel_id"], f"<@{user_id}> {body}\n{DM_FALLBACK_NOTE}",
+                                     label=label, **send_kwargs)
+    return fallback if fallback is not None else outcome
