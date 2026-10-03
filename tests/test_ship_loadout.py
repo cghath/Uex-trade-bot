@@ -19,6 +19,8 @@ from bot.uex.ship_loadout import (
     STOCK_IS_BEST,
     STOCK_UNKNOWN,
     TANK,
+    ARMOR_REFERENCE,
+    beats_armor,
     LoadoutSlot,
     PowerTotal,
     SlotGroup,
@@ -483,6 +485,87 @@ def test_a_tie_on_the_key_stat_goes_to_the_better_grade_not_the_nearer_shop(prof
 def test_a_better_grade_with_the_same_key_stat_is_not_worth_buying_over_stock():
     pick = pick_for_slot(_group("Shield Generators", RHADA), [_sold(CONCORD, 9000)], BALANCED)
     assert pick.part is None and pick.reason == STOCK_IS_BEST
+
+
+# -- The heavy-fighter armor gate (the owner's call, 2026-10-03) -----------------------------
+
+def _typed_gun(name, dps, *, physical=0.0, energy=0.0, pellets=1, size=3, uuid=None):
+    """A gun with the wiki's per-type damage per shot and pellets per shot (4.10.1 fields)."""
+    gun = _gun(name, dps, size=size, uuid=uuid, alpha=physical + energy)
+    gun["vehicle_weapon"]["damage"]["alpha"] = {"physical": physical, "energy": energy, "distortion": 0}
+    gun["vehicle_weapon"]["modes"] = [{"mode": "Auto", "pellets_per_shot": pellets}]
+    return gun
+
+
+# Live wiki 4.10.1: the S3 picks either side of the gate.
+MANTIS_4101 = _typed_gun("Mantis GT-220 Gatling", 853.3, physical=32)
+M5A_4101 = _typed_gun("M5A Cannon", 683.6, energy=410.2)
+
+
+def test_beats_armor_checks_each_damage_type_per_pellet():
+    assert ARMOR_REFERENCE == {"physical": 54.0, "energy": 40.0}
+    assert beats_armor(M5A_4101) is True and beats_armor(MANTIS_4101) is False
+    assert beats_armor(_typed_gun("Edge", 1, physical=54)) is True, "at the threshold gets through"
+    assert beats_armor(_typed_gun("Split", 1, physical=30, energy=30)) is False, "types aren't added up"
+    assert beats_armor(_typed_gun("Pellets", 1, energy=480, pellets=8)) is True, "60 a pellet"
+    assert beats_armor(_typed_gun("Weak pellets", 1, energy=240, pellets=8)) is False, "30 a pellet"
+    assert beats_armor(_gun("No split", 900, alpha=500)) is None, "nothing to judge by"
+
+
+@pytest.mark.parametrize("profile", [BALANCED, STEALTH, TANK])
+def test_a_gun_that_gets_through_heavy_fighter_armor_ranks_first(profile):
+    pick = pick_for_slot(_group("Guns"), [_sold(MANTIS_4101, 24045), _sold(M5A_4101, 69137)], profile)
+    assert pick.part["name"] == "M5A Cannon"
+
+
+def test_a_stock_gun_that_bounces_off_is_replaced_and_the_line_says_why():
+    pick = pick_for_slot(_group("Guns", MANTIS_4101), [_sold(M5A_4101, 69137)], BALANCED)
+    assert pick.part["name"] == "M5A Cannon"
+    assert "which can't get through heavy-fighter armor" in pick_line(pick, BALANCED)
+
+
+def test_the_gate_note_only_appears_when_the_gate_decided():
+    stock = _typed_gun("Stock", 500, energy=100)
+    pick = pick_for_slot(_group("Guns", stock), [_sold(M5A_4101, 1)], BALANCED)
+    assert pick.part["name"] == "M5A Cannon" and "heavy-fighter" not in pick_line(pick, BALANCED)
+
+
+def test_guns_on_the_same_side_of_the_gate_still_go_by_dps_and_the_band():
+    weak_fast, weak_slow = _typed_gun("Weak fast", 900, physical=20), _typed_gun("Weak slow", 700, physical=30)
+    assert pick_for_slot(_group("Guns"), [_sold(weak_slow, 1), _sold(weak_fast, 1)], BALANCED).part["name"] == "Weak fast"
+    level = _typed_gun("Level", 1250, physical=63.3)
+    hard = _typed_gun("Hard hitter", 1266, physical=84.4)
+    assert pick_for_slot(_group("Guns"), [_sold(level, 1), _sold(hard, 1)], BALANCED).part["name"] == "Hard hitter"
+
+
+def test_a_gun_with_no_per_type_damage_is_not_held_back():
+    unknown = _gun("Unknown split", 1000, alpha=50)
+    pick = pick_for_slot(_group("Guns"), [_sold(unknown, 1), _sold(M5A_4101, 1)], BALANCED)
+    assert pick.part["name"] == "Unknown split"
+
+
+# The research's S1 case (figures illustrative): the stock Deadbolt I gets through; the
+# YellowJacket, with more DPS, fires 8-damage rounds that bounce off even a Gladius - DPS alone
+# used to buy it (audit LOGIC-2).
+DEADBOLT_I = _typed_gun("Deadbolt I", 300, physical=80, size=1)
+YELLOWJACKET = _typed_gun("YellowJacket", 320, physical=8, size=1)
+CF117 = _typed_gun("CF-117 Bulldog", 340, energy=45, size=1)
+
+
+def test_budget_never_buys_a_gun_that_loses_to_stock_head_to_head():
+    pick = pick_for_slot(_group("Guns", DEADBOLT_I), [_sold(YELLOWJACKET, 100), _sold(CF117, 900)], BUDGET)
+    assert pick.part["name"] == "CF-117 Bulldog", "the cheaper YellowJacket bounces off armor"
+
+
+def test_budget_never_pays_for_less_dps_even_to_get_through_armor():
+    pick = pick_for_slot(_group("Guns", MANTIS_4101), [_sold(M5A_4101, 100)], BUDGET)
+    assert pick.part is None and pick.reason == NOTHING_BEATS_STOCK
+
+
+def test_budget_still_replaces_a_stock_scattergun_with_any_gun():
+    scatter = _typed_gun("Dominance-3 Scattergun", 930, energy=1116, pellets=8)
+    pick = pick_for_slot(_group("Guns", scatter), [_sold(MANTIS_4101, 100)], BUDGET)
+    assert pick.part["name"] == "Mantis GT-220 Gatling"
 
 
 # -- Point defense: a PDC slot keeps its stock turret -------------------------------------------

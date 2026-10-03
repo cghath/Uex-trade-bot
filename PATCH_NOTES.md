@@ -1,7 +1,15 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.54.
+the oldest entry below); the next new entry is 2.55.
+
+---
+
+## 2.54 - 2026-10-03 - Guns that hurt heavy fighters
+
+**Changed**
+- `/ship-loadout` - A recommended gun now has to get through heavy-fighter armor. Since 4.7, rounds below a ship's armor threshold do nothing to it, and the S3 Mantis's 32-damage rounds bounce off every heavy fighter. S3 wing guns on ships like the Avenger Titan and Gladius now get the M5A Cannon instead of the Mantis, and the Gladius's stock nose Mantis gets replaced too. The line says when stock can't get through.
+- `/ship-loadout` - Budget only buys a gun that beats your stock one by the same rules and loses no DPS. It no longer suggests a cheap gun whose rounds bounce off, like the YellowJacket over a Deadbolt I, and it can now suggest a gun with the same DPS that hits harder, like the AD4B on the Avenger Titan's nose.
 
 ---
 
