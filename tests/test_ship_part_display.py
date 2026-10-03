@@ -154,8 +154,12 @@ def test_part_block_marks_the_selected_part_and_says_how_to_save_it():
 
 
 def test_part_block_without_price_or_distance_says_so():
-    block = format_part_block({"name": "Ecouter"}, shared=[])
+    # With a location but no distance UEX could price: said. Without a location at all
+    # (no _distance_gm key): nothing, not "distance unknown" (2026-10-03 audit MSG-5).
+    block = format_part_block({"name": "Ecouter", "_distance_gm": None}, shared=[])
     assert block.split("\n")[1] == "no shop price on record · distance unknown"
+    block = format_part_block({"name": "Ecouter", "_price_buy": 900.0}, shared=[])
+    assert block.split("\n")[1] == "900 aUEC"
 
 
 def test_pages_keep_order_and_never_drop_a_part():

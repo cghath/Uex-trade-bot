@@ -110,6 +110,21 @@ def component_health(detail: dict | None) -> float | None:
     return _number(_path(detail, "durability", "health"))
 
 
+def shield_regen(detail: dict | None) -> float | None:
+    return _number(_path(detail, "shield", "regen_rate"))
+
+
+def tiebreak_key(detail: dict | None, category: str) -> tuple:
+    """Between parts level on what the profile ranks by: a shield's faster regen, then the
+    tougher component. One line's grades share their key stat - the 7SA Concord (A), 6SA
+    Arbiter (B) and 5SA Rhada (C) all hold 3,000 shield HP on the live wiki (4.10.1) - and the
+    shop used to decide between them, so Balanced could pick the C. The better grade regens
+    faster and is tougher in every line checked. Only orders the candidates: a part that ties
+    the stock part on the profile's own stat still isn't worth buying (pick_for_slot)."""
+    regen = _highest_first(shield_regen(detail)) if category == SHIELDS_CATEGORY else ()
+    return regen + _highest_first(component_health(detail))
+
+
 def alpha_damage(detail: dict | None) -> float | None:
     """A gun's damage per shot, every pellet included (vehicle_weapon.damage.alpha_total)."""
     return _number(_path(detail, "vehicle_weapon", "damage", "alpha_total"))
@@ -240,7 +255,7 @@ def rank_candidates(candidates: list[dict], category: str, profile: str, stock: 
         if profile != BUDGET:
             return _rank_guns(rated)
     if profile != BUDGET:
-        return sorted(rated, key=lambda c: merit_key(c, category, profile) + shop_key(c))
+        return sorted(rated, key=lambda c: merit_key(c, category, profile) + tiebreak_key(c, category) + shop_key(c))
     if category == GUNS_CATEGORY and is_scattergun(stock):
         floor = None
     else:
@@ -248,7 +263,7 @@ def rank_candidates(candidates: list[dict], category: str, profile: str, stock: 
         if stock is not None and floor is None:
             return []
     upgrades = [c for c in rated if value_per_auec(c) is not None and (floor is None or key_stat(c) > floor)]
-    return sorted(upgrades, key=lambda c: (-value_per_auec(c),) + shop_key(c))
+    return sorted(upgrades, key=lambda c: (-value_per_auec(c),) + tiebreak_key(c, category) + shop_key(c))
 
 
 @dataclass(frozen=True)
@@ -474,15 +489,22 @@ def pick_for_slot(group: SlotGroup, candidates: list[dict], profile: str) -> Slo
     if profile == BUDGET:
         if group.stock_unknown or (stock is not None and key_stat(stock) is None):
             return SlotPick(group, None, STOCK_UNKNOWN)
-        upgrades = rank_candidates(rated, group.category, profile, stock)
+        # A shop copy of the fitted part (another uuid, slightly different stats) is never an
+        # "upgrade" to buy - the other profiles call it stock too (audit LOGIC-3).
+        upgrades = rank_candidates([c for c in rated if not same_part(c, stock)], group.category, profile, stock)
         if not upgrades:
             return SlotPick(group, None, NOTHING_BEATS_STOCK if stock is not None else NOTHING_SOLD)
         return SlotPick(group, upgrades[0])
+    if group.category == GUNS_CATEGORY and stock is not None:
+        # Only the guns that beat the stock gun head to head. The 5% band isn't transitive, so
+        # the top sold gun can lose to stock on DPS while another sold gun beats stock on alpha
+        # within the band - which "keep stock" used to hide (audit LOGIC-1).
+        beats_stock = [c for c in rated if not same_part(c, stock)
+                       and gun_at_least_as_good(c, stock) and not gun_at_least_as_good(stock, c)]
+        ranked = rank_candidates(beats_stock, group.category, profile)
+        return SlotPick(group, ranked[0]) if ranked else SlotPick(group, None, STOCK_IS_BEST)
     best = rank_candidates(rated, group.category, profile)[0]
-    if group.category == GUNS_CATEGORY:
-        stock_holds = gun_at_least_as_good(stock, best)
-    else:
-        stock_holds = merit_key(stock, group.category, profile) <= merit_key(best, group.category, profile)
+    stock_holds = merit_key(stock, group.category, profile) <= merit_key(best, group.category, profile)
     if stock is not None and (same_part(best, stock) or stock_holds):
         return SlotPick(group, None, STOCK_IS_BEST)
     return SlotPick(group, best)

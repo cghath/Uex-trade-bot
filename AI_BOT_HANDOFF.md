@@ -373,6 +373,10 @@ date - no open item, nothing to record here.
       in `bot/delivery.py`); a new marketplace alert's first poll records what's listed without
       announcing it (`marketplace_alerts.baseline_done`, `mark_marketplace_alert_baseline`).
       See PROJECT_CONTEXT.md entry 133
+- [ ] PR #120 - `/ship-loadout` picks (`bot/uex/ship_loadout.py`): guns that beat stock head to
+      head in `pick_for_slot`, Budget's `same_part` guard, `tiebreak_key` (shield regen, then
+      component HP) before the shop; `format_part_block` leaves out the distance with no
+      location (`bot/uex/ship_part_display.py`). See PROJECT_CONTEXT.md entry 134
 
 ## To port: aiv2 -> production
 
