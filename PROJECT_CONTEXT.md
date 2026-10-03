@@ -4611,6 +4611,29 @@ they're in sync).
        role or @everyone on purpose (checked: no role mentions anywhere in `bot/`).
      - Tests: `tests/test_alert_mentions.py`; three older delivery tests now read the content
        and ignore the new keyword. 5 mutations, all caught.
+132. **A listing delete reads the listing back before anything treats it as gone.** The 2026-10-03
+     range audit's REL-1 (P1 while entry 130's fix is unproven live) and MSG-1: entry 130 only
+     changed the request (`is_production=1`). If that guess is wrong, the 2026-10-02 incident
+     repeats exactly - the 48h relist expires the job, releases the reservation, posts a copy
+     UEX refuses, stops tracking the still-live listing (a sale never reconciles) and DMs "no
+     active listing". `/inventory-cancel-post` and the marketplace delete button released stock
+     and said "deleted" on the same bare "ok".
+     - `UexClient.delete_marketplace_listing` (`bot/uex/client.py`) now reads the listing back
+       after the DELETE (`use_cache=False`; UEX documents `/marketplace_listings` as uncached
+       and realtime) and once more after `DELETE_RECHECK_SECONDS` (3), returning True once
+       it's gone, False if UEX still lists it. In the client, not the callers, so no caller
+       can skip it - this codebase's recurring sibling-call-site bug shape.
+     - Still listed: the relist keeps the job `listed` (so a sale still reconciles), pauses
+       auto-relist (`disable_auto_relist`, no 5-minute retry loop) and DMs the player that it's
+       still for sale at its price, with how to relist by hand; the cancel and the delete
+       button change nothing and say UEX still shows it. A failed read-back is a UexApiError,
+       which every caller already handles without touching local state.
+     - The relist's "no active listing" DM is now true (the listing was read back gone), and
+       PATCH 2.49's claim that the fix works is softened to what's known.
+     - Tests: a no-op delete through the real relist path (`tests/test_inventory.py`,
+       `_setup_reconcile(delete_noop=True)`), the read-back's retry and freshness
+       (`tests/test_client_write_status.py`), the cancel (`tests/test_personal_inventory.py`)
+       and the delete button (`tests/test_listing_pickers.py`). 7 mutations, all caught.
 
 ## Where to look for what
 

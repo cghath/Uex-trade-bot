@@ -365,6 +365,10 @@ date - no open item, nothing to record here.
       `send_dm`/`send_to_channel_or_dm`) and the bot never pings @everyone or roles
       (`allowed_mentions` default in `bot/main.py`). Check aiv2's AI replies too: they echo
       player text. See PROJECT_CONTEXT.md entry 131
+- [ ] PR #TBD - `delete_marketplace_listing` reads the listing back and returns whether it's gone
+      (`bot/uex/client.py`); the 48h relist, `/inventory-cancel-post` and the marketplace delete
+      button act only on a confirmed delete (`bot/cogs/personal_inventory.py`,
+      `bot/cogs/marketplace.py`). Needs PR #115 first. See PROJECT_CONTEXT.md entry 132
 
 ## To port: aiv2 -> production
 

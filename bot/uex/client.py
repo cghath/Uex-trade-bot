@@ -156,6 +156,11 @@ def retry_after_seconds(header: str | None, attempt: int, now: datetime | None =
     return min(max(seconds, 0.0), RETRY_AFTER_MAX_SECONDS)
 
 
+# How long a delete waits before reading the listing back a second time (see
+# UexClient.delete_marketplace_listing).
+DELETE_RECHECK_SECONDS = 3.0
+
+
 class UexClient:
     def __init__(
         self,
@@ -651,17 +656,32 @@ class UexClient:
         """
         return await self._post("marketplace_advertise", json_body=fields, secret_key=secret_key)
 
-    async def delete_marketplace_listing(self, listing_id: int, secret_key: str) -> Any:
-        """Delete one of the calling player's own marketplace listings.
+    async def delete_marketplace_listing(self, listing_id: int, secret_key: str) -> bool:
+        """Delete one of the calling player's own marketplace listings, then read it back: True
+        once UEX no longer lists it, False when it still does after one short retry - the caller
+        must then not treat it as gone (release stock, relist, say "deleted"). Raises UexApiError
+        when the delete is refused or the read-back fails.
+
+        The read-back is here, not in each caller, because a delete's "ok" alone proved nothing on
+        2026-10-02 and all three callers (the 48h relist, /inventory-cancel-post and the
+        marketplace delete button) needed the same check (2026-10-03 audit REL-1). UEX documents
+        /marketplace_listings as uncached and realtime, so a fresh read reflects the delete.
 
         Sends is_production=1, which UEX's own example URL carries (as 0, "for testing"). Without
         it, two 48h-relist deletes on 2026-10-02 were answered "ok" while listings 175615 and
         175616 stayed live, and the relist posts were then refused as listing_already_added - the
         same silent non-production default POST /marketplace_advertise has without its own
         is_production (bot/cogs/marketplace.py, bot/uex/inventory.py)."""
-        return await self._delete(
+        await self._delete(
             "marketplace_listings", params={"id": listing_id, "is_production": 1}, secret_key=secret_key,
         )
+        for attempt in range(2):
+            if attempt:
+                await asyncio.sleep(DELETE_RECHECK_SECONDS)
+            rows = await self.get_marketplace_listings(id=listing_id, use_cache=False)
+            if not any(str(row.get("id")) == str(listing_id) for row in rows):
+                return True
+        return False
 
     async def get_marketplace_prices_history(self, **filters: Any) -> list[dict[str, Any]]:
         """One row per Marketplace listing price CHANGE (not a fixed interval) - unlike

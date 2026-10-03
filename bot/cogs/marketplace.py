@@ -403,9 +403,15 @@ class ConfirmDeleteListingView(BotView):
         # Delete on UEX before touching any local state: if this raises, nothing below has
         # run yet, so there's nothing to leave inconsistent or roll back.
         try:
-            await self.bot.uex.delete_marketplace_listing(listing_id=listing_id, secret_key=self.secret_key)
+            gone = await self.bot.uex.delete_marketplace_listing(listing_id=listing_id, secret_key=self.secret_key)
         except UexApiError as exc:
             await interaction.followup.send(f"Couldn't delete listing #{listing_id}: {exc}", ephemeral=True)
+            return
+        if not gone:
+            await interaction.followup.send(
+                f"UEX accepted the delete but still shows listing #{listing_id}, so nothing was changed here. "
+                "Check it on UEX and try again.", ephemeral=True,
+            )
             return
 
         if tracked_job:
@@ -416,7 +422,7 @@ class ConfirmDeleteListingView(BotView):
         released = await self.bot.db.cancel_tracked_inventory_listing(self.author_id, listing_id)
         inventory_note = " Its unsold reserved inventory is available again." if released else ""
         await interaction.followup.send(
-            f"Listing #{listing_id} deleted (if it existed and belonged to you).{inventory_note}",
+            f"Listing #{listing_id} deleted - UEX no longer lists it.{inventory_note}",
             ephemeral=True,
         )
 

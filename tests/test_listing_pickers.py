@@ -355,6 +355,21 @@ def test_a_delete_drops_the_players_cached_pick_list():
     assert list(marketplace_module._listing_picks_cache) == [(2, False)]
 
 
+def test_a_delete_uex_still_shows_changes_nothing_and_says_so():
+    async def run():
+        db = NS(get_inventory_post_job_by_listing=AsyncMock(return_value=None),
+                cancel_tracked_inventory_listing=AsyncMock(return_value=True))
+        uex = NS(delete_marketplace_listing=AsyncMock(return_value=False))
+        view = ConfirmDeleteListingView(NS(db=db, uex=uex), 175615, "sk", 1)
+        interaction = NS(user=NS(id=1), response=NS(edit_message=AsyncMock()), followup=NS(send=AsyncMock()))
+        await view.confirm.callback(interaction)
+        return db, interaction
+
+    db, interaction = asyncio.run(run())
+    db.cancel_tracked_inventory_listing.assert_not_awaited()
+    assert "still shows listing #175615" in interaction.followup.send.await_args.args[0]
+
+
 def test_both_commands_pick_by_name_within_discords_limits():
     for command in (Marketplace.marketplace_listing, Marketplace.marketplace_delete_listing):
         (param,) = command.parameters

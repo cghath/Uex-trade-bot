@@ -1194,8 +1194,9 @@ def test_post_now_reports_a_friendly_error_when_live_pricing_fails(tmp_path):
 
 async def _setup_reconcile(
     tmp_path, *, hours_old, minimum_price=850_000, posted_price=1_000_000,
-    negotiation_rows=None, negotiations_fail=False, advertise_fails=False,
+    negotiation_rows=None, negotiations_fail=False, advertise_fails=False, delete_noop=False,
 ):
+    """`delete_noop`: UEX answers the DELETE "ok" but keeps listing 555 live, as on 2026-10-02."""
     db = _make_db(tmp_path)
     await db.init()
     user_id = 777
@@ -1220,8 +1221,11 @@ async def _setup_reconcile(
         )
         await sqlite.commit()
 
+    deleted = {"555": False}
+
     def handler(request: httpx.Request) -> httpx.Response:
         if request.method == "DELETE" and "marketplace_listings" in request.url.path:
+            deleted["555"] = not delete_noop
             return httpx.Response(200, json={"status": "ok"})
         if request.url.path.endswith("/marketplace_advertise"):
             if advertise_fails:
@@ -1233,6 +1237,8 @@ async def _setup_reconcile(
             # UEX answers an id= lookup with the bare listing object, not a one-row list
             # (checked live 2026-10-01); a list here hid a KeyError in production.
             assert request.url.params.get("id") == "555"
+            if deleted["555"]:
+                return httpx.Response(200, json={"status": "ok", "data": []})
             return httpx.Response(200, json={"status": "ok", "data": {"id": 555, "in_stock": 10, "is_sold_out": False}})
         if "marketplace_negotiations" in request.url.path:
             if negotiations_fail:
@@ -1424,6 +1430,36 @@ def test_reconcile_reports_failure_honestly_when_the_relist_post_does_not_succee
             await client.aclose()
 
     asyncio.run(run())
+
+
+def test_reconcile_keeps_tracking_a_listing_uex_still_shows_after_the_delete(tmp_path, monkeypatch):
+    """2026-10-02: UEX answered the relist's DELETE "ok" but the listing stayed live, the relist
+    POST was refused as listing_already_added, the job was expired and the DM said "no active
+    listing". Now the delete reads the listing back: still live means keep the job tracked,
+    pause relisting and say so - never post a second copy (audit REL-1)."""
+    monkeypatch.setattr("bot.uex.client.DELETE_RECHECK_SECONDS", 0)
+
+    async def run():
+        db, client, cog, user_id, job_id, dmed = await _setup_reconcile(
+            tmp_path, hours_old=49, minimum_price=850_000, posted_price=1_000_000, delete_noop=True,
+        )
+        try:
+            await cog._reconcile_listed_jobs()
+            job = await db.get_inventory_post_job(user_id, job_id)
+            jobs = await db.list_tracked_inventory_posts()
+            entry = await db.get_inventory_item(user_id, job["inventory_id"])
+            return job, jobs, entry, dmed
+        finally:
+            await client.aclose()
+
+    job, jobs, entry, dmed = asyncio.run(run())
+    assert job["status"] == "listed" and job["listing_id"] == 555, "still tracked, so a sale still reconciles"
+    assert job["auto_relist"] == 0, "paused, not retried every 5 minutes"
+    assert [j["id"] for j in jobs] == [job["id"]], "no replacement job, no second listing"
+    assert entry["reserved_quantity"] == 10, "nothing released"
+    (_, message), = dmed
+    assert "still shows listing #555" in message and "1,000,000" in message
+    assert "no active listing" not in message
 
 
 def test_reconcile_does_nothing_before_48_hours(tmp_path):
