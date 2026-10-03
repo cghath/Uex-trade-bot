@@ -369,7 +369,7 @@ date - no open item, nothing to record here.
       (`bot/uex/client.py`); the 48h relist, `/inventory-cancel-post` and the marketplace delete
       button act only on a confirmed delete (`bot/cogs/personal_inventory.py`,
       `bot/cogs/marketplace.py`). Needs PR #115 first. See PROJECT_CONTEXT.md entry 132
-- [ ] PR #TBD - A refused DM alert posts in its channel instead (`send_alert`/`send_to_channel`
+- [ ] PR #119 - A refused DM alert posts in its channel instead (`send_alert`/`send_to_channel`
       in `bot/delivery.py`); a new marketplace alert's first poll records what's listed without
       announcing it (`marketplace_alerts.baseline_done`, `mark_marketplace_alert_baseline`).
       See PROJECT_CONTEXT.md entry 133
