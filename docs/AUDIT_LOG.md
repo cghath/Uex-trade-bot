@@ -14,16 +14,15 @@ any `main` sync under **Syncs to main**. Audit reports stay local (`docs/audits/
 
 ## Status
 
-- **Audited up to:** `cffa68e` (2026-09-25). The full-project audit read the whole repo at
-  that commit, so everything up to it has been audited at least once.
-- **Not yet audited:** `cffa68e..TestBranch`: 70 commits as of `7e09969` (2026-10-02). That's
-  the 2026-09-25 audit's own fix rounds (PROJECT_CONTEXT.md entries 87-112) and everything
-  after them (entries 113-125, including production PRs #96-#109: trade-log edits, the
-  risk-tolerance removal, refinery and lookup ports, listing pickers, ore typos,
-  price-outlier warnings, `/ship-loadout` and its follow-ups).
-- **`main`:** at `865a3b3` (production PR #95, 2026-09-30). That sync predates the rule and
-  carried 33 commits past the last audit (`cffa68e..865a3b3`, fix rounds for the 2026-09-25
-  audit). The next audit should start at `cffa68e`, not at `main`.
+- **Audited up to:** `0e8818b` (2026-10-03). The 2026-10-03 range audit covered
+  `cffa68e..0e8818b`; the 2026-09-25 full-project audit covered everything up to `cffa68e`.
+- **Not yet audited:** `0e8818b..TestBranch` (nothing as of 2026-10-03). The next audit starts at
+  `0e8818b`.
+- **Open findings from the last audit:** 37, none P0. REL-1 is P1 until the listing-delete fix
+  (production PR #115) is proven live; REL-2, REL-3, UX-1, UX-2, LOGIC-1 and MSG-1 to MSG-4 are P2.
+  Fixing them adds new commits, which the next audit covers.
+- **`main`:** at `865a3b3` (production PR #95, 2026-09-30). Everything up to `0e8818b` is audited,
+  but the owner holds the sync until the audit's findings are fixed (2026-10-03).
 
 ## Audits
 
@@ -33,7 +32,8 @@ one. The 2026-09-25 audit re-read the whole repo, so it supersedes everything be
 
 | Date | Commits covered | Kind | Report (local) | Result |
 |---|---|---|---|---|
-| 2026-09-25 | whole repo at `cffa68e` | Full-project audit: 3 read-only auditors (UX, MSG, REL), coordinated | `docs/audits/2026-09-25-full-project-audit.md` | 58 findings (20 UX, 21 MSG, 17 REL); fixed in entries 87-112, which are not yet audited themselves |
+| 2026-10-03 | `cffa68e..0e8818b` (88 commits, entries 87-130, production PRs #64-#115) | Range audit: 4 read-only auditors (REL, UX, MSG, LOGIC), coordinated; each re-checked the 2026-09-25 fixes in its area | `docs/audits/2026-10-03-range-audit-0e8818b.md` | 37 findings (9 REL, 12 UX, 9 MSG, 7 LOGIC); no P0; 1 P1 (REL-1, the 48h relist trusting a delete's "ok") until PR #115 is proven; most 2026-09-25 fixes closed, the rest partly closed with siblings left |
+| 2026-09-25 | whole repo at `cffa68e` | Full-project audit: 3 read-only auditors (UX, MSG, REL), coordinated | `docs/audits/2026-09-25-full-project-audit.md` | 58 findings (20 UX, 21 MSG, 17 REL); fixed in entries 87-112, re-checked by the 2026-10-03 audit |
 | ~2026-09-25 | `370e232..d8a0bc2` | Outside audit | none kept; entry 82 | P1 missing `ship_parts_shopping_entries` migration, unbounded autocomplete latency; fixed (entry 82) |
 | ~2026-09-21 | `8f9be8e` (entries 68-69, route hedges and backups) | Outside audit | none kept; entry 70 | 3 findings, fixed (entry 70) |
 | 2026-09-15 | `dd8444a..1e336db` (6 commits) | Executive audit, solo | `docs/audits/2026-09-15-executive-audit-1e336db.md`, probes `data/audit-1e336db/` | 1 P1 (backup verification accepted a truncated DB), 4 P2 recovery paths; backup pruning held until fixed |
