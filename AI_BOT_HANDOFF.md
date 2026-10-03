@@ -377,6 +377,11 @@ date - no open item, nothing to record here.
       head in `pick_for_slot`, Budget's `same_part` guard, `tiebreak_key` (shield regen, then
       component HP) before the shop; `format_part_block` leaves out the distance with no
       location (`bot/uex/ship_part_display.py`). See PROJECT_CONTEXT.md entry 134
+- [ ] PR #TBD - `/ship-loadout` heavy-fighter armor gate (`bot/uex/ship_loadout.py`):
+      `ARMOR_REFERENCE`, `beats_armor` (per type, per pellet), the gate in
+      `gun_at_least_as_good` and `_rank_guns`, Budget's gun floor (beats stock head to head,
+      no DPS loss), and the "can't get through heavy-fighter armor" note in `stat_vs_stock`.
+      See PROJECT_CONTEXT.md entry 135
 
 ## To port: aiv2 -> production
 

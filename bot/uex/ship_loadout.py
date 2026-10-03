@@ -11,6 +11,12 @@ The owner's decisions (2026-10-01):
   Guns rank by DPS in all three, except that between guns within 5% DPS of each other the
   higher alpha damage wins (DPS_BAND). Budget picks the most key stat per aUEC, only among parts
   that beat the stock part.
+- A gun must hurt a heavy fighter (2026-10-03): since 4.7, armor ignores any projectile below its
+  deflection threshold, and the live wiki (4.10.1) puts heavy fighters around 54 physical / 40
+  energy per projectile. The S3 Mantis (32 physical a round) did nothing to any of them. A gun
+  that gets through ranks ahead of one that doesn't (ARMOR_REFERENCE, beats_armor) - before the
+  5% band, which research found is the right width as a tiebreak but the wrong tool for this.
+  Budget buys a gun only when it beats stock head to head this way and loses no DPS.
 - Scatterguns are never recommended (nobody uses them at the moment, the owner's call; their
   wiki DPS also counts every pellet of a shot, which put them first in S1-S3). A stock one is
   always worth replacing.
@@ -72,6 +78,11 @@ ONLY_SCATTERGUNS = "the only guns sold for it are scatterguns"
 # patch's weapon damage changes (ROADMAP.md).
 DPS_BAND = 0.05
 POINT_DEFENSE = "point defense: it shoots down incoming missiles and never runs out of ammo"
+# Heavy-fighter armor, the owner's reference (2026-10-03): per-projectile deflection on the live
+# wiki (4.10.1, armor.deflection) is 54 physical on the Hurricane, F8C, Scorpius and Vanguard
+# Warden, and 29-40 energy across them. A projectile below its type's figure does nothing to
+# full-health armor. Re-check after the combat (TTK) patch (ROADMAP.md).
+ARMOR_REFERENCE = {"physical": 54.0, "energy": 40.0}
 STOCK_RACKS = "missile racks keep the ship's own: more missiles or bigger ones is your call"
 
 # What each profile favours, under the loadout's title and in /ship-loadout's profile choices.
@@ -130,6 +141,23 @@ def alpha_damage(detail: dict | None) -> float | None:
     return _number(_path(detail, "vehicle_weapon", "damage", "alpha_total"))
 
 
+def beats_armor(detail: dict | None) -> bool | None:
+    """Whether one projectile gets through heavy-fighter armor (ARMOR_REFERENCE): any damage
+    type's share of a shot, per pellet, at or above that type's deflection. None when the wiki
+    gives no per-type damage to judge by - such a gun isn't held back for it."""
+    alpha = _path(detail, "vehicle_weapon", "damage", "alpha")
+    if not isinstance(alpha, dict):
+        return None
+    modes = _path(detail, "vehicle_weapon", "modes")
+    pellets = _number(modes[0].get("pellets_per_shot")) if isinstance(modes, list) and modes and isinstance(modes[0], dict) else None
+    pellets = pellets if pellets and pellets > 0 else 1.0
+    return any((_number(alpha.get(kind)) or 0.0) / pellets >= threshold for kind, threshold in ARMOR_REFERENCE.items())
+
+
+def _gets_through(detail: dict | None) -> bool:
+    return beats_armor(detail) is not False
+
+
 def is_scattergun(detail: dict | None) -> bool:
     """A scattergun: the wiki's vehicle_weapon.type ('Laser Scattergun', 'Ballistic
     Scattergun', 'Plasma Scattergun' on the live wiki, 4.10.1), or its name."""
@@ -154,10 +182,13 @@ def _level_on_dps(a: float | None, b: float | None) -> bool:
 
 def gun_at_least_as_good(a: dict | None, b: dict | None) -> bool:
     """Whether gun `a` is at least as good as gun `b`: a scattergun never is, against any other
-    gun; within DPS_BAND of each other, the higher alpha damage wins (then DPS); otherwise the
+    gun; one that gets through heavy-fighter armor is, against one that doesn't (beats_armor);
+    within DPS_BAND of each other, the higher alpha damage wins (then DPS); otherwise the
     higher DPS. A missing figure counts as worse than any known one."""
     if is_scattergun(a) != is_scattergun(b):
         return not is_scattergun(a)
+    if _gets_through(a) != _gets_through(b):
+        return _gets_through(a)
     dps_a, dps_b = key_stat(a), key_stat(b)
     if _level_on_dps(dps_a, dps_b):
         return (_highest_first(alpha_damage(a)) + _highest_first(dps_a)
@@ -166,9 +197,15 @@ def gun_at_least_as_good(a: dict | None, b: dict | None) -> bool:
 
 
 def _rank_guns(guns: list[dict]) -> list[dict]:
-    """Guns best first: the highest-DPS gun left leads, and every gun within DPS_BAND of it
-    is ordered by alpha damage (then DPS, then shop) ahead of the rest, which are ranked the
-    same way in turn."""
+    """Guns best first: every gun that gets through heavy-fighter armor (beats_armor) ahead of
+    every one that doesn't, and within each, the highest-DPS gun left leads and every gun within
+    DPS_BAND of it is ordered by alpha damage (then DPS, then shop) ahead of the rest, which
+    are ranked the same way in turn."""
+    through = [c for c in guns if _gets_through(c)]
+    return _rank_by_band(through) + _rank_by_band([c for c in guns if not _gets_through(c)])
+
+
+def _rank_by_band(guns: list[dict]) -> list[dict]:
     remaining = sorted(guns, key=lambda c: _highest_first(key_stat(c)) + shop_key(c))
     ranked: list[dict] = []
     while remaining:
@@ -248,7 +285,8 @@ def rank_candidates(candidates: list[dict], category: str, profile: str, stock: 
     detail) is left out: there's nothing to judge it by. Budget keeps only parts whose key stat
     beats `stock`'s (every rated part, for an empty slot) and ranks those by key stat per aUEC;
     a stock part with no key stat of its own leaves Budget nothing it can call an upgrade. A gun
-    slot never ranks a scattergun, and any other gun beats a stock one."""
+    slot never ranks a scattergun, and any other gun beats a stock one; otherwise Budget's gun
+    must also beat stock head to head (gun_at_least_as_good) with at least stock's DPS."""
     rated = [c for c in candidates if key_stat(c) is not None]
     if category == GUNS_CATEGORY:
         rated = [c for c in rated if not is_scattergun(c)]
@@ -262,6 +300,13 @@ def rank_candidates(candidates: list[dict], category: str, profile: str, stock: 
         floor = key_stat(stock)
         if stock is not None and floor is None:
             return []
+    if category == GUNS_CATEGORY and floor is not None:
+        # A gun upgrade beats stock head to head (armor gate, band) and loses no DPS: DPS alone
+        # bought the YellowJacket, whose rounds bounce off even a Gladius, over a stock
+        # Deadbolt I (the owner's call, 2026-10-03; audit LOGIC-2).
+        upgrades = [c for c in rated if value_per_auec(c) is not None and key_stat(c) >= floor
+                    and gun_at_least_as_good(c, stock) and not gun_at_least_as_good(stock, c)]
+        return sorted(upgrades, key=lambda c: (-value_per_auec(c),) + tiebreak_key(c, category) + shop_key(c))
     upgrades = [c for c in rated if value_per_auec(c) is not None and (floor is None or key_stat(c) > floor)]
     return sorted(upgrades, key=lambda c: (-value_per_auec(c),) + tiebreak_key(c, category) + shop_key(c))
 
@@ -590,6 +635,9 @@ def stat_vs_stock(part: dict, stock: dict | None, category: str, profile: str) -
         return ""
     was = shown_stat(stock, category, profile)
     if was is not None and was[0] == shown[0]:
+        # Said only when the armor gate decided, so a lower-DPS pick doesn't read as a mistake.
+        if category == GUNS_CATEGORY and beats_armor(part) and beats_armor(stock) is False:
+            return f"{shown[1]} (was {was[1]} stock, which can't get through heavy-fighter armor)"
         return f"{shown[1]} (was {was[1]} stock)"
     return shown[1]
 

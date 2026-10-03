@@ -4680,6 +4680,41 @@ they're in sync).
        research on whether the 5% band is wide enough given real armor thresholds.
      - Tests in `tests/test_ship_loadout.py` and `tests/test_ship_part_display.py`; 6
        mutations, all caught.
+135. **A recommended gun must hurt a heavy fighter; Budget's gun must beat stock head to head.**
+     The owner asked for research on what players use for PvP and PvE, and whether the 5% DPS
+     band (entry 123) was wide enough before changing Budget's gun floor (audit LOGIC-2, left
+     open in entry 134).
+     - **Finding:** since 4.7, a projectile below the target armor's deflection threshold does
+       nothing to its armor or hull. The live wiki (4.10.1, `armor.deflection`) puts heavy
+       fighters (Hurricane, F8C, Scorpius, Vanguard Warden) at 54 physical and 29-40 energy
+       per projectile. The S3 Mantis GT-220 (853 DPS, 32 physical a round), the top S3 gun on
+       DPS once scatterguns were out, did nothing to any of them; the S1 YellowJacket (8 a round) bounces off
+       even a Gladius. The band was the right width as a tiebreak, the wrong tool for this.
+     - **The owner's call:** gate at heavy fighters (`ARMOR_REFERENCE = {"physical": 54,
+       "energy": 40}`). `beats_armor` checks each damage type's share of one shot, per pellet
+       (`modes[0].pellets_per_shot`), at or above its threshold; types aren't added up. It
+       returns None when the wiki gives no per-type damage, and such a gun isn't held back.
+       `gun_at_least_as_good` checks the gate after the scattergun rule and before the band;
+       `_rank_guns` ranks every gun that gets through ahead of every one that doesn't, the
+       band applying within each group.
+     - **Budget (the owner's call, "band + no DPS loss"):** a gun upgrade must beat stock head
+       to head (`gun_at_least_as_good` both ways, gate included) and have at least stock's
+       DPS. So Budget keeps the Gladius's stock Mantis (the M5A gets through but has less DPS)
+       and now buys a gun with the same DPS that hits harder: the Avenger Titan's nose gets
+       the AD4B (1,266.0 DPS, 84.4 alpha) over the stock Revenant (1,266.0 DPS, 63.3), which
+       the old strictly-more-DPS floor never offered. A stock scattergun is still replaced by
+       any gun.
+     - **The line says why:** when the gate decided (the pick gets through, stock doesn't), the
+       stat reads "(was 853 DPS / 32 alpha stock, which can't get through heavy-fighter
+       armor)", so a lower-DPS pick doesn't look like a mistake.
+     - **Live (read-only, real UEX + wiki), before and after:** every profile, Budget
+       included, used to swap the Avenger Titan's and the Gladius's S3 wing guns (stock
+       Omnisky IX / CF-337 Panther, both of which get through) for the Mantis, and keep the
+       Gladius's stock nose Mantis. Now the wings get the M5A Cannon (684 DPS, 410 energy a
+       shot) in all four profiles, and the Gladius's nose gets it in Balanced, Stealth and
+       Tank, with the note; Budget keeps the nose Mantis.
+     - Re-check `ARMOR_REFERENCE` with the gun rules after the combat patch (ROADMAP.md).
+     - Tests in `tests/test_ship_loadout.py`; 9 mutations, all caught.
 
 ## Where to look for what
 

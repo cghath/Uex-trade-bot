@@ -937,7 +937,9 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
   weapon damage changes are coming in the next game patch after 4.10.1. Once the wiki shows
   it, re-run the live gun list (every sold gun's type, DPS and alpha per size) and check that
   `/ship-loadout`'s rules still hold: no scatterguns, the 5% DPS band (`DPS_BAND`), alpha
-  as the decider inside it (PROJECT_CONTEXT.md entries 123 and 124).
+  as the decider inside it (PROJECT_CONTEXT.md entries 123 and 124), and the heavy-fighter
+  armor gate (`ARMOR_REFERENCE`, re-read from the wiki's `armor.deflection` on the
+  Hurricane, F8C, Scorpius and Vanguard Warden; entry 135).
 - [ ] **How often alpha decides a gun pick** *(complexity: Low, next session)*: the owner
   asked for an analysis across every weapon of how often the 5% DPS band actually changes a
   pick, per size and per profile, against the live gun list, before tuning it further.
