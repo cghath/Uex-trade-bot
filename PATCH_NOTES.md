@@ -1,7 +1,15 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.50.
+the oldest entry below); the next new entry is 2.51.
+
+---
+
+## 2.50 - 2026-10-03 - No surprise pings
+
+**Fixed**
+- Alerts posted in a channel - Only ping you, the alert's owner. A Marketplace listing whose title or seller name contained @everyone, a role or someone else's name could have pinged them too.
+- The bot never pings @everyone, @here or a role, whatever text ends up in its messages.
 
 ---
 

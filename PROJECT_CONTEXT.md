@@ -4596,6 +4596,21 @@ they're in sync).
        `/inventory-post-now`.
      - Test: `test_delete_is_sent_as_a_production_delete` in
        `tests/test_client_write_status.py` (fails on the old client).
+131. **Alerts can only ping their owner; the bot never pings @everyone or a role.** The 2026-10-03
+     range audit's REL-2 (`docs/audits/2026-10-03-range-audit-0e8818b.md`, local): a "Post in
+     this channel" marketplace alert (new in entry 105's delivery choice) put the listing title
+     and seller name - text any UEX player writes - into message content, and nothing set
+     `allowed_mentions`, so a title like `Laranite @everyone <@&999>` would have pinged the
+     server, the role and anyone named. Replies that echo what a player typed (an alert's
+     keyword, a ship name) had the same gap.
+     - `bot/delivery.py`: `send_dm` and `send_to_channel_or_dm` (and so `send_alert` and the
+       scanner) default to `owner_only_mentions(user_id)` - only the alert's owner can be
+       pinged. A caller's own `allowed_mentions` is kept.
+     - `bot/main.py`: the bot-wide default is `AllowedMentions(everyone=False, roles=False)`,
+       covering every send and interaction reply that doesn't set its own. No feature pings a
+       role or @everyone on purpose (checked: no role mentions anywhere in `bot/`).
+     - Tests: `tests/test_alert_mentions.py`; three older delivery tests now read the content
+       and ignore the new keyword. 5 mutations, all caught.
 
 ## Where to look for what
 

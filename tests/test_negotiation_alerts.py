@@ -469,7 +469,7 @@ def test_failed_dm_delivery_is_retried_not_permanently_discarded(tmp_path):
             def __init__(self):
                 self.send_calls = 0
 
-            async def send(self, message):
+            async def send(self, message, **kwargs):
                 self.send_calls += 1
                 if self.send_calls == 1:
                     raise failure

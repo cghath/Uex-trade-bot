@@ -69,6 +69,14 @@ class Delivery(enum.Enum):
         return self is not Delivery.RETRY
 
 
+def owner_only_mentions(user_id: int) -> discord.AllowedMentions:
+    """Only the notification's owner can be pinged. Bodies carry text other players wrote - a
+    Marketplace listing's title, a seller's name - so an @everyone, @here, role or user mention
+    in it must not ping anyone (audit REL-2)."""
+    return discord.AllowedMentions(everyone=False, roles=False, users=[discord.Object(id=int(user_id))],
+                                   replied_user=False)
+
+
 def classify_send_error(exc: BaseException) -> Delivery:
     """A 4xx other than 429 is Discord saying no to this message or recipient; anything else
     (5xx, 429 after discord.py's own retries, a network error) may work next time."""
@@ -109,7 +117,9 @@ def fit_lines(lines: list[str], *, limit: int = MAX_MESSAGE_CHARS, footer: str |
 
 
 async def send_dm(bot: Any, user_id: int, content: str | None = None, *, label: str, **send_kwargs: Any) -> Delivery:
-    """DM one user. `label` names the notification in the logs (e.g. "price alert #12")."""
+    """DM one user. `label` names the notification in the logs (e.g. "price alert #12").
+    Only that user can be pinged unless the caller passes its own `allowed_mentions`."""
+    send_kwargs.setdefault("allowed_mentions", owner_only_mentions(user_id))
     try:
         user = bot.get_user(user_id) or await bot.fetch_user(user_id)
         await user.send(content, **send_kwargs)
@@ -125,7 +135,9 @@ async def send_to_channel_or_dm(bot: Any, channel_id: int | None, user_id: int, 
     """Post in the channel, falling back to a DM when the channel can't be resolved or
     refuses the post (any channel post can 403 - see CLAUDE.md). Delivered if either path
     works; RETRY if either failed only temporarily; UNDELIVERABLE only if neither can ever
-    work as things stand."""
+    work as things stand. Only `user_id` can be pinged unless the caller passes its own
+    `allowed_mentions`."""
+    send_kwargs.setdefault("allowed_mentions", owner_only_mentions(user_id))
     channel_outcome = None
     channel = bot.get_channel(channel_id) if channel_id is not None else None
     if channel is not None:
