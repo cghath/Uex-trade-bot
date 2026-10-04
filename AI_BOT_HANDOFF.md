@@ -425,6 +425,11 @@ date - no open item, nothing to record here.
       page=)`, `_post_route_copy` (`bot/cogs/route_progression.py`), `route_copy_view`/
       `route_container` (`bot/route_pages.py`). Needs PR #125 first. See PROJECT_CONTEXT.md
       entry 139
+- [ ] PR #127 - Configure crafting as a layout: `Recipe.layout_blocks`, `describe_change`,
+      `stat_groups`, `quality_choice_label` (`bot/uex/blueprint_crafting.py`) replace
+      `Recipe.lines`/`format_modifier`; `CraftLayoutView`/`_CraftConfig` (`bot/cogs/
+      blueprint_planner.py`), `CraftConfigView` kept as the text fallback. See PROJECT_CONTEXT.md
+      entry 140
 
 ## To port: aiv2 -> production
 

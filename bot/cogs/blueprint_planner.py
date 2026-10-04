@@ -9,8 +9,8 @@ from typing import TYPE_CHECKING
 
 import discord
 
-from bot.discord_ui import BotLayoutView, BotView
-from bot.uex.blueprint_crafting import Recipe, aggregate
+from bot.discord_ui import LAYOUT_TEXT_LIMIT, BotLayoutView, BotView
+from bot.uex.blueprint_crafting import Ingredient, Recipe, aggregate, quality_choice_label
 
 if TYPE_CHECKING:
     from bot.cogs.blueprints import Blueprints
@@ -236,14 +236,24 @@ class ShoppingView(BotView):
 
 
 class QualitySelect(discord.ui.Select):
-    def __init__(self, parent: "CraftConfigView", path: str, label: str, values: tuple[int, ...]) -> None:
+    """One material's quality menu. Each option says what that quality does ("Tungsten 858 -
+    Recoil 29% better") and the picked one stays shown, where the menu used to reset to its
+    placeholder after every pick."""
+
+    def __init__(self, parent: "_CraftConfig", item: Ingredient, values: tuple[int, ...]) -> None:
         if len(values) > 24:
             indexes = {round(i * (len(values) - 1) / 23) for i in range(24)}
             values = tuple(values[i] for i in sorted(indexes))
-        options = [discord.SelectOption(label="Unspecified", value="none")]
-        options += [discord.SelectOption(label=f"Quality {value}", value=str(value)) for value in values]
-        super().__init__(placeholder=f"{label} quality"[:150], options=options)
-        self.parent_view, self.path = parent, path
+        options = [discord.SelectOption(label="Not picked", value="none")]
+        options += [discord.SelectOption(label=quality_choice_label(item, value), value=str(value)) for value in values]
+        aspect = "" if item.aspect == item.name else f" ({item.aspect})"
+        super().__init__(placeholder=f"{item.name} quality{aspect}"[:150], options=options)
+        self.parent_view, self.path = parent, item.path
+
+    def show_current(self) -> None:
+        current = self.parent_view.qualities.get(self.path)
+        for option in self.options:
+            option.default = current is not None and option.value == str(current)
 
     async def callback(self, interaction: discord.Interaction) -> None:
         value = self.values[0]
@@ -255,7 +265,7 @@ class QualitySelect(discord.ui.Select):
 
 
 class ChoiceSelect(discord.ui.Select):
-    def __init__(self, parent: "CraftConfigView", group) -> None:
+    def __init__(self, parent: "_CraftConfig", group) -> None:
         names = []
         for path in group.children:
             item = next((item for item in parent.recipe.inputs if item.path == path), None)
@@ -265,63 +275,58 @@ class ChoiceSelect(discord.ui.Select):
                          min_values=group.required, max_values=group.required)
         self.parent_view, self.path = parent, group.path
 
+    def show_current(self) -> None:
+        chosen = {str(index) for index in self.parent_view.choices.get(self.path, ())}
+        for option in self.options:
+            option.default = option.value in chosen
+
     async def callback(self, interaction: discord.Interaction) -> None:
         self.parent_view.choices[self.path] = [int(value) for value in self.values]
         await self.parent_view.update(interaction)
 
 
-# Discord allows five rows per message and a select menu takes a whole row. The buttons share row 0, so
-# four selectors fit per page; a recipe with more is paged rather than having controls silently dropped.
+# Four menus a page, under the reply and above its buttons; a recipe with more is paged rather than
+# having controls silently dropped. (A classic message fits five rows: four menus and the buttons.)
 SELECTORS_PER_PAGE = 4
 
 
-class CraftConfigView(BotView):
-    def __init__(self, cog: "Blueprints", recipe: Recipe, count: int,
-                 quality_options: dict[str, tuple[int, ...]]) -> None:
-        # 10 idle minutes, not 15: this reply is ephemeral, so it can only be greyed out
-        # through an interaction token, and those last 15 minutes from the click that opened it.
-        super().__init__(timeout=600)
+class _CraftConfig:
+    """What the Configure crafting reply does in either form: the picks, the menus and their pages,
+    and the shopping-list button. CraftLayoutView is the reply (the owner's pick from real-data
+    mockups, 2026-10-04: a section per material with what its quality does, then "Your craft");
+    CraftConfigView sends the same text as a plain message when Discord refuses the layout."""
+
+    def _start(self, cog: "Blueprints", recipe: Recipe, count: int,
+               quality_options: dict[str, tuple[int, ...]]) -> None:
         self.cog, self.recipe, self.count = cog, recipe, count
         self.choices: dict[str, list[int]] = {}
         self.qualities: dict[str, int] = {}
+        self.options = {item.path: tuple(value for value in quality_options.get(item.path, ())
+                                         if Decimal(value) >= item.min_quality) for item in recipe.inputs}
         # Required material choices first: a plan can't be built without them, while a quality is optional.
         self.selectors: list[discord.ui.Select] = []
         for group in recipe.groups:
             if group.required < len(group.children):
                 self.selectors.append(ChoiceSelect(self, group))
         for item in recipe.inputs:
-            values = tuple(value for value in quality_options.get(item.path, ())
-                           if Decimal(value) >= item.min_quality)
-            if item.modifiers and values:
-                self.selectors.append(QualitySelect(self, item.path, f"{item.aspect} - {item.name}", values))
+            if item.modifiers and self.options[item.path]:
+                self.selectors.append(QualitySelect(self, item, self.options[item.path]))
         self.page = 0
         self.page_count = max(1, -(-len(self.selectors) // SELECTORS_PER_PAGE))
-        if self.page_count == 1:
-            self.remove_item(self.previous_button)
-            self.remove_item(self.next_button)
-        self._show_page()
 
-    def _show_page(self) -> None:
-        for child in [child for child in self.children if isinstance(child, discord.ui.Select)]:
-            self.remove_item(child)
+    def page_selectors(self) -> list[discord.ui.Select]:
         start = self.page * SELECTORS_PER_PAGE
-        for selector in self.selectors[start:start + SELECTORS_PER_PAGE]:
-            self.add_item(selector)
-        if self.page_count > 1:
-            self.previous_button.disabled = self.page == 0
-            self.next_button.disabled = self.page >= self.page_count - 1
+        return self.selectors[start:start + SELECTORS_PER_PAGE]
 
-    def text(self) -> str:
-        body = "\n".join(self.recipe.lines(self.count, self.choices, self.qualities))[:1900]
-        if self.page_count > 1:
-            return f"Options page {self.page + 1} of {self.page_count} - use Previous/Next to reach every choice.\n{body}"
-        return body
+    def blocks(self) -> tuple[str, ...]:
+        note = (f"Menus page {self.page + 1} of {self.page_count} - Previous/Next options show the rest."
+                if self.page_count > 1 else None)
+        return self.recipe.layout_blocks(self.count, self.choices, self.qualities, self.options, note=note)
 
     async def update(self, interaction: discord.Interaction) -> None:
-        await interaction.response.edit_message(content=self.text(), view=self, allowed_mentions=NO_MENTIONS)
+        raise NotImplementedError
 
-    @discord.ui.button(label="Add configured plan", style=discord.ButtonStyle.success, row=0)
-    async def add_button(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+    async def add_plan(self, interaction: discord.Interaction) -> None:
         try:
             plan = self.recipe.plan(self.count, self.choices, self.qualities)
         except ValueError as exc:
@@ -330,17 +335,97 @@ class CraftConfigView(BotView):
         await interaction.response.defer(ephemeral=True)
         await self.cog.shopping.add(interaction, plan)
 
+    async def turn_page(self, interaction: discord.Interaction, delta: int) -> None:
+        self.page = max(0, min(self.page_count - 1, self.page + delta))
+        await self.update(interaction)
+
+
+class CraftLayoutView(_CraftConfig, BotLayoutView):
+    """Configure crafting as a layout: the blocks in a container, the page's menus, then the buttons."""
+
+    def __init__(self, cog: "Blueprints", recipe: Recipe, count: int,
+                 quality_options: dict[str, tuple[int, ...]]) -> None:
+        # 10 idle minutes, not 15: this reply is ephemeral, so it can only be greyed out
+        # through an interaction token, and those last 15 minutes from the click that opened it.
+        super().__init__(timeout=600)
+        self._start(cog, recipe, count, quality_options)
+        self.add_button = discord.ui.Button(label="Add to shopping list", style=discord.ButtonStyle.success)
+        self.add_button.callback = self.add_plan
+        self.previous_button = discord.ui.Button(label="Previous options", style=discord.ButtonStyle.secondary)
+        self.previous_button.callback = self._previous
+        self.next_button = discord.ui.Button(label="Next options", style=discord.ButtonStyle.secondary)
+        self.next_button.callback = self._next
+        self.render()
+
+    async def _previous(self, interaction: discord.Interaction) -> None:
+        await self.turn_page(interaction, -1)
+
+    async def _next(self, interaction: discord.Interaction) -> None:
+        await self.turn_page(interaction, 1)
+
+    def render(self) -> None:
+        self.clear_items()
+        container = discord.ui.Container(accent_colour=discord.Colour.blurple())
+        for number, block in enumerate(self.blocks()):
+            if number:
+                container.add_item(discord.ui.Separator())
+            container.add_item(discord.ui.TextDisplay(block))
+        self.add_item(container)
+        for selector in self.page_selectors():
+            selector.show_current()
+            self.add_item(discord.ui.ActionRow(selector))
+        buttons = [self.add_button]
+        if self.page_count > 1:
+            self.previous_button.disabled = self.page == 0
+            self.next_button.disabled = self.page >= self.page_count - 1
+            buttons += [self.previous_button, self.next_button]
+        self.add_item(discord.ui.ActionRow(*buttons))
+
+    async def update(self, interaction: discord.Interaction) -> None:
+        self.render()
+        await interaction.response.edit_message(view=self, allowed_mentions=NO_MENTIONS)
+
+
+class CraftConfigView(_CraftConfig, BotView):
+    """Configure crafting as a plain message with the same text, for when Discord refuses the layout."""
+
+    def __init__(self, cog: "Blueprints", recipe: Recipe, count: int,
+                 quality_options: dict[str, tuple[int, ...]]) -> None:
+        super().__init__(timeout=600)  # see CraftLayoutView
+        self._start(cog, recipe, count, quality_options)
+        if self.page_count == 1:
+            self.remove_item(self.previous_button)
+            self.remove_item(self.next_button)
+        self._show_page()
+
+    def _show_page(self) -> None:
+        for child in [child for child in self.children if isinstance(child, discord.ui.Select)]:
+            self.remove_item(child)
+        for selector in self.page_selectors():
+            selector.show_current()
+            self.add_item(selector)
+        if self.page_count > 1:
+            self.previous_button.disabled = self.page == 0
+            self.next_button.disabled = self.page >= self.page_count - 1
+
+    def text(self) -> str:
+        return "\n\n".join(self.blocks())[:1900]
+
+    async def update(self, interaction: discord.Interaction) -> None:
+        self._show_page()
+        await interaction.response.edit_message(content=self.text(), view=self, allowed_mentions=NO_MENTIONS)
+
+    @discord.ui.button(label="Add to shopping list", style=discord.ButtonStyle.success, row=0)
+    async def add_button(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        await self.add_plan(interaction)
+
     @discord.ui.button(label="Previous options", style=discord.ButtonStyle.secondary, row=0)
     async def previous_button(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
-        self.page = max(0, self.page - 1)
-        self._show_page()
-        await self.update(interaction)
+        await self.turn_page(interaction, -1)
 
     @discord.ui.button(label="Next options", style=discord.ButtonStyle.secondary, row=0)
     async def next_button(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
-        self.page = min(self.page_count - 1, self.page + 1)
-        self._show_page()
-        await self.update(interaction)
+        await self.turn_page(interaction, 1)
 
 
 def mined_materials(recipe: Recipe) -> list[str]:
@@ -354,8 +439,25 @@ def mined_materials(recipe: Recipe) -> list[str]:
 
 
 async def open_craft_config(cog: "Blueprints", recipe: Recipe, count: int, interaction: discord.Interaction) -> None:
+    """The Configure crafting reply, private to whoever clicked: the layout, or the same text as a
+    plain message if it doesn't fit (Discord's 40 components or 4,000 characters) or Discord refuses it."""
     await interaction.response.defer(ephemeral=True)
     options = await cog.quality_options(recipe)
+    try:
+        layout = CraftLayoutView(cog, recipe, count, options)
+        if layout.content_length() > LAYOUT_TEXT_LIMIT:
+            raise ValueError(f"{layout.content_length()} characters")
+    except ValueError as exc:
+        logger.warning("Craft configuration doesn't fit a layout (%s); sending text", exc)
+    else:
+        try:
+            layout.message = await interaction.followup.send(
+                view=layout, ephemeral=True, allowed_mentions=NO_MENTIONS, wait=True,
+            )
+            return
+        except discord.HTTPException as exc:
+            layout.stop()
+            logger.warning("Craft configuration layout refused (%s); sending text", exc)
     view = CraftConfigView(cog, recipe, count, options)
     view.message = await interaction.followup.send(
         view.text(), view=view, ephemeral=True, allowed_mentions=NO_MENTIONS, wait=True,
