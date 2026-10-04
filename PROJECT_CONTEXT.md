@@ -4766,6 +4766,22 @@ they're in sync).
        `test_blueprint_crafting_cog.py`, `test_item_finder.py`, `test_expired_views.py` and
        `test_failed_interactions.py`. 22 mutations, all caught. One was caught only by
        accident (one button row for six buttons) and now has its own test.
+137. **`/blueprint-search`: the star system stands out at the top, or sits beside each giver.**
+     The owner's first look at entry 136 live (R97 Shotgun): "some dont say what system they
+     are in". "All in Nyx" was there, but in the small grey print, where they missed it.
+     - **The owner's call:** when every contract is in one system, it stays at the top but on
+       a line of its own at full size, in a grey tag ("Every contract is in `Nyx`.": the inline-
+       code highlight of the item-finder mockup they pointed at). Otherwise each giver whose
+       contracts share one system has it beside the name ("### Bit Zeros · Nyx · 1 contract"),
+       even for a single contract. A giver whose contracts differ keeps the system on each line.
+     - `GiverContracts.system` (`bot/uex/blueprints.py`) carries it; `contracts_header` writes
+       the tagged line ("The contract is in ..." for one contract, "`Nyx` and `Pyro`" for
+       several systems). The giver-level system used to go in the giver's small-print line,
+       only for 2+ contracts.
+     - Mocked up from real output before shipping (R97 Shotgun, Monde Arms Delta Camo,
+       Pembroke Helmet). Seen there, but not changed: some wiki missions carry an unfilled
+       title placeholder, "[Contractor|RecoverItemTitle]" (Bit Zeros, Dead Saints).
+     - Tests in `tests/test_blueprints.py`; 8 mutations, all caught.
 
 ## Where to look for what
 
