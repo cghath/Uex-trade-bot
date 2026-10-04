@@ -135,7 +135,7 @@ def test_mixed_cargo_footers_name_the_saved_filters(monkeypatch):
     async def footer(run_command) -> str:
         interaction = _FakeInteraction(1)
         await run_command(_prices_cog(dict(SAVED)), interaction)
-        return route_results(interaction.followup.sent).embeds[0].footer.text
+        return route_results(interaction.followup.sent).footers[0]
 
     async def run():
         expected = "Filters: auto-load-only (saved), system: Stanton (saved)"

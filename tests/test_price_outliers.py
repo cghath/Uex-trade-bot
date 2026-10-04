@@ -322,8 +322,9 @@ def test_multi_stop_route_flags_the_outlier_on_its_leg(tmp_path):
 
     results = asyncio.run(run())
     assert results and results.pages
-    text = results.all_text()
-    assert "Leg 1 ⚠️ Stileron origin buy price 2,614 is 8.3x below" in text, text
+    leg_one = results.pages[0].blocks[1]
+    assert leg_one.startswith("### Leg 1 ·"), leg_one
+    assert "\n⚠️ Stileron origin buy price 2,614 is 8.3x below" in leg_one, leg_one
 
 
 def test_intelligence_brief_routes_flag_the_outlier(tmp_path):

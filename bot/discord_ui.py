@@ -45,6 +45,9 @@ _UPDATES_ITS_MESSAGE = (
     discord.InteractionResponseType.message_update, discord.InteractionResponseType.deferred_message_update,
 )
 MAX_REMEMBERED_CLICKS = 5
+# Discord's limit on the text in one layout-components message (BotLayoutView); check
+# content_length() against it.
+LAYOUT_TEXT_LIMIT = 4000
 
 
 async def tell_player_it_failed(interaction: discord.Interaction, message: str = UNEXPECTED_ERROR_MESSAGE) -> None:
@@ -159,7 +162,8 @@ class BotView(_BotViewBehaviour, discord.ui.View):
 class BotLayoutView(_BotViewBehaviour, discord.ui.LayoutView):
     """Base class for every reply built from layout components: the whole message is the view,
     so it can't also carry `content` or an embed. Discord allows 40 components and 4,000
-    characters of text in one (discord.py raises ValueError past 40; check content_length())."""
+    characters of text in one (discord.py raises ValueError past 40; check content_length()
+    against LAYOUT_TEXT_LIMIT)."""
 
 
 class BotModal(discord.ui.Modal):

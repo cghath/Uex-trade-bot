@@ -42,14 +42,13 @@ from bot.uex.route_presentation import chunk_lines
 from bot.wiki_api import WikiApiClient, WikiApiError
 from bot.uex.blueprint_crafting import Recipe, UNAVAILABLE, craft_count, obtainable_qualities
 from bot.cogs.blueprint_planner import BlueprintResultView, CraftLaunchView, ShoppingView, ShoppingService
+from bot.discord_ui import LAYOUT_TEXT_LIMIT  # a result over it goes as text pages
 
 logger = logging.getLogger("uexbot.blueprints")
 
 REFRESH_HOURS = 12  # the API itself caches responses for 12h, so checking more often gains nothing
 DETAIL_CACHE_SECONDS = 6 * 3600
 DETAIL_CACHE_MAX = 300
-# Discord's text limit for one layout reply, across all its text. A result over it goes as text pages.
-LAYOUT_TEXT_LIMIT = 4000
 TEXT_PAGE_LIMIT = 1900  # under Discord's 2000-char message cap
 MAX_TEXT_PAGES = 5
 # The longest real blueprint name is well under this; anything longer is not a name, and a player's raw query

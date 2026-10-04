@@ -17,6 +17,7 @@ from typing import Any, Iterable, NamedTuple, Protocol
 from bot.uex.commodity_risk import format_commodity_risk
 from bot.uex.data_health import TerminalDataHealth, format_health_note
 from bot.uex.mixed_routes import format_limiting_factors
+from bot.uex.practical_routes import terminal_limit_notes
 from bot.uex.price_outliers import PriceOutlierIndex, find_price_outlier, format_price_outlier_warning
 from bot.uex.route_confidence import RouteConfidence, compute_route_confidence
 from bot.uex.status import StatusLookup, resolve_status_label
@@ -150,6 +151,48 @@ def price_outlier_warnings(
     return lines
 
 
+class CargoNotes(NamedTuple):
+    """What cargo_item_warnings says about one cargo item, piece by piece, for a caller that
+    lays the pieces out itself (/multi-stop-route's per-leg sections)."""
+
+    risk: str | None  # "⚠️ Cargo risk: ..." (format_commodity_risk); None when there's none
+    limit: str  # "limited by demand (destination will take ~84 SCU)"
+    market_status: tuple[str, ...]  # ("origin High", "destination Low"); empty when unknown
+    outliers: tuple[str, ...]  # "⚠️ origin buy price ..." (price_outlier_warnings)
+
+
+def cargo_item_notes(
+    item: _CargoItemLike,
+    *,
+    status_lookup: StatusLookup,
+    price_outlier_index: PriceOutlierIndex | None = None,
+) -> CargoNotes:
+    """cargo_item_warnings' facts before they're joined into lines - see it for each one."""
+    limit_text = format_limiting_factors(item.limiting_factors)
+    if "demand" in item.limiting_factors:
+        # The item's own quantity_scu is already capped to this same number (or lower, by
+        # ship space/budget) - showing the destination's own real ceiling separately tells
+        # the player whether there was more demand than they could take advantage of.
+        destination_capacity = effective_sell_scu(
+            item.destination.get("scu_sell"), item.destination.get("status_sell")
+        )
+        if destination_capacity:
+            limit_text += f" (destination will take ~{destination_capacity:,.0f} SCU)"
+    buy_status = resolve_status_label(status_lookup, "buy", item.source.get("status_buy"))
+    sell_status = resolve_status_label(status_lookup, "sell", item.destination.get("status_sell"))
+    market_status = tuple(
+        f"{side} {status}" for side, status in (("origin", buy_status), ("destination", sell_status)) if status
+    )
+    outliers: tuple[str, ...] = ()
+    if price_outlier_index is not None:
+        outliers = tuple(price_outlier_warnings(
+            price_outlier_index, id_commodity=item.id_commodity,
+            origin_id=_terminal_id(item.source), buy_price=item.buy_price,
+            destination_id=_terminal_id(item.destination), sell_price=item.sell_price,
+        ))
+    return CargoNotes(format_commodity_risk(item.source), limit_text, market_status, outliers)
+
+
 def cargo_item_warnings(
     item: _CargoItemLike,
     *,
@@ -166,38 +209,17 @@ def cargo_item_warnings(
     caller) flags this item's buy or sell price when it's a confirmed outlier against every
     other terminal trading the same commodity. None skips the check: a caller with no
     snapshot in scope just doesn't get it."""
+    notes = cargo_item_notes(item, status_lookup=status_lookup, price_outlier_index=price_outlier_index)
     lines: list[str] = []
-    if risk := format_commodity_risk(item.source):
-        lines.append(f"{prefix}{item.commodity_name}: {risk}")
-    limit_text = format_limiting_factors(item.limiting_factors)
-    if "demand" in item.limiting_factors:
-        # The item's own quantity_scu is already capped to this same number (or lower, by
-        # ship space/budget) - showing the destination's own real ceiling separately tells
-        # the player whether there was more demand than they could take advantage of.
-        destination_capacity = effective_sell_scu(
-            item.destination.get("scu_sell"), item.destination.get("status_sell")
-        )
-        if destination_capacity:
-            limit_text += f" (destination will take ~{destination_capacity:,.0f} SCU)"
-    lines.append(f"{prefix}{item.commodity_name}: {limit_text}")
-    buy_status = resolve_status_label(status_lookup, "buy", item.source.get("status_buy"))
-    sell_status = resolve_status_label(status_lookup, "sell", item.destination.get("status_sell"))
-    if buy_status or sell_status:
-        status_bits = []
-        if buy_status:
-            status_bits.append(f"origin {buy_status}")
-        if sell_status:
-            status_bits.append(f"destination {sell_status}")
-        lines.append(f"{prefix}{item.commodity_name} market status: {' · '.join(status_bits)}")
-    if price_outlier_index is not None:
-        for warning in price_outlier_warnings(
-            price_outlier_index, id_commodity=item.id_commodity,
-            origin_id=_terminal_id(item.source), buy_price=item.buy_price,
-            destination_id=_terminal_id(item.destination), sell_price=item.sell_price,
-        ):
-            # "⚠️ origin buy price ..." -> "⚠️ Gold origin buy price ...", so a multi-item
-            # load says which cargo it's about.
-            lines.append(f"{prefix}⚠️ {item.commodity_name} {warning.removeprefix('⚠️ ')}")
+    if notes.risk:
+        lines.append(f"{prefix}{item.commodity_name}: {notes.risk}")
+    lines.append(f"{prefix}{item.commodity_name}: {notes.limit}")
+    if notes.market_status:
+        lines.append(f"{prefix}{item.commodity_name} market status: {' · '.join(notes.market_status)}")
+    for warning in notes.outliers:
+        # "⚠️ origin buy price ..." -> "⚠️ Gold origin buy price ...", so a multi-item
+        # load says which cargo it's about.
+        lines.append(f"{prefix}⚠️ {item.commodity_name} {warning.removeprefix('⚠️ ')}")
     return lines
 
 
@@ -248,6 +270,13 @@ def worst_confidence(confidences: Iterable[RouteConfidence]) -> RouteConfidence:
     return min(confidences, key=lambda value: value.score)
 
 
+def system_crossing(origin_system: object, destination_system: object) -> tuple[str, str] | None:
+    """(origin, destination) star system names when both are known and differ, else None."""
+    origin = str(origin_system).strip() if origin_system else ""
+    destination = str(destination_system).strip() if destination_system else ""
+    return (origin, destination) if origin and destination and origin != destination else None
+
+
 def travel_warning(
     origin_system: object,
     destination_system: object,
@@ -269,10 +298,8 @@ def travel_warning(
     per-leg lines): stays silent unless both systems are known and differ, since there's
     nothing to add when they match or when system data is simply missing.
     """
-    origin = str(origin_system).strip() if origin_system else ""
-    destination = str(destination_system).strip() if destination_system else ""
-    cross_system = bool(origin) and bool(destination) and origin != destination
-    if cross_system:
+    if crossing := system_crossing(origin_system, destination_system):
+        origin, destination = crossing
         if has_real_distance:
             return f"⚠️ {prefix}crosses systems: {origin} → {destination}"
         return f"⚠️ {prefix}Cross-system route: {origin} → {destination}; compare profit against travel time"
@@ -390,3 +417,114 @@ def missing_ship_cargo_line(ship_query: str | None, *, lookup_failed: bool) -> s
     if lookup_failed:
         return "Cargo: unknown (UEX's ship list didn't load)"
     return f"Cargo: unknown ('{ship_query}' didn't match a single ship)"
+
+
+def format_gm(distance_gm: float) -> str:
+    """'17 Gm', '17.5 Gm': UEX's distances are mostly whole gigameters."""
+    return f"{distance_gm:,.0f} Gm" if float(distance_gm).is_integer() else f"{distance_gm:,.1f} Gm"
+
+
+class MultiStopLegFacts(NamedTuple):
+    """What /multi-stop-route looks up for each leg on top of the route itself."""
+
+    distance_gm: float | None  # UEX's live distance; None when it couldn't be fetched
+    origin_health: TerminalDataHealth | None
+    destination_health: TerminalDataHealth | None
+
+
+def multi_stop_footer(*, is_exact: bool, budget: float | None, filters_note: str | None,
+                      capital_access_only: bool) -> str:
+    """The small print under a /multi-stop-route route. The owner cut it down (2026-10-04) to
+    what a player can act on: prices move, the cargo split is approximate (only when it is -
+    see approximation_note), and the options in force."""
+    parts = ["Prices can change before you arrive"]
+    if not is_exact:
+        parts.append("the cargo split is approximate")
+    if budget is not None:
+        parts.append(f"starting budget {float(budget):,.0f} aUEC")
+    if filters_note:
+        parts.append(filters_note)
+    if capital_access_only:
+        parts.append(capital_access_note("every stop"))
+    return " · ".join(parts)
+
+
+def multi_stop_blocks(
+    route: Any,
+    *,
+    index: int,
+    ship_name: str,
+    space_only: bool,
+    leg_facts: list[MultiStopLegFacts],
+    confidence: RouteConfidence,
+    footer: str,
+    status_lookup: StatusLookup,
+    price_outlier_index: PriceOutlierIndex | None = None,
+) -> tuple[str, ...]:
+    """One /multi-stop-route route (a bot.uex.multi_stop_routes.MultiStopRoute) as text blocks
+    for a layout: the summary, a section per leg, then the small print. The owner's pick from
+    real-data mockups (2026-10-04, option B):
+
+    - Each leg's warnings sit under that leg, not in one list at the bottom. ⚠️ lines stay full
+      size; the rest (what limited a load, market status, the leg's money) is small print.
+    - A station's own facts - container size, no freight elevator or dock, player-owned, stale
+      data, a cargo center - are said once, under the first leg that stops there, by name. The
+      old list said "Origin"/"Destination" and repeated them for a station that ends one leg
+      and starts the next.
+    - Refuel and repair aren't listed (the owner asked them out); a cargo center still is.
+    - Every leg shows its own profit, a one-commodity leg included.
+
+    Markdown that reads the same as a plain message, so the blocks joined by blank lines are
+    the text version when the layout can't be sent."""
+    legs = route.legs
+    path = " → ".join([legs[0].origin_name, *(leg.destination_name for leg in legs)])
+    distances = [facts.distance_gm for facts in leg_facts]
+    known_gm = sum(distance for distance in distances if distance is not None)
+    if any(distance is None for distance in distances):
+        distance = f"**~{format_gm(known_gm)}** (some legs' distance unavailable)"
+    else:
+        distance = f"**{format_gm(known_gm)}** total"
+    blocks = ["\n".join([
+        f"## #{index} · {path}",
+        f"Profit **{route.profit:,.0f} aUEC** · ROI **{route.roi_pct:.1f}%**",
+        f"Investment **{route.investment:,.0f}** · Revenue **{route.revenue:,.0f} aUEC**",
+        f"Distance {distance} · Confidence **{confidence.label} ({confidence.score}/100)**",
+        f"-# {len(legs)}-leg chain for {ship_name} · ranked by profit (ROI as a tie-breaker)"
+        f"{' · space stations only' if space_only else ''}",
+    ])]
+    stations_described: set[int] = set()
+    for number, (leg, facts) in enumerate(zip(legs, leg_facts), 1):
+        lines = [f"### Leg {number} · {leg.origin_name} → {leg.destination_name}"]
+        for item in leg.cargo:
+            notes = cargo_item_notes(item, status_lookup=status_lookup, price_outlier_index=price_outlier_index)
+            lines.append(f"**{item.commodity_name}** · {item.quantity_scu:,.0f} SCU · "
+                         f"+{item.profit_per_scu:,.0f}/SCU · **+{item.profit:,.0f}**")
+            details = notes.limit[:1].upper() + notes.limit[1:]
+            if notes.market_status:
+                details += f" · market status: {', '.join(notes.market_status)}"
+            lines.append(f"-# {details}")
+            if notes.risk:
+                lines.append(f"⚠️ {item.commodity_name}: {notes.risk.removeprefix('⚠️ ')}")
+            lines += [f"⚠️ {item.commodity_name} {warning.removeprefix('⚠️ ')}" for warning in notes.outliers]
+        leg_distance = format_gm(facts.distance_gm) if facts.distance_gm is not None else "distance unavailable"
+        lines.append(f"-# Investment {leg.investment:,.0f} · revenue {leg.revenue:,.0f} · "
+                     f"leg profit {leg.profit:,.0f} · {leg_distance}")
+        source, destination = leg.cargo[0].source, leg.cargo[0].destination
+        if crossing := system_crossing(source.get("star_system_name"), destination.get("star_system_name")):
+            lines.append(f"⚠️ Crosses systems: `{crossing[0]}` → `{crossing[1]}`")
+        small_print = []
+        for station_id, name, terminal, health in (
+            (leg.origin_id, leg.origin_name, source, facts.origin_health),
+            (leg.destination_id, leg.destination_name, destination, facts.destination_health),
+        ):
+            if station_id in stations_described:
+                continue
+            stations_described.add(station_id)
+            lines += terminal_limit_notes(name, terminal)
+            if note := format_health_note(health):
+                lines.append(f"⚠️ {name}: {note.removeprefix('⚠️ ')}")
+            if terminal.get("is_cargo_center"):
+                small_print.append(f"-# {name} has a cargo center")
+        blocks.append("\n".join([*lines, *small_print]))
+    blocks.append(f"-# {footer}")
+    return tuple(blocks)

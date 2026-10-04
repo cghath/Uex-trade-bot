@@ -1,7 +1,14 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.57.
+the oldest entry below); the next new entry is 2.58.
+
+---
+
+## 2.57 - 2026-10-04 - Easier-to-read multi-stop routes
+
+**Changed**
+- `/multi-stop-route` - Each route now reads top to bottom: profit and ROI first, then one section per leg with its cargo, its own profit, and its own warnings right under it, instead of one long list at the bottom. A station's container limit or missing loading dock is said once, by name. Refuel and repair stops are no longer listed, and the small print is down to what you can act on.
 
 ---
 
