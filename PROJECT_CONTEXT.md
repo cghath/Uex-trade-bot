@@ -4817,6 +4817,23 @@ they're in sync).
      - Tests: `tests/test_multi_stop_layout.py` (new), layout paging in
        `tests/test_route_pages.py`, and the multi-stop tests in `tests/test_route_send_shape.py`
        moved from the embed to the layout. 12 mutations, all caught.
+139. **Track this route copies the route into its thread again (`/multi-stop-route`).** The
+     owner, tracking a route right after entry 138 deployed: "it doesnt copy the whole route
+     to the thread anymore". `start_tracking` (`bot/cogs/route_progression.py`) copied the
+     route by re-posting `interaction.message.embeds[0]`, the embed of the message the button
+     was on; the layout message has no embed, so the thread started with only "Tracking ...".
+     - **Missed before deploying:** the pre-deploy check of tracking looked at how the thread
+       is created, not at everything `start_tracking` reads from the clicked message. A
+       message's format is an input to anything that reads the message back.
+     - **Fix:** the button hands over the page showing (`start_tracking(..., page=page)` from
+       `RoutePaging._track`), and `_post_route_copy` posts it as it was shown: a layout page
+       as a layout without the paging buttons (`route_copy_view`, sharing `route_container`
+       with `RouteLayoutPagesView`), an embed page as its embed, a text page as text, and a
+       page Discord refuses as an embed or layout as its text. Without a page it keeps the old
+       embed copy. The other route commands' threads are unchanged, except a page shown as
+       text after Discord refused its embed now gets copied too (it used to get nothing).
+     - Tests in `tests/test_route_progression.py`, one through the real Track this route
+       button on a layout page; 4 mutations, all caught (the original bug among them).
 
 ## Where to look for what
 
