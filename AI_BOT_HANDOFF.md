@@ -411,6 +411,10 @@ date - no open item, nothing to record here.
       `item_footer`/`distance_text` (`bot/uex/item_finder.py`, replacing
       `format_item_listing_line`). `SearchResult.embed` became `blocks`/`crafting`: check
       anything in aiv2 that reads it, such as a chat tool. See PROJECT_CONTEXT.md entry 136
+- [ ] PR #124 - `/blueprint-search`'s star system: a full-size grey-tag line at the top when every
+      contract shares one, else beside each giver whose contracts share one
+      (`GiverContracts.system`, `contracts_header`, `giver_block` in `bot/uex/blueprints.py`).
+      See PROJECT_CONTEXT.md entry 137
 
 ## To port: aiv2 -> production
 

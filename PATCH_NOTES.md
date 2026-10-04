@@ -1,7 +1,14 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.56.
+the oldest entry below); the next new entry is 2.57.
+
+---
+
+## 2.56 - 2026-10-03 - Where the contracts are
+
+**Changed**
+- `/blueprint-search` - When every contract is in one star system, it now stands out under the blueprint's name ("Every contract is in Nyx") instead of hiding in the small print. Otherwise each contract giver shows its system beside its name when all its contracts are in one.
 
 ---
 

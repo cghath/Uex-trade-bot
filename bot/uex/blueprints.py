@@ -502,10 +502,13 @@ NO_CHANCE = "reward chance unavailable"
 @dataclass(frozen=True)
 class GiverContracts:
     """One giver's contracts as the reply lists them: what every one of them shares, said once
-    (`shared`), then each contract's title with only what is left (`details`)."""
+    (`shared`), then each contract's title with only what is left (`details`). `system` is
+    the star system all of them are in, shown beside the giver - set only when the contracts
+    don't all share one system (then it's said at the top instead)."""
     giver: str
     shared: str
     contracts: tuple[tuple[str, str], ...]
+    system: str | None = None
 
 
 @dataclass(frozen=True)
@@ -545,9 +548,10 @@ def _capitalized(text: str) -> str:
 
 def summarize_contracts(groups: Sequence[MissionGroup], chances: Sequence[str | None]) -> ContractSummary:
     """`chances[i]` is groups[i]'s describe_chance (None when unknown). Said once for every
-    contract: the most common pool and chance, and the star system when all share it. Said once
-    per giver with two or more contracts: one rank, one system, or all illegal. Each line keeps
-    only what differs."""
+    contract: the most common pool and chance, and the star system when all share it. Otherwise
+    each giver whose contracts share one system has it beside its name (the owner's call,
+    2026-10-03: even for one contract). Said once per giver with two or more contracts: one
+    rank, or all illegal. Each line keeps only what differs."""
     chance_of = [chance or NO_CHANCE for chance in chances]
     pool = Counter(g.pool_size for g in groups).most_common(1)[0][0]
     chance = Counter(chance_of).most_common(1)[0][0]
@@ -563,10 +567,9 @@ def summarize_contracts(groups: Sequence[MissionGroup], chances: Sequence[str | 
         ranks = {g.rank_name for g in members}
         rank_shared = several and len(ranks) == 1 and None not in ranks
         giver_systems = {_systems(g) for g in members}
-        systems_shared = several and system is None and len(giver_systems) == 1 and None not in giver_systems
+        giver_system = next(iter(giver_systems)) if system is None and len(giver_systems) == 1 else None
         illegal_shared = several and all(g.illegal for g in members)
         shared = [f"Needs {members[0].rank_name}"] if rank_shared else []
-        shared += [_systems(members[0])] if systems_shared else []
         shared += ["Illegal"] if illegal_shared else []
         contracts = []
         for i in indexes:
@@ -575,10 +578,10 @@ def summarize_contracts(groups: Sequence[MissionGroup], chances: Sequence[str | 
             bits += [f"+{g.reputation:,} rep"] if g.reputation else []
             bits += [f"pool of {g.pool_size}"] if g.pool_size != pool else []
             bits += [chance_of[i].removesuffix(" to grant one")] if chance_of[i] != chance else []
-            bits += [_systems(g)] if system is None and not systems_shared and _systems(g) else []
+            bits += [_systems(g)] if system is None and giver_system is None and _systems(g) else []
             bits += ["illegal"] if g.illegal and not illegal_shared else []
             contracts.append((g.title, _capitalized(" · ".join(bits))))
-        givers.append(GiverContracts(giver, " · ".join(shared), tuple(contracts)))
+        givers.append(GiverContracts(giver, " · ".join(shared), tuple(contracts), giver_system))
     noted = any(g.pool_size != pool for g in groups) or any(c != chance for c in chance_of)
     return ContractSummary(len(groups), system, _reward_lead(len(groups), pool, chance, noted), tuple(givers))
 
@@ -589,22 +592,28 @@ def _plural(count: int, word: str) -> str:
 
 def contracts_header(name: str, summary: ContractSummary, game_version: str | None,
                      corrected_from: str | None = None) -> str:
-    """The reply's top block: the blueprint, how many contracts and givers, and the reward said once."""
+    """The reply's top block: the blueprint, the star system when every contract shares one
+    (full size, in a grey tag, so it stands out: the owner missed it in the small print), how
+    many contracts and givers, and the reward said once."""
     lines = [f"## {name}"]
     if corrected_from:
         lines.append(f"Showing results for **{name}** (you typed “{corrected_from}”).")
-    where = f", all in {summary.system}" if summary.system else ""
+    if summary.system:
+        tags = [f"`{system}`" for system in summary.system.split(", ")]
+        where = " and ".join(tags) if len(tags) < 3 else ", ".join(tags[:-1]) + " and " + tags[-1]
+        lines.append(f"{'Every contract is' if summary.count > 1 else 'The contract is'} in {where}.")
     source = f" · Star Citizen Wiki, game {game_version.split('-')[0]}" if game_version else ""
     lines.append(f"-# Blueprint · {_plural(summary.count, 'contract')} from "
-                 f"{_plural(len(summary.givers), 'giver')}{where}{source}")
+                 f"{_plural(len(summary.givers), 'giver')}{source}")
     lines.append(f"-# {summary.lead}")
     return "\n".join(lines)
 
 
 def giver_block(section: GiverContracts) -> str:
-    """One giver: a heading, what all its contracts share, then each contract's title in bold
-    over a small line of what's left."""
-    lines = [f"### {section.giver} · {_plural(len(section.contracts), 'contract')}"]
+    """One giver: a heading (with the star system all its contracts are in, if they share one),
+    what all its contracts share, then each contract's title in bold over a small line of what's left."""
+    system = f" · {section.system}" if section.system else ""
+    lines = [f"### {section.giver}{system} · {_plural(len(section.contracts), 'contract')}"]
     if section.shared:
         lines.append(f"-# {section.shared}")
     for title, details in section.contracts:
@@ -620,6 +629,6 @@ def first_contracts(givers: Sequence[GiverContracts], shown: int) -> list[GiverC
     for section in givers:
         if shown <= 0:
             break
-        kept.append(GiverContracts(section.giver, section.shared, section.contracts[:shown]))
+        kept.append(GiverContracts(section.giver, section.shared, section.contracts[:shown], section.system))
         shown -= len(section.contracts)
     return kept

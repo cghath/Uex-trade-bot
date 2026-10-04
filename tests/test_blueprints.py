@@ -378,7 +378,7 @@ def test_what_every_contract_shares_is_said_once_and_each_line_keeps_only_what_d
     assert summary.lead == ("Each always grants one of the 10 blueprints in its pool unless noted; "
                             "the odds of getting this one aren't published.")
     bounty, citizens, highpoint, vaughn = summary.givers
-    assert bounty.shared == "Needs Probationary Guild Member"
+    assert bounty.shared == "Needs Probationary Guild Member" and bounty.system is None, "said once, at the top"
     assert bounty.contracts == (("Bounty Easy", "+1,000 rep"), ("High-Risk Bounty", "+250 rep · pool of 11 · 75% chance"))
     assert citizens.shared == "" and citizens.contracts[1] == ("Convoy Caught", "Needs Sr. Contractor · +200 rep")
     assert highpoint.shared == "" and highpoint.contracts == (("Reduce Population", "Needs Neutral · +100 rep"),), \
@@ -386,15 +386,35 @@ def test_what_every_contract_shares_is_said_once_and_each_line_keeps_only_what_d
     assert vaughn.shared == "Illegal" and "illegal" not in " ".join(d for _, d in vaughn.contracts)
 
 
-def test_star_systems_are_said_per_giver_or_per_line_when_contracts_disagree():
+def test_star_systems_are_said_beside_each_giver_or_per_line_when_contracts_disagree():
+    """The owner's call (2026-10-03): all in one system, at the top; else beside each giver whose
+    contracts share one, even a single contract's; else on each line."""
     groups = [
         _group("A", "Shubin", systems=("Pyro",)), _group("B", "Shubin", systems=("Pyro",)),
         _group("C", "Foxwell", systems=("Nyx", "Pyro")), _group("D", "Foxwell", rank="Contractor", systems=("Stanton",)),
+        _group("E", "Highpoint", systems=("Nyx",)),
     ]
-    summary = summarize_contracts(groups, ["always grants one"] * 4)
-    shubin, foxwell = summary.givers
-    assert summary.system is None and shubin.shared == "Needs Neutral · Pyro"
+    summary = summarize_contracts(groups, ["always grants one"] * 5)
+    shubin, foxwell, highpoint = summary.givers
+    assert summary.system is None
+    assert (shubin.system, shubin.shared) == ("Pyro", "Needs Neutral") and "Pyro" not in " ".join(d for _, d in shubin.contracts)
+    assert giver_block(shubin).split("\n")[0] == "### Shubin · Pyro · 2 contracts"
+    assert foxwell.system is None
     assert foxwell.contracts == (("C", "Needs Neutral · +100 rep · Nyx, Pyro"), ("D", "Needs Contractor · +100 rep · Stanton"))
+    assert highpoint.system == "Nyx" and giver_block(highpoint).split("\n")[0] == "### Highpoint · Nyx · 1 contract"
+
+
+def test_one_system_for_every_contract_stands_out_at_the_top_in_a_grey_tag():
+    """The owner missed "all in Nyx" in the small print (2026-10-03)."""
+    def header(*systems_per_contract):
+        groups = [_group(f"C{i}", "G", systems=systems) for i, systems in enumerate(systems_per_contract)]
+        return contracts_header("R97", summarize_contracts(groups, ["always grants one"] * len(groups)), None).split("\n")
+
+    assert header(("Nyx",), ("Nyx",))[1] == "Every contract is in `Nyx`."
+    assert header(("Nyx",))[1] == "The contract is in `Nyx`."
+    assert header(("Nyx", "Pyro"), ("Nyx", "Pyro"))[1] == "Every contract is in `Nyx` and `Pyro`."
+    assert header(("Nyx", "Pyro", "Stanton"),)[1] == "The contract is in `Nyx`, `Pyro` and `Stanton`."
+    assert not any("`" in line for line in header(("Nyx",), ("Pyro",))), "no single system to call out"
 
 
 def test_the_reward_is_said_once_in_plain_words_for_every_kind_of_chance():
@@ -432,7 +452,8 @@ def test_the_header_and_a_giver_read_as_headings_with_small_print_under_them():
     assert header.split("\n") == [
         "## R97 Shotgun",
         "Showing results for **R97 Shotgun** (you typed “r97 shotgn”).",
-        "-# Blueprint · 2 contracts from 1 giver, all in Nyx · Star Citizen Wiki, game 4.10.1",
+        "Every contract is in `Nyx`.",
+        "-# Blueprint · 2 contracts from 1 giver · Star Citizen Wiki, game 4.10.1",
         f"-# {summary.lead}",
     ]
     assert giver_block(summary.givers[0]).split("\n") == [
@@ -442,8 +463,10 @@ def test_the_header_and_a_giver_read_as_headings_with_small_print_under_them():
 
 
 def test_a_reply_cut_short_keeps_the_first_contracts_still_grouped_by_giver():
-    groups = [_group("A1", "A"), _group("A2", "A"), _group("B1", "B"), _group("C1", "C")]
+    groups = [_group("A1", "A", systems=("Pyro",)), _group("A2", "A", systems=("Pyro",)),
+              _group("B1", "B", systems=("Nyx",)), _group("C1", "C", systems=("Stanton",))]
     givers = summarize_contracts(groups, ["always grants one"] * 4).givers
     kept = first_contracts(givers, 3)
     assert [(g.giver, [title for title, _ in g.contracts]) for g in kept] == [("A", ["A1", "A2"]), ("B", ["B1"])]
+    assert [g.system for g in kept] == ["Pyro", "Nyx"], "a giver's system survives the cut"
     assert first_contracts(givers, 0) == []
