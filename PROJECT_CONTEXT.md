@@ -4782,6 +4782,41 @@ they're in sync).
        Pembroke Helmet). Seen there, but not changed: some wiki missions carry an unfilled
        title placeholder, "[Contractor|RecoverItemTitle]" (Bit Zeros, Dead Saints).
      - Tests in `tests/test_blueprints.py`; 8 mutations, all caught.
+138. **`/multi-stop-route` is laid out with layout components, each leg with its own warnings.**
+     The second section of the message presentation pass (ROADMAP), and the command with the
+     most players. Mocked up from real output first: today's reply, three options, then option
+     B in full against the busiest of 120 real routes (12 ships, no budget and 250K, 5 routes
+     each: 11-17 warning lines, most 17). The owner picked the C2 Hercules board: "warning per
+     leg seems like a way better choice over putting them all at the bottom".
+     - **What a route page says** (`multi_stop_blocks` in `bot/uex/route_presentation.py`): a
+       summary (profit, ROI, investment, revenue, distance, confidence), a section per leg,
+       then the small print. A leg lists its cargo with what limited each load and its market
+       status in small print, the leg's investment, revenue, profit and distance in small
+       print, then its ⚠️ lines at full size: system crossings, cargo risk, price outliers, and
+       each station's limits and stale data.
+     - **Said once, by name:** a station's own facts (container size, no dock, player-owned,
+       stale data, a cargo center) come under the first leg that stops there. The old list said
+       "Leg 2 Destination" and "Leg 3 Origin" for the same station and repeated them.
+     - **The owner's cuts:** refuel and repair aren't listed (a cargo center still is), every
+       leg shows its own profit, and the footer is "Prices can change before you arrive", plus
+       "the cargo split is approximate" only when it is, and the options in force (budget,
+       filters, capital-ship access). Dropped: "Collected UEX data + live UEX distance" and
+       "warnings do not change profit ranking".
+     - **Paging** (`bot/route_pages.py`): `RouteLayoutPagesView` pages the layout the way
+       `RoutePagesView` pages embeds; `RoutePaging` holds what both share (only the player who
+       ran it pages, anyone tracks, a refused page shows as its text, buttons grey out after 15
+       idle minutes). `layout_pages` sends a route over Discord's 4,000 characters as text
+       pages, and if Discord refuses the layout the routes go out as text pages through the
+       classic view. Real routes use about 1,500-1,700 characters and 15 of 40 components.
+     - `cargo_item_notes` and `terminal_limit_notes` split out the pieces of
+       `cargo_item_warnings`/`terminal_practical_notes`, whose lines for every other route
+       command are unchanged; `system_crossing` likewise under `travel_warning`.
+       `LAYOUT_TEXT_LIMIT` moved to `bot/discord_ui.py`, shared with `/blueprint-search`.
+     - Only `/multi-stop-route` changed. `/best-route`, `/top-routes` and `/mixed-routes` still
+       send embeds, with refuel/repair and the old footer.
+     - Tests: `tests/test_multi_stop_layout.py` (new), layout paging in
+       `tests/test_route_pages.py`, and the multi-stop tests in `tests/test_route_send_shape.py`
+       moved from the embed to the layout. 12 mutations, all caught.
 
 ## Where to look for what
 

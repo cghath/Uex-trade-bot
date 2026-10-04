@@ -24,7 +24,7 @@ from bot.cogs.route_progression import RouteProgression
 from bot.cogs.ship_parts_finder import PartsBrowserView
 from bot.db.database import Database
 from bot.discord_ui import AlertRemovePickerView, BotView, send_alert_remove_picker
-from bot.route_pages import RoutePagesView
+from bot.route_pages import RoutePaging
 from bot.uex.blueprint_crafting import Recipe
 from bot.uex.client import UexClient
 from tests.bot_views import all_bot_views
@@ -216,7 +216,7 @@ def test_every_route_tracking_view_knows_its_message(tmp_path):
     sent = [kwargs for _, kwargs in asyncio.run(run()).followup.sent if kwargs.get("view")]
     assert sent
     for kwargs in sent:
-        assert isinstance(kwargs["view"], RoutePagesView)
+        assert isinstance(kwargs["view"], RoutePaging)
         assert kwargs["view"].message.sent_with is kwargs
 
 

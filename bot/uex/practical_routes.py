@@ -4,8 +4,10 @@ from __future__ import annotations
 from typing import Any
 
 
-def terminal_practical_notes(label: str, terminal: dict[str, Any] | None) -> list[str]:
-    """Return concise confirmed limitations and useful on-site services."""
+def terminal_limit_notes(label: str, terminal: dict[str, Any] | None) -> list[str]:
+    """The "⚠️ {label}: ..." lines of terminal_practical_notes: confirmed limits on moving
+    cargo here (container size, no freight elevator or dock, player-owned), without the
+    services line."""
     if not terminal:
         return []
     notes: list[str] = []
@@ -16,7 +18,14 @@ def terminal_practical_notes(label: str, terminal: dict[str, Any] | None) -> lis
         notes.append(f"⚠️ {label}: no freight elevator or loading dock reported")
     if terminal.get("is_player_owned"):
         notes.append(f"⚠️ {label}: player-owned location; access and availability may change")
+    return notes
 
+
+def terminal_practical_notes(label: str, terminal: dict[str, Any] | None) -> list[str]:
+    """Return concise confirmed limitations and useful on-site services."""
+    if not terminal:
+        return []
+    notes = terminal_limit_notes(label, terminal)
     services = []
     if terminal.get("is_refuel"):
         services.append("refuel")

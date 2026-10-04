@@ -59,9 +59,10 @@ def _filters_note(prefs: dict, saved_filters: dict, *, space_only: bool, auto_lo
         saved={name for name, value in saved_filters.items() if value},
     )
 from bot.cogs.route_progression import RouteLegInput, TrackableRoute
-from bot.route_pages import RoutePage, send_route_pages, text_pages
+from bot.route_pages import RoutePage, layout_pages, send_route_pages, text_pages
 from bot.uex.price_outliers import PriceOutlierIndex, index_commodity_prices
 from bot.uex.route_presentation import (
+    MultiStopLegFacts,
     add_chunked_fields,
     approximation_note,
     capital_access_note,
@@ -74,6 +75,8 @@ from bot.uex.route_presentation import (
     hedge_room,
     missing_ship_cargo_line,
     missing_ship_note,
+    multi_stop_blocks,
+    multi_stop_footer,
     price_outlier_warnings,
     stock_headroom_warning,
     travel_warning,
@@ -1515,7 +1518,7 @@ class Prices(commands.Cog):
         filters_note: str | None = None,
         price_outlier_index: PriceOutlierIndex | None = None,
     ) -> None:
-        """Per-route embed/tracking/fallback sending for /multi-stop-route, whether its search
+        """Per-route layout/tracking/fallback sending for /multi-stop-route, whether its search
         was unconstrained or anchored to one starting terminal (`origin`, which was
         /route-from-multi before audit UX-8 folded it in)."""
         terminal_ids = [terminal_id for route in routes for terminal_id in route.stops]
@@ -1525,42 +1528,15 @@ class Prices(commands.Cog):
         # /multi-stop-route) - tracking buttons are additive, never required for the
         # command's own result.
         tracking_cog = self.bot.get_cog("RouteProgression")
+        ship_name = ship_vehicle.get("name", ship_query)
         pages: list[RoutePage] = []
         for index, route in enumerate(routes, 1):
             path_label = " → ".join(
                 [route.legs[0].origin_name, *(leg.destination_name for leg in route.legs)]
             )
-            route_embed = discord.Embed(
-                title=f"#{index} {path_label}",
-                description=(
-                    f"{len(route.legs)}-leg chain for **{ship_vehicle.get('name', ship_query)}** · "
-                    f"ranked by profit (ROI% as a tie-breaker)"
-                    f"{' · space stations only' if space_only else ''}"
-                ),
-                color=discord.Color.green(),
-            )
-            # Set before the per-leg field loop, not after - see the matching comment in
-            # /best-route above. This route's footer depends only on already-known
-            # per-command options and route.is_exact, all available before the loop runs.
-            route_footer = (
-                "Collected UEX data + live UEX distance · prices can change before arrival · "
-                "warnings do not change profit ranking"
-            )
-            if budget is not None:
-                route_footer += f" · starting budget {float(budget):,.0f} aUEC"
-            if filters_note:
-                route_footer += f" · {filters_note}"
-            if capital_access_only:
-                route_footer += " · capital access confirmed at every stop"
-            if note := approximation_note(route.is_exact, per_leg=True):
-                route_footer += f" · {note}"
-            route_embed.set_footer(text=route_footer)
-            warnings: list[str] = []
+            leg_facts: list[MultiStopLegFacts] = []
             leg_confidences = []
-            total_distance_gm = 0.0
-            distance_partial = False
-            all_legs_fit = True
-            for leg_index, leg in enumerate(route.legs, 1):
+            for leg in route.legs:
                 origin_health = (
                     classify_terminal_health(health_rows[leg.origin_id])
                     if leg.origin_id in health_rows else None
@@ -1573,91 +1549,26 @@ class Prices(commands.Cog):
                     distance_row = await self.bot.uex.get_terminal_distance(leg.origin_id, leg.destination_id)
                 except UexApiError:
                     distance_row = None
-                if distance_row and distance_row.get("distance") is not None:
-                    total_distance_gm += float(distance_row["distance"])
-                    distance_note = f"{float(distance_row['distance']):,.1f} Gm"
-                else:
-                    distance_partial = True
-                    distance_note = "distance unavailable"
-                cargo_lines = [cargo_item_line(item) for item in leg.cargo]
-                leg_lines = [
-                    *cargo_lines,
-                    f"Investment: **{leg.investment:,.0f}** · Revenue: **{leg.revenue:,.0f} aUEC** · "
-                    f"Profit: **{leg.profit:,.0f} aUEC** · {distance_note}",
-                ]
-                # Unlike /top-routes (where one route missing is just one omitted route),
-                # a route embed's title and "Route summary" field both unconditionally
-                # describe ALL of route.legs - if a leg's own field silently failed to
-                # fit, the embed would claim (and still total the profit/investment for)
-                # a leg it never actually shows. Tracked here and folded into
-                # embed_too_large below so that case routes into the same full-fidelity
-                # plain-text fallback as a real send failure, rather than sending a
-                # self-contradictory embed.
-                if not _add_chunked_fields(
-                    route_embed,
-                    name=f"Leg {leg_index}: {leg.origin_name} → {leg.destination_name}",
-                    lines=leg_lines,
-                ):
-                    all_legs_fit = False
-                leg_prefix = f"Leg {leg_index} "
-                warnings.extend(side_health_warnings(
-                    origin_health=origin_health, destination_health=destination_health,
-                    origin_label=f"{leg_prefix}Origin", destination_label=f"{leg_prefix}Destination",
-                ))
-                for item in leg.cargo:
-                    warnings.extend(cargo_item_warnings(
-                        item, status_lookup=status_lookup, prefix=leg_prefix,
-                        price_outlier_index=price_outlier_index,
-                    ))
-                warnings.extend(
-                    f"{leg_prefix}{note}"
-                    for note in route_practical_notes(leg.cargo[0].source, leg.cargo[0].destination)
+                distance_gm = (
+                    float(distance_row["distance"])
+                    if distance_row and distance_row.get("distance") is not None else None
                 )
-                origin_system = leg.cargo[0].source.get("star_system_name")
-                destination_system = leg.cargo[0].destination.get("star_system_name")
-                if note := travel_warning(
-                    origin_system, destination_system, has_real_distance=True, prefix=leg_prefix
-                ):
-                    warnings.append(note)
+                leg_facts.append(MultiStopLegFacts(distance_gm, origin_health, destination_health))
                 leg_confidences.extend(
                     cargo_confidences(leg.cargo, origin_health=origin_health, destination_health=destination_health)
                 )
-            if capital_access_only:
-                warnings.append(capital_access_note("every stop"))
-            confidence = worst_confidence(leg_confidences)
-            distance_summary = (
-                f"~{total_distance_gm:,.1f} Gm (partial - one or more legs' distance unavailable)"
-                if distance_partial
-                else f"{total_distance_gm:,.1f} Gm total"
+            # Laid out with each leg's warnings under it, the owner's pick from real-data mockups
+            # (2026-10-04) - see multi_stop_blocks. A route too long for one layout goes out as
+            # text pages carrying the same blocks, so no warning or disclosure is ever dropped.
+            blocks = multi_stop_blocks(
+                route, index=index, ship_name=ship_name, space_only=space_only, leg_facts=leg_facts,
+                confidence=worst_confidence(leg_confidences),
+                footer=multi_stop_footer(
+                    is_exact=route.is_exact, budget=budget, filters_note=filters_note,
+                    capital_access_only=capital_access_only,
+                ),
+                status_lookup=status_lookup, price_outlier_index=price_outlier_index,
             )
-            summary_lines = [
-                f"Investment: **{route.investment:,.0f}** · Revenue: **{route.revenue:,.0f} aUEC**",
-                f"Profit: **{route.profit:,.0f} aUEC** · ROI: **{route.roi_pct:.1f}%**",
-                f"Distance: {distance_summary}",
-                f"Confidence: **{confidence.label} ({confidence.score}/100)**",
-            ]
-            route_embed.add_field(name="Route summary", value="\n".join(summary_lines), inline=False)
-            unique_warnings = list(dict.fromkeys(warnings))
-            # _add_chunked_fields is atomic (see prices.py's own docstring) - for a route
-            # embed's leg fields, that's exactly what's wanted (never show a leg with its
-            # warning silently missing). But here the "logical field" being added is the
-            # WHOLE warnings section, not a single route - if it doesn't fit, atomicity
-            # means it adds NOTHING, silently dropping every cargo-risk/cross-system/stale-
-            # health warning while the smaller, warning-free embed still sends successfully
-            # (no discord.HTTPException, so the existing too-large fallback below never
-            # triggers). Its return value must be checked and treated the same as a real
-            # send failure - entering the same full-fidelity plain-text fallback - rather
-            # than silently accepting an embed that looks complete but isn't.
-            warnings_fit = _add_chunked_fields(
-                route_embed, name="Warnings & practical checks", lines=unique_warnings
-            )
-            # Sent one route per message, not batched like /mixed-routes: a multi-leg
-            # route's per-leg cargo/warning fields can push a single embed close to
-            # Discord's combined 6,000-character-per-message embed limit on their own,
-            # and bundling up to 5 of them (as one message with multiple embeds) hit that
-            # limit in testing - with nothing catching the send failure, Discord never
-            # got a followup at all and the interaction looked permanently "thinking."
-            embed_too_large = not warnings_fit or not all_legs_fit
             # A multi-stop leg carries several commodities at once (allocate_pair_cargo's
             # mixed load), not one - flattened here into one buy + one sell progression-
             # leg per commodity per hop, in order, so the existing leg-by-leg cog can walk
@@ -1696,22 +1607,7 @@ class Prices(commands.Cog):
                         space_only=space_only, capital_access_only=capital_access_only,
                         auto_load_only=auto_load_only, system=system,
                     )
-            # The plain-text version, for a route whose embed is too large (or whose warnings
-            # section didn't fit) - warnings (risk flags, stock/demand limits, practical
-            # notes) must survive here too, not just the profit figures, split over as many
-            # text pages as it takes rather than silently dropping anything.
-            per_leg_note = approximation_note(route.is_exact, per_leg=True)
-            fallback_lines = [
-                f"**#{index} {path_label}**",
-                *summary_lines,
-                "⚠️ Full leg-by-leg cargo/distance details omitted - too large for one Discord message.",
-                *([] if per_leg_note is None else [f"⚠️ {per_leg_note[0].upper()}{per_leg_note[1:]}"]),
-                *unique_warnings,
-            ]
-            if embed_too_large:
-                pages.extend(text_pages("\n".join(fallback_lines), route=trackable_route))
-            else:
-                pages.append(RoutePage(route_embed, "\n".join(fallback_lines), trackable_route))
+            pages.extend(layout_pages(blocks, route=trackable_route))
         # One results message, one route per page (audit UX-6).
         await send_route_pages(interaction, pages, tracking_cog=tracking_cog)
 

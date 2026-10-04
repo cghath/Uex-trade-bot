@@ -415,6 +415,12 @@ date - no open item, nothing to record here.
       contract shares one, else beside each giver whose contracts share one
       (`GiverContracts.system`, `contracts_header`, `giver_block` in `bot/uex/blueprints.py`).
       See PROJECT_CONTEXT.md entry 137
+- [ ] PR #125 - `/multi-stop-route` as layout components: a section per leg with its own warnings,
+      station facts said once by name, no refuel/repair, leg profit on every leg, short footer
+      (`multi_stop_blocks`, `multi_stop_footer`, `cargo_item_notes`, `terminal_limit_notes` in
+      `bot/uex/route_presentation.py`/`practical_routes.py`; `RouteLayoutPagesView`,
+      `RoutePaging`, `layout_pages` in `bot/route_pages.py`). A multi-stop route page has no
+      embed now: check anything in aiv2 that reads one. See PROJECT_CONTEXT.md entry 138
 
 ## To port: aiv2 -> production
 

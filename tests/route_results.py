@@ -3,7 +3,9 @@
 Route commands used to send an intro embed and then one message per route; tests read the
 intro's footer and each route's embed from those sends. Now there's one message: the intro
 is its header text and each route is a page, so tests read the pages from its view (or,
-for a single untrackable route sent without buttons, from the message itself)."""
+for a single untrackable route sent without buttons, from the message itself). A layout
+route page (/multi-stop-route) has no embed: its title and footer are its first and last
+text blocks, and its text is all of them."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -12,7 +14,7 @@ from typing import Any
 
 import discord
 
-from bot.route_pages import RoutePage, RoutePagesView
+from bot.route_pages import RoutePage, RoutePaging
 
 
 def _calls(sent: Any) -> list[tuple[tuple, dict]]:
@@ -26,7 +28,7 @@ def _calls(sent: Any) -> list[tuple[tuple, dict]]:
 class RouteResults:
     header: str
     pages: list[RoutePage]
-    view: RoutePagesView | None
+    view: RoutePaging | None
 
     @property
     def embeds(self) -> list[discord.Embed]:
@@ -34,7 +36,15 @@ class RouteResults:
 
     @property
     def titles(self) -> list[str]:
-        return [embed.title for embed in self.embeds]
+        """Each route's title: its embed's, or a layout page's heading."""
+        return [page.embed.title if page.embed is not None else page.blocks[0].splitlines()[0].removeprefix("## ")
+                for page in self.pages if page.embed is not None or page.blocks]
+
+    @property
+    def footers(self) -> list[str]:
+        """Each route's small print: its embed footer, or a layout page's last block."""
+        return [page.embed.footer.text or "" if page.embed is not None else page.blocks[-1].removeprefix("-# ")
+                for page in self.pages if page.embed is not None or page.blocks]
 
     @property
     def text_pages(self) -> list[str]:
@@ -62,7 +72,7 @@ def route_results(sent: Any) -> RouteResults | None:
     """The route results message among `sent` (the last one), or None if none was sent."""
     for _args, kwargs in reversed(_calls(sent)):
         view = kwargs.get("view")
-        if isinstance(view, RoutePagesView):
+        if isinstance(view, RoutePaging):
             return RouteResults(view.header, view.pages, view)
         if kwargs.get("embed") is not None:
             return RouteResults(kwargs.get("content") or "", [RoutePage(kwargs["embed"], "")], None)
