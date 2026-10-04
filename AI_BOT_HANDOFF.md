@@ -421,7 +421,7 @@ date - no open item, nothing to record here.
       `bot/uex/route_presentation.py`/`practical_routes.py`; `RouteLayoutPagesView`,
       `RoutePaging`, `layout_pages` in `bot/route_pages.py`). A multi-stop route page has no
       embed now: check anything in aiv2 that reads one. See PROJECT_CONTEXT.md entry 138
-- [ ] PR #TBD - Track this route copies the page showing into its thread: `start_tracking(...,
+- [ ] PR #126 - Track this route copies the page showing into its thread: `start_tracking(...,
       page=)`, `_post_route_copy` (`bot/cogs/route_progression.py`), `route_copy_view`/
       `route_container` (`bot/route_pages.py`). Needs PR #125 first. See PROJECT_CONTEXT.md
       entry 139
