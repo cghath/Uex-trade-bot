@@ -208,7 +208,8 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
   (2026-10-03), "make the messages look much easier on the eyes", one section at a time with
   mockups first; phone layout matters less, as long as it isn't a disaster. Done: the item
   and blueprint lookups (layout components, shared facts said once; PROJECT_CONTEXT.md entry
-  136), then `/multi-stop-route` (each leg with its own warnings; entry 138). Next
+  136), then `/multi-stop-route` (each leg with its own warnings; entry 138) and Configure
+  crafting (a section per material, then the totals; entry 140). Next
   candidates: the other route commands (`/best-route`, `/top-routes`, `/mixed-routes`), ship
   gear (`/ship-loadout`, `/ship-parts-finder`), and alerts and DMs.
 

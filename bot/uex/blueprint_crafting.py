@@ -204,53 +204,177 @@ class Recipe:
                 result[key] = None if previous is None or value is None else previous * value
         return result
 
-    def lines(self, count: int, choices: dict | None = None, qualities: dict | None = None) -> list[str]:
+    def layout_blocks(self, count: int, choices: dict | None = None, qualities: dict | None = None,
+                      options: dict[str, tuple[int, ...]] | None = None, *, note: str | None = None) -> tuple[str, ...]:
+        """The Configure crafting reply as text blocks, shown divided by lines in a layout (the
+        owner's pick from real-data mockups, 2026-10-04): a header, a section per material saying
+        what its quality does, then the combined result ("Your craft"). Before a quality is picked
+        a material shows what it can do across the qualities on offer, never "unavailable". The
+        markdown reads the same as a plain message, so the blocks joined by blank lines are the
+        text version.
+
+        `options` is each input's pickable qualities (Blueprints.quality_options, floored at its
+        minimum); a material without any has no quality menu, and its ranges use the stat curve's
+        own ends. `note` is one more small-print header line (the menus' page)."""
         craft_count(count)
-        choices, qualities = choices or {}, qualities or {}
-        lines = [f'Craft {count} — {self.name}', f'Blueprint {self.uuid} · game {self.game_version}']
-        selected = self.selected(choices, complete=False)
+        choices, qualities, options = choices or {}, qualities or {}, options or {}
+        header = [f'## {self.name}',
+                  f"-# Configure crafting · {count} craft{'s' if count != 1 else ''} · game {self.game_version.split('-')[0]}"]
+        if any(item.modifiers and options.get(item.path) for item in self.inputs):
+            header.append('-# Pick a quality for each material below; stats change with it.')
+        if note:
+            header.append(f'-# {note}')
+        blocks = ['\n'.join(header)]
         for group in self.groups:
             if group.required < len(group.children) and group.path not in choices:
                 names = [next((x.name for x in self.inputs if x.path == p),
                               next((g.name for g in self.groups if g.path == p), p)) for p in group.children]
-                lines.append(f'{group.name}: choose {group.required} of ' + ', '.join(names))
-        for item in selected:
-            quality = qualities.get(item.path)
-            quality_text = f'quality {quality}' if quality is not None else 'quality unspecified'
-            lines.append(f'{item.aspect}: {item.name} — {item.amount * count:g} {item.unit}; {quality_text}')
-            for modifier in item.modifiers:
-                value = modifier_at(modifier, quality)
-                label = modifier.get('label') or modifier.get('property_key') or 'Stat'
-                lines.append(f'  {label}: ' + (
-                    format_modifier(value, modifier.get('better_when'))
-                    if value is not None else 'requires known quality / supported curve'
-                ))
+                blocks.append(f'### {group.name}\nChoose {group.required} of: ' + ', '.join(names))
+        for item in self.selected(choices, complete=False):
+            blocks.append(_material_block(item, count, qualities.get(item.path), options.get(item.path, ())))
+        blocks.append(self._result_block(choices, qualities, options))
+        return tuple(blocks)
+
+    def _stat(self, key: str) -> dict:
+        return next((m for i in self.inputs for m in i.modifiers
+                     if (m.get('property_key') or m.get('property_uuid')) == key), {})
+
+    def _summary(self, totals: dict[str, Decimal | None], *, bold: bool = False) -> str:
+        """'Recoil **29% better** · Impact Force **11% better**': stats of one family that come out
+        the same (recoil smoothness, handling and kick) are said once."""
+        parts: list[list] = []
+        for key, value in totals.items():
+            if value is None:
+                continue
+            modifier = self._stat(key)
+            label = modifier.get('label') or key
+            change = describe_change(value, modifier.get('better_when'))
+            words = label.split()
+            for part in parts:
+                if part[1] == change and len(words) == 2 and part[2] == words[0]:
+                    part[0] = words[0]
+                    break
+            else:
+                parts.append([label, change, words[0] if len(words) == 2 else None])
+        return ' · '.join(f'{label} **{change}**' if bold else f'{label} {change}' for label, change, _ in parts)
+
+    def _result_block(self, choices: dict, qualities: dict, options: dict) -> str:
+        lines = ['### Your craft']
         try:
             totals = self.modifiers(choices, qualities)
         except ValueError:
-            lines.append('Complete requirement choices before calculating combined stats.')
-        else:
-            if totals:
-                lines.append('Combined stat changes (input modifiers multiply):')
-                for key, value in totals.items():
-                    modifier = next((m for i in self.inputs for m in i.modifiers
-                                     if (m.get('property_key') or m.get('property_uuid')) == key), {})
-                    label = modifier.get('label', key)
-                    lines.append(f'{label}: ' + (
-                        format_modifier(value, modifier.get('better_when')) if value is not None else 'unavailable'
-                    ))
-        return lines
+            return '\n'.join([*lines, '-# Choose the materials above first.'])
+        if not totals:
+            return '\n'.join([*lines, "-# Material quality doesn't change this item's stats."])
+        known = {key: value for key, value in totals.items() if value is not None}
+        if known:
+            lines.append(self._summary(known, bold=True))
+        selected = self.selected(choices)
+        if len(known) < len(totals):
+            top = {item.path: (options.get(item.path) or (1000,))[-1] for item in selected}
+            helps = all(_helps(modifier) for item in selected for modifier in item.modifiers)
+            label = 'Best possible' if helps else 'At top quality'
+            lines.append(f"-# Pick every quality to see {'the rest' if known else 'it'}. "
+                         f'{label}: {self._summary(self.modifiers(choices, top))}')
+        elif sum(1 for item in selected if item.modifiers) > 1:
+            lines.append('-# Stats multiply across materials')
+        return '\n'.join(lines)
 
 
-def format_modifier(value: Decimal, better_when: str | None) -> str:
+def describe_change(value: Decimal, better_when: str | None) -> str:
+    """A stat multiplier as a player reads it: '29% better', '11% worse', 'no change' (whole
+    percent; '% higher'/'% lower' for a stat with no better direction)."""
     change = (value - Decimal(1)) * 100
-    if change == 0:
-        return '0.00% change'
-    direction = 'higher' if change > 0 else 'lower'
+    if abs(change) < Decimal('0.5'):
+        return 'no change'
     if better_when in ('higher', 'lower'):
-        outcome = 'improvement' if direction == better_when else 'worse'
-        return f'{abs(change):.2f}% {outcome} ({direction})'
-    return f'{abs(change):.2f}% {direction}'
+        good = (change > 0) == (better_when == 'higher')
+        return f"{abs(change):.0f}% {'better' if good else 'worse'}"
+    return f"{abs(change):.0f}% {'higher' if change > 0 else 'lower'}"
+
+
+def _curve(modifier: dict) -> tuple:
+    return (repr(modifier.get('quality_range')), repr(modifier.get('modifier_range')), modifier.get('better_when'),
+            modifier.get('value_range_type'), repr(modifier.get('value_segments')))
+
+
+def stat_groups(item: Ingredient) -> list[tuple[str, dict]]:
+    """A material's stats as (label, modifier), stats with the same curve on one line:
+    'Recoil (smoothness, handling, kick)'."""
+    groups: list[tuple[list[str], dict]] = []
+    for modifier in item.modifiers:
+        label = modifier.get('label') or modifier.get('property_key') or 'Stat'
+        for labels, first in groups:
+            if _curve(first) == _curve(modifier):
+                labels.append(label)
+                break
+        else:
+            groups.append(([label], modifier))
+    named = []
+    for labels, modifier in groups:
+        words = [label.split() for label in labels]
+        if len(labels) > 1 and all(len(w) == 2 and w[0] == words[0][0] for w in words):
+            name = f"{words[0][0]} ({', '.join(w[1].lower() for w in words)})"
+        else:
+            name = ' / '.join(labels)
+        named.append((name, modifier))
+    return named
+
+
+def _change_at(modifier: dict, quality) -> str | None:
+    value = modifier_at(modifier, quality)
+    return None if value is None else describe_change(value, modifier.get('better_when'))
+
+
+def _helps(modifier: dict) -> bool:
+    """True when this stat improves as quality rises (the top quality is the best one)."""
+    low, high = _quality_span(modifier, ())
+    at_low, at_high = modifier_at(modifier, low), modifier_at(modifier, high)
+    if at_low is None or at_high is None or modifier.get('better_when') not in ('higher', 'lower'):
+        return False
+    return at_high >= at_low if modifier['better_when'] == 'higher' else at_high <= at_low
+
+
+def _quality_span(modifier: dict, values: tuple[int, ...]) -> tuple[int, int]:
+    """The qualities a range is shown across: those on offer, else the stat curve's own ends."""
+    if values:
+        return values[0], values[-1]
+    try:
+        return tuple(int(number(modifier['quality_range'][k])) for k in ('min', 'max'))
+    except (KeyError, TypeError, ValueError):
+        return 0, 1000
+
+
+def quality_choice_label(item: Ingredient, quality: int) -> str:
+    """A quality menu option, 'Tungsten 858 — Recoil 29% better', so the closed menu says what was
+    picked and what it does."""
+    effects = '; '.join(f"{label.split(' (')[0]} {change}" for label, modifier in stat_groups(item)
+                        if (change := _change_at(modifier, quality)) is not None)
+    return (f'{item.name} {quality}' + (f' — {effects}' if effects else ''))[:100]
+
+
+def _material_block(item: Ingredient, count: int, quality, values: tuple[int, ...]) -> str:
+    amount = item.amount * count
+    unit = 'item' if item.unit == 'items' and amount == 1 else item.unit
+    title = item.name if item.aspect == item.name else f'{item.aspect} · {item.name}'
+    lines = [f'### {title} · {amount:g} {unit}']
+    if not item.modifiers:
+        return '\n'.join([*lines, "-# Quality doesn't change any stat"])
+    span = f'{values[0]}–{values[-1]}' if values else None
+    mined = 'mined at ' if item.ore_uuid else ''
+    if quality is None:
+        lines.append(f'Quality not picked · {mined}`{span}`' if span else 'Quality not picked · none on record to pick from')
+        for label, modifier in stat_groups(item):
+            low, high = _quality_span(modifier, values)
+            at_low, at_high = _change_at(modifier, low), _change_at(modifier, high)
+            lines.append(f'-# {label}: {at_low} at {low} → {at_high} at {high}' if at_low and at_high
+                         else f"-# {label}: changes with quality; the exact effect isn't published")
+    else:
+        lines.append(f'Quality `{quality}`' + (f' · mined at {span}' if span and item.ore_uuid else ''))
+        for label, modifier in stat_groups(item):
+            change = _change_at(modifier, quality)
+            lines.append(f'{label} **{change}**' if change else f"{label}: the exact effect isn't published")
+    return '\n'.join(lines)
 
 
 def modifier_at(modifier: dict, quality) -> Decimal | None:

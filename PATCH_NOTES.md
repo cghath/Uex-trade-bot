@@ -1,7 +1,14 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.59.
+the oldest entry below); the next new entry is 2.60.
+
+---
+
+## 2.59 - 2026-10-04 - Clearer crafting choices
+
+**Changed**
+- `/blueprint-search` - Configure crafting now shows each material with what its quality does. Before you pick, you see the range ("11% worse at 363 → 40% better at 1000") and the best the craft can reach; after, each material's effect and your craft's totals. Each quality menu says what that quality does and keeps showing your pick.
 
 ---
 

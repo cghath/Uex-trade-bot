@@ -4834,6 +4834,35 @@ they're in sync).
        text after Discord refused its embed now gets copied too (it used to get nothing).
      - Tests in `tests/test_route_progression.py`, one through the real Track this route
        button on a layout page; 4 mutations, all caught (the original bug among them).
+140. **Configure crafting (`/blueprint-search`) is a layout: a section per material, then "Your
+     craft".** The owner, on the Parallax Energy Assault Rifle: "we need to make this look nicer".
+     Before anything was picked, every stat said "requires known quality / supported curve" and
+     every total "unavailable", under the blueprint's raw id; the menus reset to their placeholder
+     after each pick, so nothing showed what was chosen.
+     - **Mockups first** (real recipes, nothing picked and after picking): today, A (material by
+       material), B (result first), C (a table). A and C tied; the tie-break boards (the R97
+       Shotgun, whose Frame and Stock both move recoil, and phone width) showed C's table wrapping
+       on a phone (Discord wraps code-block lines), and the owner chose A.
+     - **What it says** (`Recipe.layout_blocks` in `bot/uex/blueprint_crafting.py`): a header (no
+       blueprint id; game version in small print), then each material with its amount (1 item, not
+       "1 items"), its quality, and what that does. Unpicked, each stat shows its range across the
+       qualities on offer ("11% worse at 363 → 40% better at 1000"); picked, its effect. Stats
+       sharing one curve are one line ("Recoil (smoothness, handling, kick)"). "Your craft" gives
+       the totals once every quality they depend on is picked, else "Pick every quality to see
+       it" with the best possible; "Best possible" only when every stat improves with quality,
+       otherwise "At top quality". Changes are whole percents, "better"/"worse"
+       (`describe_change`); a stat whose curve the bot doesn't compute (value segments) says its
+       exact effect isn't published, never a made-up number.
+     - **Menus** (`QualitySelect`): each option says what that quality does ("Tungsten 858 —
+       Recoil 29% better", `quality_choice_label`) and the pick stays shown.
+     - **Views** (`bot/cogs/blueprint_planner.py`): `CraftLayoutView` is the reply;
+       `CraftConfigView` sends the same text as a plain message when the layout doesn't fit or
+       Discord refuses it. `_CraftConfig` holds what both share (picks, menus and their pages,
+       the button, now "Add to shopping list"). `Recipe.lines` and `format_modifier` are gone.
+       Real recipes are small (a 20-recipe sample: 2-4 materials, at most 6 stats, no "choose one"
+       groups); the Parallax uses 645 of 4,000 characters and 18 of 40 components.
+     - Tests in `tests/test_blueprint_crafting.py` and `tests/test_blueprint_crafting_cog.py`
+       (the paging tests now run against both views); 9 mutations, all caught.
 
 ## Where to look for what
 

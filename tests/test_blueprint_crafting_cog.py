@@ -8,13 +8,17 @@ from unittest.mock import AsyncMock
 
 import discord
 
+import pytest
+
 from bot.cogs.blueprint_planner import (
     BlueprintResultView,
     ChoiceSelect,
     CraftConfigView,
     CraftLaunchView,
+    CraftLayoutView,
     MineButton,
     QualitySelect,
+    open_craft_config,
 )
 from bot.uex.blueprint_crafting import Group, Recipe, UNAVAILABLE
 from tests.test_blueprints_cog import FakeWiki, _make
@@ -41,7 +45,7 @@ def test_craft_quantity_is_rendered_and_three_actual_aspects_get_independent_con
     recipe = result.recipe
     quality = {item.path: (325, 521, 1000) for item in recipe.inputs if item.ore_uuid}
     view = CraftConfigView(cog, recipe, 5, quality)
-    assert "Craft 5" in view.text() and "0.20 SCU" in view.text(), "frame quantity scales from .04 to .20"
+    assert "5 crafts" in view.text() and "0.20 SCU" in view.text(), "frame quantity scales from .04 to .20"
     controls = [child for child in view.children if isinstance(child, QualitySelect)]
     assert len(controls) == 3
     assert {control.path for control in controls} == {item.path for item in recipe.inputs}
@@ -194,48 +198,64 @@ def _many_input_recipe(inputs: int, *, choice_groups: int = 0) -> tuple[Recipe, 
 
 
 def _selectors(view):
-    return [child for child in view.children if isinstance(child, discord.ui.Select)]
+    return [child for child in view.walk_children() if isinstance(child, discord.ui.Select)]
 
 
 def _nav(view):
-    return [child for child in view.children if getattr(child, "label", "") in ("Previous options", "Next options")]
+    return [child for child in view.walk_children() if getattr(child, "label", "") in ("Previous options", "Next options")]
+
+
+def _text(view) -> str:
+    """What the reply says: the plain message's text, or the layout's text blocks."""
+    if isinstance(view, CraftConfigView):
+        return view.text()
+    return "\n\n".join(item.content for item in view.walk_children() if isinstance(item, discord.ui.TextDisplay))
 
 
 def _interaction():
     return NS(response=NS(edit_message=AsyncMock()))
 
 
-def test_four_selectors_fit_one_page_with_no_paging_controls(monkeypatch):
+def _fixed_blocks(self, count, choices=None, qualities=None, options=None, *, note=None):
+    return (note or "config",)
+
+
+BOTH_FORMS = pytest.mark.parametrize("form", [CraftLayoutView, CraftConfigView])
+
+
+@BOTH_FORMS
+def test_four_selectors_fit_one_page_with_no_paging_controls(monkeypatch, form):
     """Discord fits five rows: four selects plus the button row. The old cap counted the button among
     four children, so a fourth selector was dropped even though it fit."""
-    monkeypatch.setattr(Recipe, "lines", lambda self, count, choices=None, qualities=None: ["config"])
+    monkeypatch.setattr(Recipe, "layout_blocks", _fixed_blocks)
 
     async def run():
         recipe, options = _many_input_recipe(4)
-        view = CraftConfigView(NS(), recipe, 1, options)
+        view = form(NS(), recipe, 1, options)
         assert len(_selectors(view)) == 4 and view.page_count == 1 and not _nav(view)
-        assert view.text() == "config", "no page header when everything fits"
+        assert _text(view) == "config", "no page note when everything fits"
 
     asyncio.run(run())
 
 
-def test_more_selectors_than_fit_are_paged_and_every_one_is_reachable(monkeypatch):
-    monkeypatch.setattr(Recipe, "lines", lambda self, count, choices=None, qualities=None: ["config"])
+@BOTH_FORMS
+def test_more_selectors_than_fit_are_paged_and_every_one_is_reachable(monkeypatch, form):
+    monkeypatch.setattr(Recipe, "layout_blocks", _fixed_blocks)
 
     async def run():
         recipe, options = _many_input_recipe(6)
-        view = CraftConfigView(NS(), recipe, 1, options)
+        view = form(NS(), recipe, 1, options)
         seen = {select.path for select in _selectors(view)}
         assert len(_selectors(view)) == 4 and view.page_count == 2
         previous, following = _nav(view)
         assert previous.disabled and not following.disabled
-        assert view.text().startswith("Options page 1 of 2")
+        assert _text(view).startswith("Menus page 1 of 2")
 
         interaction = _interaction()
         await view.next_button.callback(interaction)
         interaction.response.edit_message.assert_awaited_once()
         seen |= {select.path for select in _selectors(view)}
-        assert len(_selectors(view)) == 2 and view.text().startswith("Options page 2 of 2")
+        assert len(_selectors(view)) == 2 and _text(view).startswith("Menus page 2 of 2")
         assert not previous.disabled and following.disabled
 
         await view.previous_button.callback(_interaction())
@@ -245,12 +265,13 @@ def test_more_selectors_than_fit_are_paged_and_every_one_is_reachable(monkeypatc
     asyncio.run(run())
 
 
-def test_a_quality_chosen_on_a_later_page_is_kept_when_paging_back(monkeypatch):
-    monkeypatch.setattr(Recipe, "lines", lambda self, count, choices=None, qualities=None: ["config"])
+@BOTH_FORMS
+def test_a_quality_chosen_on_a_later_page_is_kept_when_paging_back(monkeypatch, form):
+    monkeypatch.setattr(Recipe, "layout_blocks", _fixed_blocks)
 
     async def run():
         recipe, options = _many_input_recipe(6)
-        view = CraftConfigView(NS(), recipe, 1, options)
+        view = form(NS(), recipe, 1, options)
         await view.next_button.callback(_interaction())
         chosen = _selectors(view)[0]
         chosen._values = ["500"]  # what discord.py fills in from the interaction payload
@@ -258,18 +279,21 @@ def test_a_quality_chosen_on_a_later_page_is_kept_when_paging_back(monkeypatch):
         await view.previous_button.callback(_interaction())
         await view.next_button.callback(_interaction())
         assert view.qualities == {chosen.path: 500}
+        assert [option.label for option in chosen.options if option.default] == [
+            next(option.label for option in chosen.options if option.value == "500")], "the pick stays shown"
 
     asyncio.run(run())
 
 
-def test_required_material_choices_come_before_optional_quality_selectors(monkeypatch):
+@BOTH_FORMS
+def test_required_material_choices_come_before_optional_quality_selectors(monkeypatch, form):
     """A plan can't be built without its required choices, so if anything is pushed to a later page it
     must be an optional quality selector, never a required choice."""
-    monkeypatch.setattr(Recipe, "lines", lambda self, count, choices=None, qualities=None: ["config"])
+    monkeypatch.setattr(Recipe, "layout_blocks", _fixed_blocks)
 
     async def run():
         recipe, options = _many_input_recipe(6, choice_groups=2)
-        view = CraftConfigView(NS(), recipe, 1, options)
+        view = form(NS(), recipe, 1, options)
         first_page = _selectors(view)
         assert view.page_count == 2 and len(view.selectors) == 8
         assert all(isinstance(select, ChoiceSelect) for select in first_page[:2])
@@ -278,16 +302,89 @@ def test_required_material_choices_come_before_optional_quality_selectors(monkey
     asyncio.run(run())
 
 
-def test_a_very_large_recipe_still_builds_and_pages_within_discords_layout_limits(monkeypatch):
-    """discord.py raises if a page ever needs more than five rows, so simply walking every page proves it."""
-    monkeypatch.setattr(Recipe, "lines", lambda self, count, choices=None, qualities=None: ["config"])
+@BOTH_FORMS
+def test_a_very_large_recipe_still_builds_and_pages_within_discords_layout_limits(monkeypatch, form):
+    """discord.py raises if a page ever needs more than five rows (or a layout more than 40
+    components), so simply walking every page proves it."""
+    monkeypatch.setattr(Recipe, "layout_blocks", _fixed_blocks)
 
     async def run():
         recipe, options = _many_input_recipe(13)
-        view = CraftConfigView(NS(), recipe, 1, options)
+        view = form(NS(), recipe, 1, options)
         assert view.page_count == 4
         for _ in range(view.page_count - 1):
             await view.next_button.callback(_interaction())
         assert len(_selectors(view)) == 1 and view.next_button.disabled
 
     asyncio.run(run())
+
+
+
+# -- Configure crafting as a layout (option A, the owner's pick 2026-10-04) ---------------------------
+
+class _Followup:
+    def __init__(self, refuse_layouts=0):
+        self.sent, self.refuse_layouts = [], refuse_layouts
+
+    async def send(self, *args, **kwargs):
+        if isinstance(kwargs.get("view"), discord.ui.LayoutView) and self.refuse_layouts:
+            self.refuse_layouts -= 1
+            raise discord.HTTPException(NS(status=400, reason="Bad Request"), "Invalid Form Body")
+        self.sent.append((args, kwargs))
+        return NS(id=len(self.sent))
+
+
+def _open(refuse_layouts=0):
+    recipe = Recipe.parse(_detail())
+    options = {item.path: (325, 521, 1000) for item in recipe.inputs}
+    cog = NS(quality_options=AsyncMock(return_value=options))
+    interaction = NS(response=NS(defer=AsyncMock()), followup=_Followup(refuse_layouts))
+
+    async def run():
+        await open_craft_config(cog, recipe, 1, interaction)
+        return interaction
+
+    return recipe, asyncio.run(run())
+
+
+def test_configure_crafting_opens_as_a_private_layout():
+    recipe, interaction = _open()
+    (args, kwargs), = interaction.followup.sent
+    view = kwargs["view"]
+    assert isinstance(view, CraftLayoutView) and kwargs["ephemeral"] is True and not args
+    container = view.children[0]
+    assert isinstance(container, discord.ui.Container)
+    texts = [item.content for item in container.children if isinstance(item, discord.ui.TextDisplay)]
+    assert texts == list(recipe.layout_blocks(1, {}, {}, view.options))
+    assert texts[0].startswith(f"## {recipe.name}") and recipe.uuid not in "".join(texts), "no blueprint id"
+    assert [select.placeholder for select in _selectors(view)] == [
+        "Iron quality (Frame)", "Hephaestanite quality (Stock)", "Iron quality (Barrel)"]
+    assert [button.label for button in view.walk_children() if isinstance(button, discord.ui.Button)] == [
+        "Add to shopping list"]
+    assert view.message is not None, "it greys out through its message when it times out"
+
+
+def test_picking_a_quality_redraws_the_layout_with_its_effect_and_keeps_it_shown():
+    recipe, interaction = _open()
+    view = interaction.followup.sent[0][1]["view"]
+    frame = _selectors(view)[0]
+    assert [option.label for option in frame.options][:2] == ["Not picked", "Iron 325 — Recoil 7% worse"]
+    frame._values = ["1000"]
+    click = _interaction()
+    asyncio.run(frame.callback(click))
+    click.response.edit_message.assert_awaited_once()
+    assert click.response.edit_message.call_args.kwargs["view"] is view
+    text = _text(view)
+    assert "Quality `1000` · mined at 325–1000\nRecoil (smoothness, handling, kick) **20% better**" in text
+    assert "### Your craft\n-# Pick every quality to see it." in text, (
+        "the Stock moves recoil too, so the total waits for it")
+    assert [option.label for option in _selectors(view)[0].options if option.default] == ["Iron 1000 — Recoil 20% better"]
+
+
+def test_a_layout_discord_refuses_is_sent_as_the_same_text():
+    recipe, interaction = _open(refuse_layouts=1)
+    (args, kwargs), = interaction.followup.sent
+    view = kwargs["view"]
+    assert isinstance(view, CraftConfigView) and kwargs["ephemeral"] is True
+    assert args[0] == "\n\n".join(recipe.layout_blocks(1, {}, {}, view.options))
+    assert [select.placeholder for select in _selectors(view)][0] == "Iron quality (Frame)"
