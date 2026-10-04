@@ -80,6 +80,24 @@ def layout_pages(blocks: tuple[str, ...], *, route: TrackableRoute | None = None
     return [RoutePage(None, text, route, blocks)]
 
 
+def route_container(blocks: tuple[str, ...]) -> discord.ui.Container:
+    """A laid-out route: its blocks in a container, divided by lines."""
+    container = discord.ui.Container(accent_colour=discord.Colour.green())
+    for number, block in enumerate(blocks):
+        if number:
+            container.add_item(discord.ui.Separator())
+        container.add_item(discord.ui.TextDisplay(block))
+    return container
+
+
+def route_copy_view(blocks: tuple[str, ...]) -> discord.ui.LayoutView:
+    """A laid-out route on its own, without the paging buttons: what Track this route posts
+    at the top of the route's thread."""
+    view = discord.ui.LayoutView(timeout=None)
+    view.add_item(route_container(blocks))
+    return view
+
+
 class RoutePaging:
     """What both route views do: page through the routes for the player who ran the command,
     and Track this route for anyone. A view renders the page showing with render(), which
@@ -135,7 +153,7 @@ class RoutePaging:
         if self.tracking_cog is None or page.route is None:
             await interaction.response.send_message("This route can't be tracked.", ephemeral=True)
             return
-        await self.tracking_cog.start_tracking(interaction, page.route)
+        await self.tracking_cog.start_tracking(interaction, page.route, page=page)
 
     async def on_timeout(self) -> None:
         await self.grey_out(**self.render(note=EXPIRED_NOTE))  # type: ignore[attr-defined]
@@ -218,12 +236,7 @@ class RouteLayoutPagesView(RoutePaging, BotLayoutView):
             self.add_item(discord.ui.TextDisplay(head))
         page = self.pages[self.index]
         blocks = page.blocks if page.blocks and self.index not in self.as_text else (page.text,)
-        container = discord.ui.Container(accent_colour=discord.Colour.green())
-        for number, block in enumerate(blocks):
-            if number:
-                container.add_item(discord.ui.Separator())
-            container.add_item(discord.ui.TextDisplay(block))
-        self.add_item(container)
+        self.add_item(route_container(blocks))
         if self.has_controls:
             self.previous_page.disabled = self.index == 0
             self.next_page.disabled = self.index >= len(self.pages) - 1

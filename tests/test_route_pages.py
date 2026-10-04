@@ -147,7 +147,7 @@ def test_anyone_can_track_the_route_showing():
 
         stranger = _interaction(SOMEONE_ELSE)
         await view.track.callback(stranger)
-        tracker.start_tracking.assert_awaited_once_with(stranger, pages[1].route)
+        tracker.start_tracking.assert_awaited_once_with(stranger, pages[1].route, page=pages[1])
 
     asyncio.run(run())
 
@@ -302,7 +302,7 @@ def test_turning_a_laid_out_page_rebuilds_it_for_its_owner_only():
 
         anyone = _interaction(SOMEONE_ELSE)
         await view.track.callback(anyone)
-        tracker.start_tracking.assert_awaited_once_with(anyone, pages[1].route)
+        tracker.start_tracking.assert_awaited_once_with(anyone, pages[1].route, page=pages[1])
 
         for _ in range(6):  # rebuilt every turn, never piling up components
             await view.next_page.callback(_interaction(OWNER))

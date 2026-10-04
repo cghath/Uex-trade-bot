@@ -1,7 +1,14 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.58.
+the oldest entry below); the next new entry is 2.59.
+
+---
+
+## 2.58 - 2026-10-04 - Tracked routes keep their details
+
+**Fixed**
+- `/multi-stop-route` - Track this route copies the whole route into its tracking thread again. Since 2.57 the thread only had the leg-by-leg buttons.
 
 ---
 

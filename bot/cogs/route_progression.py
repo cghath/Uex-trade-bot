@@ -23,6 +23,7 @@ import discord
 from discord.ext import commands, tasks
 
 from bot.discord_ui import BotModal, BotView
+from bot.route_pages import NO_MENTIONS, RoutePage, route_copy_view, text_pages
 from bot.uex.backup_routes import find_backup_routes, reroute_buyer_ids
 from bot.uex.client import fetch_terminal_distances
 from bot.uex.mixed_routes import find_hedge_cargo
@@ -628,7 +629,10 @@ class RouteProgression(commands.Cog):
         self.poll_abandoned_threads.cancel()
         self.retry_pending_route_progression_actions.cancel()
 
-    async def start_tracking(self, interaction: discord.Interaction, route: TrackableRoute) -> None:
+    async def start_tracking(self, interaction: discord.Interaction, route: TrackableRoute, *,
+                             page: RoutePage | None = None) -> None:
+        """`page` is the route page showing where Track this route was clicked
+        (bot/route_pages.py), copied into the thread first."""
         channel = interaction.channel
         if not isinstance(channel, discord.TextChannel):
             await interaction.response.send_message(
@@ -701,12 +705,10 @@ class RouteProgression(commands.Cog):
             thread_row_created = True
             self._active_legs[thread.id] = route.legs
 
-            # Post the full route breakdown the user actually picked - interaction.message
-            # is the message the "Track this route" button was attached to, carrying the
-            # same embed /best-route just sent (price, cargo, confidence, warnings,
-            # everything) - before the leg-by-leg flow starts, not just a bare title.
-            if interaction.message is not None and interaction.message.embeds:
-                await thread.send(embed=interaction.message.embeds[0])
+            # Post the full route breakdown the user actually picked (price, cargo,
+            # confidence, warnings, everything) before the leg-by-leg flow starts, not just a
+            # bare title.
+            await self._post_route_copy(thread, interaction, page)
             await thread.send(
                 f"Tracking **{route.title}** - report each leg as you complete it. This thread "
                 "closes automatically once every leg is reported (or after "
@@ -793,6 +795,29 @@ class RouteProgression(commands.Cog):
             "auto_load_only": snapshot.get("auto_load_only", False),
             "system": snapshot.get("system"),
         }
+
+    async def _post_route_copy(self, thread: discord.Thread, interaction: discord.Interaction,
+                               page: RoutePage | None) -> None:
+        """The route page that was showing, as it was shown: its embed, or its layout without
+        the paging buttons (/multi-stop-route), or its text. A page Discord refuses as an embed
+        or a layout is posted as its text. Without a page, the clicked message's own embed: a
+        layout message has none, which is how /multi-stop-route's first layout (PR #125) left
+        its threads with no copy of the route."""
+        if page is None:
+            if interaction.message is not None and interaction.message.embeds:
+                await thread.send(embed=interaction.message.embeds[0])
+            return
+        if page.blocks or page.embed is not None:
+            try:
+                if page.blocks:
+                    await thread.send(view=route_copy_view(page.blocks), allowed_mentions=NO_MENTIONS)
+                else:
+                    await thread.send(embed=page.embed)
+                return
+            except discord.HTTPException as exc:
+                logger.warning("Discord refused the route copy for thread %s (%s); posting its text", thread.id, exc)
+        for part in text_pages(page.text):
+            await thread.send(part.text, allowed_mentions=NO_MENTIONS)
 
     async def _post_leg_prompt(
         self, thread: discord.Thread, thread_id: int, leg_index: int, leg: RouteLegInput
