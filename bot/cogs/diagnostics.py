@@ -12,13 +12,14 @@ it, rather than discovering it during a real alert.
 /command-usage is owner-only: a running count of real command usage (bot.uex.main's
 on_app_command_completion listener feeds command_usage_by_user), specifically to inform
 trimming the command surface for new-user friendliness - see CONTRIBUTING.md/
-PROJECT_CONTEXT.md. The owner's own constant testing is tracked but excluded from "real"
-usage, since it would otherwise make every command look used regardless of whether any
-actual player ever touches it. Its optional `command` option drills into who (by display
-name, not just a count) has actually run one specific command, for reaching out to real
-users for feedback.
+PROJECT_CONTEXT.md. The owner's own constant testing is tracked but left out: the report
+shows only other players' usage (usage_report). Its optional `command` option drills into
+who (by display name, not just a count) has actually run one specific command, for
+reaching out to real users for feedback.
 """
 from __future__ import annotations
+
+from datetime import datetime
 
 import discord
 from discord import app_commands
@@ -40,6 +41,93 @@ async def tracked_command_autocomplete(
     current_lower = current.lower()
     matches = [row["command_name"] for row in stats if current_lower in row["command_name"].lower()][:25]
     return [app_commands.Choice(name=name, value=name) for name in matches]
+
+
+# Discord's plain-message cap is 2,000 characters; the report stops adding commands short of
+# it and says how many more there are.
+REPORT_LIMIT = 1900
+# Players named on one command's line before "+N more".
+NAMES_SHOWN = 4
+
+
+def _day(timestamp: str | None) -> str:
+    """'2026-10-04 16:03:33' -> 'Oct 4'."""
+    try:
+        day = datetime.strptime((timestamp or "")[:10], "%Y-%m-%d")
+    except ValueError:
+        return "unknown"
+    return f"{day:%b} {day.day}"
+
+
+def _player_name(name: str) -> str:
+    """A display name is the player's own text: no mention can ping and no markdown can break
+    the line. Isolated (U+2068/U+2069) so a right-to-left name doesn't reorder what follows."""
+    return "\u2068" + discord.utils.escape_markdown(discord.utils.escape_mentions(name)) + "\u2069"
+
+
+def usage_report(rows: list[dict], live_names: set[str]) -> str:
+    """The /command-usage report: other players' usage only (`rows` already leaves the owner
+    out - Database.get_real_command_usage), most-used command first, each with who ran it.
+    Commands no other player has run are one count, not a list; a retired command's usage is
+    one small line, kept for history (audit: it used to pollute the live ranking)."""
+    names: dict[int, str] = {}
+    for row in sorted(rows, key=lambda r: r["last_used_at"] or ""):
+        if row["username"]:
+            names[row["user_id"]] = row["username"]  # the latest name the player went by
+    live: dict[str, list[dict]] = {}
+    retired: dict[str, int] = {}
+    for row in rows:
+        if row["command_name"] in live_names:
+            live.setdefault(row["command_name"], []).append(row)
+        else:
+            retired[row["command_name"]] = retired.get(row["command_name"], 0) + row["use_count"]
+
+    lines = ["## Real usage", "-# Other players only - your own testing is left out"]
+    if live:
+        players = len({row["user_id"] for users in live.values() for row in users})
+        uses = sum(row["use_count"] for users in live.values() for row in users)
+        lines.append(f"**{players} player{'s' if players != 1 else ''}** · **{uses} use{'s' if uses != 1 else ''}** · "
+                     f"{len(live)} of {len(live_names)} commands")
+    else:
+        lines.append("No other player has run a command yet.")
+    footer = []
+    unused = len(live_names) - len(live)
+    if unused and live:
+        footer.append(f"-# {unused} command{'s' if unused != 1 else ''} no other player has run yet")
+    if retired:
+        footer.append("-# Retired, kept for history: " + ", ".join(
+            f"/{name} ({count} use{'s' if count != 1 else ''})" for name, count in sorted(retired.items())))
+    if live:
+        footer.append("-# Add `command:` to see who ran one, with a link to each player")
+
+    # Most uses first; a tie goes to the command used most recently (stable sorts, last key first).
+    ranked = sorted(live.items(), key=lambda item: max(r["last_used_at"] or "" for r in item[1]), reverse=True)
+    ranked.sort(key=lambda item: -sum(r["use_count"] for r in item[1]))
+    blocks = []
+    for name, users in ranked:
+        users = sorted(users, key=lambda r: r["last_used_at"] or "", reverse=True)
+        users.sort(key=lambda r: -r["use_count"])
+        uses = sum(r["use_count"] for r in users)
+        last = _day(max(r["last_used_at"] or "" for r in users))
+        who = [f"{_player_name(names.get(r['user_id'], 'unknown player'))} {r['use_count']}" for r in users]
+        if len(users) == 1:
+            block = (f"**/{name}** · {uses} use{'s' if uses != 1 else ''} · "
+                     f"{_player_name(names.get(users[0]['user_id'], 'unknown player'))} · last {last}")
+        else:
+            shown = who[:NAMES_SHOWN] + ([f"+{len(who) - NAMES_SHOWN} more"] if len(who) > NAMES_SHOWN else [])
+            block = f"**/{name}** · {uses} uses · {len(users)} players · last {last}\n-# " + " · ".join(shown)
+        blocks.append(block)
+
+    body = []
+    used = len("\n".join(lines + [""] + footer)) + 60  # room for the "more" line
+    for index, block in enumerate(blocks):
+        if used + len(block) + 1 > REPORT_LIMIT:
+            more = len(blocks) - index
+            body.append(f"-# {more} more command{'s' if more != 1 else ''} with real use not shown")
+            break
+        body.append(block)
+        used += len(block) + 1
+    return "\n".join(lines + ([""] + body if body else []) + ([""] + footer if footer else []))
 
 
 class Diagnostics(commands.Cog):
@@ -147,72 +235,13 @@ class Diagnostics(commands.Cog):
             )
             return
 
-        stats = await self.bot.db.get_command_usage_stats(owner_ids)
-        # walk_commands() is the live command surface right now - a name in it with no
-        # matching stats row has never been invoked by anyone, including the owner, which is
-        # the strongest possible "nobody is touching this" signal for trimming.
+        rows = await self.bot.db.get_real_command_usage(owner_ids)
+        # walk_commands() is the live command surface right now: a command no longer in it
+        # (e.g. /my-ship, retired 2026-09) still has rows, reported apart as retired.
         all_names = {cmd.qualified_name for cmd in self.bot.tree.walk_commands()}
-        # Audit-confirmed defect: a command removed from the tree (e.g. /my-ship, retired
-        # this same session) still has historical rows in command_usage_by_user. Nothing
-        # filtered the report against the CURRENT command tree, so a retired command kept
-        # appearing in least/most-used and inflated "have at least one recorded invocation"
-        # below - split before building anything, and surface retired ones on their own
-        # labeled line instead of silently dropping that history.
-        live_stats = [row for row in stats if row["command_name"] in all_names]
-        retired_stats = [row for row in stats if row["command_name"] not in all_names]
-        tracked_names = {row["command_name"] for row in live_stats}
-        never_invoked = sorted(all_names - tracked_names)
-
-        rows = [
-            {
-                "name": row["command_name"],
-                "real": row["total_count"] - row["owner_count"],
-                "owner": row["owner_count"],
-                "users": row["distinct_real_users"],
-                "last_real": (row["last_used_excluding_owner_at"] or "never")[:10],
-            }
-            for row in live_stats
-        ]
-        least_used = sorted(rows, key=lambda r: r["real"])[:15]
-        most_used = sorted(rows, key=lambda r: -r["real"])[:10]
-
-        lines = [
-            f"{len(all_names)} live commands - {len(tracked_names)} have at least one recorded "
-            f"invocation, {len(never_invoked)} have never been invoked at all (not even by you).",
-            "",
-            "Least used (real usage, your own testing excluded):",
-        ]
-        for r in least_used:
-            lines.append(
-                f"  /{r['name']:<28} {r['real']:>4} real  {r['users']:>3} users  "
-                f"({r['owner']} by you, last real: {r['last_real']})"
-            )
-        if never_invoked:
-            lines.append("")
-            lines.append("Never invoked at all: " + ", ".join(f"/{n}" for n in never_invoked))
-        if retired_stats:
-            lines.append("")
-            retired_summary = ", ".join(
-                f"/{row['command_name']} ({row['total_count'] - row['owner_count']} real)"
-                for row in retired_stats
-            )
-            lines.append(f"Retired (no longer a live command, kept for history): {retired_summary}")
-        lines.append("")
-        lines.append("Most used:")
-        for r in most_used:
-            lines.append(
-                f"  /{r['name']:<28} {r['real']:>4} real  {r['users']:>3} users  "
-                f"({r['owner']} by you, last real: {r['last_real']})"
-            )
-
-        body = "```\n" + "\n".join(lines) + "\n```"
-        # Discord's non-embed message cap is 2000 chars, well under this table's worst case
-        # (67 commands x ~2 sections) - truncate with a visible note rather than let the send
-        # itself fail, matching this codebase's established "disclose, don't silently drop"
-        # convention for anything that can overflow a Discord limit.
-        if len(body) > 1990:
-            body = body[:1900] + "\n... truncated, ask again after some commands are trimmed ...\n```"
-        await interaction.followup.send(body, ephemeral=True)
+        # Names are the players' own text (escaped in usage_report); nothing here may ping.
+        await interaction.followup.send(usage_report(rows, all_names), ephemeral=True,
+                                        allowed_mentions=discord.AllowedMentions.none())
 
 
 async def setup(bot: commands.Bot) -> None:

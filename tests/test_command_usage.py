@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock
 
 from cryptography.fernet import Fernet
 
-from bot.cogs.diagnostics import Diagnostics, tracked_command_autocomplete
+from bot.cogs.diagnostics import REPORT_LIMIT, Diagnostics, tracked_command_autocomplete, usage_report
 from bot.db.database import Database
 from bot.main import UexBot
 
@@ -135,6 +135,25 @@ def test_get_command_usage_stats_counts_distinct_real_users_not_total_invocation
         assert row["distinct_real_users"] == 2
 
     asyncio.run(run())
+
+
+def test_get_real_command_usage_leaves_out_every_owner_id(tmp_path):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        await db.record_command_usage("best-route", OWNER_ID, "Owner")
+        await db.record_command_usage("best-route", 10, "SecondOwner")
+        await db.record_command_usage("best-route", 111, "PlayerOne")
+        await db.record_command_usage("intro", 111, "PlayerOne")
+        await db.record_command_usage("intro", 222, "PlayerTwo")
+        rows = await db.get_real_command_usage({OWNER_ID, 10})
+        everyone = await db.get_real_command_usage(set())
+        return rows, everyone
+
+    rows, everyone = asyncio.run(run())
+    assert sorted((r["command_name"], r["user_id"], r["username"], r["use_count"]) for r in rows) == [
+        ("best-route", 111, "PlayerOne", 1), ("intro", 111, "PlayerOne", 1), ("intro", 222, "PlayerTwo", 1)]
+    assert len(everyone) == 5, "no owner known yet: nobody to leave out (never NOT IN (NULL))"
 
 
 def test_get_command_usage_stats_handles_multiple_owner_ids(tmp_path):
@@ -304,14 +323,16 @@ class _FakeInteraction:
         self.followup = NS(send=AsyncMock())
 
 
-def _cog(*, is_owner: bool, stats, live_command_names, owner_id=OWNER_ID, owner_ids=None, users_by_command=None):
+def _cog(*, is_owner: bool, stats=(), live_command_names, owner_id=OWNER_ID, owner_ids=None, users_by_command=None,
+         real_rows=()):
     cog = Diagnostics.__new__(Diagnostics)
     cog.bot = NS(
         is_owner=AsyncMock(return_value=is_owner),
         owner_id=owner_id,
         owner_ids=owner_ids or set(),
         db=NS(
-            get_command_usage_stats=AsyncMock(return_value=stats),
+            get_command_usage_stats=AsyncMock(return_value=list(stats)),
+            get_real_command_usage=AsyncMock(return_value=list(real_rows)),
             get_command_users=AsyncMock(side_effect=lambda name, _owner_ids: (users_by_command or {}).get(name, [])),
         ),
         tree=NS(walk_commands=lambda: [NS(qualified_name=name) for name in live_command_names]),
@@ -331,6 +352,10 @@ def _user_row(user_id, username, *, use_count, last_used_at="2026-09-22 00:00:00
     return {"user_id": user_id, "username": username, "use_count": use_count, "last_used_at": last_used_at}
 
 
+def _real_row(command, user_id, username, *, use_count, last_used_at="2026-09-22 00:00:00"):
+    return {"command_name": command, **_user_row(user_id, username, use_count=use_count, last_used_at=last_used_at)}
+
+
 def test_command_usage_rejects_a_non_owner_without_deferring():
     async def run():
         cog = _cog(is_owner=False, stats=[], live_command_names=[])
@@ -346,76 +371,114 @@ def test_command_usage_rejects_a_non_owner_without_deferring():
     asyncio.run(run())
 
 
-def test_command_usage_reports_real_usage_and_never_invoked_commands():
+def test_command_usage_reports_other_players_usage_most_used_first():
+    """The owner's ask (2026-10-06): real usage by other players at the focus - no owner
+    counts, no list of never-used commands (one count instead)."""
     async def run():
-        stats = [
-            _usage_row("best-route", total=12, owner=2, users=3, last_real="2026-09-22 01:00:00"),
-            _usage_row("blueprint-search", total=5, owner=5, users=0, last_real=None),
+        rows = [
+            _real_row("multi-stop-route", 1, "Ghost47th", use_count=5, last_used_at="2026-10-04 16:03:33"),
+            _real_row("multi-stop-route", 2, "RAAF", use_count=3, last_used_at="2026-10-01 20:40:58"),
+            _real_row("ingame-item-finder", 3, "Tank1000", use_count=5, last_used_at="2026-09-23 06:19:04"),
+            _real_row("where-to-mine", 3, "Tank1000", use_count=1, last_used_at="2026-09-23 06:21:22"),
         ]
         cog = _cog(
-            is_owner=True, stats=stats,
-            live_command_names=["best-route", "blueprint-search", "never-used-command"],
+            is_owner=True, real_rows=rows,
+            live_command_names=["multi-stop-route", "ingame-item-finder", "where-to-mine", "blueprint-search",
+                                "never-used-command"],
         )
         interaction = _FakeInteraction()
 
         await cog.command_usage.callback(cog, interaction, None)
 
         interaction.response.defer.assert_awaited_once_with(ephemeral=True)
-        cog.bot.db.get_command_usage_stats.assert_awaited_once_with({OWNER_ID})
+        cog.bot.db.get_real_command_usage.assert_awaited_once_with({OWNER_ID})
         interaction.followup.send.assert_awaited_once()
-        kwargs = interaction.followup.send.call_args.kwargs
-        body = interaction.followup.send.call_args.args[0]
-        assert kwargs.get("ephemeral") is True
-        assert "/best-route" in body and "10 real" in body, body  # 12 total - 2 owner = 10 real
-        assert "3 users" in body
-        assert "/blueprint-search" in body
-        assert "never-used-command" in body
-        assert "3 live commands" in body
+        return interaction.followup.send.call_args
 
-    asyncio.run(run())
+    call = asyncio.run(run())
+    body, kwargs = call.args[0], call.kwargs
+    assert kwargs.get("ephemeral") is True
+    assert "```" not in body, "a plain message, not the old monospace table"
+    assert "**3 players** · **14 uses** · 3 of 5 commands" in body, body
+    assert "**/multi-stop-route** · 8 uses · 2 players · last Oct 4" in body, body
+    assert "Ghost47th\u2069 5 · \u2068RAAF\u2069 3" in body, "who ran it, most uses first"
+    assert "**/ingame-item-finder** · 5 uses · \u2068Tank1000\u2069 · last Sep 23" in body, body
+    assert body.index("/multi-stop-route") < body.index("/ingame-item-finder") < body.index("/where-to-mine")
+    assert "2 commands no other player has run yet" in body
+    assert "never-used-command" not in body and "blueprint-search" not in body, "no list of unused commands"
+    assert "by you" not in body and "real" not in body.split("\n", 1)[1].lower().split("usage")[0]
+    assert kwargs["allowed_mentions"].everyone is False and not kwargs["allowed_mentions"].users
+
+
+def test_usage_report_ties_go_to_the_most_recently_used_command():
+    rows = [
+        _real_row("top-routes", 1, "A", use_count=1, last_used_at="2026-09-22 09:04:05"),
+        _real_row("intro", 2, "B", use_count=1, last_used_at="2026-09-23 06:20:48"),
+    ]
+    body = usage_report(rows, {"top-routes", "intro"})
+    assert body.index("/intro") < body.index("/top-routes"), body
+
+
+def test_usage_report_names_a_player_from_another_row_when_one_predates_name_tracking():
+    """A row from before usernames were tracked has none; the same player's name on another
+    command's row is used rather than "unknown"."""
+    rows = [
+        _real_row("multi-stop-route", 7, "", use_count=1, last_used_at="2026-09-22 08:39:29"),
+        _real_row("top-routes", 7, "Waffle", use_count=1, last_used_at="2026-09-22 09:04:05"),
+        _real_row("intro", 8, "", use_count=1),
+    ]
+    body = usage_report(rows, {"multi-stop-route", "top-routes", "intro"})
+    assert "**/multi-stop-route** · 1 use · \u2068Waffle\u2069" in body, body
+    assert "**/intro** · 1 use · \u2068unknown player\u2069" in body, body
+
+
+def test_usage_report_escapes_mentions_and_markdown_in_player_names():
+    rows = [_real_row("intro", 1, "@everyone **bold** <@123456789012345678>", use_count=1)]
+    body = usage_report(rows, {"intro"})
+    assert "@everyone" not in body and "<@123456789012345678>" not in body, body
+    assert "**bold**" not in body, "a name's own markdown must not break the line"
+
+
+def test_usage_report_with_no_other_players_says_so():
+    body = usage_report([], {"intro", "top-routes"})
+    assert "No other player has run a command yet." in body
+    assert "no other player has run yet" not in body, "the count line only means something next to real usage"
 
 
 def test_command_usage_resolves_owner_ids_set_when_owner_id_is_unset():
     """A team-owned Discord application: discord.py populates bot.owner_ids instead of a
     single bot.owner_id."""
     async def run():
-        stats = [_usage_row("best-route", total=5, owner=1, users=2, last_real="2026-09-22 00:00:00")]
         cog = _cog(
-            is_owner=True, stats=stats, live_command_names=["best-route"],
-            owner_id=None, owner_ids={10, 20},
+            is_owner=True, real_rows=[_real_row("best-route", 1, "PlayerOne", use_count=4)],
+            live_command_names=["best-route"], owner_id=None, owner_ids={10, 20},
         )
         interaction = _FakeInteraction()
 
         await cog.command_usage.callback(cog, interaction, None)
 
-        cog.bot.db.get_command_usage_stats.assert_awaited_once_with({10, 20})
+        cog.bot.db.get_real_command_usage.assert_awaited_once_with({10, 20})
 
     asyncio.run(run())
 
 
-def test_command_usage_truncates_instead_of_exceeding_discords_message_limit():
-    """Only 25 rows ever render (least_used[:15] + most_used[:10]), so short names alone
-    might not actually exceed the 2000-char cap - long, realistic-length names make sure
-    this test actually exercises the truncation branch, not just the untruncated path."""
-    async def run():
-        stats = [
-            _usage_row(
-                f"a-very-long-realistic-command-name-{i:03d}", total=i + 1, owner=0, users=i,
-                last_real="2026-09-22 00:00:00",
-            )
-            for i in range(80)
-        ]
-        cog = _cog(is_owner=True, stats=stats, live_command_names=[row["command_name"] for row in stats])
-        interaction = _FakeInteraction()
-
-        await cog.command_usage.callback(cog, interaction, None)
-
-        body = interaction.followup.send.call_args.args[0]
-        assert len(body) <= 2000, f"Discord's non-embed message cap is 2000 chars, got {len(body)}"
-        assert "truncated" in body, "expected the truncation branch to actually fire for this input"
-        assert body.rstrip().endswith("```"), "truncation must still close the code block"
-
-    asyncio.run(run())
+def test_usage_report_stays_inside_discords_message_limit_and_says_what_it_left_out():
+    """80 used commands, several players each, with long names: the report stops short of
+    Discord's 2,000 characters and says how many more commands there are, never cutting a
+    line in half."""
+    rows = [
+        _real_row(f"a-very-long-realistic-command-name-{i:03d}", user, f"A Fairly Long Player Name {user}",
+                  use_count=80 - i)
+        for i in range(80) for user in range(6)
+    ]
+    body = usage_report(rows, {row["command_name"] for row in rows})
+    assert len(body) <= REPORT_LIMIT, len(body)
+    shown = body.count("**/a-very-long")
+    assert 0 < shown < 80
+    assert f"{80 - shown} more commands with real use not shown" in body, body
+    assert "+2 more" in body, "six players on a command: four named, then a count"
+    assert "Player Name 3" in body and "Player Name 4" not in body and "Player Name 5" not in body
+    assert body.rstrip().endswith("with a link to each player"), "the footer survives the cut"
 
 
 def test_command_usage_with_a_command_shows_the_real_users_who_ran_it():
@@ -507,22 +570,16 @@ def test_command_usage_with_a_command_escapes_mentions_hiding_in_display_names()
     assert allowed.roles is False
 
 
-def test_command_usage_aggregate_report_excludes_retired_commands_from_ranking():
-    """Audit-confirmed defect: a command removed from the live tree (e.g. /my-ship,
-    retired the same session) can still have historical rows in command_usage_by_user -
-    nothing filtered the aggregate report against the CURRENT command tree, so a retired
-    command kept appearing in least/most-used and inflated the 'have at least one
-    recorded invocation' count. Retired usage must be surfaced separately instead of
-    silently dropped or left polluting the live ranking."""
+def test_command_usage_aggregate_report_keeps_retired_commands_out_of_the_ranking():
+    """Audit-confirmed defect: a command removed from the live tree (e.g. /my-ship) still has
+    historical rows. It used to appear in the live ranking and inflate the counts; its
+    usage is one line of its own, kept for history, and counts toward nothing else."""
     async def run():
-        stats = [
-            _usage_row("best-route", total=12, owner=2, users=3, last_real="2026-09-22 01:00:00"),
-            _usage_row("my-ship", total=40, owner=0, users=8, last_real="2026-09-20 00:00:00"),
+        rows = [
+            _real_row("best-route", 1, "PlayerOne", use_count=10),
+            _real_row("my-ship", 2, "PlayerTwo", use_count=40),
         ]
-        cog = _cog(
-            is_owner=True, stats=stats,
-            live_command_names=["best-route"],  # my-ship is no longer in the live tree
-        )
+        cog = _cog(is_owner=True, real_rows=rows, live_command_names=["best-route"])
         interaction = _FakeInteraction()
 
         await cog.command_usage.callback(cog, interaction, None)
@@ -530,17 +587,9 @@ def test_command_usage_aggregate_report_excludes_retired_commands_from_ranking()
         return interaction.followup.send.call_args.args[0]
 
     body = asyncio.run(run())
-    assert "1 live commands" in body, "my-ship must not be counted as a live command"
-    assert "1 have at least one recorded" in body, "my-ship must not inflate the live-tracked count"
-    assert "Retired" in body and "/my-ship" in body, "retired usage must still be surfaced, just separately"
-    least_used_lines = body.split("Least used")[1].split("Most used")[0].splitlines()
-    # A real ranked row is formatted as "  /{name:<28} ...", i.e. starts with "/" once
-    # stripped - the retired-disclosure line ("Retired (...): /my-ship (...)") also falls
-    # inside this header-delimited slice but does NOT start with "/my-ship", so this still
-    # distinguishes "polluting the ranking" from "merely mentioned in the disclosure line."
-    assert not any(line.strip().startswith("/my-ship") for line in least_used_lines), (
-        "a retired command must not pollute the live least-used ranking"
-    )
+    assert "**1 player** · **10 uses** · 1 of 1 commands" in body, body
+    assert "**/my-ship**" not in body, "a retired command must not join the live ranking"
+    assert "Retired, kept for history: /my-ship (40 uses)" in body, body
 
 
 def test_command_usage_with_a_command_no_real_usage_says_so():

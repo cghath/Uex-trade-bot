@@ -4676,6 +4676,26 @@ class Database:
             )).fetchall()
             return [dict(row) for row in rows]
 
+    async def get_real_command_usage(self, owner_ids: set[int]) -> list[dict[str, Any]]:
+        """Every (command, user) row except owner_ids' - other players' usage, which is all
+        /command-usage's report shows (the owner asked for that alone, 2026-10-06). One
+        query rather than get_command_users per command: a row written before usernames were
+        tracked borrows the same player's name from another command's row."""
+        owner_ids = owner_ids or set()
+        # Built conditionally, never as a NULL placeholder - see get_command_users.
+        if owner_ids:
+            exclude_clause = f"WHERE user_id NOT IN ({','.join('?' for _ in owner_ids)})"
+            params: tuple = tuple(owner_ids)
+        else:
+            exclude_clause, params = "", ()
+        async with self.connect() as db:
+            rows = await (await db.execute(
+                f"""SELECT command_name, user_id, username, use_count, last_used_at
+                    FROM command_usage_by_user {exclude_clause}""",
+                params,
+            )).fetchall()
+            return [dict(row) for row in rows]
+
     async def get_command_usage_stats(self, owner_ids: set[int]) -> list[dict[str, Any]]:
         """One row per command: total_count/owner_count/last_used_at across every user, plus
         the same three figures with owner_ids excluded (real_count/last_used_excluding_owner_at)
