@@ -443,6 +443,9 @@ date - no open item, nothing to record here.
       `open_blueprint`, `WikiApiClient.get_blueprints` (and the shared `_crawl`), tables
       `blueprint_recipe_state`/`blueprint_outputs`/`blueprint_materials`. See PROJECT_CONTEXT.md
       entry 143
+- [ ] PR #131 - Configure crafting reads stat curves given in parts (most ship parts):
+      `_segments` and `modifier_at`/`_quality_span`/`Recipe._result_block` in
+      `bot/uex/blueprint_crafting.py`. See PROJECT_CONTEXT.md entry 144
 
 ## To port: aiv2 -> production
 
