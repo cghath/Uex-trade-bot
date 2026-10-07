@@ -1,7 +1,14 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.61.
+the oldest entry below); the next new entry is 2.62.
+
+---
+
+## 2.61 - 2026-10-07 - What does this ore craft?
+
+**New**
+- `/blueprint-search material:` - Pick an ore or mineral to see every blueprint it's used in that you can actually get (from a contract, or unlocked by default). A button per category (armor, guns, ship parts), armor grouped into sets, and pages for the long lists. Pick a blueprint to open its usual reply, with where to get it, Configure crafting and Mine.
 
 ---
 

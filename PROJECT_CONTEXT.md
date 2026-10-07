@@ -4927,6 +4927,58 @@ they're in sync).
        mutations, all caught. Rendered offline from live wiki/UEX data for the Cutlass Black
        (Balanced, Budget), the Polaris and the Gladius (Stealth): matches the approved board.
 
+143. **`/blueprint-search material:` lists what an ore or mineral crafts.** The owner's ask
+     (2026-10-07): "ask what a certain ore/mineral is used to craft and then it lists the
+     blueprints". Settled with the owner before building, from real-data mockups of Aslarite
+     (266 blueprints, all armor), Hadanite, Quantainium and Tungsten:
+     - **An option, not a command:** `material:` on `/blueprint-search`, beside `blueprint:`
+       (now optional); exactly one of the two, or an ephemeral note saying so. Autocomplete
+       lists the materials most-used first ("Tungsten · 113 blueprints").
+     - **Only blueprints a player can get:** one a stored contract awards (`blueprint_pool_
+       entries`) or one unlocked by default (8 on 4.10.1: the S-38, the P4-AR, their
+       magazines and the Field Recon Suit). The wiki lists 1,606 blueprints; 917 have neither
+       and are left out. Why they exist is an open question the owner wants answered later.
+     - **The reply** (`bot/material_pages.py`, `MaterialUsesView`): a header with the count per
+       category, a button per category (Armor, Guns, Ship parts, then Other) so any category
+       is one click away, then that category 20 to a page with a menu to pick from. Armor is
+       folded into sets by name (the piece words stripped: "ADP-mk4 Helmet Woodland" is set
+       "ADP-mk4 Woodland"), each colour its own set even though that's crowded, as long as it
+       pages; picking a set shows its pieces as buttons (the owner found two menus felt "locked
+       into it"). A ship part says what it is ("Agni · quantum drive"). No amounts or stats:
+       "keep it simple just what that material is used for".
+     - **Picking a blueprint** answers the click by redrawing (the menu resets, so it can be
+       picked again), then sends that blueprint's usual `/blueprint-search` reply as a new
+       message, found by uuid (`Blueprints.open_blueprint`), so it continues into Configure
+       crafting and Mine. A default blueprint has no contract: its reply says it's unlocked by
+       default and still offers Configure crafting. Only whoever ran it can click; idle 15
+       minutes, it greys out with a note. If Discord refuses the layout, every category goes
+       as text pages (`text_listing`).
+     - **Data:** the wiki's `/blueprints` listing (`WikiApiClient.get_blueprints`, 9 requests at
+       200 a page; the mission crawl became the shared `_crawl`). It's its own snapshot -
+       `blueprint_recipe_state`, `blueprint_outputs`, `blueprint_materials`, replaced whole by
+       `replace_blueprint_recipes` - synced by `sync_recipes` in the same 12h loop as the
+       contracts but in its own try/except, with the same checks (game version unchanged and
+       under a week old skips it; rows of another version or a count under the plausible share
+       of the last one are refused). Whether a blueprint can be got is decided when it's read
+       (`get_material_uses`), against the contracts stored then. First use syncs whatever is
+       missing. Sorting and wording are pure, in `bot/uex/blueprint_materials.py`.
+     - **Real data:** every page of all 37 materials, every category, with a set picked, fits
+       Discord's layout limits (the largest is about 1,000 characters and 15 components;
+       limits 4,000 and 40). The largest set has 5 pieces (Testudo), one button row.
+     - **A pre-commit audit** (an Opus subagent, read-only) found nothing serious; fixed from it:
+       the whole list is checked against the layout limits before it's sent (`fits`: every
+       category's every page, with its biggest set picked), so a click can never reach a page
+       Discord refuses - a list that wouldn't fit goes as text from the start; a failed
+       on-demand recipe sync isn't retried by every query for 10 minutes (each try is ~9
+       requests; the loop retries anyway); blueprint ids are lowercased like the contracts';
+       a material spelt two ways is one autocomplete entry; "Did you mean" names are
+       markdown-safe; and a contract blueprint opened while the contract data is unavailable
+       says so instead of "no contract awards it". Kept as is: a material that's one choice
+       among alternatives in a recipe counts as "used in".
+     - Tests in `tests/test_blueprint_materials.py` (25); 16 mutations before the audit, 15
+       caught - the other only moved the recipe sync inside the contracts' try on the success
+       path, which changes a log line and nothing else.
+
 ## Where to look for what
 
 Seven docs, deliberately scoped so they don't duplicate each other:
