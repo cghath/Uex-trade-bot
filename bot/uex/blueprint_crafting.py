@@ -271,11 +271,16 @@ class Recipe:
             lines.append(self._summary(known, bold=True))
         selected = self.selected(choices)
         if len(known) < len(totals):
-            top = {item.path: (options.get(item.path) or (1000,))[-1] for item in selected}
-            helps = all(_helps(modifier) for item in selected for modifier in item.modifiers)
-            label = 'Best possible' if helps else 'At top quality'
-            lines.append(f"-# Pick every quality to see {'the rest' if known else 'it'}. "
-                         f'{label}: {self._summary(self.modifiers(choices, top))}')
+            if any(item.modifiers and qualities.get(item.path) is None for item in selected):
+                top = {item.path: (options.get(item.path) or (1000,))[-1] for item in selected}
+                helps = all(_helps(modifier) for item in selected for modifier in item.modifiers)
+                label = 'Best possible' if helps else 'At top quality'
+                best = self._summary(self.modifiers(choices, top))
+                lines.append(f"-# Pick every quality to see {'the rest' if known else 'it'}."
+                             + (f' {label}: {best}' if best else ''))
+            else:  # every quality is picked; what's left is a stat whose effect the wiki doesn't give
+                unknown = dict.fromkeys(self._stat(key).get('label') or key for key in totals if key not in known)
+                lines.append(f"-# {', '.join(unknown)}: the exact effect isn't published")
         elif sum(1 for item in selected if item.modifiers) > 1:
             lines.append('-# Stats multiply across materials')
         return '\n'.join(lines)
@@ -339,6 +344,9 @@ def _quality_span(modifier: dict, values: tuple[int, ...]) -> tuple[int, int]:
     """The qualities a range is shown across: those on offer, else the stat curve's own ends."""
     if values:
         return values[0], values[-1]
+    parts = _segments(modifier)
+    if parts:
+        return int(parts[0][0]), int(parts[-1][1])
     try:
         return tuple(int(number(modifier['quality_range'][k])) for k in ('min', 'max'))
     except (KeyError, TypeError, ValueError):
@@ -367,8 +375,12 @@ def _material_block(item: Ingredient, count: int, quality, values: tuple[int, ..
         for label, modifier in stat_groups(item):
             low, high = _quality_span(modifier, values)
             at_low, at_high = _change_at(modifier, low), _change_at(modifier, high)
-            lines.append(f'-# {label}: {at_low} at {low} → {at_high} at {high}' if at_low and at_high
-                         else f"-# {label}: changes with quality; the exact effect isn't published")
+            if not (at_low and at_high):
+                lines.append(f"-# {label}: changes with quality; the exact effect isn't published")
+            elif low == high:  # one quality on offer
+                lines.append(f'-# {label}: {at_low} at {low}')
+            else:
+                lines.append(f'-# {label}: {at_low} at {low} → {at_high} at {high}')
     else:
         lines.append(f'Quality `{quality}`' + (f' · mined at {span}' if span and item.ore_uuid else ''))
         for label, modifier in stat_groups(item):
@@ -377,12 +389,43 @@ def _material_block(item: Ingredient, count: int, quality, values: tuple[int, ..
     return '\n'.join(lines)
 
 
+def _segments(modifier: dict) -> list[tuple[Decimal, Decimal, Decimal, Decimal]] | None:
+    """A curve the wiki gives in parts, each a straight line - most ship parts: x0.8 at 0 to x1.0
+    at 500, then x1.0 at 501 to x1.2 at 1000 (`quality_range`/`modifier_range` then describe only
+    the first part). As (quality from, quality to, multiplier at from, multiplier at to), in
+    quality order; None when it isn't given in parts, or any part isn't that shape or overlaps."""
+    raw = modifier.get('value_segments')
+    if not isinstance(raw, list) or not raw:
+        return None
+    try:
+        parts = sorted((number(s['quality_min']), number(s['quality_max']),
+                        number(s['modifier_at_start']), number(s['modifier_at_end'])) for s in raw)
+    except (KeyError, TypeError, ValueError):
+        return None
+    if any(low > high for low, high, *_ in parts) or any(b[0] <= a[1] for a, b in zip(parts, parts[1:])):
+        return None
+    return parts
+
+
 def modifier_at(modifier: dict, quality) -> Decimal | None:
     if quality is None:
         return None
     try:
-        if modifier.get('value_segments') or modifier.get('value_range_type') not in (None, 'linear'):
-            return None  # never invent a linear curve for an unsupported response
+        if modifier.get('value_range_type') not in (None, 'linear'):
+            return None  # never invent a curve for a kind the response doesn't spell out (e.g. additive pips)
+        if modifier.get('value_segments'):
+            parts = _segments(modifier)
+            if parts is None:
+                return None
+            q = number(quality)
+            if q <= parts[0][0]:
+                return parts[0][2]
+            if q >= parts[-1][1]:
+                return parts[-1][3]
+            for low, high, start, end in parts:
+                if low <= q <= high:
+                    return end if high == low else start + (end - start) * (q - low) / (high - low)
+            return None  # between two parts (a fractional quality): neither covers it
         low, high = (number(modifier['quality_range'][k]) for k in ('min', 'max'))
         start, end = (number(modifier['modifier_range'][k]) for k in ('at_min_quality', 'at_max_quality'))
         q = min(high, max(low, number(quality)))

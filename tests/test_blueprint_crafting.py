@@ -198,3 +198,63 @@ def test_a_quality_menu_option_says_what_that_quality_does():
     frame, _, barrel = recipe.inputs
     assert crafting.quality_choice_label(frame, 1000) == 'Iron 1000 — Recoil 20% better'
     assert crafting.quality_choice_label(barrel, 325) == 'Iron 325 — Impact Force 3% worse; Fire Rate 4% worse'
+
+
+# -- curves given in parts (ship parts), 2026-10-07 --------------------------------------------
+# Real wiki responses (4.10.1): the FR-86 shield, whose stats run x0.8/x0.9 at 0 to x1.0 at 500,
+# then on to x1.2/x1.1 at 1000; and the DuraJet power plant, whose Power Pips are additive steps
+# the wiki gives no figure for.
+
+
+def _fixture(name):
+    return json.loads((Path(__file__).parent / f'fixtures/{name}').read_text(encoding='utf-8'))
+
+
+def test_a_curve_given_in_straight_line_parts_is_read_part_by_part():
+    shell = crafting.Recipe.parse(_fixture('blueprint_crafting_shield.json')).inputs[0]
+    (integrity,) = shell.modifiers
+    at = {q: crafting.modifier_at(integrity, q) for q in (0, 250, 500, 501, 947, 1000, 1200)}
+    assert at[0] == Decimal('0.8') and at[250] == Decimal('0.9') and at[500] == Decimal('1')
+    assert at[501] == Decimal('1') and at[1000] == Decimal('1.2') and at[1200] == Decimal('1.2')
+    assert crafting.describe_change(at[947], 'higher') == '18% better', "not clamped at the first part's 500"
+
+
+def test_the_fr86_reads_its_real_effects_and_totals():
+    recipe = crafting.Recipe.parse(_fixture('blueprint_crafting_shield.json'))
+    paths = [item.path for item in recipe.inputs]
+    options = {paths[0]: (330, 947, 1000), paths[1]: (330, 1000), paths[2]: (1000,)}
+    blocks = recipe.layout_blocks(1, {}, {}, options)
+    assert '-# Integrity: 7% worse at 330 → 20% better at 1000' in blocks[1].splitlines()
+    assert blocks[3].splitlines()[-1] == '-# Max. Shield Strength: 10% better at 1000', "one quality on offer, said once"
+    assert blocks[-1].splitlines() == ['### Your craft', '-# Pick every quality to see it. Best possible: '
+                                       'Integrity 20% better · Max. Shield Strength 21% better']
+    picked = recipe.layout_blocks(1, {}, dict(zip(paths, (947, 1000, 1000))), options)
+    assert picked[-1].splitlines() == ['### Your craft', 'Integrity **18% better** · Max. Shield Strength **21% better**',
+                                       '-# Stats multiply across materials']
+    assert "isn't published" not in '\n'.join(picked)
+
+
+def test_once_every_quality_is_picked_an_unknown_stat_is_never_a_reason_to_pick_more():
+    recipe = crafting.Recipe.parse(_fixture('blueprint_crafting_power_plant.json'))
+    result = recipe.layout_blocks(1, {}, {item.path: 800 for item in recipe.inputs}, {})[-1]
+    assert result.splitlines() == ['### Your craft', 'Integrity **12% better**',
+                                   "-# Power Pips: the exact effect isn't published"]
+
+
+def test_no_best_possible_line_is_left_empty():
+    raw = _fixture('blueprint_crafting_power_plant.json')
+    for group in raw['requirement_groups']:
+        group['modifiers'] = [m for m in group['modifiers'] if m['label'] == 'Power Pips']
+    recipe = crafting.Recipe.parse(raw)
+    result = recipe.layout_blocks(1, {}, {}, {})[-1]
+    assert result.splitlines() == ['### Your craft', '-# Pick every quality to see it.']
+
+
+def test_parts_that_overlap_or_arent_straight_lines_stay_unpublished():
+    shell = crafting.Recipe.parse(_fixture('blueprint_crafting_shield.json')).inputs[0]
+    integrity = copy.deepcopy(shell.modifiers[0])
+    integrity['value_segments'][1]['quality_min'] = 400
+    assert crafting.modifier_at(integrity, 450) is None
+    integrity = copy.deepcopy(shell.modifiers[0])
+    integrity['value_segments'][1]['modifier_at_end'] = None
+    assert crafting.modifier_at(integrity, 900) is None

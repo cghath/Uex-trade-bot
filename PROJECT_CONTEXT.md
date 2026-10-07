@@ -4979,6 +4979,32 @@ they're in sync).
        caught - the other only moved the recipe sync inside the contracts' try on the success
        path, which changes a log line and nothing else.
 
+144. **Configure crafting reads ship parts' stat curves, given in straight-line parts.** The
+     owner, on the FR-86 shield (2026-10-07): "your craft doesnt seem to work on this one" -
+     every material said "the exact effect isn't published", and "Your craft" said "Pick every
+     quality to see it. At top quality:" with nothing after, though every quality was picked.
+     - **Why:** the wiki gives most ship parts' curves in parts (`value_segments`): Integrity
+       x0.8 at 0 to x1.0 at 500, then x1.0 at 501 to x1.2 at 1000, and `quality_range`/
+       `modifier_range` describe only the first part. `modifier_at` refused anything with
+       parts ("never invent a linear curve"), right not to read the first part as the whole
+       curve but wrong to give up: each part is itself a straight line. On a 55-blueprint
+       sample across every type, 41 of 70 ship-part stats came in parts (35 as 0-500/501-1000);
+       no gun or armor stat did.
+     - **Now** (`bot/uex/blueprint_crafting.py`, `_segments`): a curve in parts is read part
+       by part - exact, not a guess. A part that overlaps another or lacks a figure leaves the
+       stat unpublished, as before; so does any other curve kind, e.g. power plants' Power Pips
+       (`linear_integer_additive`, every part x1 → x1: the wiki doesn't say how many pips a
+       quality adds). Ranges are shown across the whole curve (`_quality_span`). The FR-86 at
+       947/1000/1000: Integrity 18% better, Max. Shield Strength 21% better (x1.1 x x1.1).
+     - **"Your craft"** only asks to pick every quality while one isn't picked; once all are,
+       a stat with no published effect says so ("Power Pips: the exact effect isn't
+       published"). A "Best possible"/"At top quality" line is never left empty. A material
+       offered at one quality says its effect once ("10% better at 1000"), not "10% better at
+       1000 → 10% better at 1000".
+     - Tests in `tests/test_blueprint_crafting.py` on the real FR-86 and DuraJet responses
+       (`tests/fixtures/blueprint_crafting_shield.json`, `..._power_plant.json`); 4 mutations,
+       all caught.
+
 ## Where to look for what
 
 Seven docs, deliberately scoped so they don't duplicate each other:

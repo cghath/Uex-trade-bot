@@ -1,7 +1,15 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.62.
+the oldest entry below); the next new entry is 2.63.
+
+---
+
+## 2.62 - 2026-10-07 - Ship part crafting stats
+
+**Fixed**
+- `/blueprint-search` - Configure crafting now shows what material quality does for most ship parts (shields, coolers, power plants, quantum drives and more). Before, every stat said "the exact effect isn't published" and "Your craft" stayed empty. The FR-86 at qualities 947/1000/1000 now reads Integrity 18% better, Max. Shield Strength 21% better.
+- `/blueprint-search` - Once you've picked every quality, "Your craft" no longer asks you to pick every quality. A stat the wiki gives no figure for (like a power plant's power pips) now says so.
 
 ---
 

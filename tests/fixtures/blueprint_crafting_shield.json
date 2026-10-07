@@ -1,0 +1,618 @@
+{
+ "uuid": "db6460d8-273e-4fe3-bf57-a02a61e7a3e2",
+ "key": "BP_CRAFT_SHLD_GODI_S03_FR86_SCItem",
+ "category_uuid": "a7a033d9-4dcb-4a8a-8ba6-077973f1d4aa",
+ "output_item_uuid": "5fa67088-9677-40c4-b552-46c16bd7162e",
+ "output_name": "FR-86",
+ "output_class": "shld_godi_s03_fr86_scitem",
+ "craft_time_seconds": 960,
+ "craft_time_label": "16 minutes",
+ "is_available_by_default": false,
+ "game_version": "4.10.1-LIVE.12660092",
+ "ingredient_count": 3,
+ "unlocking_missions_count": 3,
+ "ingredients": [
+  {
+   "name": "Stileron",
+   "kind": "resource",
+   "resource_type_uuid": "8cd317a3-df9b-4315-8ac3-0f1fca42dfd4",
+   "item_uuid": null,
+   "quantity_scu": 3.0999999999999996,
+   "quantity": null,
+   "link": "https://api.star-citizen.wiki/api/commodities/32bafbd4-c52a-476d-b31c-97c4b3102471",
+   "web_url": "https://api.star-citizen.wiki/commodities/32bafbd4-c52a-476d-b31c-97c4b3102471"
+  },
+  {
+   "name": "Feynmaline",
+   "kind": "item",
+   "resource_type_uuid": null,
+   "item_uuid": "d7a21cac-3c2b-4695-95b7-2042d8f5755e",
+   "quantity_scu": null,
+   "quantity": 170,
+   "link": "https://api.star-citizen.wiki/api/items/d7a21cac-3c2b-4695-95b7-2042d8f5755e",
+   "web_url": "https://api.star-citizen.wiki/items/d7a21cac-3c2b-4695-95b7-2042d8f5755e"
+  }
+ ],
+ "dismantle_returns": [],
+ "output": {
+  "uuid": "5fa67088-9677-40c4-b552-46c16bd7162e",
+  "name": "FR-86",
+  "class": "shld_godi_s03_fr86_scitem",
+  "type": "Shield",
+  "type_label": "Shield",
+  "sub_type": "UNDEFINED",
+  "subtype": "UNDEFINED",
+  "grade": "1",
+  "item_web_url": "https://api.star-citizen.wiki/items/5fa67088-9677-40c4-b552-46c16bd7162e"
+ },
+ "web_url": "https://api.star-citizen.wiki/blueprints/fr-86",
+ "output_item_web_url": "https://api.star-citizen.wiki/items/5fa67088-9677-40c4-b552-46c16bd7162e",
+ "dismantle": {
+  "time_seconds": 15,
+  "time_label": "15 seconds",
+  "efficiency": 0.5
+ },
+ "requirement_groups": [
+  {
+   "key": "SHELL",
+   "name": "Shell",
+   "kind": "group",
+   "required_count": 1,
+   "modifiers": [
+    {
+     "property_key": "health_maxhealth",
+     "property_uuid": null,
+     "label": "Integrity",
+     "better_when": "higher",
+     "quality_range": {
+      "min": 0,
+      "max": 500
+     },
+     "modifier_range": {
+      "at_min_quality": 0.8,
+      "at_max_quality": 1
+     },
+     "value_range_type": "linear",
+     "value_segments": [
+      {
+       "quality_min": 0,
+       "quality_max": 500,
+       "modifier_at_start": 0.8,
+       "modifier_at_end": 1
+      },
+      {
+       "quality_min": 501,
+       "quality_max": 1000,
+       "modifier_at_start": 1,
+       "modifier_at_end": 1.2
+      }
+     ]
+    }
+   ],
+   "children": [
+    {
+     "key": null,
+     "kind": "resource",
+     "uuid": "8cd317a3-df9b-4315-8ac3-0f1fca42dfd4",
+     "name": "Stileron",
+     "required_count": null,
+     "quantity": null,
+     "quantity_scu": 1.2,
+     "min_quality": 1,
+     "modifiers": [],
+     "ore_uuid": "32bafbd4-c52a-476d-b31c-97c4b3102471"
+    }
+   ]
+  },
+  {
+   "key": "FIELD ARRAY",
+   "name": "Field Array",
+   "kind": "group",
+   "required_count": 1,
+   "modifiers": [
+    {
+     "property_key": "shield_maxhealth",
+     "property_uuid": null,
+     "label": "Max. Shield Strength",
+     "better_when": "higher",
+     "quality_range": {
+      "min": 0,
+      "max": 500
+     },
+     "modifier_range": {
+      "at_min_quality": 0.9,
+      "at_max_quality": 1
+     },
+     "value_range_type": "linear",
+     "value_segments": [
+      {
+       "quality_min": 0,
+       "quality_max": 500,
+       "modifier_at_start": 0.9,
+       "modifier_at_end": 1
+      },
+      {
+       "quality_min": 501,
+       "quality_max": 1000,
+       "modifier_at_start": 1,
+       "modifier_at_end": 1.1
+      }
+     ]
+    }
+   ],
+   "children": [
+    {
+     "key": null,
+     "kind": "resource",
+     "uuid": "8cd317a3-df9b-4315-8ac3-0f1fca42dfd4",
+     "name": "Stileron",
+     "required_count": null,
+     "quantity": null,
+     "quantity_scu": 1.9,
+     "min_quality": 1,
+     "modifiers": [],
+     "ore_uuid": "32bafbd4-c52a-476d-b31c-97c4b3102471"
+    }
+   ]
+  },
+  {
+   "key": "FREQUENCY CONTROLLER",
+   "name": "Frequency Controller",
+   "kind": "group",
+   "required_count": 1,
+   "modifiers": [
+    {
+     "property_key": "shield_maxhealth",
+     "property_uuid": null,
+     "label": "Max. Shield Strength",
+     "better_when": "higher",
+     "quality_range": {
+      "min": 0,
+      "max": 500
+     },
+     "modifier_range": {
+      "at_min_quality": 0.9,
+      "at_max_quality": 1
+     },
+     "value_range_type": "linear",
+     "value_segments": [
+      {
+       "quality_min": 0,
+       "quality_max": 500,
+       "modifier_at_start": 0.9,
+       "modifier_at_end": 1
+      },
+      {
+       "quality_min": 501,
+       "quality_max": 1000,
+       "modifier_at_start": 1,
+       "modifier_at_end": 1.1
+      }
+     ]
+    }
+   ],
+   "children": [
+    {
+     "key": null,
+     "kind": "item",
+     "uuid": "d7a21cac-3c2b-4695-95b7-2042d8f5755e",
+     "name": "Feynmaline",
+     "required_count": null,
+     "quantity": 170,
+     "quantity_scu": null,
+     "min_quality": 1,
+     "modifiers": []
+    }
+   ]
+  }
+ ],
+ "summary_properties": [
+  {
+   "property_key": "health_maxhealth",
+   "property_uuid": null,
+   "label": "Integrity",
+   "better_when": "higher"
+  },
+  {
+   "property_key": "shield_maxhealth",
+   "property_uuid": null,
+   "label": "Max. Shield Strength",
+   "better_when": "higher"
+  }
+ ],
+ "unlocking_missions": [
+  {
+   "title": "Orange Lvl. Contract: Protect Fuel Tanks and Escort Employees",
+   "debug_name": "Foxwell_DefendEntitiesAndEscort_Stanton_Hard",
+   "reward_scope": "Assassination",
+   "chance": 1,
+   "web_url": "https://api.star-citizen.wiki/missions/2f6c2d5d-51e6-43bf-a5a8-18dec9c7e5b5"
+  },
+  {
+   "title": "Red Lvl. Contract: Defend Fuel Tanks and Escort Employees",
+   "debug_name": "Foxwell_DefendEntitiesAndEscort_Stanton_VeryHard",
+   "reward_scope": "Assassination",
+   "chance": 1,
+   "web_url": "https://api.star-citizen.wiki/missions/3fba29db-01d3-4f32-a28b-74cce49a5667"
+  },
+  {
+   "title": "Red Lvl. Contract: Protect Fuel Tanks and Escort Employees",
+   "debug_name": "Foxwell_DefendEntitiesAndEscort_Stanton_Super",
+   "reward_scope": "Assassination",
+   "chance": 1,
+   "web_url": "https://api.star-citizen.wiki/missions/592d5229-9c66-40da-b0d5-33e8f88dffd0"
+  }
+ ],
+ "unlocking_missions_grouped": [
+  {
+   "label": "Guaranteed",
+   "chance": 1,
+   "missions": [
+    {
+     "title": "Orange Lvl. Contract: Protect Fuel Tanks and Escort Employees",
+     "reward_scope": "Assassination",
+     "count": 1,
+     "web_url": "https://api.star-citizen.wiki/missions/2f6c2d5d-51e6-43bf-a5a8-18dec9c7e5b5"
+    },
+    {
+     "title": "Red Lvl. Contract: Defend Fuel Tanks and Escort Employees",
+     "reward_scope": "Assassination",
+     "count": 1,
+     "web_url": "https://api.star-citizen.wiki/missions/3fba29db-01d3-4f32-a28b-74cce49a5667"
+    },
+    {
+     "title": "Red Lvl. Contract: Protect Fuel Tanks and Escort Employees",
+     "reward_scope": "Assassination",
+     "count": 1,
+     "web_url": "https://api.star-citizen.wiki/missions/592d5229-9c66-40da-b0d5-33e8f88dffd0"
+    }
+   ]
+  }
+ ],
+ "aspects": {
+  "aspects": [
+   {
+    "key": "SHELL",
+    "name": "Shell",
+    "required_count": 1,
+    "selection_group": null,
+    "input": {
+     "kind": "resource",
+     "uuid": "8cd317a3-df9b-4315-8ac3-0f1fca42dfd4",
+     "name": "Stileron",
+     "quantity": null,
+     "quantity_scu": 1.2,
+     "min_quality": 1,
+     "web_url": "https://api.star-citizen.wiki/commodities/32bafbd4-c52a-476d-b31c-97c4b3102471"
+    },
+    "modifiers": [
+     {
+      "property_key": "health_maxhealth",
+      "property_uuid": null,
+      "label": "Integrity",
+      "better_when": "higher",
+      "quality_range": {
+       "min": 0,
+       "max": 500
+      },
+      "modifier_range": {
+       "at_min_quality": 0.8,
+       "at_max_quality": 1
+      },
+      "value_range_type": "linear",
+      "value_segments": [
+       {
+        "quality_min": 0,
+        "quality_max": 500,
+        "modifier_at_start": 0.8,
+        "modifier_at_end": 1
+       },
+       {
+        "quality_min": 501,
+        "quality_max": 1000,
+        "modifier_at_start": 1,
+        "modifier_at_end": 1.2
+       }
+      ]
+     }
+    ],
+    "initial_quality": 500,
+    "slider_min": 1,
+    "slider_max": 1000,
+    "has_modifiers": true,
+    "has_dynamic_modifiers": true,
+    "is_selected": true
+   },
+   {
+    "key": "FIELD ARRAY",
+    "name": "Field Array",
+    "required_count": 1,
+    "selection_group": null,
+    "input": {
+     "kind": "resource",
+     "uuid": "8cd317a3-df9b-4315-8ac3-0f1fca42dfd4",
+     "name": "Stileron",
+     "quantity": null,
+     "quantity_scu": 1.9,
+     "min_quality": 1,
+     "web_url": "https://api.star-citizen.wiki/commodities/32bafbd4-c52a-476d-b31c-97c4b3102471"
+    },
+    "modifiers": [
+     {
+      "property_key": "shield_maxhealth",
+      "property_uuid": null,
+      "label": "Max. Shield Strength",
+      "better_when": "higher",
+      "quality_range": {
+       "min": 0,
+       "max": 500
+      },
+      "modifier_range": {
+       "at_min_quality": 0.9,
+       "at_max_quality": 1
+      },
+      "value_range_type": "linear",
+      "value_segments": [
+       {
+        "quality_min": 0,
+        "quality_max": 500,
+        "modifier_at_start": 0.9,
+        "modifier_at_end": 1
+       },
+       {
+        "quality_min": 501,
+        "quality_max": 1000,
+        "modifier_at_start": 1,
+        "modifier_at_end": 1.1
+       }
+      ]
+     }
+    ],
+    "initial_quality": 500,
+    "slider_min": 1,
+    "slider_max": 1000,
+    "has_modifiers": true,
+    "has_dynamic_modifiers": true,
+    "is_selected": true
+   },
+   {
+    "key": "FREQUENCY CONTROLLER",
+    "name": "Frequency Controller",
+    "required_count": 1,
+    "selection_group": null,
+    "input": {
+     "kind": "item",
+     "uuid": "d7a21cac-3c2b-4695-95b7-2042d8f5755e",
+     "name": "Feynmaline",
+     "quantity": 170,
+     "quantity_scu": null,
+     "min_quality": 1,
+     "web_url": "https://api.star-citizen.wiki/items/d7a21cac-3c2b-4695-95b7-2042d8f5755e"
+    },
+    "modifiers": [
+     {
+      "property_key": "shield_maxhealth",
+      "property_uuid": null,
+      "label": "Max. Shield Strength",
+      "better_when": "higher",
+      "quality_range": {
+       "min": 0,
+       "max": 500
+      },
+      "modifier_range": {
+       "at_min_quality": 0.9,
+       "at_max_quality": 1
+      },
+      "value_range_type": "linear",
+      "value_segments": [
+       {
+        "quality_min": 0,
+        "quality_max": 500,
+        "modifier_at_start": 0.9,
+        "modifier_at_end": 1
+       },
+       {
+        "quality_min": 501,
+        "quality_max": 1000,
+        "modifier_at_start": 1,
+        "modifier_at_end": 1.1
+       }
+      ]
+     }
+    ],
+    "initial_quality": 500,
+    "slider_min": 1,
+    "slider_max": 1000,
+    "has_modifiers": true,
+    "has_dynamic_modifiers": true,
+    "is_selected": true
+   }
+  ],
+  "aspect_groups": [
+   {
+    "key": "__aspect_0",
+    "name": "Shell",
+    "display_name": "Shell",
+    "required_count": 1,
+    "option_count": 1,
+    "is_choice_group": false,
+    "selected_count": 1,
+    "aspect_indexes": [
+     0
+    ]
+   },
+   {
+    "key": "__aspect_1",
+    "name": "Field Array",
+    "display_name": "Field Array",
+    "required_count": 1,
+    "option_count": 1,
+    "is_choice_group": false,
+    "selected_count": 1,
+    "aspect_indexes": [
+     1
+    ]
+   },
+   {
+    "key": "__aspect_2",
+    "name": "Frequency Controller",
+    "display_name": "Frequency Controller",
+    "required_count": 1,
+    "option_count": 1,
+    "is_choice_group": false,
+    "selected_count": 1,
+    "aspect_indexes": [
+     2
+    ]
+   }
+  ],
+  "has_interactive_aspects": true
+ },
+ "tiers": [
+  {
+   "tier_index": 0,
+   "requirements": {
+    "kind": "root",
+    "children": [
+     {
+      "key": "SHELL",
+      "kind": "group",
+      "name": "Shell",
+      "children": [
+       {
+        "kind": "resource",
+        "name": "Stileron",
+        "uuid": "8cd317a3-df9b-4315-8ac3-0f1fca42dfd4",
+        "min_quality": 1,
+        "quantity_scu": 1.2
+       }
+      ],
+      "modifiers": [
+       {
+        "key": "health_maxhealth",
+        "name": "Integrity",
+        "uuid": "93a49e68-01cf-4d7e-b995-8224466a9982",
+        "quality_range": {
+         "max": 500,
+         "min": 0
+        },
+        "modifier_range": {
+         "at_max_quality": 1,
+         "at_min_quality": 0.8
+        },
+        "value_segments": [
+         {
+          "quality_max": 500,
+          "quality_min": 0,
+          "modifier_at_end": 1,
+          "modifier_at_start": 0.8
+         },
+         {
+          "quality_max": 1000,
+          "quality_min": 501,
+          "modifier_at_end": 1.2,
+          "modifier_at_start": 1
+         }
+        ],
+        "value_range_type": "linear"
+       }
+      ],
+      "required_count": 1
+     },
+     {
+      "key": "FIELD ARRAY",
+      "kind": "group",
+      "name": "Field Array",
+      "children": [
+       {
+        "kind": "resource",
+        "name": "Stileron",
+        "uuid": "8cd317a3-df9b-4315-8ac3-0f1fca42dfd4",
+        "min_quality": 1,
+        "quantity_scu": 1.9
+       }
+      ],
+      "modifiers": [
+       {
+        "key": "shield_maxhealth",
+        "name": "Max. Shield Strength",
+        "uuid": "d1a48b92-56b6-4094-8765-7efa72ed3ceb",
+        "quality_range": {
+         "max": 500,
+         "min": 0
+        },
+        "modifier_range": {
+         "at_max_quality": 1,
+         "at_min_quality": 0.9
+        },
+        "value_segments": [
+         {
+          "quality_max": 500,
+          "quality_min": 0,
+          "modifier_at_end": 1,
+          "modifier_at_start": 0.9
+         },
+         {
+          "quality_max": 1000,
+          "quality_min": 501,
+          "modifier_at_end": 1.1,
+          "modifier_at_start": 1
+         }
+        ],
+        "value_range_type": "linear"
+       }
+      ],
+      "required_count": 1
+     },
+     {
+      "key": "FREQUENCY CONTROLLER",
+      "kind": "group",
+      "name": "Frequency Controller",
+      "children": [
+       {
+        "kind": "item",
+        "name": "Feynmaline",
+        "uuid": "d7a21cac-3c2b-4695-95b7-2042d8f5755e",
+        "quantity": 170,
+        "min_quality": 1
+       }
+      ],
+      "modifiers": [
+       {
+        "key": "shield_maxhealth",
+        "name": "Max. Shield Strength",
+        "uuid": "d1a48b92-56b6-4094-8765-7efa72ed3ceb",
+        "quality_range": {
+         "max": 500,
+         "min": 0
+        },
+        "modifier_range": {
+         "at_max_quality": 1,
+         "at_min_quality": 0.9
+        },
+        "value_segments": [
+         {
+          "quality_max": 500,
+          "quality_min": 0,
+          "modifier_at_end": 1,
+          "modifier_at_start": 0.9
+         },
+         {
+          "quality_max": 1000,
+          "quality_min": 501,
+          "modifier_at_end": 1.1,
+          "modifier_at_start": 1
+         }
+        ],
+        "value_range_type": "linear"
+       }
+      ],
+      "required_count": 1
+     }
+    ]
+   },
+   "craft_time_seconds": 960
+  }
+ ],
+ "link": "https://api.star-citizen.wiki/api/blueprints/db6460d8-273e-4fe3-bf57-a02a61e7a3e2"
+}
