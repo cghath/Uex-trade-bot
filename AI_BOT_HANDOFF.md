@@ -430,7 +430,7 @@ date - no open item, nothing to record here.
       `Recipe.lines`/`format_modifier`; `CraftLayoutView`/`_CraftConfig` (`bot/cogs/
       blueprint_planner.py`), `CraftConfigView` kept as the text fallback. See PROJECT_CONTEXT.md
       entry 140
-- [ ] PR #TBD - `/command-usage` shows only other players' usage: `usage_report` (`bot/cogs/
+- [ ] PR #128 - `/command-usage` shows only other players' usage: `usage_report` (`bot/cogs/
       diagnostics.py`) and `Database.get_real_command_usage` replace the least/most-used
       table. See PROJECT_CONTEXT.md entry 141
 
