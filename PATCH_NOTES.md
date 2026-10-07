@@ -1,7 +1,18 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.60.
+the oldest entry below); the next new entry is 2.61.
+
+---
+
+## 2.60 - 2026-10-07 - An easier-to-read loadout
+
+**Changed**
+- `/ship-loadout` - Laid out in sections: the total cost and power pips up top, then each upgrade with what it changes (`546 → 684` DPS) and its shop right under it, then the slots that keep their stock part, each reason said once. A big ship fits on one page more often (the Polaris did take two).
+- `/ship-loadout` - Guns now show their projectile speed beside DPS and alpha, compared with the stock gun's (`1,480 → 1,184` m/s). It's shown to help you judge, not used to pick.
+
+**Fixed**
+- `/ship-loadout` - The header said ties go to the cheaper part. Ties actually go to the tougher part first, then the cheaper one; it now says so.
 
 ---
 

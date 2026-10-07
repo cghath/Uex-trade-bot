@@ -209,9 +209,11 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
   mockups first; phone layout matters less, as long as it isn't a disaster. Done: the item
   and blueprint lookups (layout components, shared facts said once; PROJECT_CONTEXT.md entry
   136), then `/multi-stop-route` (each leg with its own warnings; entry 138) and Configure
-  crafting (a section per material, then the totals; entry 140). Next
-  candidates: the other route commands (`/best-route`, `/top-routes`, `/mixed-routes`), ship
-  gear (`/ship-loadout`, `/ship-parts-finder`), and alerts and DMs.
+  crafting (a section per material, then the totals; entry 140) and `/ship-loadout` (the total,
+  then upgrades with their shops, then what keeps stock; entry 142). Next: `/ship-parts-finder`'s
+  list (one line per part, its DPS in a grey tag, 10 a page - the owner's pick, option B), then
+  the other route commands (`/best-route`, `/top-routes`, `/mixed-routes`), and alerts and DMs.
+  Pick by real usage (`/command-usage`, entry 141).
 
 - [x] **Saved Trading Preferences**: Shipped 2026-09-06. `/set-trading-preferences`,
   `/clear-trading-preferences`, `/my-trading-preferences` store per-user defaults for

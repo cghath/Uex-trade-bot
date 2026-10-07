@@ -20,12 +20,13 @@ from discord import app_commands
 from bot.cogs import ship_parts_finder
 from bot.cogs.help import CATEGORIES
 from bot.cogs.ship_parts_finder import (
-    LOADOUT_EXPIRED_NOTE, MAX_CUSTOM_ID_CHARS, MESSAGE_LIMIT, WIKI_SILENT_FOR_SLOT, LoadoutDoneButton, LoadoutView,
-    PartsBrowserView, ShipPartsFinder, _LoadoutDoneStub, _LoadoutPageButton, _ProfileButton, loadout_done_custom_id,
+    LOADOUT_EXPIRED_NOTE, MAX_CUSTOM_ID_CHARS, MESSAGE_LIMIT, WIKI_SILENT_FOR_SLOT, LoadoutDoneButton,
+    LoadoutLayoutView, LoadoutView, PartsBrowserView, ShipPartsFinder, _Loadout, _LoadoutDoneStub, _LoadoutPageButton,
+    _ProfileButton, loadout_done_custom_id,
 )
 from bot.db.database import Database
 from bot.uex.ship_loadout import (
-    NO_STATS, NOTHING_BEATS_STOCK, PROFILES, STOCK_IS_BEST, STOCK_RACKS, STOCK_UNKNOWN, LoadoutSlot, group_slots,
+    NO_STATS, NOTHING_BEATS_STOCK, PROFILES, STOCK_UNKNOWN, LoadoutSlot, group_slots,
     purchases,
 )
 from bot.uex.ship_parts import ShipPort
@@ -159,21 +160,47 @@ async def _run_command(cog, thread, *, ship="Avenger Titan", profile=None, locat
 
 
 def _posted(thread):
-    """(content, view) of the loadout message sent into the thread."""
-    call = next(c for c in reversed(thread.send.await_args_list) if isinstance(c.kwargs.get("view"), LoadoutView))
-    return call.kwargs["content"], call.kwargs["view"]
+    """(text, view) of the loadout message sent into the thread: the layout's text, or the
+    text message's content when Discord refused the layout."""
+    call = next(c for c in reversed(thread.send.await_args_list) if isinstance(c.kwargs.get("view"), _Loadout))
+    view = call.kwargs["view"]
+    return call.kwargs.get("content") or view.text(), view
 
 
-def _line(text, label):
-    return next(line for line in text.splitlines() if line.startswith(f"**{label}**"))
+def _items(view):
+    """The view's buttons, wherever they sit (a layout's are in action rows)."""
+    return [child for child in view.walk_children() if isinstance(child, (discord.ui.Button, discord.ui.Select))]
+
+
+def _entry(text, label):
+    """An upgrade's lines - slot → part · price, the stat change, the shop - as one string."""
+    lines = text.splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith(f"**{label}** → "))
+    end = next((i for i in range(start + 1, len(lines)) if not lines[i].startswith(("-#", "`")) and "`" not in lines[i]
+                and not lines[i][:1].isdigit() and not lines[i].startswith(("EM ", "IR ", "stock part"))), len(lines))
+    return "\n".join(lines[start:end])
+
+
+def _kept(text, label):
+    """(the reason heading, the line) of a slot under "Keeping stock"."""
+    lines = text.splitlines()
+    index = next(i for i, line in enumerate(lines) if line.startswith(f"-# {label} · "))
+    heading = next(lines[i] for i in range(index, -1, -1) if lines[i].startswith("**"))
+    return heading, lines[index]
 
 
 async def _switch(view, profile, *, user_id=1):
     click = _interaction(None, user_id=user_id)
-    button = next(c for c in view.children if isinstance(c, _ProfileButton) and c.profile == profile)
+    button = next(c for c in _items(view) if isinstance(c, _ProfileButton) and c.profile == profile)
     if await view.interaction_check(click):
         await button.callback(click)
     return click
+
+
+async def _switch_text(view, profile):
+    """The loadout's text after switching to `profile`."""
+    await _switch(view, profile)
+    return view.text()
 
 
 # -- the command -------------------------------------------------------------------------------
@@ -188,20 +215,22 @@ def test_the_command_posts_a_balanced_loadout_in_the_private_thread(tmp_path, mo
     interaction.response.defer.assert_awaited_once_with(ephemeral=True)
     text, view = _posted(thread)
     assert view.message is thread.message, "kept, so idling can grey it out with a plain edit"
-    assert view.profile == "Balanced" and text.startswith("**Avenger Titan** recommended loadout · **Balanced**")
-    assert _line(text, "S4 Nose Gun") == ("**S4 Nose Gun** · keep stock **Revenant Gatling** (1,266 DPS) - "
-                                         f"{STOCK_IS_BEST}")
-    assert _line(text, "2x S3 Wing Gun").startswith(
-        "**2x S3 Wing Gun** → **M5A Cannon** · 930 DPS (was 547 DPS stock) · 69,137 aUEC each · Shop 12")
-    assert "**S1 Power Plant** → **SunFlare** · 16 power pips (was 15 power pips stock)" in text
-    assert "**2x S1 Cooler** → **Glacier** · 40 cooling segments (was 34 cooling segments stock)" in text
-    assert "**S1 Shield Generator Left** → **5SA 'Rhada'** · 3,000 shield HP (was 2,160 shield HP stock)" in text
-    assert _line(text, "S3 Left Wing Missile Rack").endswith(f"keep stock **MSD-322 Missile Rack** (2x S2 missiles) - "
-                                                        f"{STOCK_RACKS}")
+    assert isinstance(view, LoadoutLayoutView), "laid out (layout C, the owner's pick)"
+    assert view.profile == "Balanced" and text.startswith("## Avenger Titan · Balanced\n")
+    assert _kept(text, "S4 Nose Gun") == ("**Stock is already the best pick**",
+                                          "-# S4 Nose Gun · Revenant Gatling · 1,266 DPS")
+    assert _entry(text, "2x S3 Wing Gun") == "**2x S3 Wing Gun** → **M5A Cannon** · 69,137 each\n`547 → 930` DPS\n-# Shop 12"
+    assert "**S1 Power Plant** → **SunFlare** · 60,500\n`15 → 16` power pips" in text
+    assert "**2x S1 Cooler** → **Glacier** · 50,000 each\n`34 → 40` cooling segments" in text
+    assert "**S1 Shield Generator Left** → **5SA 'Rhada'** · 15,000\n`2,160 → 3,000` shield HP" in text
+    assert _kept(text, "S3 Left Wing Missile Rack") == (
+        "**Missile racks** · more missiles or bigger ones is your call",
+        "-# S3 Left Wing Missile Rack · MSD-322 Missile Rack · 2x S2 missiles")
     # 2x 69,137 + 60,500 + 2x 50,000 + 15,000
-    assert "**Total: 313,774 aUEC** for 6 parts" in text
-    assert "Gm" not in text and "ties go to the cheaper part" in text, "no location: no distances, cheapest wins ties"
-    assert len(text) <= MESSAGE_LIMIT
+    assert "**313,774 aUEC** for 6 parts · ⚡ 16 power pips" in text
+    assert "Gm" not in text and "ties go to the tougher part, then the cheaper one." in text, \
+        "no location: no distances; the tie-break said as rank_candidates applies it"
+    assert view.content_length() <= 4000
     pointer = interaction.followup.send.await_args
     assert thread.mention in pointer.args[0] and pointer.kwargs["ephemeral"] is True
 
@@ -213,7 +242,7 @@ def test_the_profile_option_opens_that_profile(tmp_path, monkeypatch):
         return thread
 
     text, view = _posted(asyncio.run(run()))
-    assert view.profile == "Budget" and "· **Budget**" in text
+    assert view.profile == "Budget" and text.startswith("## Avenger Titan · Budget\n")
 
 
 def test_the_profile_choices_and_option_texts_fit_discords_limits():
@@ -267,11 +296,10 @@ def test_slots_of_one_shape_with_different_stock_guns_are_two_lines_but_one_look
     s3_loads = [c for c in spy.await_args_list if c.kwargs["category"] == "Guns" and c.args[0].size_max == 3]
     assert len(s3_loads) == 1
     text = view.text()
-    left = next(line for line in text.splitlines() if line.startswith("**S3 Left Wing Gun**"))
-    right = next(line for line in text.splitlines() if line.startswith("**S3 Right Wing Gun**"))
-    assert left.startswith("**S3 Left Wing Gun** → **Mantis GT-220 Gatling** · 853 DPS (was 547 DPS stock)")
+    assert _entry(text, "S3 Left Wing Gun").startswith("**S3 Left Wing Gun** → **Mantis GT-220 Gatling** · 24,045\n"
+                                                       "`547 → 853` DPS")
     # An equal Mantis isn't an upgrade, so Budget's best-value gun that beats it is the M5A.
-    assert right.startswith("**S3 Right Wing Gun** → **M5A Cannon** · 930 DPS (was 853 DPS stock)")
+    assert _entry(text, "S3 Right Wing Gun").startswith("**S3 Right Wing Gun** → **M5A Cannon** · 69,137\n`853 → 930` DPS")
 
 
 def test_a_fixed_gun_is_replaced_by_a_gun_of_the_slots_own_size(tmp_path, monkeypatch):
@@ -287,7 +315,7 @@ def test_a_fixed_gun_is_replaced_by_a_gun_of_the_slots_own_size(tmp_path, monkey
 
     text, view = _posted(asyncio.run(run()))
     assert [s.entry_port_name for g in view.groups for s in g.slots] == ["hardpoint_weapon"]
-    assert "→ **M5A Cannon** · 930 DPS (was 304 DPS stock)" in text
+    assert "→ **M5A Cannon** · 69,137\n`304 → 930` DPS" in text
 
 
 # -- switching profile -------------------------------------------------------------------------
@@ -301,9 +329,9 @@ def test_every_profile_switch_repicks_from_the_loaded_parts_without_new_lookups(
         texts = {}
         for profile in ("Stealth", "Tank", "Budget", "Balanced"):
             click = await _switch(view, profile)
-            texts[profile] = click.response.edit_message.await_args.kwargs["content"]
+            texts[profile] = view.text()
             assert click.response.edit_message.await_args.kwargs["view"] is view
-            current = [c for c in view.children if isinstance(c, _ProfileButton) and c.disabled]
+            current = [c for c in _items(view) if isinstance(c, _ProfileButton) and c.disabled]
             assert [c.profile for c in current] == [profile], "only the profile showing is pressed in"
         after = (cog.bot.uex.get_item_catalog.await_count, cog._wiki.get_item_detail.await_count)
         return texts, lookups, after
@@ -312,24 +340,27 @@ def test_every_profile_switch_repicks_from_the_loaded_parts_without_new_lookups(
     assert before == after, "switching only re-picks: no UEX or wiki calls"
 
     stealth = texts["Stealth"]
-    assert "**2x S1 Cooler** → **HeatSafe** · EM 1,490 / IR 2,330 (was EM 1,490 / IR 7,260 stock)" in stealth
-    assert "**S1 Shield Generator Left** → **Cloak** · EM 250 (was EM 1,490 stock)" in stealth
-    assert _line(stealth, "S1 Power Plant").endswith(f"keep stock **Endurance** (EM 7,430) - {STOCK_IS_BEST}")
-    assert "**2x S3 Wing Gun** → **M5A Cannon** · 930 DPS" in stealth, "guns stay by DPS"
+    assert "**2x S1 Cooler** → **HeatSafe** · 30,800 each\nEM 1,490 · IR `7,260 → 2,330`" in stealth
+    assert "**S1 Shield Generator Left** → **Cloak** · 31,500\nEM `1,490 → 250`" in stealth
+    assert _kept(stealth, "S1 Power Plant") == ("**Stock is already the best pick**",
+                                                "-# S1 Power Plant · Endurance · EM 7,430")
+    assert "**2x S3 Wing Gun** → **M5A Cannon** · 69,137 each\n`547 → 930` DPS" in stealth, "guns stay by DPS"
 
     tank = texts["Tank"]
-    assert "**S1 Power Plant** → **JS-300** · 400 component HP (was 270 component HP stock)" in tank
-    assert "**2x S1 Cooler** → **Glacier** · 250 component HP (was 180 component HP stock)" in tank
-    assert "**S1 Shield Generator Left** → **5SA 'Rhada'** · 3,000 shield HP" in tank, "shields by HP"
+    assert "**S1 Power Plant** → **JS-300** · 9,000\n`270 → 400` component HP" in tank
+    assert "**2x S1 Cooler** → **Glacier** · 50,000 each\n`180 → 250` component HP" in tank
+    assert "**S1 Shield Generator Left** → **5SA 'Rhada'** · 15,000\n`2,160 → 3,000` shield HP" in tank, "shields by HP"
     assert "**2x S3 Wing Gun** → **M5A Cannon**" in tank
 
     budget = texts["Budget"]
-    assert "**2x S3 Wing Gun** → **Mantis GT-220 Gatling** · 853 DPS (was 547 DPS stock) · 24,045 aUEC each" in budget
-    assert _line(budget, "S4 Nose Gun").endswith(f"keep stock **Revenant Gatling** (1,266 DPS) - {NOTHING_BEATS_STOCK}")
+    assert _entry(budget, "2x S3 Wing Gun") == (
+        "**2x S3 Wing Gun** → **Mantis GT-220 Gatling** · 24,045 each\n`547 → 853` DPS\n-# Shop 11")
+    assert _kept(budget, "S4 Nose Gun") == (f"**{NOTHING_BEATS_STOCK[:1].upper()}{NOTHING_BEATS_STOCK[1:]}**",
+                                            "-# S4 Nose Gun · Revenant Gatling · 1,266 DPS")
     assert "**S1 Power Plant** → **SunFlare**" in budget, "the cheaper JS-300 doesn't beat stock"
-    assert "**Total: 223,590 aUEC** for 6 parts" in budget  # 2x 24,045 + 60,500 + 2x 50,000 + 15,000
+    assert "**223,590 aUEC** for 6 parts" in budget  # 2x 24,045 + 60,500 + 2x 50,000 + 15,000
 
-    assert "· **Balanced**" in texts["Balanced"] and "**Total: 313,774 aUEC**" in texts["Balanced"]
+    assert "## Avenger Titan · Balanced" in texts["Balanced"] and "**313,774 aUEC**" in texts["Balanced"]
 
 
 def test_only_the_player_who_opened_the_loadout_can_use_it(tmp_path, monkeypatch):
@@ -353,15 +384,15 @@ def test_the_power_line_is_each_profiles_total_pips_never_a_draw_warning(tmp_pat
         cog, thread = await _cog(tmp_path, monkeypatch)
         await _run_command(cog, thread)
         text, view = _posted(thread)
-        stealth = (await _switch(view, "Stealth")).response.edit_message.await_args.kwargs["content"]
-        tank = (await _switch(view, "Tank")).response.edit_message.await_args.kwargs["content"]
+        stealth = (await _switch_text(view, "Stealth"))
+        tank = (await _switch_text(view, "Tank"))
         return text, stealth, tank
 
     balanced, stealth, tank = asyncio.run(run())
     # The parts could take 22.1 pips in Balanced and Tank: never compared, nothing is meant to run at max.
-    assert "⚡ **16** power pips in total, from the power plant." in balanced
-    assert "⚡ **12** power pips in total, from the power plant." in tank
-    assert "⚡ **15** power pips in total, from the power plant." in stealth, "Stealth keeps the stock plant"
+    assert "**313,774 aUEC** for 6 parts · ⚡ 16 power pips" in balanced
+    assert "**262,274 aUEC** for 6 parts · ⚡ 12 power pips" in tank
+    assert "**231,374 aUEC** for 5 parts · ⚡ 15 power pips" in stealth, "Stealth keeps the stock plant"
     for text in (balanced, stealth, tank):
         assert "full load" not in text and "You assign power" not in text
 
@@ -378,7 +409,7 @@ def _done_click(cog, view, *, user_id=1, delete=None, message_id=None):
 
 async def _press_done(view, click):
     """A click on Done as discord.py dispatches it: through the handler registered at startup."""
-    stub = next(child for child in view.children if isinstance(child, _LoadoutDoneStub))
+    stub = next(child for child in _items(view) if isinstance(child, _LoadoutDoneStub))
     match = LoadoutDoneButton.__discord_ui_compiled_template__.fullmatch(stub.custom_id)
     await (await LoadoutDoneButton.from_custom_id(click, stub, match)).callback(click)
 
@@ -434,9 +465,10 @@ def test_done_still_works_once_the_loadout_has_gone_idle(tmp_path, monkeypatch):
         return after_idle, view, click
 
     after_idle, view, click = asyncio.run(run())
-    done = next(child for child in view.children if isinstance(child, _LoadoutDoneStub))
-    assert not done.disabled and all(child.disabled for child in view.children if child is not done)
-    assert "**Done** still removes this message." in view.message.edit.await_args.kwargs["content"]
+    done = next(child for child in _items(view) if isinstance(child, _LoadoutDoneStub))
+    assert not done.disabled and all(child.disabled for child in _items(view) if child is not done)
+    assert "**Done** still removes this message." in view.text()
+    assert view.message.edit.await_args.kwargs == {"view": view}, "a layout edits as a view, never content"
     assert after_idle == {}, "an idle view is forgotten as it closes"
     click.message.delete.assert_awaited_once()
 
@@ -466,8 +498,8 @@ def test_a_message_discord_wont_delete_greys_out_but_keeps_done(tmp_path, monkey
         return view, click
 
     view, click = asyncio.run(run())
-    done = next(child for child in view.children if isinstance(child, _LoadoutDoneStub))
-    assert not done.disabled and all(child.disabled for child in view.children if child is not done)
+    done = next(child for child in _items(view) if isinstance(child, _LoadoutDoneStub))
+    assert not done.disabled and all(child.disabled for child in _items(view) if child is not done)
     view.message.edit.assert_awaited_once()
     assert "try **Done** again" in click.followup.send.await_args.args[0]
 
@@ -491,14 +523,14 @@ def test_a_scattergun_for_sale_is_never_recommended_in_any_profile(tmp_path, mon
         cog, thread = await _cog(tmp_path, monkeypatch)
         await _run_command(cog, thread)
         text, view = _posted(thread)
-        texts = [text] + [(await _switch(view, p)).response.edit_message.await_args.kwargs["content"]
+        texts = [text] + [(await _switch_text(view, p))
                           for p in ("Stealth", "Tank", "Budget")]
         return texts, view
 
     texts, view = asyncio.run(run())
     for text in texts:
         assert "Scattergun" not in text
-    assert "**2x S3 Wing Gun** → **M5A Cannon** · 930 DPS (was 547 DPS stock)" in texts[0]
+    assert "**2x S3 Wing Gun** → **M5A Cannon** · 69,137 each\n`547 → 930` DPS" in texts[0]
     assert all("dominance" not in str(part.get("uuid")) for _, part in purchases(view.picks))
 
 
@@ -584,9 +616,9 @@ def test_a_location_sends_ties_to_the_nearest_shop_and_shows_distances(tmp_path,
     cog, thread = asyncio.run(run())
     text, view = _posted(thread)
     # The Rhada and the Rhada Twin hold 3,000 HP each: the Twin's shop is 5 Gm away, the Rhada's 40.
-    assert "**S1 Shield Generator Left** → **Rhada Twin** · 3,000 shield HP (was 2,160 shield HP stock) · 20,000 aUEC · " \
-           "Shop 12 · 5.0 Gm" in text
-    assert "ties go to the shop nearest **Area 18 TDD**" in text
+    assert _entry(text, "S1 Shield Generator Left") == (
+        "**S1 Shield Generator Left** → **Rhada Twin** · 20,000\n`2,160 → 3,000` shield HP\n-# Shop 12 · 5.0 Gm")
+    assert "ties go to the tougher part, then the shop nearest **Area 18 TDD**" in text
     assert view.origin_terminal == (99, "Area 18 TDD")
     origins = {c.args[0] for c in cog.bot.uex.get_terminal_distance.await_args_list}
     assert origins == {99}
@@ -676,7 +708,8 @@ def test_parts_the_wiki_didnt_answer_for_are_said_not_shown_as_missing_stats(tmp
     text, _ = _posted(asyncio.run(run()))
     assert ("⚠️ The Star Citizen Wiki didn't respond for 3 parts: they may be missing, so a better pick may exist. "
             "Try again in a few minutes.") in text
-    assert _line(text, "S1 Shield Generator Left").endswith(f"keep stock **Bulwark** (2,160 shield HP) - {WIKI_SILENT_FOR_SLOT}")
+    assert _kept(text, "S1 Shield Generator Left") == (f"**{WIKI_SILENT_FOR_SLOT[:1].upper()}{WIKI_SILENT_FOR_SLOT[1:]}**",
+                                                      "-# S1 Shield Generator Left · Bulwark · 2,160 shield HP")
 
 
 def test_without_the_vehicle_tree_the_stock_gun_is_unknown_not_an_empty_slot(tmp_path, monkeypatch):
@@ -684,13 +717,14 @@ def test_without_the_vehicle_tree_the_stock_gun_is_unknown_not_an_empty_slot(tmp
         cog, thread = await _cog(tmp_path, monkeypatch, wiki=_wiki(stock_tree=WikiUnavailableError("down")))
         await _run_command(cog, thread)
         text, view = _posted(thread)
-        budget = (await _switch(view, "Budget")).response.edit_message.await_args.kwargs["content"]
+        budget = (await _switch_text(view, "Budget"))
         return text, budget
 
     text, budget = asyncio.run(run())
-    assert "→ **M5A Cannon** · 930 DPS (stock part unknown)" in text
+    assert "→ **M5A Cannon** · 69,137 each\n930 DPS · stock part unknown" in text
     assert "didn't respond for 3 stock parts: they can't be compared against stock" in text
-    assert _line(budget, "2x S3 Wing Gun").endswith(f"keep stock - {STOCK_UNKNOWN}"), \
+    assert _kept(budget, "2x S3 Wing Gun") == (f"**{STOCK_UNKNOWN[:1].upper()}{STOCK_UNKNOWN[1:]}**",
+                                               "-# 2x S3 Wing Gun · stock part"), \
         "Budget never buys what it can't call an upgrade"
 
 
@@ -701,7 +735,7 @@ def test_a_gun_slot_whose_mount_the_wiki_didnt_answer_for_is_left_out_and_said(t
         return thread
 
     text, view = _posted(asyncio.run(run()))
-    assert "Wing Gun" not in text and "**S4 Nose Gun**" in text
+    assert "Wing Gun" not in text and "-# S4 Nose Gun · " in text
     assert "didn't respond for 2 gun slots: they are left out, since the mount decides the gun's size" in text
 
 
@@ -728,7 +762,7 @@ def test_every_slots_lookups_share_one_deadline(tmp_path, monkeypatch):
     text, _ = _posted(thread)
     assert elapsed < 5, f"took {elapsed:.1f}s"
     assert "⚠️ The Star Citizen Wiki didn't respond for 11 parts" in text
-    assert _line(text, "S4 Nose Gun").endswith(WIKI_SILENT_FOR_SLOT)
+    assert _kept(text, "S4 Nose Gun")[0] == f"**{WIKI_SILENT_FOR_SLOT[:1].upper()}{WIKI_SILENT_FOR_SLOT[1:]}**"
 
 
 def test_the_vehicle_tree_is_looked_up_once_per_ship(tmp_path, monkeypatch):
@@ -790,10 +824,10 @@ def test_a_big_ship_pages_its_lines_inside_discords_limit():
         texts, edges = [], []
         for page in range(len(view.pages)):
             texts.append(view.text())
-            edges.append({c.delta: c.disabled for c in view.children if isinstance(c, _LoadoutPageButton)})
+            edges.append({c.delta: c.disabled for c in _items(view) if isinstance(c, _LoadoutPageButton)})
             if page < len(view.pages) - 1:
                 click = _interaction(None)
-                await next(c for c in view.children if isinstance(c, _LoadoutPageButton) and c.delta > 0).callback(click)
+                await next(c for c in _items(view) if isinstance(c, _LoadoutPageButton) and c.delta > 0).callback(click)
         view.expired = True
         expired = view.text()
         return view, texts, edges, expired
@@ -805,7 +839,84 @@ def test_a_big_ship_pages_its_lines_inside_discords_limit():
     shown = [line for text in texts for line in text.splitlines() if "Shield Generator Number" in line]
     assert len(shown) == 30, "every line on some page, none cut"
     assert f"Page {len(view.pages)} of {len(view.pages)}" in texts[-1]
-    assert all("**Total: 450,000 aUEC** for 30 parts" in text for text in texts)
+    assert all("**450,000 aUEC** for 30 parts" in text for text in texts)
+
+
+def test_a_big_ship_pages_inside_a_layouts_limits_and_redraws_never_pile_up():
+    """The layout's own limits: 4,000 characters of text and 40 components, on every page and
+    every redraw - a profile switch or page turn rebuilds the items rather than adding more."""
+    async def run():
+        groups = _many_groups(60)
+        candidates = {g.fit_key: [dict(RHADA, size=g.port.size_min, _price_buy=15000.0, _uex_id=9,
+                                       _terminal_name="Platinum Bay - HUR-L3", _id_terminal=11)] for g in groups}
+        view = LoadoutLayoutView(NS(), VEHICLE, None, groups, candidates, owner_id=1)
+        sizes, texts = [], []
+        for page in range(len(view.pages)):
+            sizes.append((view.content_length(), len(list(view.walk_children()))))
+            texts.append(view.text())
+            if page < len(view.pages) - 1:
+                await next(c for c in _items(view) if isinstance(c, _LoadoutPageButton) and c.delta > 0).callback(
+                    _interaction(None))
+        for profile in ("Tank", "Budget", "Balanced", "Stealth"):
+            await _switch(view, profile)
+            sizes.append((view.content_length(), len(list(view.walk_children()))))
+        view.expired = True
+        view.render()
+        sizes.append((view.content_length(), len(list(view.walk_children()))))
+        return view, sizes, texts
+
+    view, sizes, texts = asyncio.run(run())
+    assert len(view.pages) > 1
+    assert all(chars <= 4000 and components <= 40 for chars, components in sizes), sizes
+    assert len({components for _, components in sizes[:-1]}) == 1, "a redraw rebuilds, never adds"
+    shown = [line for text in texts for line in text.splitlines() if "Shield Generator Number" in line]
+    assert len(shown) == 60, "every entry on some page, none cut"
+    assert all(text.startswith("## Avenger Titan · Balanced") for text in texts), "the header on every page"
+
+
+def test_discord_refusing_the_layout_posts_the_same_loadout_as_text(tmp_path, monkeypatch):
+    async def run():
+        cog, thread = await _cog(tmp_path, monkeypatch)
+        refused = discord.HTTPException(NS(status=400, reason="Bad Request"), "layouts not allowed here")
+        sent = thread.send
+
+        async def send(*args, **kwargs):  # Discord refuses only the laid-out loadout
+            await sent(*args, **kwargs)
+            if isinstance(kwargs.get("view"), LoadoutLayoutView):
+                raise refused
+            return thread.message
+
+        thread.send = AsyncMock(side_effect=send)
+        interaction = await _run_command(cog, thread, profile="Tank")
+        return cog, thread, interaction
+
+    cog, thread, interaction = asyncio.run(run())
+    first, second = [c for c in thread.send.await_args_list if isinstance(c.kwargs.get("view"), _Loadout)]
+    assert isinstance(first.kwargs["view"], LoadoutLayoutView) and "content" not in first.kwargs
+    assert first.kwargs["view"].is_finished(), "the refused layout's view is stopped"
+    text, view = second.kwargs["content"], second.kwargs["view"]
+    assert type(view) is LoadoutView and view.profile == "Tank"
+    assert text == view.text() and text.startswith("## Avenger Titan · Tank\n") and len(text) <= MESSAGE_LIMIT
+    assert "**S1 Power Plant** → **JS-300** · 9,000\n`270 → 400` component HP" in text
+    assert cog._loadouts == {thread.message.id: view}, "Done finds the text loadout"
+    assert "Posted a **Tank** loadout" in interaction.followup.send.await_args.args[0]
+
+
+def test_an_idle_laid_out_loadout_greys_out_and_says_how_to_get_it_back(tmp_path, monkeypatch):
+    async def run():
+        cog, thread = await _cog(tmp_path, monkeypatch)
+        await _run_command(cog, thread)
+        _, view = _posted(thread)
+        _editable(view.message)
+        await view.on_timeout()
+        return view
+
+    view = asyncio.run(run())
+    notes = [c for c in view.walk_children() if isinstance(c, discord.ui.TextDisplay) and c.content == LOADOUT_EXPIRED_NOTE]
+    assert len(notes) == 1, "the idle note shows under the loadout"
+    done = next(c for c in _items(view) if isinstance(c, _LoadoutDoneStub))
+    assert not done.disabled and all(c.disabled for c in _items(view) if c is not done)
+    assert view.message.edit.await_args.kwargs == {"view": view}
 
 
 def test_an_idle_loadout_greys_out_and_says_how_to_get_it_back():
@@ -817,8 +928,8 @@ def test_an_idle_loadout_greys_out_and_says_how_to_get_it_back():
         return view
 
     view = asyncio.run(run())
-    assert all(child.disabled for child in view.children if not isinstance(child, _LoadoutDoneStub))
-    assert not next(child for child in view.children if isinstance(child, _LoadoutDoneStub)).disabled
+    assert all(child.disabled for child in _items(view) if not isinstance(child, _LoadoutDoneStub))
+    assert not next(child for child in _items(view) if isinstance(child, _LoadoutDoneStub)).disabled
     assert LOADOUT_EXPIRED_NOTE in view.message.edit.await_args.kwargs["content"]
 
 
@@ -835,7 +946,7 @@ def test_a_loadout_with_a_location_still_greys_out_when_idle():
 
     view = asyncio.run(run())
     assert view.origin is None and view.origin_terminal == (99, "Area 18 TDD")
-    assert all(child.disabled for child in view.children if not isinstance(child, _LoadoutDoneStub))
+    assert all(child.disabled for child in _items(view) if not isinstance(child, _LoadoutDoneStub))
     content = view.message.edit.await_args.kwargs["content"]
     assert LOADOUT_EXPIRED_NOTE in content and "nearest **Area 18 TDD**" in content
 
@@ -883,7 +994,7 @@ def test_guns_inside_a_locked_turret_are_recommended(tmp_path, monkeypatch):
         return _posted(thread)
 
     text, view = asyncio.run(run())
-    assert "**2x S3 Turret Manned Gun** → **M5A Cannon** · 930 DPS (was 547 DPS stock)" in text
+    assert "**2x S3 Turret Manned Gun** → **M5A Cannon** · 69,137 each\n`547 → 930` DPS" in text
     (group,) = [g for g in view.groups if g.port.name.startswith("hardpoint_turret_manned/")]
     assert [s.entry_port_name for s in group.slots] == [
         f"hardpoint_turret_manned/hardpoint_weapon_{side}/{GUN_PORT}" for side in ("left", "right")]
@@ -919,7 +1030,7 @@ def test_a_turret_the_wiki_didnt_answer_for_is_said(tmp_path, monkeypatch):
     text, view = _posted(asyncio.run(run()))
     assert ("⚠️ The Star Citizen Wiki didn't respond for 1 turret: its guns are left out. "
             "Try again in a few minutes.") in text
-    assert "⚡ **16** power pips in total, from the power plant." in text
+    assert "· ⚡ 16 power pips" in text
 
 
 def test_a_gun_slot_the_vehicle_tree_doesnt_list_is_stock_unknown_not_empty(tmp_path, monkeypatch):
@@ -934,16 +1045,16 @@ def test_a_gun_slot_the_vehicle_tree_doesnt_list_is_stock_unknown_not_empty(tmp_
         cog, thread = await _cog(tmp_path, monkeypatch, wiki=_wiki(stock_tree=tree))
         await _run_command(cog, thread)
         text, view = _posted(thread)
-        budget = (await _switch(view, "Budget")).response.edit_message.await_args.kwargs["content"]
+        budget = (await _switch_text(view, "Budget"))
         return text, budget
 
     text, budget = asyncio.run(run())
-    assert _line(text, "S3 Left Wing Gun").startswith(
-        "**S3 Left Wing Gun** → **M5A Cannon** · 930 DPS (stock part unknown)")
-    assert _line(text, "S3 Right Wing Gun").startswith(
-        "**S3 Right Wing Gun** → **M5A Cannon** · 930 DPS · 69,137 aUEC")
+    assert _entry(text, "S3 Left Wing Gun").startswith(
+        "**S3 Left Wing Gun** → **M5A Cannon** · 69,137\n930 DPS · stock part unknown")
+    assert _entry(text, "S3 Right Wing Gun").startswith(
+        "**S3 Right Wing Gun** → **M5A Cannon** · 69,137\n930 DPS\n")
     assert "didn't respond" not in text, "a gap in the wiki's data, not an outage to retry"
-    assert _line(budget, "S3 Left Wing Gun").endswith(f"keep stock - {STOCK_UNKNOWN}")
+    assert _kept(budget, "S3 Left Wing Gun") == (f"**{STOCK_UNKNOWN[:1].upper()}{STOCK_UNKNOWN[1:]}**", "-# S3 Left Wing Gun · stock part")
 
 
 def test_a_mount_inside_a_stock_mount_is_kept_down_to_the_gun_slot(tmp_path, monkeypatch):
@@ -968,7 +1079,7 @@ def test_a_mount_inside_a_stock_mount_is_kept_down_to_the_gun_slot(tmp_path, mon
     (group,) = view.groups
     assert group.port.name == f"{NOSE}/hardpoint_gimbal/{GUN_PORT}" and group.stock["name"] == "Omnisky IX Cannon"
     assert [s.entry_port_name for s in group.slots] == [NOSE], "saved where the browser saves the hardpoint's gun"
-    assert "→ **M5A Cannon** · 930 DPS (was 547 DPS stock)" in text
+    assert "→ **M5A Cannon** · " in text and "\n`547 → 930` DPS" in text
     assert "holds" not in text and "VariPuck" not in text
 
 
@@ -989,7 +1100,7 @@ def test_a_mount_still_found_past_the_depth_limit_is_never_compared_as_a_gun(tmp
         return thread
 
     text, _ = _posted(asyncio.run(run()))
-    assert "→ **M5A Cannon** · 930 DPS (stock part unknown)" in text
+    assert "\n930 DPS · stock part unknown" in text
     assert "holds" not in text
 
 def test_a_turret_whose_guns_are_in_the_loadout_keeps_the_stock_turret(tmp_path, monkeypatch):
@@ -1007,7 +1118,7 @@ def test_a_turret_whose_guns_are_in_the_loadout_keeps_the_stock_turret(tmp_path,
     cog, thread = asyncio.run(run())
     text, view = _posted(thread)
     assert [g.category for g in view.groups] == ["Guns"]
-    assert "→ **M5A Cannon** · 930 DPS (was 547 DPS stock)" in text
+    assert "→ **M5A Cannon** · " in text and "\n`547 → 930` DPS" in text
     assert "VariPuck" not in text
     entries = asyncio.run(cog.bot.db.get_ship_parts_entries(1, 10))
     assert {e["category"] for e in entries} == {"Guns"}
@@ -1026,7 +1137,7 @@ def test_a_turrets_gun_slots_without_the_vehicle_tree_are_stock_unknown(tmp_path
         return thread
 
     text, _ = _posted(asyncio.run(run()))
-    assert "→ **M5A Cannon** · 930 DPS (stock part unknown)" in text
+    assert "\n930 DPS · stock part unknown" in text
     assert "didn't respond for 2 stock parts: they can't be compared against stock" in text
 
 
@@ -1092,14 +1203,14 @@ def test_one_stock_part_the_wiki_didnt_answer_for_is_said_in_the_singular(tmp_pa
         cog, thread = await _cog(tmp_path, monkeypatch, wiki=_wiki(unavailable={ENDURANCE["uuid"]}))
         await _run_command(cog, thread)
         text, view = _posted(thread)
-        budget = (await _switch(view, "Budget")).response.edit_message.await_args.kwargs["content"]
+        budget = (await _switch_text(view, "Budget"))
         return text, budget
 
     text, budget = asyncio.run(run())
     assert ("⚠️ The Star Citizen Wiki didn't respond for 1 stock part: it can't be compared against stock. "
             "Try again in a few minutes.") in text
-    assert "**S1 Power Plant** → **SunFlare** · 16 power pips (stock part unknown)" in text
-    assert _line(budget, "S1 Power Plant").endswith(f"keep stock - {STOCK_UNKNOWN}")
+    assert "**S1 Power Plant** → **SunFlare** · 60,500\n16 power pips · stock part unknown" in text
+    assert _kept(budget, "S1 Power Plant") == (f"**{STOCK_UNKNOWN[:1].upper()}{STOCK_UNKNOWN[1:]}**", "-# S1 Power Plant · stock part")
 
 
 def test_one_gun_slot_left_out_is_said_in_the_singular(tmp_path, monkeypatch):
@@ -1128,7 +1239,8 @@ def test_parts_the_wiki_answered_for_without_stats_say_so_not_that_it_didnt_resp
         return thread
 
     text, _ = _posted(asyncio.run(run()))
-    assert _line(text, "S3 Left Wing Missile Rack").endswith(f"nothing to recommend - {NO_STATS}")
+    assert _kept(text, "S3 Left Wing Missile Rack") == (f"**{NO_STATS[:1].upper()}{NO_STATS[1:]}**",
+                                                       "-# S3 Left Wing Missile Rack · empty slot")
     assert WIKI_SILENT_FOR_SLOT not in text
 
 
@@ -1206,7 +1318,7 @@ def test_the_vehicle_tree_is_found_by_uexs_full_name_too(tmp_path, monkeypatch):
         return thread
 
     text, _ = _posted(asyncio.run(run()))
-    assert "**2x S3 Wing Gun** → **M5A Cannon** · 930 DPS (was 547 DPS stock)" in text
+    assert "**2x S3 Wing Gun** → **M5A Cannon** · 69,137 each\n`547 → 930` DPS" in text
 
 
 def test_a_top_level_stock_part_comes_from_the_vehicle_tree_when_the_reference_lacks_it(tmp_path, monkeypatch):
@@ -1218,7 +1330,7 @@ def test_a_top_level_stock_part_comes_from_the_vehicle_tree_when_the_reference_l
         return thread
 
     text, _ = _posted(asyncio.run(run()))
-    assert "**S1 Power Plant** → **SunFlare** · 16 power pips (was 15 power pips stock)" in text
+    assert "**S1 Power Plant** → **SunFlare** · 60,500\n`15 → 16` power pips" in text
 
 
 def test_a_stock_part_the_wiki_doesnt_have_isnt_called_an_outage(tmp_path, monkeypatch):
@@ -1232,7 +1344,7 @@ def test_a_stock_part_the_wiki_doesnt_have_isnt_called_an_outage(tmp_path, monke
         return thread
 
     text, _ = _posted(asyncio.run(run()))
-    assert "**S1 Power Plant** → **SunFlare** · 16 power pips (stock part unknown)" in text
+    assert "**S1 Power Plant** → **SunFlare** · 60,500\n16 power pips · stock part unknown" in text
     assert "didn't respond" not in text, "asking again won't help, so no 'try again'"
 
 
@@ -1273,7 +1385,7 @@ def test_the_browsers_button_without_a_location_opens_a_loadout_without_one(tmp_
     cog, thread = asyncio.run(run())
     cog._terminal_name.assert_not_awaited()
     text, view = _posted(thread)
-    assert view.origin_terminal is None and "ties go to the cheaper part" in text and " Gm" not in text
+    assert view.origin_terminal is None and "ties go to the tougher part, then the cheaper one" in text and " Gm" not in text
 
 
 def test_the_browsers_button_still_opens_when_the_location_name_lookup_fails(tmp_path, monkeypatch):
@@ -1285,7 +1397,7 @@ def test_the_browsers_button_still_opens_when_the_location_name_lookup_fails(tmp
         return thread
 
     text, view = _posted(asyncio.run(run()))
-    assert view.origin_terminal == (99, "") and "ties go to the shop nearest your location" in text
+    assert view.origin_terminal == (99, "") and "then the shop nearest your location" in text
 
 
 def test_each_stock_part_is_looked_up_once_however_many_slots_hold_it(tmp_path, monkeypatch):
