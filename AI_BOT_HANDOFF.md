@@ -433,7 +433,7 @@ date - no open item, nothing to record here.
 - [ ] PR #128 - `/command-usage` shows only other players' usage: `usage_report` (`bot/cogs/
       diagnostics.py`) and `Database.get_real_command_usage` replace the least/most-used
       table. See PROJECT_CONTEXT.md entry 141
-- [ ] PR #TBD - `/ship-loadout` as a layout: `upgrade_entry`, `stat_change`, `kept_sections`,
+- [ ] PR #129 - `/ship-loadout` as a layout: `upgrade_entry`, `stat_change`, `kept_sections`,
       `summary_line`, `paginate_loadout`, `PowerTotal.text` (`bot/uex/ship_loadout.py`) replace
       `pick_line`/`total_line`/`paginate_lines`/`stat_vs_stock`/`PowerTotal.line`;
       `_Loadout`/`LoadoutLayoutView` (`bot/cogs/ship_parts_finder.py`), `LoadoutView` kept as
