@@ -141,6 +141,12 @@ def alpha_damage(detail: dict | None) -> float | None:
     return _number(_path(detail, "vehicle_weapon", "damage", "alpha_total"))
 
 
+def projectile_speed(detail: dict | None) -> float | None:
+    """How fast a gun's rounds fly, in m/s (vehicle_weapon.ammunition.speed): shown beside DPS
+    and alpha, the owner's call (2026-10-07) - a faster round is easier to land."""
+    return _number(_path(detail, "vehicle_weapon", "ammunition", "speed"))
+
+
 def beats_armor(detail: dict | None) -> bool | None:
     """Whether one projectile gets through heavy-fighter armor (ARMOR_REFERENCE): any damage
     type's share of a shot, per pellet, at or above that type's deflection. None when the wiki
@@ -613,7 +619,8 @@ def shown_stat(detail: dict | None, category: str, profile: str) -> tuple[str, s
     """(kind, text) of the figure a line shows for a part: profile_stat's, as stat_text. A
     Stealth cooler shows its EM and IR together ('EM 1,490 / IR 7,130'): EM decides, but coolers
     often tie on it (the Bracer and Ultra-Flow are both EM 1,490), and then IR does. A gun shows
-    its DPS and alpha damage together ('1,266 DPS / 84.4 alpha') for the same reason."""
+    its DPS and alpha damage together ('1,266 DPS / 84.4 alpha') for the same reason, and its
+    projectile speed after them ('1,266 DPS / 84.4 alpha / 1,332 m/s') - shown, never ranked by."""
     if profile == STEALTH and category == COOLERS_CATEGORY:
         em, ir = em_signature(detail), ir_signature(detail)
         if em is not None and ir is not None:
@@ -621,25 +628,17 @@ def shown_stat(detail: dict | None, category: str, profile: str) -> tuple[str, s
     stat = profile_stat(detail, category, profile)
     if stat is None:
         return None
-    alpha = alpha_damage(detail) if category == GUNS_CATEGORY and stat[0] == "DPS" else None
+    if category != GUNS_CATEGORY or stat[0] != "DPS":
+        return (stat[0], stat_text(*stat))
+    kinds, texts = ["DPS"], [stat_text(*stat)]
+    alpha, speed = alpha_damage(detail), projectile_speed(detail)
     if alpha is not None:
-        return ("DPS / alpha", f"{stat_text(*stat)} / {_amount(alpha)} alpha")
-    return (stat[0], stat_text(*stat))
-
-
-def stat_vs_stock(part: dict, stock: dict | None, category: str, profile: str) -> str:
-    """'1,266 DPS (was 547 DPS stock)': the deciding figure, and the stock part's beside it
-    when it has the same one."""
-    shown = shown_stat(part, category, profile)
-    if shown is None:
-        return ""
-    was = shown_stat(stock, category, profile)
-    if was is not None and was[0] == shown[0]:
-        # Said only when the armor gate decided, so a lower-DPS pick doesn't read as a mistake.
-        if category == GUNS_CATEGORY and beats_armor(part) and beats_armor(stock) is False:
-            return f"{shown[1]} (was {was[1]} stock, which can't get through heavy-fighter armor)"
-        return f"{shown[1]} (was {was[1]} stock)"
-    return shown[1]
+        kinds.append("alpha")
+        texts.append(f"{_amount(alpha)} alpha")
+    if speed is not None:
+        kinds.append("speed")
+        texts.append(f"{speed:,.0f} m/s")
+    return (" / ".join(kinds), " / ".join(texts))
 
 
 def power_generation(part: dict | None) -> float | None:
@@ -656,19 +655,18 @@ class PowerTotal:
     # the total leaves them out, so it's a lower bound.
     unknown: int = 0
 
-    def line(self) -> str | None:
-        """'⚡ **16** power pips in total, from the power plant.' None for a ship with no power
-        plant. A missing figure is never guessed: the line says the total is a lower bound, or
+    def text(self) -> str | None:
+        """'⚡ 16 power pips', for the loadout's summary line. None for a ship with no power
+        plant. A missing figure is never guessed: the text says the total is a lower bound, or
         unknown."""
         if not self.plants:
             return None
         source = "the power plant" if self.plants == 1 else f"the {self.plants} power plants"
         if not self.unknown:
-            return f"⚡ **{_amount(self.pips)}** power pips in total, from {source}."
+            return f"⚡ {_amount(self.pips)} power pips"
         if self.unknown == self.plants:
-            return f"⚡ Total power pips unknown: the wiki has no output figure for {source}."
-        return (f"⚡ At least **{_amount(self.pips)}** power pips in total: the wiki has no output figure "
-                f"for {self.unknown} of {source}.")
+            return f"⚡ power pips unknown: no output figure for {source}"
+        return f"⚡ at least {_amount(self.pips)} power pips: no output figure for {self.unknown} of {source}"
 
 
 def _installed(picks: list[SlotPick]) -> list[tuple[str, dict | None]]:
@@ -706,70 +704,182 @@ def power_total(picks: list[SlotPick]) -> PowerTotal:
     return PowerTotal(pips, plants, unknown)
 
 
-def pick_line(pick: SlotPick, profile: str, *, reason: str | None = None) -> str:
-    """One line of the loadout message. A purchase: '**2x S3 Wing Gun** → **Mantis GT-220
-    Gatling** · 853 DPS (was 547 DPS stock) · 24,045 aUEC each · Area18 (Centermass) · 3.2 Gm'.
-    Nothing to buy: '**S4 Nose Gun** · keep stock **Revenant Gatling** (1,266 DPS) - stock is
-    already the best pick'. `reason` replaces pick.reason, for a cause only the caller knows
-    (the wiki not answering for the slot's parts)."""
-    group = pick.group
-    head = f"**{group.label}**"
-    why = reason or pick.reason
-    if pick.part is None:
-        if not pick.keeps_stock:
-            return f"{head} · nothing to recommend - {why}"
-        name = group.stock.get("name") if isinstance(group.stock, dict) else None
-        text = f"keep stock **{name}**" if name else "keep stock"
-        # A PDC's turret rank (the gun size it holds) isn't why it's kept, so it isn't shown. A
-        # kept rack shows what it holds ('4x S2 missiles'), not the profile's figure (Tank's HP).
-        if why == POINT_DEFENSE:
-            shown = None
+# The loadout's message, layout C (the owner's pick from real-data mockups, 2026-10-07): a header
+# with the total, then "Upgrades" - a part per slot with its stat before -> after and, under it,
+# its shop - then "Keeping stock", each reason said once over the slots it covers.
+
+_STAT_PIECE = re.compile(r"^([\d,.]+) (.+)$")
+_SIGNATURE_PIECE = re.compile(r"^(EM|IR) ([\d,.]+)$")
+
+
+def _stat_pieces(text: str) -> list[tuple[str, str, bool]]:
+    """'684 DPS / 410.2 alpha' -> [('684', 'DPS', False), ('410.2', 'alpha', False)]; a
+    signature reads label first ('EM 250' -> ('250', 'EM', True)); anything else ('holds 2x S3')
+    is one value with no unit."""
+    pieces = []
+    for piece in text.split(" / "):
+        if match := _SIGNATURE_PIECE.match(piece):
+            pieces.append((match.group(2), match.group(1), True))
+        elif match := _STAT_PIECE.match(piece):
+            pieces.append((match.group(1), match.group(2), False))
         else:
-            shown = shown_stat(group.stock, group.category, BALANCED if why == STOCK_RACKS else profile)
-        if shown is not None:
-            text += f" ({shown[1]})"
-        return f"{head} · {text} - {why}"
-    part = pick.part
-    bits = [f"{head} → **{part.get('name') or 'Unknown'}**"]
-    stat = stat_vs_stock(part, group.stock, group.category, profile)
+            pieces.append((piece, "", False))
+    return pieces
+
+
+def stat_change(part: dict, stock: dict | None, category: str, profile: str) -> str:
+    """'`547 → 930` DPS', '1,266 DPS · `63.3 → 84.4` alpha', 'EM `1,240 → 250`': the
+    figure the profile chose the part by, from the stock part's to this one's. Only the part's own
+    figure when the stock part has no comparable one. Says when the armor gate decided, so a
+    lower-DPS pick doesn't read as a mistake."""
+    shown = shown_stat(part, category, profile)
+    if shown is None:
+        return ""
+    was = shown_stat(stock, category, profile)
+    if was is None or was[0].split(" / ")[0] != shown[0].split(" / ")[0]:
+        text = shown[1]
+    else:
+        # Figure by figure: one the stock part lacks (a gun with no speed on the wiki) is
+        # shown alone, the rest still compared. One that didn't change is said once
+        # ('1,266 DPS'), not '`1,266 → 1,266`'.
+        old = {(unit, label_first): before for before, unit, label_first in _stat_pieces(was[1])}
+        pieces = []
+        for after, unit, label_first in _stat_pieces(shown[1]):
+            before = old.get((unit, label_first))
+            if before is None or before == after:
+                pieces.append((f"{unit} {after}" if label_first else f"{after} {unit}").strip())
+            else:
+                pieces.append((f"{unit} `{before} → {after}`" if label_first else f"`{before} → {after}` {unit}").strip())
+        text = " · ".join(pieces)
+    if category == GUNS_CATEGORY and beats_armor(part) and beats_armor(stock) is False:
+        text += " — stock can't get through heavy-fighter armor"
+    return text
+
+
+def upgrade_entry(pick: SlotPick, profile: str) -> str:
+    """One purchase under "Upgrades":
+    '**2x S3 Wing Gun** → **M5A Cannon** · 75,145 each' / '`546 → 684` DPS · `43.7 → 410.2` alpha'
+    / '-# Orison (Ship Weapons - Crusader Showroom) · 3.2 Gm'. Its shop sits under it, not in a
+    list of its own (the owner's call)."""
+    group, part = pick.group, pick.part
+    head = f"**{group.label}** → **{part.get('name') or 'Unknown'}**"
+    price = _number(part.get("_price_buy"))
+    if price:
+        head += f" · {price:,.0f}" + (" each" if group.count > 1 else "")
+    lines = [head]
+    change = stat_change(part, group.stock, group.category, profile)
     if group.stock_unknown:
         # Bought without a comparison: the other profiles still recommend their best pick,
         # whose own stats are known, but the line says the stock part couldn't be checked.
-        stat = f"{stat} (stock part unknown)" if stat else "stock part unknown"
-    if stat:
-        bits.append(stat)
-    price = _number(part.get("_price_buy"))
-    if price:
-        bits.append(f"{price:,.0f} aUEC" + (" each" if group.count > 1 else ""))
-    shop = shop_text(part.get("_terminal_name"))
-    if shop:
-        bits.append(shop)
+        change = f"{change} · stock part unknown" if change else "stock part unknown"
+    if change:
+        lines.append(change)
     distance = _number(part.get("_distance_gm"))
-    if distance is not None:
-        bits.append(f"{distance:.1f} Gm")
-    return " · ".join(bits)
+    where = [bit for bit in (shop_text(part.get("_terminal_name")),
+                             f"{distance:.1f} Gm" if distance is not None else None) if bit]
+    if where:
+        lines.append("-# " + " · ".join(where))
+    return "\n".join(lines)
 
 
-def total_line(picks: list[SlotPick]) -> str:
-    """'**Total: 520,274 aUEC** for 9 parts', or that nothing needs buying."""
+# How "Keeping stock" heads a reason that needs more than the reason itself.
+_REASON_HEADINGS = {
+    STOCK_RACKS: "**Missile racks** · more missiles or bigger ones is your call",
+    POINT_DEFENSE: "**Point defense** · shoots down incoming missiles, never runs out of ammo",
+}
+
+
+def _kept_line(pick: SlotPick, profile: str, reason: str) -> tuple[tuple, str, int, str]:
+    """(what makes two slots the same line, size, count, the rest) for one slot group nothing
+    is bought for."""
+    group = pick.group
+    if not pick.keeps_stock:
+        what, stat = "empty slot", None
+    else:
+        what = (group.stock.get("name") if isinstance(group.stock, dict) else None) or "stock part"
+        # A PDC's turret rank (the gun size it holds) isn't why it's kept, so it isn't shown. A
+        # kept rack shows what it holds ('4x S2 missiles'), not the profile's figure (Tank's HP).
+        shown = None if reason == POINT_DEFENSE else shown_stat(
+            group.stock, group.category, BALANCED if reason == STOCK_RACKS else profile)
+        stat = shown[1] if shown else None
+    count_label = group.label
+    size, words = "", count_label
+    match = re.match(r"^(?:\d+x )?(S\d+(?:-\d+)?) (.*)$", count_label)
+    if match:
+        size, words = match.group(1), match.group(2)
+    return (reason, what, stat, size), size, group.count, words
+
+
+def kept_sections(picks: list[SlotPick], profile: str, reasons: list[str | None] | None = None) -> list[str]:
+    """"Keeping stock": one section per reason, said once over the slots it covers, each slot
+    '-# S4 Nose Gun · Revenant Gatling · 1,266 DPS'. Slots with the same stock part, figure and
+    reason are one line - the Polaris's four torpedo racks read '4x S10 Torpedo'. `reasons`
+    overrides a pick's reason (one only the caller knows), position for position."""
+    sections: dict[str, list[dict]] = {}
+    for index, pick in enumerate(picks):
+        if pick.part is not None:
+            continue
+        reason = (reasons[index] if reasons and reasons[index] else None) or pick.reason or ""
+        key, size, count, words = _kept_line(pick, profile, reason)
+        lines = sections.setdefault(reason, [])
+        for line in lines:
+            if line["key"] == key:
+                line["count"] += count
+                line["words"].append(words.split())
+                break
+        else:
+            lines.append({"key": key, "size": size, "count": count, "words": [words.split()]})
+    out = []
+    for reason, lines in sections.items():
+        heading = _REASON_HEADINGS.get(reason) or f"**{reason[:1].upper()}{reason[1:]}**"
+        body = [heading]
+        for line in lines:
+            # The words every merged slot's name shares, so left and right drop out.
+            common = [w for w in line["words"][0] if all(w in other for other in line["words"][1:])]
+            label = " ".join(common) or " ".join(line["words"][0])
+            label = f"{line['size']} {label}".strip()
+            if line["count"] > 1:
+                label = f"{line['count']}x {label}"
+            _, what, stat, _ = line["key"]
+            body.append("-# " + " · ".join(bit for bit in (label, what, stat) if bit))
+        out.append("\n".join(body))
+    return out
+
+
+def summary_line(picks: list[SlotPick]) -> str:
+    """'**520,274 aUEC** for 9 parts · ⚡ 20 power pips', or that nothing needs buying."""
     bought = purchases(picks)
-    if not bought:
-        return "**Nothing to buy** - every slot keeps what it has."
-    count = f"{len(bought)} parts" if len(bought) != 1 else "1 part"
-    return f"**Total: {total_cost(picks):,.0f} aUEC** for {count}"
+    if bought:
+        text = f"**{total_cost(picks):,.0f} aUEC** for {len(bought)} part{'s' if len(bought) != 1 else ''}"
+    else:
+        text = "**Nothing to buy**: every slot keeps what it has"
+    power = power_total(picks).text()
+    return f"{text} · {power}" if power else text
 
 
-def paginate_lines(lines: list[str], budget: int) -> list[list[str]]:
-    """Whole lines in pages of at most `budget` characters (newlines counted), never cutting
-    one: a big ship's loadout runs past one Discord message. A single line longer than the
-    budget gets a page to itself. Always at least one (possibly empty) page."""
-    pages: list[list[str]] = [[]]
-    used = 0
-    for line in lines:
-        cost = len(line) + 1
-        if pages[-1] and used + cost > budget:
-            pages.append([])
-            used = 0
-        pages[-1].append(line)
-        used += cost
+def loadout_blocks(header: str, entries: list[str], kept: list[str]) -> tuple[str, ...]:
+    """One page's blocks: the header, its upgrades, its kept-stock sections."""
+    blocks = [header]
+    if entries:
+        blocks.append("\n".join(["### Upgrades", *entries]))
+    if kept:
+        blocks.append("\n".join(["### Keeping stock", *kept]))
+    return tuple(blocks)
+
+
+def paginate_loadout(header: str, entries: list[str], kept: list[str], budget: int) -> list[tuple[str, ...]]:
+    """Pages of blocks, each at most `budget` characters with the blocks joined by blank lines,
+    the header on every page, no entry or section ever cut: a big ship's loadout can run past
+    one message. Always at least one page."""
+    pages: list[tuple[str, ...]] = []
+    page_entries: list[str] = []
+    page_kept: list[str] = []
+    for kind, unit in [("entry", e) for e in entries] + [("kept", k) for k in kept]:
+        trial = (page_entries + [unit], page_kept) if kind == "entry" else (page_entries, page_kept + [unit])
+        if (page_entries or page_kept) and len("\n\n".join(loadout_blocks(header, *trial))) > budget:
+            pages.append(loadout_blocks(header, page_entries, page_kept))
+            page_entries, page_kept = [], []
+            trial = ([unit], []) if kind == "entry" else ([], [unit])
+        page_entries, page_kept = trial
+    pages.append(loadout_blocks(header, page_entries, page_kept))
     return pages

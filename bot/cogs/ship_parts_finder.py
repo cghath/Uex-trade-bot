@@ -25,7 +25,7 @@ before truncating" lesson). Display labels live in bot/uex/ship_part_display.py.
 candidates: one recommended part per slot for a profile - Balanced, Stealth, Tank or Budget
 - or "keep stock" where the stock part is already the best pick. Which part to pick is pure
 logic in bot/uex/ship_loadout.py; this file loads the slots, stock parts and candidates and
-shows the result (LoadoutView).
+shows the result (LoadoutLayoutView, or LoadoutView's plain text if Discord refuses the layout).
 
 An outside audit before merge found four real P2s, all fixed: (1) selecting a category ran
 the full catalog/price/wiki lookup before acknowledging the interaction, risking Discord's
@@ -52,7 +52,7 @@ from discord.ext import commands, tasks
 from bot.autocomplete import gather_within
 from bot.cogs.prices import terminal_name_autocomplete
 from bot.cogs.ships import ship_name_autocomplete
-from bot.discord_ui import BotView
+from bot.discord_ui import LAYOUT_TEXT_LIMIT, BotLayoutView, BotView
 from bot.uex.client import cache_interval_text
 from bot.uex.exceptions import UexApiError, describe_uex_api_error
 from bot.uex.ship_part_display import (
@@ -77,16 +77,16 @@ from bot.uex.ship_loadout import (
     group_slots,
     gun_entry_port_name,
     is_gun_mount,
+    kept_sections,
     loadout_gun_ports,
     locked_turret_gun_ports,
-    paginate_lines,
+    paginate_loadout,
     pick_for_slot,
-    pick_line,
-    power_total,
     purchases,
     slot_category,
     stock_uuids_by_port,
-    total_line,
+    summary_line,
+    upgrade_entry,
 )
 from bot.uex.ship_parts import (
     GUNS_CATEGORY,
@@ -971,22 +971,30 @@ class _PartSelect(discord.ui.Select):
         await interaction.response.edit_message(content=self.parent_view.text(), view=self.parent_view)
 
 
-class LoadoutView(BotView):
-    """/ship-loadout's message, also opened by the parts browser's "Recommend a loadout": one
-    recommended part per group of identical slots for a profile (bot/uex/ship_loadout.py),
-    with buttons to switch profile, page through a big ship, add every purchase to the
-    private shopping list, and remove the message once the player is done with it.
+class _Loadout:
+    """What /ship-loadout's message does, whether it's laid out (LoadoutLayoutView, the reply) or
+    plain text (LoadoutView, sent when Discord refuses the layout): one recommended part per
+    group of identical slots for a profile (bot/uex/ship_loadout.py), with buttons to switch
+    profile, page through a big ship, add every purchase to the private shopping list, and
+    remove the message once the player is done with it.
 
     Every slot's candidates and stock parts are loaded once, when it opens. A profile switch
     only re-picks from them, so it answers at once with no lookups. Posted in the player's
     private ship parts thread like the browser (so a plain message edit, not a 15-minute
     interaction token, greys it out when idle), and answers only the player who opened it."""
-    def __init__(
+    # The most characters one page may hold; each view sets its own.
+    PAGE_BUDGET = MESSAGE_LIMIT
+
+    def _start(
         self, cog: "ShipPartsFinder", vehicle: dict, origin: tuple[int, str] | None, groups: list[SlotGroup],
         candidates: dict[tuple, list[dict]], *, owner_id: int, profile: str = DEFAULT_PROFILE,
         stock_unanswered: int = 0, slots_missing: int = 0, parts_unanswered: int = 0, turrets_unanswered: int = 0,
     ) -> None:
-        super().__init__(timeout=LOADOUT_IDLE_SECONDS)
+        # Everything a text copy of this loadout needs (as_text).
+        self._settings = dict(
+            cog=cog, vehicle=vehicle, origin=origin, groups=groups, candidates=candidates, owner_id=owner_id,
+            stock_unanswered=stock_unanswered, slots_missing=slots_missing, parts_unanswered=parts_unanswered,
+            turrets_unanswered=turrets_unanswered)
         self.cog = cog
         self.vehicle = vehicle
         # (terminal id, name) of the player's location, or None: ties then go to the cheaper part.
@@ -1012,10 +1020,8 @@ class LoadoutView(BotView):
         self.expired = False
         self.message: discord.Message | None = None
         self.picks: list[SlotPick] = []
-        self.pages: list[list[str]] = [[]]
+        self.pages: list[tuple[str, ...]] = [()]
         self.page = 0
-        self.add_item(_LoadoutDoneStub(owner_id))
-        self.repick()
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         await super().interaction_check(interaction)
@@ -1026,17 +1032,17 @@ class LoadoutView(BotView):
         return True
 
     def repick(self) -> None:
-        """Pick every slot for the current profile, then page the lines so the whole message,
-        header and totals included, stays inside Discord's 2,000 characters."""
+        """Pick every slot for the current profile, then page the message so each page, header
+        and idle note included, stays inside the view's PAGE_BUDGET."""
         self.picks = [pick_for_slot(group, self.candidates.get(group.fit_key, []), self.profile)
                       for group in self.groups]
-        lines = [pick_line(pick, self.profile, reason=self._reason(pick)) for pick in self.picks]
-        # Measured with a two-digit page count and the idle note, so neither can push a page over.
-        fixed = sum(len(part) + 2 for part in ("\n".join(self._header()), "\n".join(self._footer(99)),
-                                               LOADOUT_EXPIRED_NOTE))
-        self.pages = paginate_lines(lines, max(MESSAGE_LIMIT - fixed - 10, 400))
+        entries = [upgrade_entry(pick, self.profile) for pick in self.picks if pick.part is not None]
+        kept = kept_sections(self.picks, self.profile, [self._reason(pick) for pick in self.picks])
+        # Room for the page line and the idle note, so neither can push a page over.
+        budget = max(self.PAGE_BUDGET - len(LOADOUT_EXPIRED_NOTE) - 40, 400)
+        self.pages = paginate_loadout("\n".join(self._header()), entries, kept, budget)
         self.page = 0
-        self._show_buttons()
+        self.render()
 
     def _reason(self, pick: SlotPick) -> str | None:
         """'No stats' only means the wiki lacks them when it answered; if it didn't, say that."""
@@ -1046,13 +1052,16 @@ class LoadoutView(BotView):
         return None
 
     def _header(self) -> list[str]:
+        # Ties go to the tougher part (a shield's faster regen first), then the shop: the order
+        # rank_candidates breaks them in. "The cheaper part" alone was wrong (the 172,800 Snowpack
+        # over the 44,000 IceDive, both 46 cooling segments).
         if self.origin_terminal is None:
-            shops = "Each part at its cheapest shop; ties go to the cheaper part."
+            shops = "Each part at its cheapest shop; ties go to the tougher part, then the cheaper one."
         else:
             where = f"**{self.origin_terminal[1]}**" if self.origin_terminal[1] else "your location"
-            shops = f"Each part at its cheapest shop; ties go to the shop nearest {where}."
-        lines = [f"**{self.vehicle.get('name')}** recommended loadout · **{self.profile}**",
-                 f"-# {PROFILE_BLURBS[self.profile][0].upper()}{PROFILE_BLURBS[self.profile][1:]}. {shops}"]
+            shops = f"Each part at its cheapest shop; ties go to the tougher part, then the shop nearest {where}."
+        blurb = PROFILE_BLURBS[self.profile]
+        lines = [f"## {self.vehicle.get('name')} · {self.profile}", f"-# {blurb[0].upper()}{blurb[1:]}. {shops}"]
         # (count, noun, what it means for one, for several)
         for count, what, one, many in (
             (self.slots_missing, "gun slot", "it is left out", "they are left out"),
@@ -1068,43 +1077,40 @@ class LoadoutView(BotView):
                        "part": ", so a better pick may exist"}.get(what, "")
             lines.append(f"⚠️ The Star Citizen Wiki didn't respond for {count} {what}{'s' if count != 1 else ''}: "
                          f"{effect}. Try again in a few minutes.")
+        lines.append(summary_line(self.picks))
         return lines
 
-    def _footer(self, page_count: int) -> list[str]:
-        lines = [total_line(self.picks)]
-        power = power_total(self.picks).line()
-        if power:
-            lines.append(power)
-        if page_count > 1:
-            lines.append(f"Page {self.page + 1} of {page_count}")
-        return lines
+    def page_blocks(self) -> tuple[str, ...]:
+        """The page showing, its page line last when there's more than one."""
+        blocks = tuple(discord.utils.escape_mentions(block) for block in self.pages[min(self.page, len(self.pages) - 1)])
+        if len(self.pages) > 1:
+            blocks += (f"-# Page {self.page + 1} of {len(self.pages)}",)
+        return blocks
 
     def text(self) -> str:
-        page = self.pages[min(self.page, len(self.pages) - 1)]
-        sections = ["\n".join(self._header()), "\n".join(page), "\n".join(self._footer(len(self.pages)))]
-        if self.expired:
-            sections.append(LOADOUT_EXPIRED_NOTE)
-        return discord.utils.escape_mentions("\n\n".join(s for s in sections if s))[:MESSAGE_LIMIT]
+        """The page as one message's text, the idle note under it once it has gone idle."""
+        sections = list(self.page_blocks()) + ([LOADOUT_EXPIRED_NOTE] if self.expired else [])
+        return "\n\n".join(section for section in sections if section)
+
+    def render(self) -> None:
+        raise NotImplementedError
+
+    def _message(self) -> dict:
+        """What an edit sends: the view, and for the text view its text."""
+        raise NotImplementedError
 
     def _show_buttons(self) -> None:
-        for child in [c for c in self.children if isinstance(c, (_ProfileButton, _LoadoutPageButton))]:
-            self.remove_item(child)
-        for profile in PROFILES:
-            self.add_item(_ProfileButton(self, profile))
-        if len(self.pages) > 1:
-            self.add_item(_LoadoutPageButton(self, -1))
-            self.add_item(_LoadoutPageButton(self, +1))
         self.add_all_button.disabled = not purchases(self.picks)
 
     async def switch_profile(self, interaction: discord.Interaction, profile: str) -> None:
         self.profile = profile
         self.repick()
-        await interaction.response.edit_message(content=self.text(), view=self)
+        await interaction.response.edit_message(**self._message())
 
     async def turn_page(self, interaction: discord.Interaction, delta: int) -> None:
         self.page = max(0, min(len(self.pages) - 1, self.page + delta))
-        self._show_buttons()
-        await interaction.response.edit_message(content=self.text(), view=self)
+        self.render()
+        await interaction.response.edit_message(**self._message())
 
     async def add_all(self, interaction: discord.Interaction) -> None:
         """Every purchase in the current profile's picks - never a kept-stock line - into the
@@ -1134,17 +1140,84 @@ class LoadoutView(BotView):
         finally:
             self._adding = False
 
-    @discord.ui.button(label="Add all to shopping list", style=discord.ButtonStyle.success, row=1)
-    async def add_all_button(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
-        await self.add_all(interaction)
-
     async def on_timeout(self) -> None:
         """Grey every button out but Done, which still works (LoadoutDoneButton), and say how
         to get the loadout back."""
         self.expired = True
         if self.message is not None:
             getattr(self.cog, "_loadouts", {}).pop(self.message.id, None)
-        await self.grey_out(content=self.text(), keep=(_LoadoutDoneStub,))
+        self.render()
+        fields = self._message()
+        fields.pop("view")
+        await self.grey_out(keep=(_LoadoutDoneStub,), **fields)
+
+
+class LoadoutLayoutView(_Loadout, BotLayoutView):
+    """The loadout as /ship-loadout posts it, laid out (the owner's pick, layout C, 2026-10-07):
+    the header, "Upgrades" and "Keeping stock" in a container divided by lines, the buttons
+    under it. The whole message is this view, so render() rebuilds its items."""
+    # Under Discord's 4,000 characters for a layout's text, with room to spare.
+    PAGE_BUDGET = LAYOUT_TEXT_LIMIT - 200
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(timeout=LOADOUT_IDLE_SECONDS)
+        self._start(*args, **kwargs)
+        self.add_all_button = discord.ui.Button(label="Add all to shopping list", style=discord.ButtonStyle.success)
+        self.add_all_button.callback = self.add_all
+        self.done = _LoadoutDoneStub(self.owner_id)
+        self.repick()
+
+    def render(self) -> None:
+        self.clear_items()
+        container = discord.ui.Container(accent_colour=discord.Colour.green())
+        for number, block in enumerate(self.page_blocks()):
+            if number:
+                container.add_item(discord.ui.Separator())
+            container.add_item(discord.ui.TextDisplay(block))
+        self.add_item(container)
+        if self.expired:
+            self.add_item(discord.ui.TextDisplay(LOADOUT_EXPIRED_NOTE))
+        self.add_item(discord.ui.ActionRow(*(_ProfileButton(self, profile) for profile in PROFILES)))
+        paging = [_LoadoutPageButton(self, -1), _LoadoutPageButton(self, +1)] if len(self.pages) > 1 else []
+        self._show_buttons()
+        self.add_item(discord.ui.ActionRow(self.add_all_button, self.done, *paging))
+
+    def _message(self) -> dict:
+        return {"view": self}
+
+    def as_text(self) -> "LoadoutView":
+        """The same loadout, on the same profile, as plain text: for when Discord refuses the
+        layout."""
+        return LoadoutView(**self._settings, profile=self.profile)
+
+
+class LoadoutView(_Loadout, BotView):
+    """The loadout as plain text, the same blocks as LoadoutLayoutView, paged to a message's
+    2,000 characters: what's posted when Discord refuses the layout."""
+    PAGE_BUDGET = MESSAGE_LIMIT
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(timeout=LOADOUT_IDLE_SECONDS)
+        self._start(*args, **kwargs)
+        self.add_item(_LoadoutDoneStub(self.owner_id))
+        self.repick()
+
+    def render(self) -> None:
+        for child in [c for c in self.children if isinstance(c, (_ProfileButton, _LoadoutPageButton))]:
+            self.remove_item(child)
+        for profile in PROFILES:
+            self.add_item(_ProfileButton(self, profile))
+        if len(self.pages) > 1:
+            self.add_item(_LoadoutPageButton(self, -1))
+            self.add_item(_LoadoutPageButton(self, +1))
+        self._show_buttons()
+
+    def _message(self) -> dict:
+        return {"content": self.text()[:MESSAGE_LIMIT], "view": self}
+
+    @discord.ui.button(label="Add all to shopping list", style=discord.ButtonStyle.success, row=1)
+    async def add_all_button(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        await self.add_all(interaction)
 
 
 def loadout_done_custom_id(owner_id: int) -> str:
@@ -1202,7 +1275,7 @@ class LoadoutDoneButton(discord.ui.DynamicItem[discord.ui.Button], template=LOAD
 
 class _ProfileButton(discord.ui.Button):
     """One per profile; the one showing is highlighted and can't be pressed again."""
-    def __init__(self, parent: LoadoutView, profile: str) -> None:
+    def __init__(self, parent: _Loadout, profile: str) -> None:
         current = profile == parent.profile
         super().__init__(label=profile, style=discord.ButtonStyle.primary if current else discord.ButtonStyle.secondary,
                          row=0, disabled=current)
@@ -1214,7 +1287,7 @@ class _ProfileButton(discord.ui.Button):
 
 
 class _LoadoutPageButton(discord.ui.Button):
-    def __init__(self, parent: LoadoutView, delta: int) -> None:
+    def __init__(self, parent: _Loadout, delta: int) -> None:
         at_edge = parent.page == 0 if delta < 0 else parent.page >= len(parent.pages) - 1
         super().__init__(label="◀ Previous" if delta < 0 else "Next ▶", style=discord.ButtonStyle.secondary,
                          row=1, disabled=at_edge)
@@ -1294,7 +1367,7 @@ class ShipPartsFinder(commands.Cog):
         # /ship-loadout: see _vehicle_stock_tree.
         self._stock_trees: dict[int, tuple[float, dict[str, str], list[ShipPort]]] = {}
         # Live loadout views by message id, so Done can stop the one it removes.
-        self._loadouts: dict[int, LoadoutView] = {}
+        self._loadouts: dict[int, _Loadout] = {}
         if start_refresh:
             self.refresh_reference.start()
 
@@ -1895,22 +1968,29 @@ class ShipPartsFinder(commands.Cog):
             )
             return
         try:
-            view.message = await thread.send(content=view.text(), view=view, allowed_mentions=NO_MENTIONS)
-            self._loadouts[view.message.id] = view
-        except discord.HTTPException:
-            logger.exception("Could not post a ship loadout in thread %s", thread.id)
+            view.message = await thread.send(view=view, allowed_mentions=NO_MENTIONS)
+        except discord.HTTPException as exc:
+            # The same loadout as plain text, before giving up.
+            logger.warning("Discord refused the loadout layout (%s); sending text", exc)
             view.stop()
-            await interaction.followup.send(
-                f"I couldn't post the loadout in {thread.mention}. Please try again.", ephemeral=True,
-            )
-            return
+            view = view.as_text()
+            try:
+                view.message = await thread.send(content=view.text(), view=view, allowed_mentions=NO_MENTIONS)
+            except discord.HTTPException:
+                logger.exception("Could not post a ship loadout in thread %s", thread.id)
+                view.stop()
+                await interaction.followup.send(
+                    f"I couldn't post the loadout in {thread.mention}. Please try again.", ephemeral=True,
+                )
+                return
+        self._loadouts[view.message.id] = view
         await interaction.followup.send(
             f"Posted a **{profile}** loadout for **{vehicle.get('name')}** in {thread.mention}.", ephemeral=True,
         )
 
     async def _build_loadout(
         self, vehicle: dict, origin: tuple[int, str] | None, profile: str, owner_id: int,
-    ) -> LoadoutView | str:
+    ) -> LoadoutLayoutView | str:
         """A loadout view for one ship, or the message to show instead. Every lookup shares
         one deadline (LOADOUT_TIME_BUDGET_SECONDS)."""
         deadline = time.monotonic() + LOADOUT_TIME_BUDGET_SECONDS
@@ -1931,7 +2011,7 @@ class ShipPartsFinder(commands.Cog):
             candidates, parts_unanswered = await self._loadout_candidates(groups, origin, deadline)
         except UexApiError as exc:
             return describe_uex_api_error(exc)
-        return LoadoutView(
+        return LoadoutLayoutView(
             self, vehicle, origin, groups, candidates, owner_id=owner_id, profile=profile,
             stock_unanswered=stock_unanswered, slots_missing=slots_missing, parts_unanswered=parts_unanswered,
             turrets_unanswered=turrets_unanswered,

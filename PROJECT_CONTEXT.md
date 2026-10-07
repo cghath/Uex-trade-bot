@@ -4889,6 +4889,43 @@ they're in sync).
        the owner's testing: `/blueprint-search` and `/ship-parts-finder` have no use by
        another player.
      - Tests in `tests/test_command_usage.py`; 10 mutations, all caught.
+142. **`/ship-loadout` is a layout: the total up top, then "Upgrades", then "Keeping stock".**
+     The next section of the message-presentation pass, picked by real usage (entry 141: the
+     most-used command not yet redone; `/ship-parts-finder` has no use by another player).
+     - **Mockups first** (real data, 2026-10-04, the Cutlass Black and the Polaris as the
+       stress case): today, A (by kind, slot by slot), B (a shopping trip, by place), C
+       (compact, before → after, shops in a list at the end). The owner picked C with each
+       part's shop under it rather than in a list, and the Polaris the same way.
+     - **What it says** (`bot/uex/ship_loadout.py`): a header (ship · profile, the profile's
+       blurb, any wiki notes, then "**1,950,910 aUEC** for 12 parts · ⚡ 20 power pips",
+       `summary_line`). "Upgrades" (`upgrade_entry`): the slot → the part · its price, the
+       figure the profile chose it by as `before → after` in grey tags (`stat_change`; a figure
+       that didn't change is said once, "1,266 DPS"), the armor-gate or stock-unknown note, and
+       its shop in small print. "Keeping stock" (`kept_sections`): each reason said once over
+       the slots it covers; slots with the same stock part, figure and reason are one line
+       ("4x S10 Torpedo"). `pick_line`, `total_line`, `paginate_lines`, `stat_vs_stock` and
+       `PowerTotal.line` are gone (`PowerTotal.text` replaces the last).
+     - **Projectile speed** is shown on every gun beside DPS and alpha (`projectile_speed`,
+       "`1,480 → 1,184` m/s"), the owner's ask: "velocity is a pretty important stat for
+       weapons". Shown only, never ranked by - the owner's pick of three (show it; a tie-breaker
+       inside the 5% DPS band; a speed floor) after seeing the M5A replace the Panther with
+       rounds 20% slower. Compared figure by figure, so a stock gun with no speed on the wiki
+       still gets its DPS and alpha compared.
+     - **A wording bug fixed on the way:** the header said "ties go to the cheaper part", but
+       `rank_candidates` breaks ties on a shield's regen, then the tougher component, and only
+       then the shop - the Balanced Cutlass got the 172,800 Snowpack over the 44,000 IceDive,
+       both 46 cooling segments. It now says "ties go to the tougher part, then the cheaper one"
+       (or "then the shop nearest X").
+     - **Views** (`bot/cogs/ship_parts_finder.py`): `_Loadout` holds what both share (picks,
+       paging, profile switch, Add all, idle). `LoadoutLayoutView` is what's posted: the blocks
+       in a green container, the idle note under it when idle, the profile buttons, then Add
+       all, Done and the page buttons. `LoadoutView` is the same loadout as plain text, sent
+       when Discord refuses the layout (`as_text`, same profile). Pages are built by
+       `paginate_loadout` to each view's budget (3,800 characters laid out, 2,000 as text);
+       the Polaris used to take 2 pages and now takes one (1,154 characters, 14 components).
+     - Tests in `tests/test_ship_loadout.py` and `tests/test_ship_loadout_command.py`; 14
+       mutations, all caught. Rendered offline from live wiki/UEX data for the Cutlass Black
+       (Balanced, Budget), the Polaris and the Gladius (Stealth): matches the approved board.
 
 ## Where to look for what
 

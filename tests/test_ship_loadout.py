@@ -30,11 +30,11 @@ from bot.uex.ship_loadout import (
     is_scattergun,
     locked_turret_gun_ports,
     is_gun_mount,
+    kept_sections,
     loadout_gun_ports,
     merit_key,
-    paginate_lines,
+    paginate_loadout,
     pick_for_slot,
-    pick_line,
     power_total,
     profile_stat,
     purchases,
@@ -42,11 +42,12 @@ from bot.uex.ship_loadout import (
     same_part,
     shown_stat,
     slot_category,
+    stat_change,
     stat_text,
-    stat_vs_stock,
     stock_uuids_by_port,
+    summary_line,
     total_cost,
-    total_line,
+    upgrade_entry,
     value_per_auec,
 )
 from bot.uex.ship_parts import ShipPort
@@ -322,7 +323,7 @@ def test_only_scatterguns_for_sale_keeps_stock_and_says_why(profile):
     pick = pick_for_slot(_group("Guns", OMNISKY), [_sold(DOMINANCE, 10)], profile)
     assert pick.part is None and pick.keeps_stock and pick.reason == ONLY_SCATTERGUNS
     empty = pick_for_slot(_group("Guns"), [_sold(DOMINANCE, 10)], profile)
-    assert pick_line(empty, profile).endswith("nothing to recommend - the only guns sold for it are scatterguns")
+    assert kept_sections([empty], profile) == ["**The only guns sold for it are scatterguns**\n-# S1 Slot 0 Gun · empty slot"]
 
 
 @pytest.mark.parametrize("profile", [BALANCED, STEALTH, TANK])
@@ -369,13 +370,12 @@ def test_a_stock_gun_within_the_band_with_more_alpha_is_kept():
 
 
 def test_a_gun_line_shows_dps_and_alpha():
-    assert stat_vs_stock(AD4B, REVENANT_WITH_ALPHA, "Guns", BALANCED) == (
-        "1,266 DPS / 84.4 alpha (was 1,266 DPS / 63.3 alpha stock)")
+    assert stat_change(AD4B, REVENANT_WITH_ALPHA, "Guns", BALANCED) == "1,266 DPS · `63.3 → 84.4` alpha"
     assert shown_stat(DOMINANCE, "Guns", STEALTH) == ("DPS / alpha", "930 DPS / 1,116 alpha")
-    keep = pick_line(pick_for_slot(_group("Guns", AD4B), [_sold(REVENANT_WITH_ALPHA, 1)], BALANCED), BALANCED)
-    assert "keep stock **AD4B Ballistic Gatling** (1,266 DPS / 84.4 alpha)" in keep
-    # A gun with no alpha figure shows DPS alone, and isn't compared with a stock one shown by both.
-    assert stat_vs_stock(_gun("X", 900), REVENANT_WITH_ALPHA, "Guns", BALANCED) == "900 DPS"
+    keep = kept_sections([pick_for_slot(_group("Guns", AD4B), [_sold(REVENANT_WITH_ALPHA, 1)], BALANCED)], BALANCED)
+    assert "-# S1 Slot 0 Gun · AD4B Ballistic Gatling · 1,266 DPS / 84.4 alpha" in keep[0]
+    # A gun with no alpha figure is still compared on DPS; the stock gun's alpha isn't shown.
+    assert stat_change(_gun("X", 900), REVENANT_WITH_ALPHA, "Guns", BALANCED) == "`1,266 → 900` DPS"
 
 
 # -- Guns inside a locked turret (the Idris-M's) ------------------------------------------------
@@ -521,13 +521,13 @@ def test_a_gun_that_gets_through_heavy_fighter_armor_ranks_first(profile):
 def test_a_stock_gun_that_bounces_off_is_replaced_and_the_line_says_why():
     pick = pick_for_slot(_group("Guns", MANTIS_4101), [_sold(M5A_4101, 69137)], BALANCED)
     assert pick.part["name"] == "M5A Cannon"
-    assert "which can't get through heavy-fighter armor" in pick_line(pick, BALANCED)
+    assert upgrade_entry(pick, BALANCED).splitlines()[1].endswith(" — stock can't get through heavy-fighter armor")
 
 
 def test_the_gate_note_only_appears_when_the_gate_decided():
     stock = _typed_gun("Stock", 500, energy=100)
     pick = pick_for_slot(_group("Guns", stock), [_sold(M5A_4101, 1)], BALANCED)
-    assert pick.part["name"] == "M5A Cannon" and "heavy-fighter" not in pick_line(pick, BALANCED)
+    assert pick.part["name"] == "M5A Cannon" and "heavy-fighter" not in upgrade_entry(pick, BALANCED)
 
 
 def test_guns_on_the_same_side_of_the_gate_still_go_by_dps_and_the_band():
@@ -589,8 +589,8 @@ def test_a_pdc_slot_keeps_its_stock_turret_in_every_profile(profile):
                                                                "bottom_left", "rear_bottom", "rear_top")])
     pick = pick_for_slot(group, [_sold(PEPPERBOX, 1)], profile)
     assert pick.part is None and pick.keeps_stock and pick.reason == POINT_DEFENSE
-    assert pick_line(pick, profile) == ('**6x S2 PDC** · keep stock **M2C "Swarm"** - point defense: it shoots down '
-                                        "incoming missiles and never runs out of ammo")
+    assert kept_sections([pick], profile) == [
+        '**Point defense** · shoots down incoming missiles, never runs out of ammo\n-# 6x S2 PDC · M2C "Swarm"']
 
 
 # -- Missile racks: the ship's own are kept ---------------------------------------------------
@@ -609,13 +609,15 @@ def test_a_missile_rack_keeps_the_ships_own_in_every_profile(profile):
     pick = pick_for_slot(group, [_sold(MSD_414, 17846), _sold(MSD_423, 11899)], profile)
     assert pick.part is None and pick.keeps_stock and pick.reason == STOCK_RACKS
     # What it holds, whatever the profile ranks by (not Tank's component HP).
-    assert pick_line(pick, profile).endswith(f"keep stock **MSD-442 Missile Rack** (4x S2 missiles) - {STOCK_RACKS}")
+    assert kept_sections([pick], profile) == [
+        "**Missile racks** · more missiles or bigger ones is your call\n"
+        "-# 2x S4 Left Missile Rack · MSD-442 Missile Rack · 4x S2 missiles"]
 
 
 def test_a_rack_whose_stock_part_is_unknown_is_still_kept_never_swapped_blind():
     pick = pick_for_slot(_group("Missile Racks", None, port=RACK_PORT, stock_unknown=True), [_sold(MSD_414, 1)], BALANCED)
     assert pick.part is None and pick.reason == STOCK_RACKS
-    assert pick_line(pick, BALANCED).endswith(f"keep stock - {STOCK_RACKS}")
+    assert kept_sections([pick], BALANCED)[0].endswith("-# S4 Left 0 Missile Rack · stock part")
 
 
 def test_an_empty_rack_slot_still_gets_the_best_rack():
@@ -1010,7 +1012,7 @@ def _titan_stock_picks():
 
 def test_titan_stock_power_total_is_the_plants_output():
     assert power_total(_titan_stock_picks()) == PowerTotal(15, 1, 0)
-    assert power_total(_titan_stock_picks()).line() == "⚡ **15** power pips in total, from the power plant."
+    assert power_total(_titan_stock_picks()).text() == "⚡ 15 power pips"
 
 
 def test_the_parts_maximum_draw_is_never_compared():
@@ -1021,7 +1023,7 @@ def test_the_parts_maximum_draw_is_never_compared():
     greedy = {**BULWARK, "resource_network": {"usage": {"power": {"min": 0, "max": 500}}}}
     picks[2] = _keep("Shield Generators", greedy, 2)
     assert power_total(picks) == power_total(_titan_stock_picks())
-    assert "22" not in power_total(_titan_stock_picks()).line()
+    assert "22" not in power_total(_titan_stock_picks()).text()
 
 
 def test_a_bought_plant_counts_instead_of_the_stock_one():
@@ -1035,7 +1037,7 @@ def test_several_plants_add_up_and_only_plants_count():
     total = power_total([_keep("Power Plants", _plant("Big", 15), 2), _keep("Coolers", BRACER, 2),
                          _keep("Shield Generators", BULWARK)])
     assert total == PowerTotal(30, 2, 0)
-    assert total.line() == "⚡ **30** power pips in total, from the 2 power plants."
+    assert total.text() == "⚡ 30 power pips"
 
 
 def test_power_generation_falls_back_to_the_resource_network_figure():
@@ -1048,10 +1050,9 @@ def test_a_plant_with_no_output_figure_makes_the_total_a_lower_bound_not_a_guess
     no_figure = {**_plant("P", 4), "power_plant": {}, "resource_network": {}}
     total = power_total([_keep("Power Plants", ENDURANCE), _keep("Power Plants", no_figure)])
     assert total == PowerTotal(15, 2, 1)
-    assert total.line() == ("⚡ At least **15** power pips in total: the wiki has no output figure for 1 of the "
-                            "2 power plants.")
-    assert power_total([_keep("Power Plants", no_figure)]).line() == (
-        "⚡ Total power pips unknown: the wiki has no output figure for the power plant.")
+    assert total.text() == "⚡ at least 15 power pips: no output figure for 1 of the 2 power plants"
+    assert power_total([_keep("Power Plants", no_figure)]).text() == (
+        "⚡ power pips unknown: no output figure for the power plant")
 
 
 def test_a_stock_plant_that_failed_to_load_is_unknown_not_zero():
@@ -1060,8 +1061,8 @@ def test_a_stock_plant_that_failed_to_load_is_unknown_not_zero():
 
 
 def test_no_power_plant_means_no_power_line():
-    assert power_total([_keep("Coolers", BRACER), _keep("Radar", ECOUTER)]).line() is None
-    assert power_total([_keep("Power Plants", None)]).line() is None, "an empty slot nothing is bought for"
+    assert power_total([_keep("Coolers", BRACER), _keep("Radar", ECOUTER)]).text() is None
+    assert power_total([_keep("Power Plants", None)]).text() is None, "an empty slot nothing is bought for"
 
 
 # -- What each line shows ------------------------------------------------------------------------
@@ -1097,22 +1098,37 @@ def test_stat_text(label, value, text):
     assert stat_text(label, value) == text
 
 
-def test_stat_vs_stock():
-    assert stat_vs_stock(_gun("Mantis", 853.3), OMNISKY, "Guns", BALANCED) == "853 DPS (was 547 DPS stock)"
-    assert stat_vs_stock(_plant("Quiet", 12, em=3000), ENDURANCE, "Power Plants", STEALTH) == "EM 3,000 (was EM 7,430 stock)"
-    assert stat_vs_stock(_gun("Mantis", 853.3), None, "Guns", BALANCED) == "853 DPS"
-    assert stat_vs_stock({"name": "x"}, OMNISKY, "Guns", BALANCED) == ""
+def test_a_gun_shows_its_projectile_speed_beside_dps_and_alpha():
+    """The owner's call (2026-10-07): velocity matters for landing hits. Shown, compared with
+    the stock gun's, never ranked by."""
+    fast = {**_gun("Fast", 900, alpha=60), "vehicle_weapon": {"damage": {"burst": 900, "alpha_total": 60},
+                                                             "ammunition": {"speed": 1332}}}
+    slow = {**_gun("Slow", 700, alpha=40), "vehicle_weapon": {"damage": {"burst": 700, "alpha_total": 40},
+                                                             "ammunition": {"speed": 1184}}}
+    assert shown_stat(fast, "Guns", BALANCED) == ("DPS / alpha / speed", "900 DPS / 60 alpha / 1,332 m/s")
+    assert stat_change(fast, slow, "Guns", BALANCED) == "`700 → 900` DPS · `40 → 60` alpha · `1,184 → 1,332` m/s"
+    # A stock gun with no speed on the wiki: the rest is still compared, the speed shown alone.
+    assert stat_change(fast, _gun("Old", 700, alpha=40), "Guns", BALANCED) == "`700 → 900` DPS · `40 → 60` alpha · 1,332 m/s"
+    assert merit_key(fast, "Guns", BALANCED) == merit_key({**fast, "vehicle_weapon": {
+        "damage": {"burst": 900, "alpha_total": 60}, "ammunition": {"speed": 1}}}, "Guns", BALANCED), "never ranked by"
+
+
+def test_stat_change():
+    assert stat_change(_gun("Mantis", 853.3), OMNISKY, "Guns", BALANCED) == "`547 → 853` DPS"
+    assert stat_change(_plant("Quiet", 12, em=3000), ENDURANCE, "Power Plants", STEALTH) == "EM `7,430 → 3,000`"
+    assert stat_change(_gun("Mantis", 853.3), None, "Guns", BALANCED) == "853 DPS"
+    assert stat_change({"name": "x"}, OMNISKY, "Guns", BALANCED) == ""
     # A stock part missing the figure the pick was chosen by isn't compared on a different one.
     no_em_stock = {**BULWARK, "emission": None}
-    assert stat_vs_stock(_shield("Quiet", 2000, em=900), no_em_stock, "Shield Generators", STEALTH) == "EM 900"
+    assert stat_change(_shield("Quiet", 2000, em=900), no_em_stock, "Shield Generators", STEALTH) == "EM 900"
 
 
 def test_a_stealth_cooler_shows_em_and_ir_together():
     """EM decides, but real coolers tie on it often and then IR decides: showing EM alone
     would read 'EM 1,490 (was EM 1,490 stock)' for a real upgrade."""
     assert shown_stat(BRACER, "Coolers", STEALTH) == ("EM / IR", "EM 1,490 / IR 7,260")
-    assert stat_vs_stock(_cooler("Ultra-Flow", 34, ir=7130, em=1490), BRACER, "Coolers", STEALTH) == (
-        "EM 1,490 / IR 7,130 (was EM 1,490 / IR 7,260 stock)")
+    assert stat_change(_cooler("Ultra-Flow", 34, ir=7130, em=1490), BRACER, "Coolers", STEALTH) == (
+        "EM 1,490 · IR `7,260 → 7,130`")
     # Only a Stealth cooler: other profiles, and other Stealth components, show the one figure.
     assert shown_stat(BRACER, "Coolers", BALANCED) == ("cooling", "34 cooling segments")
     assert shown_stat(BULWARK, "Shield Generators", STEALTH) == ("EM", "EM 1,490")
@@ -1120,27 +1136,56 @@ def test_a_stealth_cooler_shows_em_and_ir_together():
     # part shown by both.
     no_em = {**BRACER, "emission": {"em_max": None, "ir": 7130}}
     assert shown_stat(no_em, "Coolers", STEALTH) == ("IR", "IR 7,130")
-    assert stat_vs_stock(no_em, BRACER, "Coolers", STEALTH) == "IR 7,130"
+    assert stat_change(no_em, BRACER, "Coolers", STEALTH) == "IR 7,130"
+
+
+def test_kept_slots_with_the_same_part_figure_and_reason_are_one_line():
+    """The Polaris's four torpedo racks (each its own slot group, left/right and upper/lower)
+    read as one line, counted, in the words every slot's name shares."""
+    names = ["hardpoint_torpedo_right_upper", "hardpoint_torpedo_left_lower", "hardpoint_torpedo_right_lower"]
+    picks = [pick_for_slot(_group("Missile Racks", MSD_442, port=_port(name, "MissileLauncher", 4), names=[name]), [],
+                           BALANCED) for name in names]
+    other = pick_for_slot(_group("Missile Racks", MSD_423, port=_port("hardpoint_rack", "MissileLauncher", 4),
+                                 names=["hardpoint_rack"]), [], BALANCED)
+    (section,) = kept_sections([*picks, other], BALANCED)
+    assert section.splitlines() == [
+        "**Missile racks** · more missiles or bigger ones is your call",
+        "-# 3x S4 Torpedo · MSD-442 Missile Rack · 4x S2 missiles",
+        "-# S4 Rack · MSD-423 Missile Rack · 2x S3 missiles",
+    ]
+
+
+def test_an_override_reason_heads_its_own_section():
+    pick = _keep("Coolers", BRACER, 2)
+    sections = kept_sections([pick, _keep("Radar", ECOUTER)], BALANCED, ["the wiki didn't respond", None])
+    assert sections[0].startswith("**The wiki didn't respond**\n-# 2x S1 Slot · Bracer")
+    assert sections[1].startswith("**No shop sells a part that fits**\n-# S1 Slot 0 · Ecouter")
 
 
 def test_keeping_a_stealth_cooler_shows_both_figures():
-    line = pick_line(_keep("Coolers", BRACER, 2), STEALTH)
-    assert "keep stock **Bracer** (EM 1,490 / IR 7,260)" in line
+    assert "-# 2x S1 Slot · Bracer · EM 1,490 / IR 7,260" in kept_sections([_keep("Coolers", BRACER, 2)], STEALTH)[0]
 
 
-def test_total_line_counts_one_part_in_the_singular():
+def test_summary_line_counts_one_part_in_the_singular():
     buy = pick_for_slot(_group("Shield Generators", BULWARK), [_sold(_shield("FR-66", 3300), 30000)], BALANCED)
-    assert total_line([buy]) == "**Total: 30,000 aUEC** for 1 part"
+    assert summary_line([buy]) == "**30,000 aUEC** for 1 part"
     two = pick_for_slot(_group("Shield Generators", BULWARK, count=2), [_sold(_shield("FR-66", 3300), 30000)], BALANCED)
-    assert total_line([two]) == "**Total: 60,000 aUEC** for 2 parts"
+    assert summary_line([two]) == "**60,000 aUEC** for 2 parts"
+    assert summary_line([_keep("Power Plants", ENDURANCE)]) == (
+        "**Nothing to buy**: every slot keeps what it has · ⚡ 15 power pips")
 
 
-def test_paginate_lines_keeps_whole_lines_within_the_budget():
-    # Each line costs its length plus a newline.
-    assert paginate_lines([], 10) == [[]]
-    assert paginate_lines(["abcd", "efgh"], 10) == [["abcd", "efgh"]], "exactly the budget stays on one page"
-    assert paginate_lines(["abcd", "efghi"], 10) == [["abcd"], ["efghi"]], "one more character starts a page"
-    assert paginate_lines(["a" * 30, "b"], 10) == [["a" * 30], ["b"]], "an oversize line gets its own page"
+def test_paginate_loadout_keeps_whole_entries_within_the_budget_and_the_header_on_every_page():
+    head = "## Ship"
+    one = paginate_loadout(head, ["a" * 10], ["b" * 10], 1000)
+    assert one == [(head, "### Upgrades\n" + "a" * 10, "### Keeping stock\n" + "b" * 10)]
+    assert paginate_loadout(head, [], [], 1000) == [(head,)], "always one page"
+    pages = paginate_loadout(head, ["a" * 40, "c" * 40], ["b" * 40], 80)
+    assert pages == [(head, "### Upgrades\n" + "a" * 40), (head, "### Upgrades\n" + "c" * 40),
+                     (head, "### Keeping stock\n" + "b" * 40)]
+    assert all(len("\n\n".join(page)) <= 80 for page in pages)
+    # An entry too long for any page gets one of its own rather than being cut.
+    assert paginate_loadout(head, ["x" * 500], [], 80) == [(head, "### Upgrades\n" + "x" * 500)]
 
 
 def test_profile_blurbs_name_the_stat_not_the_code_term():
