@@ -4863,6 +4863,32 @@ they're in sync).
        groups); the Parallax uses 645 of 4,000 characters and 18 of 40 components.
      - Tests in `tests/test_blueprint_crafting.py` and `tests/test_blueprint_crafting_cog.py`
        (the paging tests now run against both views); 9 mutations, all caught.
+141. **`/command-usage` shows other players' usage, most used first, and who ran it.** The
+     owner, on the old report: "this is a bit confusing ... take the mess at the bottom out and
+     just put real usage by users other than me at the focus".
+     - **What was wrong.** A monospace table led with the 15 *least*-used commands (all 0 real
+       uses, each with the owner's own count), then a list of every command never run. It
+       passed 1,900 characters, so the cut fell before "Most used", the one section that
+       answered the question. The owner never saw it.
+     - **What it says now** (`usage_report`, `bot/cogs/diagnostics.py`): a plain message. A
+       heading, then how many players, uses and commands, then each command other players
+       ran, most uses first (a tie goes to the most recent). Each line gives its uses, the
+       last day it was used and who ran it: one name, or up to four with their counts and
+       "+N more". The commands nobody else has run are one count, not a list. A retired
+       command's usage is one small line. No owner counts anywhere.
+     - **Data** (`Database.get_real_command_usage`): every (command, user) row except the
+       owner's, in one query. A row from before usernames were tracked borrows the same
+       player's name from another row: the unnamed `/multi-stop-route` use is الوافل [STD].
+       The `command:` drill-down (links to each player) is unchanged.
+     - Names are the players' own text: mentions and markdown escaped, wrapped in Unicode
+       isolates (U+2068/U+2069) so a right-to-left name doesn't reorder the line, and sent
+       with no mentions allowed. The report stops adding commands before 1,900 characters and
+       says how many it left out.
+     - On the Pi's data (2026-10-06): 5 players, 23 uses, 8 of 66 commands; `/multi-stop-route`
+       leads with 9 uses from 3 players. Usage figures quoted earlier this session counted
+       the owner's testing: `/blueprint-search` and `/ship-parts-finder` have no use by
+       another player.
+     - Tests in `tests/test_command_usage.py`; 10 mutations, all caught.
 
 ## Where to look for what
 
