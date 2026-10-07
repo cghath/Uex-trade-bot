@@ -215,6 +215,11 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
   the other route commands (`/best-route`, `/top-routes`, `/mixed-routes`), and alerts and DMs.
   Pick by real usage (`/command-usage`, entry 141).
 
+- [x] **What an ore crafts**: Shipped 2026-10-07 as `/blueprint-search material:` (PR #130,
+  PROJECT_CONTEXT.md entry 143): the blueprints a player can get that use an ore or mineral,
+  by category, armor as sets, each opening its usual reply. Open question from the owner: why
+  917 of the wiki's 1,606 blueprints have no contract and aren't unlocked by default.
+
 - [x] **Saved Trading Preferences**: Shipped 2026-09-06. `/set-trading-preferences`,
   `/clear-trading-preferences`, `/my-trading-preferences` store per-user defaults for
   space-only terminals, capital-ship access, auto-loading, preferred system, and risk

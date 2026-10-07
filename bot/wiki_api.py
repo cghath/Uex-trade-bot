@@ -24,6 +24,8 @@ logger = logging.getLogger("uexbot.wiki_api")
 BASE_URL = "https://api.star-citizen.wiki/api"
 USER_AGENT = "uex-trading-bot (Discord bot blueprint lookups; https://github.com/cghath/Uex-trade-bot)"
 PAGE_SIZE = 100
+# Every blueprint's recipe (1,606 on 4.10.1) in 9 requests rather than 17: the API serves 200 a page.
+BLUEPRINT_PAGE_SIZE = 200
 MAX_ATTEMPTS = 3
 MAX_RETRY_AFTER_SECONDS = 30.0
 # A safety valve: 786 blueprint missions are ~8 pages today. A response claiming wildly more is a bug
@@ -169,18 +171,24 @@ class WikiApiClient:
         return last_page, total, per_page
 
     async def get_blueprint_missions(self) -> list[dict[str, Any]]:
-        """Every mission that awards blueprints, or WikiApiError - never a partial list. Completeness
-        is checked against the API's own pagination `meta` (which must be present, self-consistent
-        and unchanged from page to page), so a page that silently returned short, a response with no
+        """Every mission that awards blueprints, or WikiApiError - never a partial list (_crawl)."""
+        return await self._crawl("/missions", {"filter[has_blueprints]": "1"}, PAGE_SIZE)
+
+    async def get_blueprints(self) -> list[dict[str, Any]]:
+        """Every blueprint with its recipe's ingredients and what it makes (`output`), or
+        WikiApiError - never a partial list (_crawl). What /blueprint-search material: reads."""
+        return await self._crawl("/blueprints", {}, BLUEPRINT_PAGE_SIZE)
+
+    async def _crawl(self, path: str, params: dict[str, Any], page_size: int) -> list[dict[str, Any]]:
+        """Every row of a paged listing, or WikiApiError - never a partial list. Completeness is
+        checked against the API's own pagination `meta` (which must be present, self-consistent and
+        unchanged from page to page), so a page that silently returned short, a response with no
         meta, or a pagination shift mid-crawl can't be mistaken for the whole set."""
-        path = "/missions"
         rows: list[dict[str, Any]] = []
         page = 1
         expected: tuple[int, int] | None = None
         while expected is None or page <= expected[0]:
-            body = await self._get_json(
-                path, {"filter[has_blueprints]": "1", "page[size]": PAGE_SIZE, "page[number]": page},
-            )
+            body = await self._get_json(path, {**params, "page[size]": page_size, "page[number]": page})
             page_rows = self._rows(body, path)
             last_page, total, per_page = self._page_meta(body, path, page)
             if expected is None:

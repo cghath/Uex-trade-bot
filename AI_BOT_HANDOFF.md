@@ -438,6 +438,11 @@ date - no open item, nothing to record here.
       `pick_line`/`total_line`/`paginate_lines`/`stat_vs_stock`/`PowerTotal.line`;
       `_Loadout`/`LoadoutLayoutView` (`bot/cogs/ship_parts_finder.py`), `LoadoutView` kept as
       the text fallback. Also the tie-break wording fix. See PROJECT_CONTEXT.md entry 142
+- [ ] PR #130 - `/blueprint-search material:` (what an ore crafts): `bot/uex/blueprint_materials.py`,
+      `bot/material_pages.py` (`MaterialUsesView`), `Blueprints.sync_recipes`/`material_uses`/
+      `open_blueprint`, `WikiApiClient.get_blueprints` (and the shared `_crawl`), tables
+      `blueprint_recipe_state`/`blueprint_outputs`/`blueprint_materials`. See PROJECT_CONTEXT.md
+      entry 143
 
 ## To port: aiv2 -> production
 

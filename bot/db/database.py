@@ -21,6 +21,7 @@ logger = logging.getLogger("uexbot.database")
 
 from bot.uex.marketplace import compute_liquidity_score
 from bot.uex.route_confidence import coalesce_report_count
+from bot.uex.blueprint_materials import BlueprintRecipe, MaterialUse
 from bot.uex.blueprints import BlueprintMission, BlueprintRef, SnapshotState
 
 # How long hourly liquidity snapshots are kept on the bot's own disk: twice the longest
@@ -767,6 +768,33 @@ CREATE TABLE IF NOT EXISTS blueprint_pool_entries (
 );
 
 CREATE INDEX IF NOT EXISTS idx_blueprint_pool_by_blueprint ON blueprint_pool_entries (blueprint_uuid);
+
+-- What every blueprint makes and the materials it takes, from the wiki API's blueprint listing - what
+-- /blueprint-search material: reads. Its own snapshot (replace_blueprint_recipes, one transaction,
+-- never patched in place) with its own state row, synced beside the contracts but apart from them, so
+-- a failure in one can't hold back or mix with the other. Every blueprint is kept; which ones a
+-- player can get is decided at read time against the contract snapshot (get_material_uses).
+CREATE TABLE IF NOT EXISTS blueprint_recipe_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    game_version TEXT NOT NULL,
+    synced_at TEXT NOT NULL,
+    blueprint_count INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS blueprint_outputs (
+    blueprint_uuid TEXT PRIMARY KEY,
+    output_name TEXT NOT NULL,
+    output_type TEXT NOT NULL DEFAULT '',
+    is_default INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS blueprint_materials (
+    blueprint_uuid TEXT NOT NULL,
+    material TEXT NOT NULL,
+    PRIMARY KEY (blueprint_uuid, material)
+);
+
+CREATE INDEX IF NOT EXISTS idx_blueprint_materials_by_material ON blueprint_materials (material);
 
 -- One row per (command, user), aggregated rather than one row per invocation - matches this
 -- project's standing preference for keeping the Pi's own storage footprint lean (see
@@ -4384,6 +4412,74 @@ class Database:
             mission_count=row["mission_count"],
             blueprint_count=row["blueprint_count"],
         )
+
+    async def replace_blueprint_recipes(
+        self, recipes: list[BlueprintRecipe], *, game_version: str, synced_at: datetime | None = None,
+    ) -> int:
+        """Replace every stored recipe with `recipes` in ONE transaction, as
+        replace_blueprint_snapshot does for contracts: a failure anywhere leaves the previous
+        recipes intact, and an empty list is refused outright. Returns how many were stored."""
+        if not recipes:
+            raise ValueError("refusing to replace the blueprint recipes with zero blueprints")
+        stamp = (synced_at or datetime.now(timezone.utc)).replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S")
+        async with self.connect() as db:
+            try:
+                await db.execute("DELETE FROM blueprint_materials")
+                await db.execute("DELETE FROM blueprint_outputs")
+                await db.executemany(
+                    "INSERT INTO blueprint_outputs (blueprint_uuid, output_name, output_type, is_default) VALUES (?, ?, ?, ?)",
+                    [(r.uuid, r.name, r.output_type, 1 if r.is_default else 0) for r in recipes],
+                )
+                await db.executemany(
+                    "INSERT INTO blueprint_materials (blueprint_uuid, material) VALUES (?, ?)",
+                    [(r.uuid, material) for r in recipes for material in r.materials],
+                )
+                await db.execute(
+                    """INSERT INTO blueprint_recipe_state (id, game_version, synced_at, blueprint_count)
+                       VALUES (1, ?, ?, ?)
+                       ON CONFLICT(id) DO UPDATE SET game_version = excluded.game_version,
+                           synced_at = excluded.synced_at, blueprint_count = excluded.blueprint_count""",
+                    (game_version, stamp, len(recipes)),
+                )
+                await db.commit()
+            except BaseException:
+                await db.rollback()
+                raise
+        return len(recipes)
+
+    async def get_blueprint_recipe_state(self) -> tuple[str, datetime, int] | None:
+        """(game version, synced at, blueprint count) of the stored recipes, or None."""
+        async with self.connect() as db:
+            row = await (await db.execute(
+                "SELECT game_version, synced_at, blueprint_count FROM blueprint_recipe_state WHERE id = 1")).fetchone()
+        if row is None:
+            return None
+        return row["game_version"], datetime.strptime(row["synced_at"], "%Y-%m-%d %H:%M:%S"), row["blueprint_count"]
+
+    # A blueprint a player can get: one a stored contract awards, or one unlocked by default.
+    _OBTAINABLE = ("(o.is_default = 1 OR o.blueprint_uuid IN (SELECT blueprint_uuid FROM blueprint_pool_entries))")
+
+    async def get_material_names(self) -> list[tuple[str, int]]:
+        """Every material used in a blueprint a player can get, with how many such blueprints
+        use it, most-used first - the material option's autocomplete."""
+        async with self.connect() as db:
+            rows = await (await db.execute(
+                f"""SELECT m.material, COUNT(*) AS uses FROM blueprint_materials m
+                    JOIN blueprint_outputs o ON o.blueprint_uuid = m.blueprint_uuid
+                    WHERE {self._OBTAINABLE}
+                    GROUP BY m.material COLLATE NOCASE ORDER BY uses DESC, m.material""")).fetchall()
+        return [(row["material"], row["uses"]) for row in rows]
+
+    async def get_material_uses(self, material: str) -> list[MaterialUse]:
+        """The blueprints a player can get that use `material` (matched ignoring case), by name."""
+        async with self.connect() as db:
+            rows = await (await db.execute(
+                f"""SELECT o.blueprint_uuid, o.output_name, o.output_type, o.is_default FROM blueprint_materials m
+                    JOIN blueprint_outputs o ON o.blueprint_uuid = m.blueprint_uuid
+                    WHERE m.material = ? COLLATE NOCASE AND {self._OBTAINABLE}
+                    ORDER BY o.output_name, o.blueprint_uuid""", (material,))).fetchall()
+        return [MaterialUse(row["blueprint_uuid"], row["output_name"], row["output_type"], bool(row["is_default"]))
+                for row in rows]
 
     async def get_blueprint_refs(self) -> list[BlueprintRef]:
         """Every distinct blueprint any stored mission can award - the autocomplete/matching universe."""
