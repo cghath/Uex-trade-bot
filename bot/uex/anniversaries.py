@@ -50,15 +50,15 @@ def _stamp(joined: datetime, style: str) -> str:
 
 
 def dm_text(name: str, years: int, joined: datetime) -> str:
-    return (f"**Happy anniversary, {name}.**\n"
+    return (f"🎉 **Happy anniversary, {name}!**\n"
             f"Today marks {_years(years)} since you joined **{COMMUNITY_NAME}**, on {_stamp(joined, 'D')} at "
-            f"{_stamp(joined, 't')}. Thank you for being part of the community. We're glad to have you with us.")
+            f"{_stamp(joined, 't')}. Thank you for being part of the community. We're glad to have you with us. 🥳")
 
 
 def post_text(mention: str, years: int, joined: datetime) -> str:
-    return (f"**Server anniversary**\n"
+    return (f"🎊 **Server anniversary** 🎊\n"
             f"{mention} joined **{COMMUNITY_NAME}** {_years(years)} ago today, on {_stamp(joined, 'D')}. "
-            "Thank you for being part of the community.")
+            "Thank you for being part of the community! 🎉")
 
 
 def upcoming(members: list[tuple[str, datetime]], now: datetime, count: int = 3) -> list[tuple[datetime, str, int]]:

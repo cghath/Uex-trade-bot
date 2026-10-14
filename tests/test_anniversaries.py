@@ -72,12 +72,12 @@ def test_upcoming_lists_the_next_ones_soonest_first_skipping_first_years():
 def test_the_messages_are_formal_and_name_star_tech_dynamics_in_full():
     stamp = int(JOINED.timestamp())
     assert dm_text("Shikashi", 3, JOINED) == (
-        "**Happy anniversary, Shikashi.**\n"
+        "🎉 **Happy anniversary, Shikashi!**\n"
         f"Today marks 3 years since you joined **Star Tech Dynamics**, on <t:{stamp}:D> at <t:{stamp}:t>. "
-        "Thank you for being part of the community. We're glad to have you with us.")
+        "Thank you for being part of the community. We're glad to have you with us. 🥳")
     assert post_text("<@1>", 1, JOINED) == (
-        "**Server anniversary**\n"
-        f"<@1> joined **Star Tech Dynamics** 1 year ago today, on <t:{stamp}:D>. Thank you for being part of the community.")
+        "🎊 **Server anniversary** 🎊\n"
+        f"<@1> joined **Star Tech Dynamics** 1 year ago today, on <t:{stamp}:D>. Thank you for being part of the community! 🎉")
     assert "STDynamics" not in dm_text("x", 2, JOINED) + post_text("x", 2, JOINED)
 
 
@@ -144,12 +144,12 @@ def test_a_due_member_gets_one_dm_and_one_post_that_pings_only_them_even_after_r
     first, channel, users = asyncio.run(run())
     assert first == 1
     ((dm, dm_kwargs),) = users[1].sent
-    assert dm.startswith("**Happy anniversary, Shikashi.**") and "3 years" in dm
+    assert dm.startswith("🎉 **Happy anniversary, Shikashi!**") and "3 years" in dm
     (button,) = dm_kwargs["view"].children
     assert isinstance(button, StopAnniversariesButton) and button.item.label == "Stop anniversary messages"
     assert button.custom_id == f"anniversary:stop:{GUILD_ID}"
     ((post, post_kwargs),) = channel.sent
-    assert post.startswith("**Server anniversary**\n<@1> joined **Star Tech Dynamics** 3 years ago today")
+    assert post.startswith("🎊 **Server anniversary** 🎊\n<@1> joined **Star Tech Dynamics** 3 years ago today")
     mentions = post_kwargs["allowed_mentions"]
     assert [u.id for u in mentions.users] == [1] and not mentions.everyone and not mentions.roles
     assert not users[2].sent and not users[3].sent and not users[4].sent, "a bot, a first-year and a not-due member"
@@ -261,7 +261,7 @@ def test_preview_is_owner_only_and_shows_the_owner_both_messages(tmp_path):
 
     stranger, owner, users, channel = asyncio.run(run())
     assert stranger.response.send_message.await_args.kwargs["ephemeral"] and not users[5].sent
-    assert users[1].sent[0][0].startswith("**Happy anniversary, Owner.**")
+    assert users[1].sent[0][0].startswith("🎉 **Happy anniversary, Owner!**")
     reply = owner.followup.send.await_args
     assert reply.kwargs["ephemeral"] and "<@1> joined **Star Tech Dynamics**" in reply.args[0]
     assert "**Next anniversaries**" in reply.args[0]
