@@ -796,6 +796,29 @@ CREATE TABLE IF NOT EXISTS blueprint_materials (
 
 CREATE INDEX IF NOT EXISTS idx_blueprint_materials_by_material ON blueprint_materials (material);
 
+-- Server anniversaries (bot/cogs/anniversaries.py): one row per member per anniversary, claimed
+-- before anything is sent so a restart or an overlapping check can never send one twice. The DM
+-- and the channel post are tracked apart: 'pending' is tried again on the next check (a temporary
+-- failure), 'sent' and 'skipped' (Discord refused it for good, e.g. DMs closed) are final.
+CREATE TABLE IF NOT EXISTS member_anniversaries (
+    guild_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    anniversary_year INTEGER NOT NULL,
+    years INTEGER NOT NULL,
+    dm_status TEXT NOT NULL DEFAULT 'pending' CHECK (dm_status IN ('pending', 'sent', 'skipped')),
+    post_status TEXT NOT NULL DEFAULT 'pending' CHECK (post_status IN ('pending', 'sent', 'skipped')),
+    claimed_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (guild_id, user_id, anniversary_year)
+);
+
+-- Members who pressed "Stop anniversary messages" under the DM: no DM and no post for them.
+CREATE TABLE IF NOT EXISTS anniversary_opt_outs (
+    guild_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    opted_out_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (guild_id, user_id)
+);
+
 -- One row per (command, user), aggregated rather than one row per invocation - matches this
 -- project's standing preference for keeping the Pi's own storage footprint lean (see
 -- CLAUDE.local.md) over a raw per-event log nobody needs the individual rows of; still
@@ -4480,6 +4503,48 @@ class Database:
                     ORDER BY o.output_name, o.blueprint_uuid""", (material,))).fetchall()
         return [MaterialUse(row["blueprint_uuid"], row["output_name"], row["output_type"], bool(row["is_default"]))
                 for row in rows]
+
+    # -- server anniversaries -----------------------------------------------------------------
+
+    async def claim_anniversary(self, guild_id: int, user_id: int, anniversary_year: int, years: int) -> dict[str, str]:
+        """This member's anniversary row for that year, created (both parts pending) if it
+        isn't there yet: {"dm": status, "post": status}."""
+        async with self.connect() as db:
+            await db.execute(
+                """INSERT OR IGNORE INTO member_anniversaries (guild_id, user_id, anniversary_year, years)
+                   VALUES (?, ?, ?, ?)""", (guild_id, user_id, anniversary_year, years))
+            await db.commit()
+            row = await (await db.execute(
+                """SELECT dm_status, post_status FROM member_anniversaries
+                   WHERE guild_id = ? AND user_id = ? AND anniversary_year = ?""",
+                (guild_id, user_id, anniversary_year))).fetchone()
+        return {"dm": row["dm_status"], "post": row["post_status"]}
+
+    async def set_anniversary_status(self, guild_id: int, user_id: int, anniversary_year: int, *,
+                                     part: str, status: str) -> None:
+        """Record how one part ("dm" or "post") went: 'sent', 'skipped' or still 'pending'."""
+        column = {"dm": "dm_status", "post": "post_status"}[part]
+        async with self.connect() as db:
+            await db.execute(
+                f"UPDATE member_anniversaries SET {column} = ? WHERE guild_id = ? AND user_id = ? AND anniversary_year = ?",
+                (status, guild_id, user_id, anniversary_year))
+            await db.commit()
+
+    async def set_anniversary_opt_out(self, guild_id: int, user_id: int, opted_out: bool) -> None:
+        async with self.connect() as db:
+            if opted_out:
+                await db.execute("INSERT OR IGNORE INTO anniversary_opt_outs (guild_id, user_id) VALUES (?, ?)",
+                                 (guild_id, user_id))
+            else:
+                await db.execute("DELETE FROM anniversary_opt_outs WHERE guild_id = ? AND user_id = ?",
+                                 (guild_id, user_id))
+            await db.commit()
+
+    async def get_anniversary_opt_outs(self, guild_id: int) -> set[int]:
+        async with self.connect() as db:
+            rows = await (await db.execute(
+                "SELECT user_id FROM anniversary_opt_outs WHERE guild_id = ?", (guild_id,))).fetchall()
+        return {row["user_id"] for row in rows}
 
     async def get_blueprint_refs(self) -> list[BlueprintRef]:
         """Every distinct blueprint any stored mission can award - the autocomplete/matching universe."""

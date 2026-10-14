@@ -215,6 +215,12 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
   the other route commands (`/best-route`, `/top-routes`, `/mixed-routes`), and alerts and DMs.
   Pick by real usage (`/command-usage`, entry 141).
 
+- [x] **Server anniversaries**: Shipped 2026-10-14 (PR #132, PROJECT_CONTEXT.md entry 145): a
+  DM and a post in `#stdynamics-bot` on the day and at the time a member joined, to bring
+  people back to the server. Other ideas for that, from the same talk: a weekly hosted event,
+  Discord Onboarding with a personal welcome, a daily low-effort prompt (poll, screenshot of the
+  day), patch-day threads, fewer and busier channels.
+
 - [x] **What an ore crafts**: Shipped 2026-10-07 as `/blueprint-search material:` (PR #130,
   PROJECT_CONTEXT.md entry 143): the blueprints a player can get that use an ore or mineral,
   by category, armor as sets, each opening its usual reply. Open question from the owner: why
