@@ -1,7 +1,14 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.63.
+the oldest entry below); the next new entry is 2.64.
+
+---
+
+## 2.63 - 2026-10-14 - Server anniversaries
+
+**New**
+- On the day you joined Star Tech Dynamics, at the time you joined, the bot now sends you a short anniversary message and marks it in the bot channel. Don't want them? Press "Stop anniversary messages" under the message.
 
 ---
 

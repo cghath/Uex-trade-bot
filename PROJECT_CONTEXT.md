@@ -5005,6 +5005,36 @@ they're in sync).
        (`tests/fixtures/blueprint_crafting_shield.json`, `..._power_plant.json`); 4 mutations,
        all caught.
 
+145. **Server anniversaries: a DM and a post on the day, and at the time, a member joined.**
+     The owner's idea (2026-10-14), to bring people back to the server - "getting people to stop
+     by in general not just use the bot". Star Tech Dynamics has 355 members (365 with bots); 148
+     were past their first year and most joined in 2025-2026, so it grows fast.
+     - **The owner's decisions:** a DM *and* a post in `#stdynamics-bot` that @mentions the member
+       (a DM alone reaches one person; the post invites others to say hello); formal, with no push
+       to use the bot; "Star Tech Dynamics" in full, never "STDynamics" (the bot's own name); sent
+       at the member's own join time of day, since members are all over the world. The join date
+       is a Discord timestamp, so each reader sees it in their own time zone.
+     - **How** (`bot/cogs/anniversaries.py`, pure timing/wording in `bot/uex/anniversaries.py`): a
+       check every 5 minutes over the channel's guild's members; one is due from its moment
+       (same month, day and time; 29 February on 28 February in other years) for 24 hours, so a
+       bot that was down still sends it the same day. Each anniversary is claimed in
+       `member_anniversaries` before anything is sent, and its DM and post are tracked apart
+       through bot/delivery.py's outcomes: a temporary failure is tried again on the next check, a
+       refusal (DMs closed) isn't, and one part failing never holds up the other. Bots, members
+       under a year, and members who opted out (`anniversary_opt_outs`) get nothing. The post
+       pings only that member. "Stop anniversary messages" under the DM (and "Turn them back on"
+       in its reply) are DynamicItems, so they work after a restart.
+     - **Needs the Server Members intent** - the bot's first privileged intent (audit MSG-14 had
+       turned them all off). Switched on in the Developer Portal by the owner on 2026-10-14
+       before this deployed; without it Discord refuses the connection at startup. README step 3
+       says so; `tests/test_honest_labels.py` now checks it's the only one.
+     - **`/anniversary-preview`** (owner-only, hidden from `/intro`): DMs the owner their own
+       anniversary message and shows the channel post privately, with the next three
+       anniversaries.
+     - Tests in `tests/test_anniversaries.py`; 11 mutations, all caught. Real join dates read
+       once over the API to check the timing: anniversaries fall on 86 days a year, at most 6 in
+       a day (22 June), at all hours.
+
 ## Where to look for what
 
 Seven docs, deliberately scoped so they don't duplicate each other:

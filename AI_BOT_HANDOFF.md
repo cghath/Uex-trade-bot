@@ -446,6 +446,10 @@ date - no open item, nothing to record here.
 - [ ] PR #131 - Configure crafting reads stat curves given in parts (most ship parts):
       `_segments` and `modifier_at`/`_quality_span`/`Recipe._result_block` in
       `bot/uex/blueprint_crafting.py`. See PROJECT_CONTEXT.md entry 144
+- [ ] PR #132 - Server anniversaries: `bot/cogs/anniversaries.py`, `bot/uex/anniversaries.py`,
+      tables `member_anniversaries`/`anniversary_opt_outs`, the Server Members intent. Only if
+      aiv2 runs in a server of its own; it needs that intent switched on there too. See
+      PROJECT_CONTEXT.md entry 145
 
 ## To port: aiv2 -> production
 

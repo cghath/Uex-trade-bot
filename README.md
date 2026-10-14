@@ -110,8 +110,10 @@ background posting/sale updates are delivered only by private DM.
 
 1. Go to the [Discord Developer Portal](https://discord.com/developers/applications) → New Application.
 2. Bot tab → Reset Token → copy it. This is `DISCORD_BOT_TOKEN`.
-3. Under **Bot**, leave all three privileged intents (Presence, Server Members, Message Content)
-   off. The bot only uses slash commands, buttons and forms, so it never needs to read messages.
+3. Under **Bot** → Privileged Gateway Intents, switch on **Server Members** and leave Presence and
+   Message Content off. Server Members lets the bot see who's a member and when they joined, for
+   server anniversaries; without it Discord refuses the bot's connection at startup. The bot only
+   uses slash commands, buttons and forms, so it never needs to read messages.
 4. Under **OAuth2 → URL Generator**, check the `bot` and `applications.commands` scopes, then these
    permissions:
    - `View Channels`, `Send Messages`, `Embed Links`, `Read Message History`;
@@ -266,6 +268,7 @@ bot/
     ship_shops.py         /where-to-buy-ship
     ship_parts_finder.py  /ship-parts-finder, /ship-loadout + loop
     diagnostics.py        /test-dm, /command-usage
+    anniversaries.py      server-anniversary DMs and posts + loop, /anniversary-preview
     help.py               /intro (the categorized command guide)
 scripts/
   deploy_and_backup.sh, revert_last_deploy.sh   Pi deploys and rollback (see above)
