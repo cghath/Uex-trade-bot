@@ -453,6 +453,8 @@ date - no open item, nothing to record here.
 - [ ] PR #134 - The welcome DM for new members: `bot/cogs/welcome.py`, `bot/uex/welcome.py`,
       table `member_welcomes`. Same condition as PR #132 (a server of its own, the Server
       Members intent). See PROJECT_CONTEXT.md entry 146
+- [ ] PR #135 - `/ship-loadout` shows a gun's fire rate: `fire_rate` and `shown_stat` in
+      `bot/uex/ship_loadout.py`. See PROJECT_CONTEXT.md entry 147
 
 ## To port: aiv2 -> production
 

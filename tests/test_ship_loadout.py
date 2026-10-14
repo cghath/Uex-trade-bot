@@ -1113,6 +1113,25 @@ def test_a_gun_shows_its_projectile_speed_beside_dps_and_alpha():
         "damage": {"burst": 900, "alpha_total": 60}, "ammunition": {"speed": 1}}}, "Guns", BALANCED), "never ranked by"
 
 
+def test_a_gun_shows_its_fire_rate_between_alpha_and_speed():
+    """The owner's call (2026-10-14): the rpm, as /ship-parts-finder shows it. Shown, compared
+    with the stock gun's, never ranked by."""
+    def gun(name, dps, alpha, rpm, speed):
+        return {**_gun(name, dps, alpha=alpha), "vehicle_weapon": {
+            "damage": {"burst": dps, "alpha_total": alpha}, "rpm": rpm, "ammunition": {"speed": speed}}}
+    cannon, gatling = gun("Cannon", 900, 615, 100, 1100), gun("Gatling", 700, 84, 900, 1332)
+    assert shown_stat(cannon, "Guns", BALANCED) == ("DPS / alpha / rpm / speed",
+                                                    "900 DPS / 615 alpha / 100 rpm / 1,100 m/s")
+    assert stat_change(cannon, gatling, "Guns", BALANCED) == (
+        "`700 → 900` DPS · `84 → 615` alpha · `900 → 100` rpm · `1,332 → 1,100` m/s")
+    # Same rpm: said once. A stock gun with no rpm on the wiki: the rest still compared.
+    assert "· 900 rpm ·" in stat_change(gun("New", 800, 90, 900, 1332), gatling, "Guns", BALANCED)
+    no_rpm = {**gatling, "vehicle_weapon": {"damage": {"burst": 700, "alpha_total": 84}, "ammunition": {"speed": 1332}}}
+    assert stat_change(cannon, no_rpm, "Guns", BALANCED) == (
+        "`700 → 900` DPS · `84 → 615` alpha · 100 rpm · `1,332 → 1,100` m/s")
+    assert merit_key(cannon, "Guns", BALANCED) == merit_key(gun("Cannon", 900, 615, 5000, 1100), "Guns", BALANCED),         "never ranked by"
+
+
 def test_stat_change():
     assert stat_change(_gun("Mantis", 853.3), OMNISKY, "Guns", BALANCED) == "`547 → 853` DPS"
     assert stat_change(_plant("Quiet", 12, em=3000), ENDURANCE, "Power Plants", STEALTH) == "EM `7,430 → 3,000`"
