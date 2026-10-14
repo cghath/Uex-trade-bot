@@ -5058,6 +5058,20 @@ they're in sync).
        retry loop for members still pending, which can't happen (a row exists only once they've
        accepted, and Discord never sets `pending` back), so the guard was removed.
 
+147. **`/ship-loadout` shows a gun's fire rate.**
+     The owner's ask (2026-10-14): "add the fire rate to all the weapon stats". `/ship-parts-finder`
+     already listed rpm (`ship_part_display._weapon_stats`); `/ship-loadout`'s gun lines didn't.
+     `shown_stat` (`bot/uex/ship_loadout.py`) now adds it between alpha and projectile speed
+     ('1,266 DPS / 84.4 alpha / 900 rpm / 1,332 m/s', the parts finder's order) through a new
+     `fire_rate` (`vehicle_weapon.rpm`), so an upgrade line compares it with the stock gun's
+     (`` `60 → 750` rpm``), says it once when unchanged, and shows it alone when the stock gun
+     has none. Shown, never ranked by.
+     - **Crowding, checked on real data at the owner's request:** the 8 longest gun names on the
+       wiki, rendered as upgrade lines. The name sits on its own line, so it's unaffected; the
+       stats line grows about 18 characters (around 56 to around 74): one line on desktop, two
+       on a phone as before. The longest, with the heavy-fighter armor note, goes from 99 to 116.
+       The Polaris stays one page (about 1,150 characters of about 3,800).
+
 ## Where to look for what
 
 Seven docs, deliberately scoped so they don't duplicate each other:

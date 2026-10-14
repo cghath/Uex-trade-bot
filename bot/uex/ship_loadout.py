@@ -147,6 +147,12 @@ def projectile_speed(detail: dict | None) -> float | None:
     return _number(_path(detail, "vehicle_weapon", "ammunition", "speed"))
 
 
+def fire_rate(detail: dict | None) -> float | None:
+    """A gun's rounds per minute (vehicle_weapon.rpm): shown beside DPS and alpha, the owner's
+    call (2026-10-14) - two guns with the same DPS can fire very differently."""
+    return _number(_path(detail, "vehicle_weapon", "rpm"))
+
+
 def beats_armor(detail: dict | None) -> bool | None:
     """Whether one projectile gets through heavy-fighter armor (ARMOR_REFERENCE): any damage
     type's share of a shot, per pellet, at or above that type's deflection. None when the wiki
@@ -620,7 +626,8 @@ def shown_stat(detail: dict | None, category: str, profile: str) -> tuple[str, s
     Stealth cooler shows its EM and IR together ('EM 1,490 / IR 7,130'): EM decides, but coolers
     often tie on it (the Bracer and Ultra-Flow are both EM 1,490), and then IR does. A gun shows
     its DPS and alpha damage together ('1,266 DPS / 84.4 alpha') for the same reason, and its
-    projectile speed after them ('1,266 DPS / 84.4 alpha / 1,332 m/s') - shown, never ranked by."""
+    fire rate and projectile speed after them ('1,266 DPS / 84.4 alpha / 900 rpm / 1,332 m/s') -
+    shown, never ranked by."""
     if profile == STEALTH and category == COOLERS_CATEGORY:
         em, ir = em_signature(detail), ir_signature(detail)
         if em is not None and ir is not None:
@@ -631,10 +638,13 @@ def shown_stat(detail: dict | None, category: str, profile: str) -> tuple[str, s
     if category != GUNS_CATEGORY or stat[0] != "DPS":
         return (stat[0], stat_text(*stat))
     kinds, texts = ["DPS"], [stat_text(*stat)]
-    alpha, speed = alpha_damage(detail), projectile_speed(detail)
+    alpha, rpm, speed = alpha_damage(detail), fire_rate(detail), projectile_speed(detail)
     if alpha is not None:
         kinds.append("alpha")
         texts.append(f"{_amount(alpha)} alpha")
+    if rpm is not None:
+        kinds.append("rpm")
+        texts.append(f"{rpm:,.0f} rpm")
     if speed is not None:
         kinds.append("speed")
         texts.append(f"{speed:,.0f} m/s")

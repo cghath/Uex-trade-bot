@@ -1,7 +1,14 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.65.
+the oldest entry below); the next new entry is 2.66.
+
+---
+
+## 2.65 - 2026-10-14 - Fire rate in loadouts
+
+**Changed**
+- `/ship-loadout` - Each gun now shows its fire rate (rpm) beside DPS, alpha and projectile speed, compared with your stock gun's, as `/ship-parts-finder` already did.
 
 ---
 
