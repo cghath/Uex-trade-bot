@@ -49,6 +49,7 @@ INITIAL_COGS = (
     "bot.cogs.ship_parts_finder",
     "bot.cogs.ship_shops",
     "bot.cogs.anniversaries",
+    "bot.cogs.welcome",
 )
 
 

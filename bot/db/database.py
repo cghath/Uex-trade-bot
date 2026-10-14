@@ -811,6 +811,17 @@ CREATE TABLE IF NOT EXISTS member_anniversaries (
     PRIMARY KEY (guild_id, user_id, anniversary_year)
 );
 
+-- The welcome DM (bot/cogs/welcome.py): one row per member, ever - claimed before sending so a
+-- rejoin or a restart never sends it twice. 'pending' is retried for a day; 'sent' and 'skipped'
+-- (Discord refused it, e.g. DMs closed) are final.
+CREATE TABLE IF NOT EXISTS member_welcomes (
+    guild_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'sent', 'skipped')),
+    claimed_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (guild_id, user_id)
+);
+
 -- Members who pressed "Stop anniversary messages" under the DM: no DM and no post for them.
 CREATE TABLE IF NOT EXISTS anniversary_opt_outs (
     guild_id INTEGER NOT NULL,
@@ -4539,6 +4550,30 @@ class Database:
                 await db.execute("DELETE FROM anniversary_opt_outs WHERE guild_id = ? AND user_id = ?",
                                  (guild_id, user_id))
             await db.commit()
+
+    async def claim_welcome(self, guild_id: int, user_id: int) -> str:
+        """This member's welcome status, created as 'pending' if they've never had one."""
+        async with self.connect() as db:
+            await db.execute("INSERT OR IGNORE INTO member_welcomes (guild_id, user_id) VALUES (?, ?)",
+                             (guild_id, user_id))
+            await db.commit()
+            row = await (await db.execute(
+                "SELECT status FROM member_welcomes WHERE guild_id = ? AND user_id = ?", (guild_id, user_id))).fetchone()
+        return row["status"]
+
+    async def set_welcome_status(self, guild_id: int, user_id: int, status: str) -> None:
+        async with self.connect() as db:
+            await db.execute("UPDATE member_welcomes SET status = ? WHERE guild_id = ? AND user_id = ?",
+                             (status, guild_id, user_id))
+            await db.commit()
+
+    async def get_pending_welcomes(self, guild_id: int) -> list[int]:
+        """Members whose welcome failed only for now, claimed within the last day."""
+        async with self.connect() as db:
+            rows = await (await db.execute(
+                """SELECT user_id FROM member_welcomes WHERE guild_id = ? AND status = 'pending'
+                   AND claimed_at >= datetime('now', '-1 day')""", (guild_id,))).fetchall()
+        return [row["user_id"] for row in rows]
 
     async def get_anniversary_opt_outs(self, guild_id: int) -> set[int]:
         async with self.connect() as db:

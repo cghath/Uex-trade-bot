@@ -450,6 +450,9 @@ date - no open item, nothing to record here.
       tables `member_anniversaries`/`anniversary_opt_outs`, the Server Members intent. Only if
       aiv2 runs in a server of its own; it needs that intent switched on there too. See
       PROJECT_CONTEXT.md entry 145
+- [ ] PR #134 - The welcome DM for new members: `bot/cogs/welcome.py`, `bot/uex/welcome.py`,
+      table `member_welcomes`. Same condition as PR #132 (a server of its own, the Server
+      Members intent). See PROJECT_CONTEXT.md entry 146
 
 ## To port: aiv2 -> production
 

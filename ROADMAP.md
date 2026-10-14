@@ -221,6 +221,9 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
   Discord Onboarding with a personal welcome, a daily low-effort prompt (poll, screenshot of the
   day), patch-day threads, fewer and busier channels.
 
+- [x] **A welcome DM for new members**: Shipped 2026-10-14 (PR #134, PROJECT_CONTEXT.md entry
+  146): a short DM when someone joins, with six commands and the bot's channel, nothing more.
+
 - [x] **What an ore crafts**: Shipped 2026-10-07 as `/blueprint-search material:` (PR #130,
   PROJECT_CONTEXT.md entry 143): the blueprints a player can get that use an ore or mineral,
   by category, armor as sets, each opening its usual reply. Open question from the owner: why
