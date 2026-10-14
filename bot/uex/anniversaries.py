@@ -56,7 +56,7 @@ def dm_text(name: str, years: int, joined: datetime) -> str:
 
 
 def post_text(mention: str, years: int, joined: datetime) -> str:
-    return (f"🎊 **Server anniversary** 🎊\n"
+    return (f"🎊 **Happy server anniversary!** 🎊\n"
             f"{mention} joined **{COMMUNITY_NAME}** {_years(years)} ago today, on {_stamp(joined, 'D')}. "
             "Thank you for being part of the community! 🎉")
 

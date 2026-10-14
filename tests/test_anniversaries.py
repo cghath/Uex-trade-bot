@@ -76,7 +76,7 @@ def test_the_messages_are_formal_and_name_star_tech_dynamics_in_full():
         f"Today marks 3 years since you joined **Star Tech Dynamics**, on <t:{stamp}:D> at <t:{stamp}:t>. "
         "Thank you for being part of the community. We're glad to have you with us. 🥳")
     assert post_text("<@1>", 1, JOINED) == (
-        "🎊 **Server anniversary** 🎊\n"
+        "🎊 **Happy server anniversary!** 🎊\n"
         f"<@1> joined **Star Tech Dynamics** 1 year ago today, on <t:{stamp}:D>. Thank you for being part of the community! 🎉")
     assert "STDynamics" not in dm_text("x", 2, JOINED) + post_text("x", 2, JOINED)
 
@@ -149,7 +149,7 @@ def test_a_due_member_gets_one_dm_and_one_post_that_pings_only_them_even_after_r
     assert isinstance(button, StopAnniversariesButton) and button.item.label == "Stop anniversary messages"
     assert button.custom_id == f"anniversary:stop:{GUILD_ID}"
     ((post, post_kwargs),) = channel.sent
-    assert post.startswith("🎊 **Server anniversary** 🎊\n<@1> joined **Star Tech Dynamics** 3 years ago today")
+    assert post.startswith("🎊 **Happy server anniversary!** 🎊\n<@1> joined **Star Tech Dynamics** 3 years ago today")
     mentions = post_kwargs["allowed_mentions"]
     assert [u.id for u in mentions.users] == [1] and not mentions.everyone and not mentions.roles
     assert not users[2].sent and not users[3].sent and not users[4].sent, "a bot, a first-year and a not-due member"
