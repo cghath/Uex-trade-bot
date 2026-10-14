@@ -5035,6 +5035,29 @@ they're in sync).
        once over the API to check the timing: anniversaries fall on 86 days a year, at most 6 in
        a day (22 June), at all hours.
 
+146. **A welcome DM for new members.**
+     The owner's idea (2026-10-14), the second step after anniversaries (entry 145): "nothing
+     welcomes and no onboarding at the moment". Each member who joins Star Tech Dynamics gets one
+     short DM: a welcome, six commands with a line each, and the bot's channel.
+     - **The owner's decisions:** a DM only (no channel post); no pointer to `/intro` - "just let
+       them get started and something useful and don't overload them"; `/where-to-mine` and
+       `/ship-parts-finder` ("in case people want to compare parts") among the six. The others
+       are the commands other players use most (`/multi-stop-route`, `/ingame-item-finder`,
+       `/ship-loadout`; `/command-usage` with the owner left out) plus `/blueprint-search`. "Star Tech Dynamics" in full, as everywhere.
+     - **How** (`bot/cogs/welcome.py`, wording in `bot/uex/welcome.py`): sent from
+       `on_member_join`, for the server `#stdynamics-bot` is in only, never to bots. If the
+       server ever turns on membership screening, a member still accepting the rules
+       (`member.pending`) is welcomed from `on_member_update` once they accept, so the channel
+       it names is one they can open. Each welcome is claimed in `member_welcomes` (one row per
+       member, ever) before it's sent, so a rejoin, a restart or a second event never sends it
+       twice. bot/delivery.py's outcomes decide the rest: a temporary failure stays 'pending'
+       and a 10-minute loop tries again for a day; a refusal (DMs closed) is 'skipped' and never
+       retried. Members already in the server don't get it - only joins from the deploy on.
+     - **`/welcome-preview`** (owner-only, hidden from `/intro`): DMs the owner the welcome.
+     - Tests in `tests/test_welcome.py`. 7 mutations: 6 caught; the seventh was a guard in the
+       retry loop for members still pending, which can't happen (a row exists only once they've
+       accepted, and Discord never sets `pending` back), so the guard was removed.
+
 ## Where to look for what
 
 Seven docs, deliberately scoped so they don't duplicate each other:

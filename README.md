@@ -112,7 +112,7 @@ background posting/sale updates are delivered only by private DM.
 2. Bot tab → Reset Token → copy it. This is `DISCORD_BOT_TOKEN`.
 3. Under **Bot** → Privileged Gateway Intents, switch on **Server Members** and leave Presence and
    Message Content off. Server Members lets the bot see who's a member and when they joined, for
-   server anniversaries; without it Discord refuses the bot's connection at startup. The bot only
+   server anniversaries and the welcome DM; without it Discord refuses the bot's connection at startup. The bot only
    uses slash commands, buttons and forms, so it never needs to read messages.
 4. Under **OAuth2 → URL Generator**, check the `bot` and `applications.commands` scopes, then these
    permissions:
@@ -269,6 +269,7 @@ bot/
     ship_parts_finder.py  /ship-parts-finder, /ship-loadout + loop
     diagnostics.py        /test-dm, /command-usage
     anniversaries.py      server-anniversary DMs and posts + loop, /anniversary-preview
+    welcome.py            the welcome DM new members get + retry loop, /welcome-preview
     help.py               /intro (the categorized command guide)
 scripts/
   deploy_and_backup.sh, revert_last_deploy.sh   Pi deploys and rollback (see above)

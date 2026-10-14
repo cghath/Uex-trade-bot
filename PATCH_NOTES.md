@@ -1,7 +1,14 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.64.
+the oldest entry below); the next new entry is 2.65.
+
+---
+
+## 2.64 - 2026-10-14 - A welcome for new members
+
+**New**
+- When you join Star Tech Dynamics, the bot now sends you a short welcome with a few commands to get you started and the channel to use them in.
 
 ---
 
