@@ -315,7 +315,8 @@ def extract_item_activity(trend_rows: list[dict]) -> list[dict]:
                 "negotiations_open": row.get("negotiations_open") or 0,
                 "negotiations_success": row.get("negotiations_success") or 0,
                 "listings_count": row.get("total_listings_count") or 0,
-                "listings_count_sell": row.get("listings_count_sell") or 0,
+                # Kept as None when UEX sends none: see sell_count_unknown.
+                "listings_count_sell": row.get("listings_count_sell"),
                 "listings_count_buy": row.get("listings_count_buy") or 0,
             }
         )
@@ -335,6 +336,22 @@ def extract_item_activity(trend_rows: list[dict]) -> list[dict]:
 # one with five real completed sales. That is backwards for a rating whose whole question
 # is "will this actually sell?", and it contradicted this module's own description of buy
 # postings as the weaker signal.
+def sell_count_unknown(activity: dict) -> bool:
+    """True when /marketplace_trends sent no sell-listing count for this item.
+
+    UEX sends null, never 0, for a count with nothing in it (425 of 500 items had a null buy
+    count on 2026-10-17, every one an item with no buy postings). But from 2026-10-16 the sell
+    count came back null for 18 items that were plainly still being sold - Ouratite had 27
+    unexpired, not-sold-out sell listings from about 30 sellers, one added that day. Read as 0,
+    that scored them 0/100 and put a false crash in the digest and /liquidity-trends. So a null
+    sell count is unknown: the item isn't rescored and keeps its last real score. A 0 score
+    from no sellers never meant "won't sell" anyway - it only guarded the division.
+
+    Only a row that carries the key counts: one built without it (older callers) still falls
+    back to its total listings in compute_liquidity_score."""
+    return "listings_count_sell" in activity and activity["listings_count_sell"] is None
+
+
 WEIGHT_COMPLETED_NEGOTIATION = 1.0
 WEIGHT_OPEN_NEGOTIATION = 0.5
 WEIGHT_BUY_POSTING = 0.25

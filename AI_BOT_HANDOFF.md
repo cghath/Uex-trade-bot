@@ -455,6 +455,9 @@ date - no open item, nothing to record here.
       Members intent). See PROJECT_CONTEXT.md entry 146
 - [ ] PR #135 - `/ship-loadout` shows a gun's fire rate: `fire_rate` and `shown_stat` in
       `bot/uex/ship_loadout.py`. See PROJECT_CONTEXT.md entry 147
+- [ ] PR #136 - A sell count UEX leaves out is unknown, not zero: `sell_count_unknown` and
+      `extract_item_activity` in `bot/uex/marketplace.py`, `update_liquidity_scores` and
+      `_repair_unknown_sell_count_scores` in `bot/db/database.py`. See PROJECT_CONTEXT.md entry 148
 
 ## To port: aiv2 -> production
 
