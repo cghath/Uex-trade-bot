@@ -1,7 +1,14 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.66.
+the oldest entry below); the next new entry is 2.67.
+
+---
+
+## 2.66 - 2026-10-17 - Sellability ratings that didn't really crash
+
+**Fixed**
+- `/liquidity-rank`, `/liquidity-trends` and the daily digest - Some items (Ouratite, Gold, Aslarite and others) dropped to 0/100 overnight even though they were still selling: UEX stopped reporting how many people were selling them. Those items now keep their last real rating until UEX reports it again, and the false drops are gone from their history.
 
 ---
 

@@ -5072,6 +5072,35 @@ they're in sync).
        on a phone as before. The longest, with the heavy-fighter armor note, goes from 99 to 116.
        The Polaris stays one page (about 1,150 characters of about 3,800).
 
+148. **A sell count UEX leaves out is unknown, not zero (sellability ratings).**
+     Found from the owner's question (2026-10-17): why Ouratite "all of a sudden dropped to 0" in
+     the digest's Biggest Rating Shifts, alongside V801-12, Aslarite and Gold.
+     - **Cause:** `/marketplace_trends` sends null, never 0, for an empty count (425 of 500 items
+       had a null buy count, every one with no buy postings). From 2026-10-16 12:00 UTC it also
+       sent a null sell count for 18 items that were plainly still being sold: Ouratite had 27
+       unexpired, not-sold-out sell listings from about 30 sellers on `/marketplace_listings`,
+       one added that day; Lindinium 43 sell rows, Gold 25. `extract_item_activity` turned null
+       into 0 sellers, and `compute_liquidity_score` scores no sellers 0 - a guard on the
+       division, never a judgement that the item won't sell. Deal counts didn't move.
+     - **Not new:** the Pi already had false zeros from 2026-10-03 (2,004 hourly snapshots over
+       25 items by 2026-10-17; 30 items rated 0).
+     - **Fix (the owner's pick of two):** a null sell count is unknown (`sell_count_unknown`,
+       `bot/uex/marketplace.py`): `update_liquidity_scores` doesn't rescore the item, so it keeps
+       its last real score and isn't reported as a mover, and logs which items. The other option,
+       counting `/marketplace_listings` ourselves, was declined: ~14 more calls an hour, and its
+       count doesn't match trends' (47 rows against trends' 20-21 for Ouratite), so the items
+       would jump instead. Older rows built without the key keep their total-listings fallback.
+     - **Repair** (`Database._repair_unknown_sell_count_scores`, every startup, a no-op once
+       clean): a stored row with no sell listings and a 0 score can only have come from a null,
+       so each such current rating goes back to its last real snapshot (with that snapshot's
+       hour as last_updated), one with none left in the 7 days kept is removed as unrated, and
+       the false snapshots are deleted. Dry run on a copy of the Pi's database (SQLite 3.40.1):
+       15 restored (Ouratite 67.41, V801-12 68.14, Aslarite 64.58, Gold 56.63), 15 removed, 2,004
+       snapshots deleted.
+     - Such an item's rating stays frozen until UEX sends the count again; its "last updated"
+       says how old it is.
+     - Tests in `tests/test_liquidity.py`; 9 mutations, all caught.
+
 ## Where to look for what
 
 Seven docs, deliberately scoped so they don't duplicate each other:

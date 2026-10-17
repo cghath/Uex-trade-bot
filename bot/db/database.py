@@ -19,7 +19,7 @@ from bot.uex.trading_preferences import DEFAULT_TRADING_PREFERENCES, UNSET
 
 logger = logging.getLogger("uexbot.database")
 
-from bot.uex.marketplace import compute_liquidity_score
+from bot.uex.marketplace import compute_liquidity_score, sell_count_unknown
 from bot.uex.route_confidence import coalesce_report_count
 from bot.uex.blueprint_materials import BlueprintRecipe, MaterialUse
 from bot.uex.blueprints import BlueprintMission, BlueprintRef, SnapshotState
@@ -936,6 +936,7 @@ class Database:
             await self._migrate_negotiation_message_seen_scope(db)
             await self._migrate_ship_parts_entries_port_name(db)
             await self._migrate_ship_preference_into_trading_preferences(db)
+            await self._repair_unknown_sell_count_scores(db)
             # Must run before the two CREATE UNIQUE INDEX statements below - see
             # _migrate_dedupe_route_progression_pending_actions's own docstring.
             await self._migrate_dedupe_route_progression_pending_actions(db)
@@ -1162,6 +1163,39 @@ class Database:
                SELECT user_id, datetime('now') FROM user_ship_preference AS s
                WHERE s.user_id NOT IN (SELECT user_id FROM ship_preference_migrated)"""
         )
+
+    async def _repair_unknown_sell_count_scores(self, db: aiosqlite.Connection) -> None:
+        """Undo the false 0/100 sellability ratings a missing UEX sell count used to produce
+        (bot/uex/marketplace.py: sell_count_unknown). UEX never sends a sell count of 0, only a
+        number or null, and null used to be stored as 0 sellers with a 0 score - so a liquidity
+        row with no sell listings and a 0 score is always one of those. On the Pi on
+        2026-10-17: 2,004 hourly snapshots over 25 items from 2026-10-03 on, and 30 items rated
+        0 (Ouratite's real 67.41 among them).
+
+        Each such current rating goes back to the item's last real snapshot (its counts too,
+        and that snapshot's hour as last_updated); one with no real snapshot left in the 7 days
+        kept is removed, as unrated, rather than left at a false 0; the false snapshots are
+        deleted, so the digest and /liquidity-trends stop showing a crash that never happened.
+        Idempotent and a no-op from then on: update_liquidity_scores no longer writes rows
+        without a sell count."""
+        real = """FROM liquidity_score_snapshots AS x
+                  WHERE x.id_item = liquidity_scores.id_item AND x.listings_count_sell > 0
+                  ORDER BY x.recorded_hour DESC LIMIT 1"""
+        false_zero = "listings_count_sell = 0 AND score = 0"
+        restored = await db.execute(
+            f"""UPDATE liquidity_scores
+                SET (score, negotiations_success, negotiations_open, listings_count, listings_count_sell,
+                     listings_count_buy, last_updated) = (
+                    SELECT x.score, x.negotiations_success, x.negotiations_open, x.listings_count,
+                           x.listings_count_sell, x.listings_count_buy, x.recorded_hour {real})
+                WHERE {false_zero} AND EXISTS (SELECT 1 {real})"""
+        )
+        unrated = await db.execute(f"DELETE FROM liquidity_scores WHERE {false_zero}")
+        snapshots = await db.execute(f"DELETE FROM liquidity_score_snapshots WHERE {false_zero}")
+        if restored.rowcount or unrated.rowcount or snapshots.rowcount:
+            logger.info("Liquidity repair: %d rating(s) restored to their last real score, %d with none left "
+                        "removed, %d false-zero snapshot(s) deleted",
+                        restored.rowcount, unrated.rowcount, snapshots.rowcount)
 
     async def _migrate_dedupe_route_progression_pending_actions(self, db: aiosqlite.Connection) -> None:
         """Audit-confirmed defect #4 (2026-09-15 follow-up audit): the two partial UNIQUE
@@ -3290,11 +3324,16 @@ class Database:
             return 0
 
         count = 0
+        unknown = []
         async with self.connect() as db:
             for row in activity_rows:
                 item_name = row.get("item_name")
                 id_item = row.get("id_item")
                 if not item_name or id_item is None:
+                    continue
+                if sell_count_unknown(row):
+                    # Not rescored: its last real score and snapshots stand (sell_count_unknown).
+                    unknown.append(item_name)
                     continue
 
                 score = compute_liquidity_score(row)
@@ -3335,6 +3374,9 @@ class Database:
                 )
                 count += 1
             await db.commit()
+        if unknown:
+            logger.info("Liquidity: no sell-listing count from UEX for %d item(s), kept their last score: %s",
+                        len(unknown), ", ".join(sorted(unknown)[:20]))
         await self.prune_liquidity_snapshots()
         return count
 
