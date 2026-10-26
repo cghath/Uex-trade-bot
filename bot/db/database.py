@@ -811,6 +811,57 @@ CREATE TABLE IF NOT EXISTS member_anniversaries (
     PRIMARY KEY (guild_id, user_id, anniversary_year)
 );
 
+-- Voice ranks (bot/cogs/voice_ranks.py; rules in bot/uex/voice_ranks.py). Only minutes in voice
+-- are stored, never audio. voice_members: lifetime totals and the highest rank already announced
+-- (claimed before the announcement, so it's never made twice). voice_daily: one row per person per
+-- UTC day, for the daily cap and the weekly/seasonal leaderboards.
+CREATE TABLE IF NOT EXISTS voice_members (
+    guild_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    xp INTEGER NOT NULL DEFAULT 0,
+    minutes INTEGER NOT NULL DEFAULT 0,
+    rank_index INTEGER NOT NULL DEFAULT -1,
+    ops INTEGER NOT NULL DEFAULT 0,
+    op_rank_index INTEGER NOT NULL DEFAULT -1,
+    PRIMARY KEY (guild_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS voice_daily (
+    guild_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    day TEXT NOT NULL,
+    minutes INTEGER NOT NULL DEFAULT 0,
+    xp INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (guild_id, user_id, day)
+);
+CREATE INDEX IF NOT EXISTS idx_voice_daily_day ON voice_daily (guild_id, day);
+
+-- The op in progress in the Ops channels, saved every minute so a restart carries on with it.
+CREATE TABLE IF NOT EXISTS voice_op_session (
+    guild_id INTEGER PRIMARY KEY,
+    started_at TEXT NOT NULL,
+    minutes INTEGER NOT NULL,
+    quiet INTEGER NOT NULL,
+    present TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+-- Every op that ended (30+ minutes with 3+ people) and who attended it.
+CREATE TABLE IF NOT EXISTS voice_ops (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id INTEGER NOT NULL,
+    started_at TEXT NOT NULL,
+    ended_at TEXT NOT NULL,
+    minutes INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS voice_op_attendance (
+    op_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    minutes INTEGER NOT NULL,
+    PRIMARY KEY (op_id, user_id)
+);
+
 -- The welcome DM (bot/cogs/welcome.py): one row per member, ever - claimed before sending so a
 -- rejoin or a restart never sends it twice. 'pending' is retried for a day; 'sent' and 'skipped'
 -- (Discord refused it, e.g. DMs closed) are final.
@@ -4616,6 +4667,113 @@ class Database:
                 """SELECT user_id FROM member_welcomes WHERE guild_id = ? AND status = 'pending'
                    AND claimed_at >= datetime('now', '-1 day')""", (guild_id,))).fetchall()
         return [row["user_id"] for row in rows]
+
+    # -- voice ranks -----------------------------------------------------------
+
+    async def credit_voice_minute(self, guild_id: int, day: str, credits: list[tuple[int, int]],
+                                  cap_minutes: int) -> list[tuple[int, int, int]]:
+        """One minute of voice for each (user_id, xp for the minute), in one transaction. A person
+        already at `cap_minutes` for `day` gets nothing. Returns (user_id, xp before, xp after) for
+        everyone credited."""
+        if not credits:
+            return []
+        credited = []
+        async with self.connect() as db:
+            for user_id, xp in credits:
+                row = await (await db.execute(
+                    "SELECT minutes FROM voice_daily WHERE guild_id = ? AND user_id = ? AND day = ?",
+                    (guild_id, user_id, day))).fetchone()
+                if row is not None and row["minutes"] >= cap_minutes:
+                    continue
+                await db.execute(
+                    """INSERT INTO voice_daily (guild_id, user_id, day, minutes, xp) VALUES (?, ?, ?, 1, ?)
+                       ON CONFLICT(guild_id, user_id, day) DO UPDATE SET minutes = minutes + 1, xp = xp + excluded.xp""",
+                    (guild_id, user_id, day, xp))
+                await db.execute(
+                    """INSERT INTO voice_members (guild_id, user_id, xp, minutes) VALUES (?, ?, ?, 1)
+                       ON CONFLICT(guild_id, user_id) DO UPDATE SET xp = xp + excluded.xp, minutes = minutes + 1""",
+                    (guild_id, user_id, xp))
+                total = await (await db.execute(
+                    "SELECT xp FROM voice_members WHERE guild_id = ? AND user_id = ?", (guild_id, user_id))).fetchone()
+                credited.append((user_id, total["xp"] - xp, total["xp"]))
+            await db.commit()
+        return credited
+
+    async def claim_voice_rank(self, guild_id: int, user_id: int, index: int, *, ops: bool = False) -> bool:
+        """Record `index` as this person's announced rank (or op rank) if it's higher than the one
+        recorded. True when this call raised it - only then is the rank-up announced."""
+        column = "op_rank_index" if ops else "rank_index"
+        async with self.connect() as db:
+            cursor = await db.execute(
+                f"UPDATE voice_members SET {column} = ? WHERE guild_id = ? AND user_id = ? AND {column} < ?",
+                (index, guild_id, user_id, index))
+            await db.commit()
+        return cursor.rowcount > 0
+
+    async def get_voice_member(self, guild_id: int, user_id: int) -> dict[str, Any] | None:
+        async with self.connect() as db:
+            row = await (await db.execute(
+                "SELECT * FROM voice_members WHERE guild_id = ? AND user_id = ?", (guild_id, user_id))).fetchone()
+        return dict(row) if row else None
+
+    async def get_voice_members(self, guild_id: int) -> list[dict[str, Any]]:
+        async with self.connect() as db:
+            rows = await (await db.execute("SELECT * FROM voice_members WHERE guild_id = ?", (guild_id,))).fetchall()
+        return [dict(row) for row in rows]
+
+    async def voice_totals_since(self, guild_id: int, since: str | None) -> list[dict[str, Any]]:
+        """Everyone's XP and minutes from `since` (a UTC day, inclusive; None for all time), most
+        XP first."""
+        async with self.connect() as db:
+            rows = await (await db.execute(
+                """SELECT user_id, SUM(xp) AS xp, SUM(minutes) AS minutes FROM voice_daily
+                   WHERE guild_id = ? AND day >= ? GROUP BY user_id HAVING SUM(xp) > 0
+                   ORDER BY SUM(xp) DESC, user_id""", (guild_id, since or ""))).fetchall()
+        return [dict(row) for row in rows]
+
+    async def load_op_session(self, guild_id: int) -> dict[str, Any] | None:
+        async with self.connect() as db:
+            row = await (await db.execute("SELECT * FROM voice_op_session WHERE guild_id = ?", (guild_id,))).fetchone()
+        return dict(row) if row else None
+
+    async def save_op_session(self, guild_id: int, session: dict[str, Any] | None) -> None:
+        """The op in progress (started_at, minutes, quiet, present as JSON, updated_at - the minute
+        it was saved, by the cog's clock), or None once over."""
+        async with self.connect() as db:
+            if session is None:
+                await db.execute("DELETE FROM voice_op_session WHERE guild_id = ?", (guild_id,))
+            else:
+                await db.execute(
+                    """INSERT INTO voice_op_session (guild_id, started_at, minutes, quiet, present, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(guild_id) DO UPDATE SET started_at = excluded.started_at,
+                           minutes = excluded.minutes, quiet = excluded.quiet, present = excluded.present,
+                           updated_at = excluded.updated_at""",
+                    (guild_id, session["started_at"], session["minutes"], session["quiet"], session["present"],
+                     session["updated_at"]))
+            await db.commit()
+
+    async def record_op(self, guild_id: int, started_at: str, ended_at: str, minutes: int,
+                        attendees: dict[int, int]) -> list[tuple[int, int]]:
+        """Log an op that ended and count it for each attendee (user_id -> minutes there), in one
+        transaction with clearing the saved session. Returns (user_id, ops attended now)."""
+        counted = []
+        async with self.connect() as db:
+            cursor = await db.execute(
+                "INSERT INTO voice_ops (guild_id, started_at, ended_at, minutes) VALUES (?, ?, ?, ?)",
+                (guild_id, started_at, ended_at, minutes))
+            for user_id, present in sorted(attendees.items()):
+                await db.execute("INSERT INTO voice_op_attendance (op_id, user_id, minutes) VALUES (?, ?, ?)",
+                                 (cursor.lastrowid, user_id, present))
+                await db.execute(
+                    """INSERT INTO voice_members (guild_id, user_id, ops) VALUES (?, ?, 1)
+                       ON CONFLICT(guild_id, user_id) DO UPDATE SET ops = ops + 1""", (guild_id, user_id))
+                row = await (await db.execute(
+                    "SELECT ops FROM voice_members WHERE guild_id = ? AND user_id = ?", (guild_id, user_id))).fetchone()
+                counted.append((user_id, row["ops"]))
+            await db.execute("DELETE FROM voice_op_session WHERE guild_id = ?", (guild_id,))
+            await db.commit()
+        return counted
 
     async def get_anniversary_opt_outs(self, guild_id: int) -> set[int]:
         async with self.connect() as db:
