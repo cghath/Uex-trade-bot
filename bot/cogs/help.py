@@ -35,6 +35,9 @@ CATEGORIES: list[tuple[str, str, list[str]]] = [
         "alert-add", "stock-alert-add", "marketplace-alert-add",
         "alert-list", "alert-remove", "negotiation-alerts", "test-dm",
     ]),
+    ("🎖️ Voice Ranks", "Ranks earned from time in voice with others, and for ops attended. Never audio.", [
+        "rank", "rank-leaderboard",
+    ]),
     ("🧾 Trade Log & Leaderboard", "Your personal ledger, UEX-recorded history, and server standings.", [
         "trade-log-add", "trade-log", "uex-trades", "leaderboard",
     ]),

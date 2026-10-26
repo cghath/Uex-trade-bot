@@ -5101,6 +5101,47 @@ they're in sync).
        says how old it is.
      - Tests in `tests/test_liquidity.py`; 9 mutations, all caught.
 
+149. **Voice-activity ranks, replacing Arcane's levels.**
+     The owner's ask (2026-10-26): ranks from time in voice, with SC-themed names, rank-up
+     announcements, `/rank` and weekly/seasonal leaderboards, 2x in the Ops channels, a daily cap,
+     tracking that survives a restart - and only minutes in voice, never audio.
+     - **The owner's decisions:** the ladder Cadet 1h, Crewman 5h, Specialist 15h, Petty Officer
+       35h, Officer 75h, Lieutenant 150h, Commander 300h, Captain 500h, Admiral 1,000h of ordinary
+       voice (1 XP a minute); Arcane's Level 1-5 roles aren't carried over (everyone starts at 0);
+       rank-ups post in `#stdynamics-bot`; and a second ladder for ops attended (Operator 5,
+       Veteran Operator 15, Op Specialist 40, Wing Commander 100), picked over plain 2x XP and over
+       a ladder of minutes in Ops: an op is an event, and idling alone in an Ops channel doesn't
+       make one.
+     - **How** (`bot/cogs/voice_ranks.py`, pure rules in `bot/uex/voice_ranks.py`): once a minute
+       the cog reads every voice channel's members from discord.py's cache, which voice state
+       events keep current (the Guild Voice States intent is in `Intents.default()`, so nothing
+       to switch on). A minute counts with 2+ members who aren't bots or deafened (muted counts:
+       people listen in on ops), never in the AFK channel, 2 XP in the Ops category
+       (`OPS_CATEGORY_ID`, so a new Ops channel counts without a code change), up to 5 hours a UTC
+       day (`voice_daily`). Reading state each minute rather than timing sessions from events
+       makes a restart nothing to catch up on: the next minute sees whoever is in voice. TempVoice's
+       channels count like any other.
+     - **Ops:** 3+ counted people across the Ops channels together (one op even when squads split
+       across channels) for 30+ minutes; it ends after 5 minutes in a row below 3, so a dropped
+       connection doesn't split it; you attended if you were there for half its minutes. The op
+       in progress is saved every minute (`voice_op_session`, timed by the cog's own clock); after
+       a restart it carries on, or, if the bot was down past the 5-minute grace, it's counted as
+       ended when last seen. Every op and its attendees are kept (`voice_ops`,
+       `voice_op_attendance`).
+     - **Roles and announcements:** the 13 roles are created by name when first needed - the bot
+       needs Manage Roles, with its own role above them (the owner adds this; README step 4 says
+       so). Each person holds one rank and one op rank. A rank-up is claimed in `voice_members`
+       (`claim_voice_rank`) before it's announced, so it's announced once; without Manage Roles
+       it's still announced. Roles are put right every 30 minutes, quietly.
+     - **Commands:** `/rank [member]` (rank, progress, voice time, this week, ops attended, and a
+       line saying audio is never read) and `/rank-leaderboard` (this week from Monday, this
+       season - calendar quarters - all time, or ops attended); top 10 still in the server, plus
+       your own place.
+     - Not done: the fleet bot tie-in (top ship on the leaderboard) waits on where that bot's
+       data lives.
+     - Tests in `tests/test_voice_ranks.py`; 12 mutations, all caught (one only after a test that
+       an op rank isn't announced again at every later op).
+
 ## Where to look for what
 
 Seven docs, deliberately scoped so they don't duplicate each other:

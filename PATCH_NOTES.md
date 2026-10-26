@@ -1,7 +1,17 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.67.
+the oldest entry below); the next new entry is 2.68.
+
+---
+
+## 2.67 - 2026-10-26 - Voice ranks
+
+**New**
+- Voice ranks: time in voice with others earns ranks, from Cadet (1 hour) to Admiral (1,000 hours), with a role and an announcement in the bot channel at each promotion. Time in the Ops channels counts double, up to 5 hours a day count, and it never needs a microphone or reads any audio.
+- Ops ranks: attending ops (3 or more people in the Ops channels for 30 minutes or more) earns Operator, Veteran Operator, Op Specialist and Wing Commander.
+- `/rank` - Your rank or another member's: progress to the next one, time in voice, this week, and ops attended.
+- `/rank-leaderboard` - The most time in voice this week, this season or all time, or the most ops attended.
 
 ---
 

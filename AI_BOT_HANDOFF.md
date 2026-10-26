@@ -458,6 +458,9 @@ date - no open item, nothing to record here.
 - [ ] PR #136 - A sell count UEX leaves out is unknown, not zero: `sell_count_unknown` and
       `extract_item_activity` in `bot/uex/marketplace.py`, `update_liquidity_scores` and
       `_repair_unknown_sell_count_scores` in `bot/db/database.py`. See PROJECT_CONTEXT.md entry 148
+- [ ] PR #137 - Voice-activity ranks: `bot/cogs/voice_ranks.py`, `bot/uex/voice_ranks.py`, tables
+      `voice_members`/`voice_daily`/`voice_op_session`/`voice_ops`/`voice_op_attendance`. Only if
+      aiv2 runs in a server of its own, with Manage Roles. See PROJECT_CONTEXT.md entry 149
 
 ## To port: aiv2 -> production
 

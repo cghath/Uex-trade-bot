@@ -221,6 +221,11 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
   Discord Onboarding with a personal welcome, a daily low-effort prompt (poll, screenshot of the
   day), patch-day threads, fewer and busier channels.
 
+- [x] **Voice ranks**: Shipped 2026-10-26 (PR #137, PROJECT_CONTEXT.md entry 149): ranks from time
+  in voice with others (Cadet to Admiral), a second ladder for ops attended, `/rank` and
+  `/rank-leaderboard`, replacing Arcane. Open: show each person's top ship from the fleet bot on
+  the leaderboard, once it's known where that bot keeps its data.
+
 - [x] **A welcome DM for new members**: Shipped 2026-10-14 (PR #134, PROJECT_CONTEXT.md entry
   146): a short DM when someone joins, with six commands and the bot's channel, nothing more.
 

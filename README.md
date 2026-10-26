@@ -120,6 +120,8 @@ background posting/sale updates are delivered only by private DM.
    - `Attach Files`, for charts and long lists;
    - `Create Private Threads`, `Send Messages in Threads` and `Manage Threads`, for the private
      threads that route tracking, the ship-parts list and the blueprint list use.
+   - `Manage Roles`, for voice ranks: the bot creates the rank roles and gives them out, so its
+     own role must sit above them in Server Settings → Roles.
 
    Use the generated URL to invite the bot to your server.
 5. (Optional, recommended while developing) Enable Developer Mode in Discord, right-click your
@@ -270,6 +272,7 @@ bot/
     diagnostics.py        /test-dm, /command-usage
     anniversaries.py      server-anniversary DMs and posts + loop, /anniversary-preview
     welcome.py            the welcome DM new members get + retry loop, /welcome-preview
+    voice_ranks.py        voice-activity ranks + 1-minute loop, /rank, /rank-leaderboard
     help.py               /intro (the categorized command guide)
 scripts/
   deploy_and_backup.sh, revert_last_deploy.sh   Pi deploys and rollback (see above)
