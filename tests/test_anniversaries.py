@@ -74,18 +74,52 @@ def test_the_messages_are_formal_and_name_star_tech_dynamics_in_full():
     assert dm_text("Shikashi", 3, JOINED) == (
         "🎉 **Happy anniversary, Shikashi!**\n"
         f"Today marks 3 years since you joined **Star Tech Dynamics**, on <t:{stamp}:D> at <t:{stamp}:t>. "
-        "Thank you for being part of the community. We're glad to have you with us. 🥳")
+        "Thank you for being part of the community. We're glad to have you with us. 🥳\n"
+        "🎖️ You've earned the **3-Year Veteran** role.")
+    assert dm_text("Shikashi", 3, JOINED, "🚀 event").endswith("role.\n🚀 event")
     assert post_text("<@1>", 1, JOINED) == (
         "🎊 **Happy server anniversary!** 🎊\n"
-        f"<@1> joined **Star Tech Dynamics** 1 year ago today, on <t:{stamp}:D>. Thank you for being part of the community! 🎉")
+        f"<@1> joined **Star Tech Dynamics** 1 year ago today, on <t:{stamp}:D>, and is now a **1-Year Veteran**. "
+        "Thank you for being part of the community! 🎉")
     assert "STDynamics" not in dm_text("x", 2, JOINED) + post_text("x", 2, JOINED)
 
 
 # -- 3. sending ---------------------------------------------------------------------------------
 
 
+class FakeMember:
+    def __init__(self, user_id, joined, *, bot=False, name=None):
+        self.id, self.bot, self.joined_at = user_id, bot, joined
+        self.display_name, self.mention, self.roles = name or f"Member{user_id}", f"<@{user_id}>", []
+
+    async def add_roles(self, *roles, reason=None):
+        self.roles += [r for r in roles if r not in self.roles]
+
+    async def remove_roles(self, *roles, reason=None):
+        self.roles = [r for r in self.roles if r not in roles]
+
+
 def _member(user_id, joined, *, bot=False, name=None):
-    return NS(id=user_id, bot=bot, joined_at=joined, display_name=name or f"Member{user_id}", mention=f"<@{user_id}>")
+    return FakeMember(user_id, joined, bot=bot, name=name)
+
+
+class FakeGuild:
+    def __init__(self, members, *, events=(), can_manage_roles=True):
+        self.id, self.members, self.roles, self.events = GUILD_ID, members, [], list(events)
+        self.can_manage_roles = can_manage_roles
+
+    def get_member(self, uid):
+        return next((m for m in self.members if m.id == uid), None)
+
+    async def create_role(self, name, reason=None):
+        if not self.can_manage_roles:
+            raise discord.Forbidden(NS(status=403, reason="Forbidden"), "Missing Permissions")
+        role = NS(id=9000 + len(self.roles), name=name)
+        self.roles.append(role)
+        return role
+
+    async def fetch_scheduled_events(self):
+        return self.events
 
 
 class FakeUser:
@@ -113,10 +147,10 @@ def _http(status):
     return error(NS(status=status, reason="x"), "refused" if status == 403 else "server error")
 
 
-async def _make(tmp_path, members, users=None):
+async def _make(tmp_path, members, users=None, **guild_kwargs):
     db = Database(tmp_path / "ann.sqlite3", Fernet(Fernet.generate_key()))
     await db.init()
-    guild = NS(id=GUILD_ID, members=members, get_member=lambda uid: next((m for m in members if m.id == uid), None))
+    guild = FakeGuild(members, **guild_kwargs)
     channel = FakeChannel(guild)
     users = users or {}
     for member in members:

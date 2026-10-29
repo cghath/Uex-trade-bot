@@ -6,11 +6,19 @@ the bot DMs them a short formal note and posts one in the bot channel (the owner
 The owner's decisions: sent at the member's own join time (members are all over the world), a
 DM plus a post that @mentions them, formal, no push to use the bot, "Star Tech Dynamics" in full
 (never "STDynamics", the bot's own name). A button under the DM stops them.
+
+Added 2026-10-29 (the owner's ask): a veteran role for each year - "1-Year Veteran", then
+"2-Year Veteran", each replacing the last - given as the message goes out and named in it, and a
+line in the DM pointing to the server's next Discord event. The same event line goes in the
+welcome-back DM (bot/cogs/welcome_back.py).
 """
 from __future__ import annotations
 
 import calendar
+from dataclasses import dataclass
 from datetime import datetime, timedelta
+
+from discord.utils import escape_markdown
 
 COMMUNITY_NAME = "Star Tech Dynamics"
 # A bot that was down at someone's moment still sends it when back, up to this long after.
@@ -40,6 +48,47 @@ def due_anniversary(joined: datetime, now: datetime) -> tuple[int, datetime] | N
     return None
 
 
+def years_completed(joined: datetime, now: datetime) -> int:
+    """How many anniversaries have passed by `now` (0 in the first year)."""
+    years = now.year - joined.year
+    if years > 0 and anniversary_moment(joined, now.year) > now:
+        years -= 1
+    return max(years, 0)
+
+
+def veteran_role_name(years: int) -> str:
+    return f"{years}-Year Veteran"
+
+
+def is_veteran_role(name: str) -> bool:
+    head, sep, rest = name.partition("-Year Veteran")
+    return bool(sep) and rest == "" and head.isdigit()
+
+
+@dataclass(frozen=True)
+class Event:
+    """A Discord scheduled event: status 1 is scheduled, 2 is happening now."""
+    id: int
+    name: str
+    start: datetime
+    status: int
+
+
+def event_line(events: list[Event], guild_id: int, now: datetime) -> str | None:
+    """'🚀 Come fly with us at our next event: [**Mining Mondays**](link), <t:..:F>.', for the
+    event on now or else the soonest still to come; None when there's neither. The time is a
+    Discord timestamp, so each reader sees it in their own time zone."""
+    live = [e for e in events if e.status == 2]
+    coming = sorted((e for e in events if e.status == 1 and e.start > now), key=lambda e: e.start)
+    if not live and not coming:
+        return None
+    event = live[0] if live else coming[0]
+    link = f"[**{escape_markdown(event.name)}**](https://discord.com/events/{guild_id}/{event.id})"
+    if live:
+        return f"🚀 Come fly with us: {link} is happening now."
+    return f"🚀 Come fly with us at our next event: {link}, {_stamp(event.start, 'F')}."
+
+
 def _years(years: int) -> str:
     return f"{years} year{'s' if years != 1 else ''}"
 
@@ -49,16 +98,31 @@ def _stamp(joined: datetime, style: str) -> str:
     return f"<t:{int(joined.timestamp())}:{style}>"
 
 
-def dm_text(name: str, years: int, joined: datetime) -> str:
-    return (f"🎉 **Happy anniversary, {name}!**\n"
-            f"Today marks {_years(years)} since you joined **{COMMUNITY_NAME}**, on {_stamp(joined, 'D')} at "
-            f"{_stamp(joined, 't')}. Thank you for being part of the community. We're glad to have you with us. 🥳")
+def dm_text(name: str, years: int, joined: datetime, event: str | None = None) -> str:
+    lines = [f"🎉 **Happy anniversary, {name}!**",
+             f"Today marks {_years(years)} since you joined **{COMMUNITY_NAME}**, on {_stamp(joined, 'D')} at "
+             f"{_stamp(joined, 't')}. Thank you for being part of the community. We're glad to have you with us. 🥳",
+             f"🎖️ You've earned the **{veteran_role_name(years)}** role."]
+    if event:
+        lines.append(event)
+    return "\n".join(lines)
 
 
 def post_text(mention: str, years: int, joined: datetime) -> str:
     return (f"🎊 **Happy server anniversary!** 🎊\n"
-            f"{mention} joined **{COMMUNITY_NAME}** {_years(years)} ago today, on {_stamp(joined, 'D')}. "
-            "Thank you for being part of the community! 🎉")
+            f"{mention} joined **{COMMUNITY_NAME}** {_years(years)} ago today, on {_stamp(joined, 'D')}, "
+            f"and is now a **{veteran_role_name(years)}**. Thank you for being part of the community! 🎉")
+
+
+# The welcome-back DM (bot/cogs/welcome_back.py): for a member back after this long away.
+INACTIVE_DAYS = 30
+
+
+def welcome_back_text(name: str, event: str | None = None) -> str:
+    lines = [f"👋 **Welcome back, {name}!**", f"It's good to see you around **{COMMUNITY_NAME}** again."]
+    if event:
+        lines.append(event)
+    return "\n".join(lines)
 
 
 def upcoming(members: list[tuple[str, datetime]], now: datetime, count: int = 3) -> list[tuple[datetime, str, int]]:

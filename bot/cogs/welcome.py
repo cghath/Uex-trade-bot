@@ -10,13 +10,15 @@ retried by a short loop for a day, and one Discord refuses (DMs closed) isn't.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
-from bot.cogs.anniversaries import ANNIVERSARY_CHANNEL_ID
+from bot.cogs.anniversaries import ANNIVERSARY_CHANNEL_ID, next_event_line
 from bot.delivery import Delivery, send_dm
+from bot.uex.anniversaries import welcome_back_text
 from bot.uex.welcome import welcome_text
 
 logger = logging.getLogger("uexbot.welcome")
@@ -84,9 +86,23 @@ class Welcome(commands.Cog):
         await self.bot.wait_until_ready()
 
     @app_commands.command(name="welcome-preview", description="Owner only: send yourself the welcome DM new members get.")
-    async def welcome_preview(self, interaction: discord.Interaction) -> None:
+    @app_commands.describe(message="Which DM: for a new member (default) or for someone back after 30+ days")
+    @app_commands.choices(message=[app_commands.Choice(name="New member", value="new"),
+                                   app_commands.Choice(name="Welcome back", value="back")])
+    async def welcome_preview(self, interaction: discord.Interaction,
+                              message: app_commands.Choice[str] | None = None) -> None:
         if not await self.bot.is_owner(interaction.user):
             await interaction.response.send_message("This command is for the bot's owner.", ephemeral=True)
+            return
+        if message is not None and message.value == "back":
+            await interaction.response.defer(ephemeral=True)
+            channel = self.bot.get_channel(ANNIVERSARY_CHANNEL_ID)
+            event = await next_event_line(channel.guild, datetime.now(timezone.utc)) if channel else None
+            outcome = await send_dm(self.bot, interaction.user.id, welcome_back_text(_name(interaction.user), event),
+                                    label="welcome back preview")
+            await interaction.followup.send(
+                "I've sent you the welcome-back DM." if outcome is Delivery.DELIVERED
+                else "I couldn't DM you - your DMs from server members may be off.", ephemeral=True)
             return
         outcome = await send_dm(self.bot, interaction.user.id,
                                 welcome_text(_name(interaction.user), ANNIVERSARY_CHANNEL_ID), label="welcome preview")
