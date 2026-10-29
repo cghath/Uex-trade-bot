@@ -234,6 +234,26 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
   by category, armor as sets, each opening its usual reply. Open question from the owner: why
   917 of the wiki's 1,606 blueprints have no contract and aren't unlocked by default.
 
+- [ ] **Free guns from salvage wrecks** *(declined as a bot feature 2026-10-10; made a spreadsheet instead)*:
+  the idea was to catalog the stock guns on salvage-contract wrecks, by size, as free
+  upgrades. Researched on the live wiki (4.10.1) first: only 32 of 132 salvage contracts name
+  their wrecks (`combat.spawns`, group `SalvageableShip`), about 20 of them sharing one pool of
+  17 ships; the common Stanton "Claim #...: [Ship] Salvage Rights" and "Risky [Ship] Salvage
+  Job" contracts name none. Those 17 wrecks carry 9 different guns, mostly mid-pack stock
+  repeaters; only three stood out - the S3 M5A Cannon (A1/C1 Spirit, 4 each, sold for 75k),
+  the S5 CF-557 Galdereen (M80, not sold) and the S5 Vanduul 'WRATH' Cannon (Stinger, not
+  sold). A cloud research session then found the community wiki's (starcitizen.tools,
+  hand-maintained, unverified) ship list for the Claim contracts, by Adagio rank: its top tier
+  (Hercules A2/C2/M2, 890 Jump) carries S5 M7As, Omnisky XVs and S4 M6As - about 2.85M aUEC of
+  guns at shop prices on an A2 wreck. Community sources agree guns up to S5 come off with a
+  tractor beam (unlock from the wreck's pilot seat, strip before scraping); that wrecks spawn
+  with their stock guns is implied by guides, not documented. The owner chose a spreadsheet over
+  a bot feature: `docs/salvage_guns_4.10.2.xlsx` (private, excluded in `.git/info/exclude`) -
+  guns by size, wrecks by gun value, with columns to mark what's confirmed in-game. If it's ever
+  revisited: the wiki also lists a second "CF-557 Galdereen Repeater" at 9,375 DPS (a
+  non-player variant to filter out), and the lighter option was a "or free: salvage an A1/C1
+  Spirit" note on `/ship-loadout`/`/ship-parts-finder` picks.
+
 - [x] **Saved Trading Preferences**: Shipped 2026-09-06. `/set-trading-preferences`,
   `/clear-trading-preferences`, `/my-trading-preferences` store per-user defaults for
   space-only terminals, capital-ship access, auto-loading, preferred system, and risk
