@@ -51,6 +51,7 @@ INITIAL_COGS = (
     "bot.cogs.anniversaries",
     "bot.cogs.welcome",
     "bot.cogs.voice_ranks",
+    "bot.cogs.welcome_back",
 )
 
 

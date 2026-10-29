@@ -862,6 +862,21 @@ CREATE TABLE IF NOT EXISTS voice_op_attendance (
     PRIMARY KEY (op_id, user_id)
 );
 
+-- Welcome back (bot/cogs/welcome_back.py): when each member was last seen posting or joining
+-- voice - only the time, never what they said. activity_seed_state marks the one-time read of
+-- the last 30 days of chat as done; until then a member with no row isn't known to be away.
+CREATE TABLE IF NOT EXISTS member_activity (
+    guild_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    last_active TEXT NOT NULL,
+    PRIMARY KEY (guild_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS activity_seed_state (
+    guild_id INTEGER PRIMARY KEY,
+    seeded_at TEXT NOT NULL
+);
+
 -- The welcome DM (bot/cogs/welcome.py): one row per member, ever - claimed before sending so a
 -- rejoin or a restart never sends it twice. 'pending' is retried for a day; 'sent' and 'skipped'
 -- (Discord refused it, e.g. DMs closed) are final.
@@ -4667,6 +4682,50 @@ class Database:
                 """SELECT user_id FROM member_welcomes WHERE guild_id = ? AND status = 'pending'
                    AND claimed_at >= datetime('now', '-1 day')""", (guild_id,))).fetchall()
         return [row["user_id"] for row in rows]
+
+    # -- welcome back ----------------------------------------------------------
+
+    async def touch_member_activity(self, guild_id: int, user_id: int, now: str) -> str | None:
+        """Record `now` as this member's last activity; returns the one it replaces (None if
+        they had none). One transaction, so two events at once can't both see the old time."""
+        async with self.connect() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            row = await (await db.execute(
+                "SELECT last_active FROM member_activity WHERE guild_id = ? AND user_id = ?",
+                (guild_id, user_id))).fetchone()
+            await db.execute(
+                """INSERT INTO member_activity (guild_id, user_id, last_active) VALUES (?, ?, ?)
+                   ON CONFLICT(guild_id, user_id) DO UPDATE SET last_active = MAX(last_active, excluded.last_active)""",
+                (guild_id, user_id, now))
+            await db.commit()
+        return row["last_active"] if row else None
+
+    async def seed_member_activity(self, guild_id: int, seen: dict[int, str]) -> None:
+        """Record what the one-time history read found (user_id -> last seen), keeping whichever
+        time is later, and mark the read done."""
+        async with self.connect() as db:
+            await db.executemany(
+                """INSERT INTO member_activity (guild_id, user_id, last_active) VALUES (?, ?, ?)
+                   ON CONFLICT(guild_id, user_id) DO UPDATE SET last_active = MAX(last_active, excluded.last_active)""",
+                [(guild_id, uid, when) for uid, when in seen.items()])
+            await db.execute(
+                "INSERT OR REPLACE INTO activity_seed_state (guild_id, seeded_at) VALUES (?, datetime('now'))",
+                (guild_id,))
+            await db.commit()
+
+    async def member_activity_seeded(self, guild_id: int) -> bool:
+        async with self.connect() as db:
+            row = await (await db.execute(
+                "SELECT 1 FROM activity_seed_state WHERE guild_id = ?", (guild_id,))).fetchone()
+        return row is not None
+
+    async def voice_last_days(self, guild_id: int) -> dict[int, str]:
+        """Each member's last day with voice time (voice ranks' voice_daily), as 'YYYY-MM-DD'."""
+        async with self.connect() as db:
+            rows = await (await db.execute(
+                "SELECT user_id, MAX(day) AS day FROM voice_daily WHERE guild_id = ? GROUP BY user_id",
+                (guild_id,))).fetchall()
+        return {row["user_id"]: row["day"] for row in rows}
 
     # -- voice ranks -----------------------------------------------------------
 

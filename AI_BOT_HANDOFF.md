@@ -461,6 +461,11 @@ date - no open item, nothing to record here.
 - [ ] PR #137 - Voice-activity ranks: `bot/cogs/voice_ranks.py`, `bot/uex/voice_ranks.py`, tables
       `voice_members`/`voice_daily`/`voice_op_session`/`voice_ops`/`voice_op_attendance`. Only if
       aiv2 runs in a server of its own, with Manage Roles. See PROJECT_CONTEXT.md entry 149
+- [ ] PR #138 - Veteran roles, the next event in the anniversary DM, and welcome backs:
+      `set_veteran_role`/`sync_veteran_roles`/`next_event_line` in `bot/cogs/anniversaries.py`,
+      `event_line`/`years_completed`/`welcome_back_text` in `bot/uex/anniversaries.py`,
+      `bot/cogs/welcome_back.py`, tables `member_activity`/`activity_seed_state`. Same condition
+      as PR #132. See PROJECT_CONTEXT.md entry 150
 
 ## To port: aiv2 -> production
 

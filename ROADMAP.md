@@ -221,6 +221,10 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
   Discord Onboarding with a personal welcome, a daily low-effort prompt (poll, screenshot of the
   day), patch-day threads, fewer and busier channels.
 
+- [x] **Veteran roles and welcome backs**: Shipped 2026-10-29 (PR #138, PROJECT_CONTEXT.md entry
+  150): a role per year at each anniversary (given quietly to everyone already past one), the
+  next Discord event in the anniversary DM, and a welcome-back DM after 30+ days away.
+
 - [x] **Voice ranks**: Shipped 2026-10-26 (PR #137, PROJECT_CONTEXT.md entry 149): ranks from time
   in voice with others (Cadet to Admiral), a second ladder for ops attended, `/rank` and
   `/rank-leaderboard`, replacing Arcane. Open: show each person's top ship from the fleet bot on

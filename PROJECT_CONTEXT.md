@@ -5142,6 +5142,43 @@ they're in sync).
      - Tests in `tests/test_voice_ranks.py`; 12 mutations, all caught (one only after a test that
        an op rank isn't announced again at every later op).
 
+150. **Veteran roles, the next event in the anniversary DM, and welcome backs.**
+     The owner's asks (2026-10-29): a veteran role when the anniversary message goes out, named
+     in it "if it's not too tacky"; a line pointing the member to the next event ("Come fly with
+     us Saturday at 8 CT", not that exactly); and a welcome back for anyone who speaks or joins
+     voice after 30+ days away. At the time 152 of 387 members were past a first anniversary;
+     only the 8 whose anniversary fell after the feature went live (2026-10-14) had had a message
+     - all 8 sent, DM and post.
+     - **Veteran roles** (`bot/cogs/anniversaries.py`): one per year, "1-Year Veteran", "2-Year
+       Veteran"..., each replacing the last (the owner's pick over a single "Veteran"), created by
+       name when first needed (Manage Roles, on since voice ranks). Given as the anniversary is
+       sent; the DM says "🎖️ You've earned the **N-Year Veteran** role." and the post "...and is
+       now a **N-Year Veteran**". `sync_veteran_roles` (every 6 hours and at startup) gives everyone
+       theirs quietly - so the 152 got theirs when this shipped, the owner's pick over waiting for
+       each one's next anniversary - and repairs a failed change. A role failure never stops the
+       message. Members who pressed "Stop anniversary messages" still get the role.
+     - **The next event:** the server runs recurring Discord scheduled events (Mining Mondays,
+       Contested Tuesdays), so the DM's last line is read from them (`next_event_line`, pure in
+       `bot/uex/anniversaries.py: event_line`): the event on now, else the soonest to come, linked,
+       with a Discord timestamp so each reader sees their own time - not a fixed "8 CT". No line
+       when nothing is scheduled. DM only; the channel post stays a celebration.
+     - **Welcome back** (`bot/cogs/welcome_back.py`): a DM (the owner's pick over a public reply)
+       when a member posts or joins a voice channel (not AFK) after 30+ days away: "👋 **Welcome
+       back, Nova!** It's good to see you around **Star Tech Dynamics** again." plus the event
+       line. Only times are kept (`member_activity`), from message and voice state events the bot
+       already gets - Message Content isn't needed or asked for. Written at most hourly per member.
+       The new time is recorded before the DM, so one return gets one DM.
+     - **Starting from day one** (the owner's pick over starting fresh): the first start reads who
+       posted in each readable channel over the last 30 days (authors and times only) plus voice
+       ranks' voice days, then marks it done (`activity_seed_state`). Before that, a member with
+       no record isn't known to be away; after, no record means unseen for 30 days, and only a
+       member who joined over 30 days ago is welcomed back. A channel the bot can't read isn't
+       counted, so someone active only there could get one welcome back they don't need.
+     - `/welcome-preview message:` previews the welcome-back DM too.
+     - Tests in `tests/test_veteran_and_welcome_back.py` (11) and the updated
+       `tests/test_anniversaries.py`; 16 mutations, all caught (two only after a test for the
+       hourly write limit and for the read never rewinding a newer time).
+
 ## Where to look for what
 
 Seven docs, deliberately scoped so they don't duplicate each other:

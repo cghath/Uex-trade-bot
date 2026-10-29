@@ -1,7 +1,16 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.68.
+the oldest entry below); the next new entry is 2.69.
+
+---
+
+## 2.68 - 2026-10-29 - Veteran roles and welcome backs
+
+**New**
+- Veteran roles: each server anniversary now gives you a role for your years with Star Tech Dynamics - 1-Year Veteran, 2-Year Veteran and so on. Members already past an anniversary have theirs now.
+- Anniversary messages now name your new veteran role, and the DM points you to the server's next event, at your own local time.
+- Welcome back: come back to chat or voice after a month or more away and the bot sends you a quick welcome back, with the next event.
 
 ---
 
