@@ -1,7 +1,14 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.69.
+the oldest entry below); the next new entry is 2.70.
+
+---
+
+## 2.69 - 2026-10-30 - Pick your own roles
+
+**New**
+- Pick your roles: the role panels let you choose your activities, your timezone, your experience and which announcements ping you - just press a button or pick from the list. Press again to take one off.
 
 ---
 

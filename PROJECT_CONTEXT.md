@@ -5179,6 +5179,38 @@ they're in sync).
        `tests/test_anniversaries.py`; 16 mutations, all caught (two only after a test for the
        hourly write limit and for the read never rewinding a newer time).
 
+151. **The role picker: self-serve role panels.**
+     The owner's spec (2026-10-30): buttons and dropdowns, not emoji reactions, for four groups -
+     Activities (Mining, Salvage, Cargo/Trade, Combat/Bounty, FPS, Exploration, Medical, Racing),
+     Timezone (Eastern, Central, Mountain, Pacific, Outside US), Experience (New Pilot, Getting
+     There, Veteran) and Pings (Org Events, Patch & Server Status, Free Fly & Events, Joint Ops).
+     Discord Onboarding was in the spec as optional; the owner is setting it up by hand, using
+     these same roles.
+     - **`/rolesetup`** (admins; `bot/cogs/role_picker.py`): every role, plus Mentor, is kept by
+       its saved id (`role_picker_roles`), so a rename is fine; else an existing role with the same
+       name (any case) is used; else it's created with no permissions, no color, not mentionable.
+       Never a duplicate - a second run creates nothing. It warns about a matched role with
+       permissions of its own, a role above the bot's (can't be given), and a Mentor it can't ping.
+       At the time none of the 21 existed; "miner" and "Combat medic" did and are left alone, and
+       "Veteran" is not the "N-Year Veteran" roles (entry 150).
+     - **`/rolepanel post channel:`** (admins; a command group, so it reads `/rolepanel post`): four
+       messages. Activities is a dropdown where each pick toggles that role - the dropdown can't
+       show what each member already has, so "pick exactly these" would silently drop the ones
+       they didn't re-pick. Timezone and Experience are buttons, one role at a time (picking
+       another swaps it, picking yours removes it). Pings are toggle buttons. Pure rules in
+       `bot/uex/role_picker.py`.
+     - **Through restarts:** each button's custom id carries its role's id
+       (`rolepick:btn:<group>:<role id>`), the dropdown's options carry theirs; both are
+       DynamicItems registered in `cog_load`. A pick is acted on only if the id is still one of
+       the group's saved roles, so an old or forged panel can't hand out anything else ("This
+       panel is out of date").
+     - **Each pick:** a private "Added **X**. Removed **Y**." reply, and a line in #staff that
+       doesn't ping the member. Picking New Pilot also pings Mentor there - the role is
+       non-mentionable like the rest, so the bot needs "Mention @everyone, @here and All Roles"
+       (the owner granted it) and `/rolesetup` warns without it.
+     - Tests in `tests/test_role_picker.py` (17); 17 mutations, all caught. The test caught a
+       one-role group removing a member's role on a pick from outside the group.
+
 ## Where to look for what
 
 Seven docs, deliberately scoped so they don't duplicate each other:
