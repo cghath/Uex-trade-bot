@@ -4,12 +4,14 @@ Guarantees under test:
   1. Rules - the dropdown and the Pings buttons toggle each pick; Timezone and Experience keep
      one role, picking another swaps it, picking the one you have removes it; picks outside the
      group are ignored. Pings' Everything adds the missing ones, or removes all once you have all.
-  2. /rolesetup - creates only what's missing, plain (no permissions, no color, not
-     mentionable), matches an existing role by name (any case), keeps a saved role by id even
-     after a rename, never duplicates on a second run, warns about a role it can't give or
-     can't ping; admins only.
-  3. /rolepanel post - four panels whose buttons and dropdown carry the saved role ids, matched
-     by the startup-registered templates; refuses until /rolesetup has run.
+  2. /rolesetup - creates only what's missing, plain (no permissions, not mentionable, no color but
+     a Colors role's own), matches an existing role by name (any case), keeps a saved role by id
+     even after a rename, never duplicates on a second run, warns about a role it can't give or
+     can't ping; admins only. It puts the Colors roles right under the lowest voice rank role,
+     moving nothing above it and nothing at all once they're there, and says so when it can't.
+  3. /rolepanel post - five panels whose buttons and dropdown carry the saved role ids, matched
+     by the startup-registered templates, the Colors buttons with their emoji; refuses until
+     /rolesetup has run.
   4. Picking - changes only the member's roles in that group, replies privately, logs in #role-log
      without pinging the member, pings Mentor (only) in #welcome for New Pilot; an id that isn't a saved
      picker role does nothing; a refused role change says so and logs nothing.
@@ -37,8 +39,8 @@ from bot.cogs.role_picker import (
 )
 from bot.db.database import Database
 from bot.uex.role_picker import (
-    ALL_ROLES, CREATE, GROUPS, KEPT, MATCHED, MULTI, ONE, TOGGLE, change_text, everything_changes, log_text,
-    role_changes, setup_plan,
+    ALL_ROLES, COLOR_ROLES, CREATE, GROUPS, KEPT, MATCHED, MULTI, ONE, ROLE_COLOURS, TOGGLE, change_text,
+    color_positions, everything_changes, log_text, role_changes, setup_plan,
 )
 
 GUILD_ID = 1132378045232197694
@@ -80,12 +82,34 @@ def test_reply_and_log_wording():
 
 
 def test_every_group_fits_a_discord_panel():
-    assert [g.key for g in GROUPS] == ["activity", "timezone", "experience", "pings"]
+    assert [g.key for g in GROUPS] == ["activity", "timezone", "experience", "pings", "colors"]
     for group in GROUPS:
         # a dropdown takes 25 options; buttons wrap 5 to a row, 5 rows to a message
         assert len(group.roles) + group.everything <= 25
     assert [g.key for g in GROUPS if g.everything] == ["pings"]
-    assert len(ALL_ROLES) == len(set(ALL_ROLES)) == 22
+    assert len(ALL_ROLES) == len(set(ALL_ROLES)) == 32
+    assert GROUPS[-1].mode == ONE and GROUPS[-1].roles == tuple(name for name, _, _ in COLOR_ROLES)
+    assert len(COLOR_ROLES) == 10 and len({colour for _, colour, _ in COLOR_ROLES}) == 10
+    assert all(0 < colour <= 0xFFFFFF for _, colour, _ in COLOR_ROLES)
+
+
+def test_color_positions_put_colors_right_under_the_anchor_and_keep_the_rest_in_order():
+    # anchor 10 (the lowest rank role) and one role above it; X and Y are the colors
+    roles = [(98, 11), (99, 10), (1, 9), (2, 8), (3, 3), (50, 2), (51, 1)]
+    moves = color_positions(roles, 10, [50, 51])
+    assert moves == {50: 9, 51: 8, 1: 7, 2: 6, 3: 5}
+    after = dict(roles) | moves
+    assert color_positions(list(after.items()), 10, [50, 51]) == {}   # already in place: nothing moves
+    # a color above the anchor comes down too; nothing at or above the anchor otherwise moves
+    assert color_positions([(99, 10), (50, 12), (1, 9)], 10, [50]) == {50: 9, 1: 8}
+
+
+def test_color_positions_keep_discords_order_at_a_shared_position_and_never_go_below_one():
+    # 7 and 8 share position 1: the newer (8) is lower, and stays lower
+    assert color_positions([(7, 1), (8, 1), (50, 2)], 5, [50]) == {50: 4, 7: 3, 8: 2}
+    # more roles than places under the anchor: the bottom ones share position 1
+    moves = color_positions([(1, 2), (2, 1), (50, 1)], 3, [50])
+    assert moves == {50: 2, 1: 1} and min(moves.values()) == 1
 
 
 # -- 2. setup plan --------------------------------------------------------------------------------
@@ -103,8 +127,8 @@ def test_setup_plan_keeps_by_id_matches_by_name_creates_the_rest():
 # -- fakes ----------------------------------------------------------------------------------------
 
 class FakeRole:
-    def __init__(self, role_id, name, *, permissions=0, assignable=True):
-        self.id, self.name, self.mentionable = role_id, name, False
+    def __init__(self, role_id, name, *, permissions=0, assignable=True, position=1):
+        self.id, self.name, self.mentionable, self.position = role_id, name, False, position
         self.permissions, self._assignable = discord.Permissions(permissions), assignable
         self.mention = f"<@&{role_id}>"
 
@@ -131,12 +155,26 @@ class FakeGuild:
     def __init__(self, roles=(), *, mention_everyone=True):
         self.id, self.roles, self.created = GUILD_ID, list(roles), []
         self.me = NS(guild_permissions=discord.Permissions(mention_everyone=mention_everyone))
+        self.moves, self.move_error = [], None
+
+    async def fetch_roles(self):
+        return [FakeRole(self.id, "@everyone", position=0)] + list(self.roles)
+
+    async def edit_role_positions(self, positions, *, reason=None):
+        if self.move_error:
+            raise self.move_error
+        moves = {role.id: position for role, position in positions.items()}
+        self.moves.append(moves)
+        for role in self.roles:
+            role.position = moves.get(role.id, role.position)
 
     def get_role(self, role_id):
         return next((r for r in self.roles if r.id == role_id), None)
 
     async def create_role(self, **kwargs):
         self.created.append(kwargs)
+        for other in self.roles:   # like Discord: a new role goes in at the bottom, the rest move up
+            other.position += 1
         role = FakeRole(5000 + len(self.roles), kwargs["name"])
         self.roles.append(role)
         return role
@@ -174,13 +212,16 @@ def test_rolesetup_creates_plain_roles_matches_existing_and_never_duplicates(tmp
         assert [c["name"] for c in guild.created] == [n for n in ALL_ROLES if n != "Mining"]
         for kwargs in guild.created:
             assert kwargs["permissions"].value == 0 and kwargs["mentionable"] is False
-            assert kwargs["hoist"] is False and kwargs["colour"] == discord.Colour.default()
+            assert kwargs["hoist"] is False
+            assert kwargs["colour"] == discord.Colour(ROLE_COLOURS.get(kwargs["name"], 0))
+        colours = {c["name"]: c["colour"] for c in guild.created}
+        assert colours["Teal"].value == 0x2DD4BF and colours["Eastern"] == discord.Colour.default()
         saved = await db.get_role_picker_roles(GUILD_ID)
-        assert saved["Mining"] == 10 and len(saved) == 22
-        assert "Using existing: Mining" in reply and "22 of 22 ready" in reply
+        assert saved["Mining"] == 10 and len(saved) == 32
+        assert "Using existing: Mining" in reply and "32 of 32 ready" in reply
         guild.get_role(saved["Salvage"]).name = "Salvagers"   # renamed later: still the same role
         _, again = await _set_up(db, guild)
-        assert len(guild.created) == 21 and await db.get_role_picker_roles(GUILD_ID) == saved
+        assert len(guild.created) == 31 and await db.get_role_picker_roles(GUILD_ID) == saved
         assert "Created" not in again
     _run(tmp_path, body)
 
@@ -209,6 +250,41 @@ def test_rolesetup_and_panel_post_are_admin_only(tmp_path):
     _run(tmp_path, body)
 
 
+def _ranked_guild():
+    return FakeGuild([FakeRole(900, "Admiral", position=6), FakeRole(901, "Operator", position=5),
+                      FakeRole(902, "Star Citizen", position=4), FakeRole(903, "Mining", position=3)])
+
+
+def test_rolesetup_puts_the_colors_right_under_the_rank_roles_once(tmp_path):
+    async def body(db):
+        guild = _ranked_guild()
+        _, reply = await _set_up(db, guild)
+        assert "Moved the color roles right under **Operator**" in reply
+        saved = await db.get_role_picker_roles(GUILD_ID)
+        by_id = {role.id: role for role in guild.roles}
+        operator, admiral = by_id[901].position, by_id[900].position
+        colours = [by_id[saved[name]].position for name, _, _ in COLOR_ROLES]
+        assert colours == list(range(operator - 1, operator - 11, -1))   # panel order, top first
+        assert admiral == operator + 1                                     # nothing above moved
+        others = [role.position for role in guild.roles if role.id not in {900, 901, *map(saved.get, ROLE_COLOURS)}]
+        assert max(others) < min(colours) and min(others) >= 1
+        assert by_id[902].position > by_id[903].position                  # the rest keep their order
+        _, again = await _set_up(db, guild)
+        assert len(guild.moves) == 1 and "Moved" not in again and GUILD_ID not in guild.moves[0]
+    _run(tmp_path, body)
+
+
+def test_rolesetup_says_when_it_cant_move_the_colors(tmp_path):
+    async def body(db):
+        guild = _ranked_guild()
+        guild.move_error = discord.Forbidden(NS(status=403, reason="Forbidden"), "Missing Permissions")
+        _, reply = await _set_up(db, guild)
+        assert "couldn't move the color roles" in reply and "right under **Operator**" in reply
+        _, no_ranks = await _set_up(db, FakeGuild())
+        assert "no voice rank roles yet" in no_ranks
+    _run(tmp_path, body)
+
+
 # -- 3. /rolepanel post ---------------------------------------------------------------------------
 
 def test_panels_carry_the_saved_role_ids(tmp_path):
@@ -219,7 +295,7 @@ def test_panels_carry_the_saved_role_ids(tmp_path):
         channel = NS(mention="#pick-your-roles", send=AsyncMock())
         inter = _interaction(db, guild, FakeMember(1), None)
         await RolePicker.rolepanel_post.callback(cog, inter, channel)
-        assert channel.send.await_count == 4
+        assert channel.send.await_count == 5
         views = [c.kwargs["view"] for c in channel.send.await_args_list]
         menu = views[0].children[0].item
         assert re.fullmatch(MENU_TEMPLATE, menu.custom_id)
@@ -232,7 +308,9 @@ def test_panels_carry_the_saved_role_ids(tmp_path):
             assert all(re.fullmatch(BUTTON_TEMPLATE, i) for i in expected)
         assert re.fullmatch(EVERYTHING_TEMPLATE, views[3].children[-1].custom_id)
         assert views[3].children[-1].item.label == "Everything"
-        assert "Posted the four role panels" in inter.followup.send.await_args.args[0]
+        assert [str(b.item.emoji) for b in views[4].children] == [emoji for _, _, emoji in COLOR_ROLES]
+        assert views[4].children[0].item.label == "Orange" and views[1].children[0].item.emoji is None
+        assert "Posted the five role panels" in inter.followup.send.await_args.args[0]
     _run(tmp_path, body)
 
 

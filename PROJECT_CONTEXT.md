@@ -5248,6 +5248,21 @@ they're in sync).
      - **#role-log** (PR #143): the owner keeps #staff for moderation, so every role log line -
        panel picks and Onboarding - goes to a new #role-log (`ROLE_LOG_CHANNEL_ID`) instead.
      - 7 more tests (24 in all), 14 mutations, all caught.
+     - **Colors** (PR #146, the owner's ask): a fifth panel, "🎨 Colors - What color do you want
+       your name to have in text channels?", ten one-at-a-time buttons, each with an emoji
+       (`COLOR_ROLES`: name, color, emoji - Orange, Gold, Green, Teal, Ice, Blue, Purple, Pink,
+       Silver, Bronze; no red, the owner's call, since the Star Tech Dynamics role is red).
+       Created with their color and no permissions; one renamed or recolored in
+       Discord is kept by id, as every picker role is. A name shows the color of the highest
+       colored role a member has, so `/rolesetup` moves them right under the lowest voice rank
+       role (Operator; none of the 13 rank roles has a color) in one `edit_role_positions` call:
+       `color_positions` moves only roles under that one, keeping their order (at a shared
+       position the newer role is lower, as Discord shows it), and nothing once they're in place.
+       On the live server (read 2026-10-30) a picked color beats Star Citizen (the color of 251 of
+       389 names), Path of Exile and every other colored role under the ranks, but not Mod,
+       Server Booster or the red Star Tech Dynamics role above them (27 members) - unless the
+       owner takes that role's color off. 32 roles. 4 more tests (28 in all), 12 mutations, all
+       caught.
 
 152. **Event cards: sign-ups for Discord's scheduled events in #📅events.**
      The owner's ask (2026-10-30): members on phones couldn't find Discord's Events list. Designed
