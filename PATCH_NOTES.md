@@ -1,7 +1,14 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.75.
+the oldest entry below); the next new entry is 2.76.
+
+---
+
+## 2.75 - 2026-10-30 - Name colors
+
+**New**
+- Pick the color your name shows in text channels from the new Colors panel in #🙋‍♂️pick-your-roles: ten colors, one at a time. Pick yours again to go back to no color.
 
 ---
 

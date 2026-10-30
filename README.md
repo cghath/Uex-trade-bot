@@ -121,7 +121,8 @@ background posting/sale updates are delivered only by private DM.
    - `Create Private Threads`, `Send Messages in Threads` and `Manage Threads`, for the private
      threads that route tracking, the ship-parts list and the blueprint list use.
    - `Manage Roles`, for voice ranks, veteran roles and the role picker: the bot creates those
-     roles and gives them out, so its own role must sit above them in Server Settings → Roles.
+     roles and gives them out (and moves the color roles right under the rank roles), so its own
+     role must sit above them in Server Settings → Roles.
    - `Mention @everyone, @here and All Roles`, so the role picker can ping Mentor in #👋welcome when
      someone picks New Pilot (or make Mentor mentionable instead).
    - `Manage Events`, so an event card's Start and End also start and end the Discord event.

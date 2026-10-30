@@ -1,14 +1,18 @@
 """The self-serve role picker (bot/cogs/role_picker.py): which roles there are, how a pick
 changes a member's roles, and how /rolesetup matches the roles a server already has.
 
-Four groups, each a panel of its own:
+Five groups, each a panel of its own:
 - Activities: a dropdown; picking a role adds it, picking one you already have removes it.
-- Timezone and Experience: buttons, one role per member - picking one removes the others,
-  picking the one you have removes it.
+- Timezone, Experience and Colors: buttons, one role per member - picking one removes the
+  others, picking the one you have removes it.
 - Pings: toggle buttons, plus Everything: all of them, or none once you have them all.
 
-Every role is plain - no permissions, no color, not mentionable. Mentor isn't on a panel: it's
-the staff role pinged in #👋welcome when someone picks New Pilot.
+Every role is plain - no permissions, not mentionable, and no color but the Colors roles' own.
+Mentor isn't on a panel: it's the staff role pinged in #👋welcome when someone picks New Pilot.
+
+A name shows the color of the highest colored role a member has, so /rolesetup puts the Colors
+roles right under the voice rank roles (which have no color): a picked color beats every colored
+role below them, not one above (a staff role, Server Booster).
 """
 from __future__ import annotations
 
@@ -32,6 +36,23 @@ class RoleGroup:
     everything: bool = False  # an Everything button: every role in the group at once
 
 
+# The Colors panel: each role's name, its color and its button's emoji, in panel order. No red:
+# the Star Tech Dynamics role is red, and a member's name shouldn't look like the org's.
+COLOR_ROLES: tuple[tuple[str, int, str], ...] = (
+    ("Orange", 0xFF9F43, "🧡"),
+    ("Gold", 0xFFD43B, "💛"),
+    ("Green", 0x4ADE80, "💚"),
+    ("Teal", 0x2DD4BF, "🌊"),
+    ("Ice", 0x7FE3FF, "🧊"),
+    ("Blue", 0x4C8DFF, "💙"),
+    ("Purple", 0xA66BFF, "💜"),
+    ("Pink", 0xFF7AC8, "💗"),
+    ("Silver", 0xC0C8D2, "🤍"),
+    ("Bronze", 0xCD8B5A, "🤎"),
+)
+ROLE_COLOURS = {name: colour for name, colour, _ in COLOR_ROLES}
+ROLE_EMOJI = {name: emoji for name, _, emoji in COLOR_ROLES}
+
 GROUPS: tuple[RoleGroup, ...] = (
     RoleGroup("activity", "🛠️ Activities", "What do you like to do? Pick any to add them; pick one you already "
               "have to remove it.", MULTI,
@@ -44,6 +65,8 @@ GROUPS: tuple[RoleGroup, ...] = (
               "off, or Everything for all of them.", TOGGLE,
               ("Org Events", "Patch & Server Status", "Free Fly & Events", "Joint Ops", "Streams & Videos"),
               everything=True),
+    RoleGroup("colors", "🎨 Colors", "What color do you want your name to have in text channels? One at a "
+              "time - pick yours again to go back to no color.", ONE, tuple(name for name, _, _ in COLOR_ROLES)),
 )
 GROUPS_BY_KEY = {group.key: group for group in GROUPS}
 
@@ -138,3 +161,17 @@ def setup_plan(saved: dict[str, int], existing: list[tuple[int, str]]) -> dict[s
         else:
             plan[name] = (CREATE, None)
     return plan
+
+
+def color_positions(roles: list[tuple[int, int]], anchor: int, colors: list[int]) -> dict[int, int]:
+    """New role positions that put `colors` (top one first) right under position `anchor`, the
+    lowest voice rank role. `roles` is (id, position) for every role but @everyone. Only roles
+    under the anchor move, each keeping its place in the order (at a shared position the newer
+    role, the higher id, is lower, as Discord shows it); only the ones that change are returned."""
+    color_ids = set(colors)
+    below = sorted(((position, -role_id) for role_id, position in roles
+                    if position < anchor and role_id not in color_ids), reverse=True)
+    order = list(colors) + [-negative for _, negative in below]
+    current = dict(roles)
+    moves = {role_id: max(anchor - 1 - index, 1) for index, role_id in enumerate(order)}
+    return {role_id: position for role_id, position in moves.items() if current.get(role_id) != position}

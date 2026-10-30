@@ -226,8 +226,8 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
   every-week regulars, reminder, Start/End. Next: attendance (who was in voice 30+ minutes).
 
 - [x] **Role picker**: Shipped 2026-10-30 (PR #140, PROJECT_CONTEXT.md entry 151): `/rolesetup`
-  and `/rolepanel post` - self-serve Activities, Timezone, Experience and Pings roles from
-  buttons and a dropdown, logged in #staff, Mentor pinged for New Pilots.
+  and `/rolepanel post` - self-serve Activities, Timezone, Experience, Pings and name Colors
+  roles from buttons and a dropdown, logged in #role-log, Mentor pinged for New Pilots.
 
 - [x] **Veteran roles and welcome backs**: Shipped 2026-10-29 (PR #138, PROJECT_CONTEXT.md entry
   150): a role per year at each anniversary (given quietly to everyone already past one), the

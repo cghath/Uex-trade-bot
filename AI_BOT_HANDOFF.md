@@ -484,6 +484,9 @@ date - no open item, nothing to record here.
       `event_cards`, `event_roles`, `event_signups`, `event_regulars`, `event_ship_history`;
       production's #events and Event Manager ids. Only if aiv2's server runs Discord events.
       See PROJECT_CONTEXT.md entry 152
+- [ ] PR #146 - The role picker's Colors panel (`COLOR_ROLES`, `color_positions` in
+      `bot/uex/role_picker.py`, `place_colors` in the cog); goes with PR #140. See
+      PROJECT_CONTEXT.md entry 151
 
 ## To port: aiv2 -> production
 

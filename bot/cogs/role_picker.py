@@ -3,8 +3,9 @@ roles (bot/uex/role_picker.py has the groups and the rules).
 
 - /rolesetup (admins): makes sure every picker role exists - a role saved earlier is kept by
   id (so renaming it is fine), else one with the same name is used, else it's created plain (no
-  permissions, no color, not mentionable). Never a duplicate. Saves the ids.
-- /rolepanel post (admins): posts the four panels in a channel.
+  permissions, not mentionable, no color but a Colors role's own). Never a duplicate. Saves the
+  ids, and moves the Colors roles right under the voice rank roles.
+- /rolepanel post (admins): posts the five panels in a channel.
 
 The panels' buttons and dropdown are DynamicItems registered at startup, each carrying its
 role's id (the dropdown's options carry theirs; Everything needs none), so they work through restarts for as long as
@@ -36,16 +37,19 @@ from discord.ext import commands, tasks
 from bot.delivery import send_to_channel
 from bot.uex.welcome import WELCOME_CHANNEL_ID
 from bot.uex.role_picker import (
-    CREATE, GROUPS, GROUPS_BY_KEY, MATCHED, MENTOR_ROLE, MULTI, NEW_PILOT_ROLE, RoleGroup, change_text, log_text,
-    everything_changes, intro_text, mentor_text, new_pilot_text, onboarding_log_text, picker_order, role_changes,
-    setup_plan,
+    CREATE, GROUPS, GROUPS_BY_KEY, MATCHED, MENTOR_ROLE, MULTI, NEW_PILOT_ROLE, ROLE_COLOURS, ROLE_EMOJI, RoleGroup,
+    change_text, color_positions, everything_changes, intro_text, log_text, mentor_text, new_pilot_text,
+    onboarding_log_text, picker_order, role_changes, setup_plan,
 )
+from bot.uex.voice_ranks import OP_RANKS, RANKS
 
 logger = logging.getLogger("uexbot.role_picker")
 
 # #role-log on Star Tech Dynamics: every pick is logged here (not #staff, which the owner keeps for
 # moderation).
 ROLE_LOG_CHANNEL_ID = 1565653911472439356
+# The voice rank roles (bot/cogs/voice_ranks.py) the Colors roles go right under.
+RANK_ROLE_NAMES = {name for name, _ in RANKS + OP_RANKS}
 # #👋welcome (WELCOME_CHANNEL_ID): Mentor is pinged there for a New Pilot and each member's first post.
 BUTTON_TEMPLATE = r"rolepick:btn:(?P<group>[a-z]+):(?P<role>\d+)"
 MENU_TEMPLATE = r"rolepick:menu:(?P<group>[a-z]+)"
@@ -139,8 +143,8 @@ async def apply_pick(interaction: discord.Interaction, group_key: str, picked: s
 class RoleButton(discord.ui.DynamicItem[discord.ui.Button], template=BUTTON_TEMPLATE):
     """A Timezone, Experience or Pings button; its custom id carries the role's id."""
 
-    def __init__(self, group_key: str, role_id: int, label: str = "Role") -> None:
-        super().__init__(discord.ui.Button(label=label, style=discord.ButtonStyle.secondary,
+    def __init__(self, group_key: str, role_id: int, label: str = "Role", emoji: str | None = None) -> None:
+        super().__init__(discord.ui.Button(label=label, style=discord.ButtonStyle.secondary, emoji=emoji,
                                            custom_id=f"rolepick:btn:{group_key}:{role_id}"))
         self.group_key, self.role_id = group_key, role_id
 
@@ -194,8 +198,8 @@ def panel(group: RoleGroup, roles: list[discord.Role]) -> tuple[str, discord.ui.
         view.add_item(RoleMenu(group.key, [discord.SelectOption(label=role.name, value=str(role.id))
                                            for role in roles]))
     else:
-        for role in roles:
-            view.add_item(RoleButton(group.key, role.id, role.name))
+        for name, role in zip(group.roles, roles):
+            view.add_item(RoleButton(group.key, role.id, role.name, ROLE_EMOJI.get(name)))
         if group.everything:
             view.add_item(EverythingButton(group.key))
     return f"**{group.title}**\n{group.blurb}", view
@@ -311,6 +315,31 @@ class RolePicker(commands.Cog):
     async def before_read_welcome_history(self) -> None:
         await self.bot.wait_until_ready()
 
+    async def place_colors(self, guild: discord.Guild, ids: dict[str, int]) -> str:
+        """Move the Colors roles right under the lowest voice rank role; what happened, for the
+        /rolesetup reply ("" when they were already there)."""
+        names = GROUPS_BY_KEY["colors"].roles
+        if not all(name in ids for name in names):
+            return ""
+        roles = [role for role in await guild.fetch_roles() if role.id != guild.id]
+        ranks = [role for role in roles if role.name in RANK_ROLE_NAMES]
+        if not ranks:
+            return ("⚠️ There are no voice rank roles yet, so the color roles stay where they are - drag them above "
+                    "any colored role you want a picked color to beat.")
+        lowest = min(ranks, key=lambda role: role.position)
+        moves = color_positions([(role.id, role.position) for role in roles], lowest.position,
+                                [ids[name] for name in names])
+        if not moves:
+            return ""
+        try:
+            await guild.edit_role_positions({discord.Object(id=role_id): position
+                                             for role_id, position in moves.items()},
+                                            reason="Role picker setup: colors under the rank roles")
+        except discord.HTTPException as exc:
+            return (f"⚠️ I couldn't move the color roles ({exc}) - drag them right under **{lowest.name}** in "
+                    "Server Settings > Roles.")
+        return f"Moved the color roles right under **{lowest.name}**."
+
     @app_commands.command(name="rolesetup", description="Admin: create any missing role picker roles and save them.")
     @app_commands.default_permissions(administrator=True)
     @app_commands.guild_only()
@@ -328,7 +357,8 @@ class RolePicker(commands.Cog):
             if action == CREATE:
                 try:
                     role = await guild.create_role(name=name, permissions=discord.Permissions.none(),
-                                                   colour=discord.Colour.default(), hoist=False, mentionable=False,
+                                                   colour=discord.Colour(ROLE_COLOURS.get(name, 0)), hoist=False,
+                                                   mentionable=False,
                                                    reason="Role picker setup (/rolesetup)")
                 except discord.HTTPException as exc:
                     problems.append(f"Couldn't create **{name}**: {exc}")
@@ -355,11 +385,14 @@ class RolePicker(commands.Cog):
         if matched:
             lines.append("Using existing: " + ", ".join(matched))
         lines += [f"⚠️ {problem}" for problem in problems]
+        placed = await self.place_colors(guild, ids)
+        if placed:
+            lines.append(placed)
         if len(ids) == len(plan):
             lines.append("Next: `/rolepanel post` in your roles channel.")
         await interaction.followup.send("\n".join(lines), ephemeral=True)
 
-    @rolepanel.command(name="post", description="Admin: post the four role picker panels in a channel.")
+    @rolepanel.command(name="post", description="Admin: post the five role picker panels in a channel.")
     @app_commands.describe(channel="Where to post them, e.g. #pick-your-roles")
     async def rolepanel_post(self, interaction: discord.Interaction, channel: discord.TextChannel) -> None:
         if not _is_admin(interaction):
@@ -383,7 +416,7 @@ class RolePicker(commands.Cog):
         except discord.HTTPException as exc:
             await interaction.followup.send(f"I couldn't post in {channel.mention}: {exc}", ephemeral=True)
             return
-        await interaction.followup.send(f"Posted the four role panels in {channel.mention}.", ephemeral=True)
+        await interaction.followup.send(f"Posted the five role panels in {channel.mention}.", ephemeral=True)
 
 
 async def setup(bot: commands.Bot) -> None:
