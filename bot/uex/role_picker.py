@@ -5,7 +5,7 @@ Four groups, each a panel of its own:
 - Activities: a dropdown; picking a role adds it, picking one you already have removes it.
 - Timezone and Experience: buttons, one role per member - picking one removes the others,
   picking the one you have removes it.
-- Pings: toggle buttons.
+- Pings: toggle buttons, plus Everything: all four, or none once you have all four.
 
 Every role is plain - no permissions, no color, not mentionable. Mentor isn't on a panel: it's
 the staff role pinged in #staff when someone picks New Pilot.
@@ -29,6 +29,7 @@ class RoleGroup:
     blurb: str
     mode: str
     roles: tuple[str, ...]
+    everything: bool = False  # an Everything button: every role in the group at once
 
 
 GROUPS: tuple[RoleGroup, ...] = (
@@ -40,8 +41,8 @@ GROUPS: tuple[RoleGroup, ...] = (
     RoleGroup("experience", "🧭 Experience", "How long have you been flying? One at a time.", ONE,
               ("New Pilot", "Getting There", "Veteran")),
     RoleGroup("pings", "🔔 Pings", "Which announcements do you want to be pinged for? Press again to turn one "
-              "off.", TOGGLE,
-              ("Org Events", "Patch & Server Status", "Free Fly & Events", "Joint Ops")),
+              "off, or Everything for all of them.", TOGGLE,
+              ("Org Events", "Patch & Server Status", "Free Fly & Events", "Joint Ops"), everything=True),
 )
 GROUPS_BY_KEY = {group.key: group for group in GROUPS}
 
@@ -60,6 +61,14 @@ def role_changes(mode: str, group_ids: set[int], held: set[int], picked: set[int
             return set(), picked & held
         return picked, (group_ids & held) - picked
     return picked - held, picked & held  # MULTI and TOGGLE: each pick flips that role
+
+
+def everything_changes(group_ids: set[int], held: set[int]) -> tuple[set[int], set[int]]:
+    """(to add, to remove) for the Everything button: the ones missing, or all of them off when
+    the member already has every one."""
+    if group_ids <= held:
+        return set(), set(group_ids)
+    return group_ids - held, set()
 
 
 def change_text(added: list[str], removed: list[str]) -> str:

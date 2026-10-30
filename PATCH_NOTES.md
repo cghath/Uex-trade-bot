@@ -1,7 +1,14 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.70.
+the oldest entry below); the next new entry is 2.71.
+
+---
+
+## 2.70 - 2026-10-30 - Every ping at once
+
+**New**
+- The Pings panel has an Everything button: one press and you're pinged for all announcements. Press it again to turn them all off.
 
 ---
 

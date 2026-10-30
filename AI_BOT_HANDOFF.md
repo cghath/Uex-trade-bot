@@ -470,6 +470,8 @@ date - no open item, nothing to record here.
       DynamicItem buttons/dropdown), `bot/uex/role_picker.py`, table `role_picker_roles`. Only if
       aiv2 runs in a server that wants self-serve roles; its #staff channel id is production's.
       See PROJECT_CONTEXT.md entry 151
+- [ ] PR #141 - Pings' Everything button (`EverythingButton`, `everything_changes`,
+      `RoleGroup.everything`); goes with PR #140. See PROJECT_CONTEXT.md entry 151
 
 ## To port: aiv2 -> production
 
