@@ -4877,8 +4877,8 @@ class Database:
 
     async def update_event_card(self, card_id: int, **fields: Any) -> None:
         """Refresh a card's copy of the event (any of name, description, cover_url, creator_id,
-        voice_channel_id, message_id)."""
-        allowed = (*self._EVENT_CARD_FIELDS, "message_id")
+        voice_channel_id, message_id, repeats)."""
+        allowed = (*self._EVENT_CARD_FIELDS, "message_id", "repeats")
         names = [name for name in allowed if name in fields]
         if not names:
             return
@@ -4938,6 +4938,14 @@ class Database:
             rows = await (await db.execute(
                 """SELECT * FROM event_cards WHERE state = 'open' AND reminded = 0 AND starts_at > ?
                    AND starts_at <= ?""", (now, now + before))).fetchall()
+        return [dict(row) for row in rows]
+
+    async def open_event_cards(self, guild_id: int) -> list[dict[str, Any]]:
+        """The guild's cards still open or under way."""
+        async with self.connect() as db:
+            rows = await (await db.execute(
+                "SELECT * FROM event_cards WHERE guild_id = ? AND state IN ('open', 'started')",
+                (guild_id,))).fetchall()
         return [dict(row) for row in rows]
 
     async def stale_event_cards(self, started_before: int) -> list[dict[str, Any]]:

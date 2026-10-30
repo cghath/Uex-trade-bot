@@ -20,6 +20,8 @@ MAX_CAPACITY = 99
 MAX_ROLE_NAME = 40
 READY_BEFORE = 15 * 60   # seconds: "Ready by" this long before the start
 REMIND_BEFORE = 60 * 60  # seconds: the roster is reminded this long before the start
+PING_USERS = 100         # Discord lets one message mention at most 100 members by allowed_mentions
+PING_CHARS = 2000        # and a message holds 2,000 characters
 ROSTER_BUDGET = 2400     # characters of roster text; Discord allows 4000 across one card
 DESCRIPTION_LIMIT = 800  # the rest of the card's text, at most ~1,200, fits beside them
 REGULAR_MARK = "🔁"
@@ -221,13 +223,32 @@ def mentions(user_ids: list[int]) -> str:
     return " ".join(f"<@{uid}>" for uid in user_ids)
 
 
+def ping_messages(text: str, user_ids: list[int]) -> list[tuple[str, list[int]]]:
+    """A roster ping as messages Discord accepts: `text` then everyone's mentions, split so each
+    message mentions at most PING_USERS members in at most PING_CHARS characters. Each message is
+    (content, the ids it mentions); everyone is mentioned exactly once."""
+    messages: list[tuple[str, list[int]]] = []
+    content, ids = text, []
+    for uid in user_ids:
+        mention = f"<@{uid}>"
+        joiner = (" " if ids else "\n") if content else ""
+        if len(ids) >= PING_USERS or len(content) + len(joiner) + len(mention) > PING_CHARS:
+            messages.append((content, ids))
+            content, ids, joiner = "", [], ""
+        content += joiner + mention
+        ids.append(uid)
+    messages.append((content, ids))
+    return messages
+
+
 def announce_text(org_mention: str | None) -> str:
     return f"{org_mention} a new op is on the schedule." if org_mention else "A new op is on the schedule."
 
 
 def reminder_text(name: str, starts_at: int, voice_channel_id: int | None) -> str:
+    # <t:...:R> is Discord's live "in 25 minutes": a card posted or moved inside the hour says so
     where = f", in <#{voice_channel_id}>" if voice_channel_id else ""
-    return f"**{name}** starts in 1 hour, at <t:{starts_at}:t>{where}."
+    return f"**{name}** starts <t:{starts_at}:R>, at <t:{starts_at}:t>{where}."
 
 
 def start_text(name: str, voice_channel_id: int | None) -> str:
