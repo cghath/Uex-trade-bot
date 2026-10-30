@@ -15,7 +15,7 @@ from discord.ext import commands
 # These remain available as slash commands but are implementation health checks rather than
 # normal player tools, so they do not add noise to /intro.
 HIDDEN_COMMANDS = {"marketplace-index-status", "command-usage", "anniversary-preview", "welcome-preview",
-                   "rolesetup", "rolepanel"}
+                   "rolesetup", "rolepanel", "event-roles"}
 
 CATEGORIES: list[tuple[str, str, list[str]]] = [
     ("💰 Prices & Routes", "Terminal prices, profitable hauls, and ranked live routes.", [

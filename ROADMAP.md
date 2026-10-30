@@ -221,6 +221,10 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
   Discord Onboarding with a personal welcome, a daily low-effort prompt (poll, screenshot of the
   day), patch-day threads, fewer and busier channels.
 
+- [x] **Event cards**: Shipped 2026-10-30 (PR #144, PROJECT_CONTEXT.md entry 152): a sign-up card in
+  #events for each Discord event - roles and spots (`/event-roles`), wait list, Maybe, ships,
+  every-week regulars, reminder, Start/End. Next: attendance (who was in voice 30+ minutes).
+
 - [x] **Role picker**: Shipped 2026-10-30 (PR #140, PROJECT_CONTEXT.md entry 151): `/rolesetup`
   and `/rolepanel post` - self-serve Activities, Timezone, Experience and Pings roles from
   buttons and a dropdown, logged in #staff, Mentor pinged for New Pilots.

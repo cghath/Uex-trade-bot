@@ -913,6 +913,69 @@ CREATE TABLE IF NOT EXISTS welcome_intro_seed (
     seeded_at TEXT NOT NULL
 );
 
+-- Event cards (bot/cogs/event_cards.py): one card per occurrence of a Discord scheduled event,
+-- posted in #events. The event's name, picture and so on are copied here so a card can still
+-- be drawn once the event itself is gone (cancelled). A repeating event keeps its event_id from
+-- week to week; each week is a new card.
+CREATE TABLE IF NOT EXISTS event_cards (
+    card_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id INTEGER NOT NULL,
+    event_id INTEGER NOT NULL,
+    starts_at INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT,
+    cover_url TEXT,
+    creator_id INTEGER,
+    voice_channel_id INTEGER,
+    repeats TEXT,
+    channel_id INTEGER NOT NULL,
+    message_id INTEGER,
+    state TEXT NOT NULL DEFAULT 'open' CHECK (state IN ('open', 'started', 'ended', 'cancelled')),
+    reminded INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_event_cards_event ON event_cards (event_id, starts_at);
+
+-- An event's roles and spots (/event-roles), by its Discord event id, so they carry over to every
+-- week of a repeating event. No rows: everyone just joins.
+CREATE TABLE IF NOT EXISTS event_roles (
+    event_id INTEGER NOT NULL,
+    position INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    capacity INTEGER NOT NULL,
+    PRIMARY KEY (event_id, position)
+);
+
+-- Who's on a card. `queued` (unix time) orders a role's wait list: it's reset whenever the
+-- member's role or status changes, so switching roles puts you at the back of the new one's line.
+CREATE TABLE IF NOT EXISTS event_signups (
+    card_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('going', 'maybe', 'waiting')),
+    role TEXT,
+    ship TEXT,
+    queued REAL NOT NULL,
+    PRIMARY KEY (card_id, user_id)
+);
+
+-- Regulars ("Sign me up every time"): put on each new card of the event in this role and ship.
+CREATE TABLE IF NOT EXISTS event_regulars (
+    event_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    role TEXT,
+    ship TEXT,
+    PRIMARY KEY (event_id, user_id)
+);
+
+-- Ships each member has said they're bringing, newest first in the card's ship menu.
+CREATE TABLE IF NOT EXISTS event_ship_history (
+    user_id INTEGER NOT NULL,
+    ship TEXT NOT NULL,
+    last_used TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (user_id, ship)
+);
+
 -- Members who pressed "Stop anniversary messages" under the DM: no DM and no post for them.
 CREATE TABLE IF NOT EXISTS anniversary_opt_outs (
     guild_id INTEGER NOT NULL,
@@ -4793,6 +4856,192 @@ class Database:
             row = await (await db.execute(
                 "SELECT 1 FROM welcome_intro_seed WHERE guild_id = ?", (guild_id,))).fetchone()
         return row is not None
+
+    # -- event cards -----------------------------------------------------------
+
+    _EVENT_CARD_FIELDS = ("name", "description", "cover_url", "creator_id", "voice_channel_id")
+
+    async def create_event_card(self, *, guild_id: int, event_id: int, starts_at: int, channel_id: int,
+                                repeats: str | None, **fields: Any) -> int:
+        """A new card for one occurrence; `fields` are the event's name, description, cover_url,
+        creator_id and voice_channel_id."""
+        async with self.connect() as db:
+            cursor = await db.execute(
+                """INSERT INTO event_cards (guild_id, event_id, starts_at, channel_id, repeats, name, description,
+                                            cover_url, creator_id, voice_channel_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (guild_id, event_id, starts_at, channel_id, repeats,
+                 *(fields.get(name) for name in self._EVENT_CARD_FIELDS)))
+            await db.commit()
+        return cursor.lastrowid
+
+    async def update_event_card(self, card_id: int, **fields: Any) -> None:
+        """Refresh a card's copy of the event (any of name, description, cover_url, creator_id,
+        voice_channel_id, message_id)."""
+        allowed = (*self._EVENT_CARD_FIELDS, "message_id")
+        names = [name for name in allowed if name in fields]
+        if not names:
+            return
+        async with self.connect() as db:
+            await db.execute(f"UPDATE event_cards SET {', '.join(f'{n} = ?' for n in names)} WHERE card_id = ?",
+                             (*(fields[n] for n in names), card_id))
+            await db.commit()
+
+    async def get_event_card(self, card_id: int) -> dict[str, Any] | None:
+        async with self.connect() as db:
+            row = await (await db.execute("SELECT * FROM event_cards WHERE card_id = ?", (card_id,))).fetchone()
+        return dict(row) if row else None
+
+    async def current_event_card(self, event_id: int) -> dict[str, Any] | None:
+        """The event's card still open or under way, if any."""
+        async with self.connect() as db:
+            row = await (await db.execute(
+                """SELECT * FROM event_cards WHERE event_id = ? AND state IN ('open', 'started')
+                   ORDER BY card_id DESC LIMIT 1""", (event_id,))).fetchone()
+        return dict(row) if row else None
+
+    async def event_card_exists(self, event_id: int, starts_at: int) -> bool:
+        """Whether this occurrence ever had a card, in any state - so a closed one isn't posted again."""
+        async with self.connect() as db:
+            row = await (await db.execute(
+                "SELECT 1 FROM event_cards WHERE event_id = ? AND starts_at = ?", (event_id, starts_at))).fetchone()
+        return row is not None
+
+    async def move_event_card(self, card_id: int, starts_at: int) -> None:
+        """The event's time changed: the card follows it and is reminded afresh."""
+        async with self.connect() as db:
+            await db.execute("UPDATE event_cards SET starts_at = ?, reminded = 0 WHERE card_id = ?", (starts_at, card_id))
+            await db.commit()
+
+    async def set_event_card_state(self, card_id: int, state: str, *, only_from: tuple[str, ...]) -> bool:
+        """Move a card to `state` if it's in one of `only_from`; False when it wasn't (someone
+        else already did), so only one caller ever announces a change."""
+        async with self.connect() as db:
+            cursor = await db.execute(
+                f"UPDATE event_cards SET state = ? WHERE card_id = ? AND state IN ({','.join('?' * len(only_from))})",
+                (state, card_id, *only_from))
+            changed = cursor.rowcount == 1
+            await db.commit()
+        return changed
+
+    async def claim_event_reminder(self, card_id: int) -> bool:
+        async with self.connect() as db:
+            cursor = await db.execute(
+                "UPDATE event_cards SET reminded = 1 WHERE card_id = ? AND reminded = 0", (card_id,))
+            claimed = cursor.rowcount == 1
+            await db.commit()
+        return claimed
+
+    async def event_cards_due_reminder(self, now: int, before: int) -> list[dict[str, Any]]:
+        """Open cards starting within `before` seconds that haven't been reminded."""
+        async with self.connect() as db:
+            rows = await (await db.execute(
+                """SELECT * FROM event_cards WHERE state = 'open' AND reminded = 0 AND starts_at > ?
+                   AND starts_at <= ?""", (now, now + before))).fetchall()
+        return [dict(row) for row in rows]
+
+    async def stale_event_cards(self, started_before: int) -> list[dict[str, Any]]:
+        """Cards still open or under way for an occurrence that started before `started_before`."""
+        async with self.connect() as db:
+            rows = await (await db.execute(
+                "SELECT * FROM event_cards WHERE state IN ('open', 'started') AND starts_at < ?",
+                (started_before,))).fetchall()
+        return [dict(row) for row in rows]
+
+    async def get_event_roles(self, event_id: int) -> list[tuple[str, int]]:
+        async with self.connect() as db:
+            rows = await (await db.execute(
+                "SELECT name, capacity FROM event_roles WHERE event_id = ? ORDER BY position", (event_id,))).fetchall()
+        return [(row["name"], row["capacity"]) for row in rows]
+
+    async def set_event_roles(self, event_id: int, roles: list[tuple[str, int]]) -> None:
+        async with self.connect() as db:
+            await db.execute("DELETE FROM event_roles WHERE event_id = ?", (event_id,))
+            await db.executemany("INSERT INTO event_roles (event_id, position, name, capacity) VALUES (?, ?, ?, ?)",
+                                 [(event_id, i, name, capacity) for i, (name, capacity) in enumerate(roles)])
+            await db.commit()
+
+    async def get_event_signups(self, card_id: int) -> list[dict[str, Any]]:
+        """Everyone on a card, in the order they took their place."""
+        async with self.connect() as db:
+            rows = await (await db.execute(
+                "SELECT user_id, status, role, ship FROM event_signups WHERE card_id = ? ORDER BY queued, user_id",
+                (card_id,))).fetchall()
+        return [dict(row) for row in rows]
+
+    async def save_event_signup(self, card_id: int, user_id: int, *, status: str, role: str | None,
+                                queued: float, ship: Any = UNSET) -> None:
+        """Put a member on a card with this status and role (their ship is kept unless given)."""
+        async with self.connect() as db:
+            if ship is UNSET:
+                await db.execute(
+                    """INSERT INTO event_signups (card_id, user_id, status, role, queued) VALUES (?, ?, ?, ?, ?)
+                       ON CONFLICT(card_id, user_id) DO UPDATE SET status = excluded.status, role = excluded.role,
+                       queued = excluded.queued""", (card_id, user_id, status, role, queued))
+            else:
+                await db.execute(
+                    """INSERT INTO event_signups (card_id, user_id, status, role, ship, queued) VALUES (?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(card_id, user_id) DO UPDATE SET status = excluded.status, role = excluded.role,
+                       ship = excluded.ship, queued = excluded.queued""", (card_id, user_id, status, role, ship, queued))
+            await db.commit()
+
+    async def set_event_signup_ship(self, card_id: int, user_id: int, ship: str | None) -> bool:
+        async with self.connect() as db:
+            cursor = await db.execute("UPDATE event_signups SET ship = ? WHERE card_id = ? AND user_id = ?",
+                                      (ship, card_id, user_id))
+            changed = cursor.rowcount == 1
+            await db.commit()
+        return changed
+
+    async def set_event_signup_status(self, card_id: int, user_id: int, status: str, role: str | None) -> None:
+        """Change status and role without losing the member's place in line (a move up from the wait
+        list, a role the organizer took away)."""
+        async with self.connect() as db:
+            await db.execute("UPDATE event_signups SET status = ?, role = ? WHERE card_id = ? AND user_id = ?",
+                             (status, role, card_id, user_id))
+            await db.commit()
+
+    async def delete_event_signup(self, card_id: int, user_id: int) -> bool:
+        async with self.connect() as db:
+            cursor = await db.execute("DELETE FROM event_signups WHERE card_id = ? AND user_id = ?", (card_id, user_id))
+            removed = cursor.rowcount == 1
+            await db.commit()
+        return removed
+
+    async def get_event_regulars(self, event_id: int) -> list[dict[str, Any]]:
+        async with self.connect() as db:
+            rows = await (await db.execute(
+                "SELECT user_id, role, ship FROM event_regulars WHERE event_id = ? ORDER BY rowid", (event_id,))).fetchall()
+        return [dict(row) for row in rows]
+
+    async def set_event_regular(self, event_id: int, user_id: int, role: str | None, ship: str | None) -> None:
+        async with self.connect() as db:
+            await db.execute(
+                """INSERT INTO event_regulars (event_id, user_id, role, ship) VALUES (?, ?, ?, ?)
+                   ON CONFLICT(event_id, user_id) DO UPDATE SET role = excluded.role, ship = excluded.ship""",
+                (event_id, user_id, role, ship))
+            await db.commit()
+
+    async def delete_event_regular(self, event_id: int, user_id: int) -> bool:
+        async with self.connect() as db:
+            cursor = await db.execute("DELETE FROM event_regulars WHERE event_id = ? AND user_id = ?", (event_id, user_id))
+            removed = cursor.rowcount == 1
+            await db.commit()
+        return removed
+
+    async def record_event_ship(self, user_id: int, ship: str) -> None:
+        async with self.connect() as db:
+            await db.execute(
+                """INSERT INTO event_ship_history (user_id, ship, last_used) VALUES (?, ?, strftime('%Y-%m-%d %H:%M:%f'))
+                   ON CONFLICT(user_id, ship) DO UPDATE SET last_used = excluded.last_used""", (user_id, ship))
+            await db.commit()
+
+    async def event_ship_history(self, user_id: int, limit: int = 20) -> list[str]:
+        async with self.connect() as db:
+            rows = await (await db.execute(
+                "SELECT ship FROM event_ship_history WHERE user_id = ? ORDER BY last_used DESC LIMIT ?",
+                (user_id, limit))).fetchall()
+        return [row["ship"] for row in rows]
 
     # -- voice ranks -----------------------------------------------------------
 

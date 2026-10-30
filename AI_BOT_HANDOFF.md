@@ -480,6 +480,10 @@ date - no open item, nothing to record here.
       #rules); production's channel ids in `bot/uex/welcome.py`. Only if aiv2 sends the welcome
       DM. See PROJECT_CONTEXT.md entry 146. Also the role picker's log lines move from #staff to
       #role-log (`ROLE_LOG_CHANNEL_ID`, entry 151)
+- [ ] PR #144 - Event cards: `bot/cogs/event_cards.py`, `bot/uex/events.py`, `/event-roles`, tables
+      `event_cards`, `event_roles`, `event_signups`, `event_regulars`, `event_ship_history`;
+      production's #events and Event Manager ids. Only if aiv2's server runs Discord events.
+      See PROJECT_CONTEXT.md entry 152
 
 ## To port: aiv2 -> production
 
