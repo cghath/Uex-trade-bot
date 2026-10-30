@@ -11,7 +11,10 @@ The panels' buttons and dropdown are DynamicItems registered at startup, each ca
 role's id (the dropdown's options carry theirs; Everything needs none), so they work through restarts for as long as
 the message stays up. A pick is only acted on if that id is still one of the picker's saved
 roles, so an old panel can't hand out anything else. Each pick gets a private "Added/Removed"
-reply, and is logged in #role-log; picking New Pilot also pings Mentor in #👋welcome.
+reply, and is logged in #role-log; picking New Pilot also pings Mentor in #👋welcome - once per
+member ever (`new_pilot_pings`, shared with Onboarding), so toggling it can't ping Mentor again.
+The dropdown answers a pick by re-sending the panel, which clears its ticks: Discord otherwise
+keeps the last picks ticked, and picking again would toggle them off.
 
 Roles picked in Discord's Onboarding (the same roles) never pass through the panels, so
 on_member_update catches them: picker roles a member gained that a panel didn't just give
@@ -34,7 +37,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
-from bot.delivery import send_to_channel
+from bot.delivery import Delivery, send_to_channel
 from bot.uex.welcome import WELCOME_CHANNEL_ID
 from bot.uex.role_picker import (
     CREATE, GROUPS, GROUPS_BY_KEY, MATCHED, MENTOR_ROLE, MULTI, NEW_PILOT_ROLE, ROLE_COLOURS, ROLE_EMOJI, RoleGroup,
@@ -79,16 +82,16 @@ def _from_panel(member_id: int, role_id: int) -> bool:
 
 
 async def ping_mentor(client, guild: discord.Guild, saved: dict[str, int], text: Callable[[str], str], *,
-                      label: str, **send_kwargs) -> None:
-    """Post `text(mentor mention)` in #welcome, pinging Mentor and nobody else."""
+                      label: str, **send_kwargs) -> bool:
+    """Post `text(mentor mention)` in #welcome, pinging Mentor and nobody else. True if it arrived."""
     mentor = guild.get_role(saved.get(MENTOR_ROLE, 0))
     if mentor is None:
         logger.warning("No Mentor role to ping - run /rolesetup")
-        return
-    await send_to_channel(client, WELCOME_CHANNEL_ID, text(mentor.mention), label=label,
+        return False
+    return await send_to_channel(client, WELCOME_CHANNEL_ID, text(mentor.mention), label=label,
                           allowed_mentions=discord.AllowedMentions(everyone=False, users=False, roles=[mentor],
                                                                    replied_user=False),
-                          **send_kwargs)
+                          **send_kwargs) == Delivery.DELIVERED
 
 
 def _is_admin(interaction: discord.Interaction) -> bool:
@@ -96,15 +99,20 @@ def _is_admin(interaction: discord.Interaction) -> bool:
     return interaction.guild is not None and perms is not None and perms.administrator
 
 
-async def apply_pick(interaction: discord.Interaction, group_key: str, picked: set[int] | None) -> None:
+async def apply_pick(interaction: discord.Interaction, group_key: str, picked: set[int] | None, *,
+                     reset: discord.ui.View | None = None) -> None:
     """Change the member's roles for a pick in one group, reply privately, log it in #role-log.
-    `picked` None is the group's Everything button."""
+    `picked` None is the group's Everything button. `reset`: the panel's view to answer with (the
+    dropdown's, so its ticks clear), the reply then following privately."""
     guild, member = interaction.guild, interaction.user
     group = GROUPS_BY_KEY.get(group_key)
     if guild is None or group is None:
         await interaction.response.send_message(OUT_OF_DATE, ephemeral=True)
         return
-    await interaction.response.defer(ephemeral=True, thinking=True)
+    if reset is not None:
+        await interaction.response.edit_message(view=reset)
+    else:
+        await interaction.response.defer(ephemeral=True, thinking=True)
     saved = await interaction.client.db.get_role_picker_roles(guild.id)
     order = [saved[name] for name in group.roles if name in saved]
     everything = picked is None and group.everything
@@ -135,9 +143,11 @@ async def apply_pick(interaction: discord.Interaction, group_key: str, picked: s
         return
     await send_to_channel(interaction.client, ROLE_LOG_CHANNEL_ID, log_text(member.mention, added, removed),
                           label="role picker log", allowed_mentions=discord.AllowedMentions.none())
-    if saved.get(NEW_PILOT_ROLE) in add:
-        await ping_mentor(interaction.client, guild, saved, lambda mentor: mentor_text(mentor, member.mention),
-                          label="role picker mentor ping")
+    db = interaction.client.db
+    if saved.get(NEW_PILOT_ROLE) in add and await db.claim_new_pilot_ping(guild.id, member.id):
+        if not await ping_mentor(interaction.client, guild, saved, lambda mentor: mentor_text(mentor, member.mention),
+                                 label="role picker mentor ping"):
+            await db.release_new_pilot_ping(guild.id, member.id)  # didn't arrive: the next pick tries again
 
 
 class RoleButton(discord.ui.DynamicItem[discord.ui.Button], template=BUTTON_TEMPLATE):
@@ -184,11 +194,15 @@ class RoleMenu(discord.ui.DynamicItem[discord.ui.Select], template=MENU_TEMPLATE
 
     @classmethod
     async def from_custom_id(cls, interaction: discord.Interaction, item: discord.ui.Select, match, /):
-        return cls(match["group"])
+        return cls(match["group"], list(item.options) if item is not None else None)
 
     async def callback(self, interaction: discord.Interaction) -> None:
         picked = {int(value) for value in self.item.values if value.isdigit()}
-        await apply_pick(interaction, self.group_key, picked)
+        fresh = discord.ui.View(timeout=None)  # the same dropdown, nothing ticked
+        fresh.add_item(RoleMenu(self.group_key, [
+            discord.SelectOption(label=o.label, value=o.value, description=o.description, emoji=o.emoji)
+            for o in self.item.options]))
+        await apply_pick(interaction, self.group_key, picked, reset=fresh)
 
 
 def panel(group: RoleGroup, roles: list[discord.Role]) -> tuple[str, discord.ui.View]:
@@ -259,13 +273,15 @@ class RolePicker(commands.Cog):
             await send_to_channel(self.bot, ROLE_LOG_CHANNEL_ID,
                                   onboarding_log_text(member.mention, [role.name for role in roles]),
                                   label="onboarding log", allowed_mentions=discord.AllowedMentions.none())
-            if saved.get(NEW_PILOT_ROLE) in {role.id for role in roles}:
+            if (saved.get(NEW_PILOT_ROLE) in {role.id for role in roles}
+                    and await self.bot.db.claim_new_pilot_ping(member.guild.id, member.id)):
                 timezone = next((member.guild.get_role(saved[name]) for name in GROUPS_BY_KEY["timezone"].roles
                                  if saved.get(name) in held), None)
-                await ping_mentor(self.bot, member.guild, saved,
-                                  lambda mentor: new_pilot_text(mentor, member.mention,
-                                                                timezone.name if timezone else None),
-                                  label="onboarding new pilot ping")
+                if not await ping_mentor(self.bot, member.guild, saved,
+                                         lambda mentor: new_pilot_text(mentor, member.mention,
+                                                                       timezone.name if timezone else None),
+                                         label="onboarding new pilot ping"):
+                    await self.bot.db.release_new_pilot_ping(member.guild.id, member.id)
         except Exception:  # an event handler: log, never raise into discord.py
             logger.exception("Logging member %s's Onboarding roles failed", member.id)
 

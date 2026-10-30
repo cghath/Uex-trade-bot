@@ -223,7 +223,8 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
 
 - [x] **Event cards**: Shipped 2026-10-30 (PR #144, PROJECT_CONTEXT.md entry 152): a sign-up card in
   #events for each Discord event - roles and spots (`/event-roles`), wait list, Maybe, ships,
-  every-week regulars, reminder, Start/End. Next: attendance (who was in voice 30+ minutes).
+  every-week regulars, reminder, Start/End. Hardened 2026-10-30 (PR #147, the full audit's
+  EVT-1 to EVT-5). Next: attendance (who was in voice 30+ minutes).
 
 - [x] **Role picker**: Shipped 2026-10-30 (PR #140, PROJECT_CONTEXT.md entry 151): `/rolesetup`
   and `/rolepanel post` - self-serve Activities, Timezone, Experience, Pings and name Colors

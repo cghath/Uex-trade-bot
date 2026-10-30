@@ -1,7 +1,22 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.76.
+the oldest entry below); the next new entry is 2.77.
+
+---
+
+## 2.76 - 2026-10-30 - Op cards you can count on
+
+**Fixed**
+- Op cards in #📅events keep their @Org Events mention; it used to disappear a few minutes after the card was posted.
+- An op card Discord fails to post is posted again a few minutes later, instead of never.
+- Pushing back an op that's running late keeps everyone signed up and tells them the new time, instead of starting an empty card.
+- An op deleted or cancelled while the bot was restarting now closes its card and tells the people on it, instead of reminding them an hour before.
+- Starting an op early keeps its card running.
+- The reminder before an op now says how long is really left ("starts in 25 minutes"), and moving an op's time inside the last hour no longer pings you twice.
+- A big op with more than 100 people signed up now pings everyone when it starts, moves or is cancelled.
+- Picking New Pilot again no longer pings the Mentors again.
+- The Activities menu clears after each pick, so adding an activity no longer removes ones you already had.
 
 ---
 

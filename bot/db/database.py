@@ -901,6 +901,13 @@ CREATE TABLE IF NOT EXISTS role_picker_roles (
 -- #👋welcome intros (bot/cogs/role_picker.py): who has posted there, so Mentor is pinged for each
 -- member's first post only. welcome_intro_seed marks the one-time read of the channel's history;
 -- until it's done no post counts as a first.
+CREATE TABLE IF NOT EXISTS new_pilot_pings (
+    guild_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    pinged_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (guild_id, user_id)
+);
+
 CREATE TABLE IF NOT EXISTS welcome_intros (
     guild_id INTEGER NOT NULL,
     user_id INTEGER NOT NULL,
@@ -4832,6 +4839,22 @@ class Database:
                 [(guild_id, name, role_id) for name, role_id in roles.items()])
             await db.commit()
 
+    async def claim_new_pilot_ping(self, guild_id: int, user_id: int) -> bool:
+        """True the first time Mentor is to be pinged about this member picking New Pilot (from a
+        panel or Onboarding); never again, however often they pick it."""
+        async with self.connect() as db:
+            cursor = await db.execute(
+                "INSERT OR IGNORE INTO new_pilot_pings (guild_id, user_id) VALUES (?, ?)", (guild_id, user_id))
+            claimed = cursor.rowcount == 1
+            await db.commit()
+        return claimed
+
+    async def release_new_pilot_ping(self, guild_id: int, user_id: int) -> None:
+        """Undo a claim whose ping didn't arrive, so the member's next New Pilot pick tries again."""
+        async with self.connect() as db:
+            await db.execute("DELETE FROM new_pilot_pings WHERE guild_id = ? AND user_id = ?", (guild_id, user_id))
+            await db.commit()
+
     async def claim_welcome_intro(self, guild_id: int, user_id: int) -> bool:
         """True the first time this member is seen posting in #welcome."""
         async with self.connect() as db:
@@ -4877,8 +4900,8 @@ class Database:
 
     async def update_event_card(self, card_id: int, **fields: Any) -> None:
         """Refresh a card's copy of the event (any of name, description, cover_url, creator_id,
-        voice_channel_id, message_id)."""
-        allowed = (*self._EVENT_CARD_FIELDS, "message_id")
+        voice_channel_id, message_id, repeats)."""
+        allowed = (*self._EVENT_CARD_FIELDS, "message_id", "repeats")
         names = [name for name in allowed if name in fields]
         if not names:
             return
@@ -4938,6 +4961,14 @@ class Database:
             rows = await (await db.execute(
                 """SELECT * FROM event_cards WHERE state = 'open' AND reminded = 0 AND starts_at > ?
                    AND starts_at <= ?""", (now, now + before))).fetchall()
+        return [dict(row) for row in rows]
+
+    async def open_event_cards(self, guild_id: int) -> list[dict[str, Any]]:
+        """The guild's cards still open or under way."""
+        async with self.connect() as db:
+            rows = await (await db.execute(
+                "SELECT * FROM event_cards WHERE guild_id = ? AND state IN ('open', 'started')",
+                (guild_id,))).fetchall()
         return [dict(row) for row in rows]
 
     async def stale_event_cards(self, started_before: int) -> list[dict[str, Any]]:

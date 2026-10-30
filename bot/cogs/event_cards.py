@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from collections import defaultdict
 
@@ -34,7 +35,7 @@ from bot.delivery import send_dm
 from bot.discord_ui import BotLayoutView, BotModal, BotView
 from bot.uex.events import (
     CANCELLED, ENDED, GOING, MAYBE, OPEN, REMIND_BEFORE, STARTED, WAITING, EventRole, Signup, announce_text,
-    cancelled_text, details_text, ended_text, joined_text, mentions, next_in_line, parse_roles, placed_status,
+    cancelled_text, details_text, ended_text, joined_text, next_in_line, parse_roles, ping_messages, placed_status,
     SHIP_CHOICES, promoted_text, reminder_text, repeats_text, roster_text, ship_matches, start_text, time_change_text,
 )
 from bot.uex.welcome import EVENTS_CHANNEL_ID
@@ -70,6 +71,35 @@ def _voice_url(card: dict) -> str | None:
     if not card["voice_channel_id"]:
         return None
     return f"https://discord.com/channels/{card['guild_id']}/{card['voice_channel_id']}"
+
+
+def _card_mentions(org_role) -> discord.AllowedMentions:
+    """A card mentions Org Events and nobody else - on its post and on every redraw."""
+    return discord.AllowedMentions(everyone=False, users=False, roles=[org_role] if org_role else False)
+
+
+def moved_on(card: dict, starts_at: int, now: float, repeating: bool) -> bool:
+    """Whether an event's new start time means Discord moved on to its next occurrence (close this
+    card; the next gets its own) rather than an organizer changing the time (follow it, roster
+    kept). Moved on: the op was started, or a repeating event whose start has passed now starts
+    at least CLOSE_AFTER later - a late op pushed back, or any one-off event, keeps its card."""
+    if card["state"] == STARTED:
+        return True
+    return repeating and card["starts_at"] <= now and starts_at - card["starts_at"] >= CLOSE_AFTER
+
+
+def _card_ids(components) -> set[int]:
+    """The card ids on a message's buttons and menus, however deep in its layout."""
+    found: set[int] = set()
+    for component in components or ():
+        match = re.fullmatch(BUTTON_TEMPLATE, getattr(component, "custom_id", None) or "") or re.fullmatch(
+            MENU_TEMPLATE, getattr(component, "custom_id", None) or "")
+        if match:
+            found.add(int(match["card"]))
+        found |= _card_ids(getattr(component, "children", None))
+        if getattr(component, "accessory", None) is not None:
+            found |= _card_ids([component.accessory])
+    return found
 
 
 def _snapshot(event: discord.ScheduledEvent) -> dict:
@@ -235,11 +265,10 @@ class EventCards(commands.Cog):
         channel = self.bot.get_channel(card["channel_id"]) if card else None
         if channel is None or not card["message_id"]:
             return
-        org, _ = await self._org_mention(card["guild_id"])
+        org, org_role = await self._org_mention(card["guild_id"])
         view = build_card(card, *await self._parts(card), org)
-        try:
-            await channel.get_partial_message(card["message_id"]).edit(
-                view=view, allowed_mentions=discord.AllowedMentions.none())
+        try:  # Discord re-reads mentions on an edit: allow Org Events again or the card stops mentioning it
+            await channel.get_partial_message(card["message_id"]).edit(view=view, allowed_mentions=_card_mentions(org_role))
         except discord.HTTPException as exc:
             logger.warning("Couldn't redraw event card %s: %s", card_id, exc)
 
@@ -251,16 +280,18 @@ class EventCards(commands.Cog):
         channel = self.bot.get_channel(card["channel_id"])
         if channel is None:
             return
-        content = text + (f"\n{mentions(ids)}" if ids else "")
-        kwargs = {"view": view} if view is not None else {}
-        if card["message_id"]:
-            kwargs["reference"] = discord.MessageReference(message_id=card["message_id"], channel_id=card["channel_id"],
-                                                           fail_if_not_exists=False)
-        try:
-            await channel.send(content[:2000], allowed_mentions=discord.AllowedMentions(
-                everyone=False, roles=False, users=[discord.Object(i) for i in ids]), **kwargs)
-        except discord.HTTPException as exc:
-            logger.warning("Couldn't post to event card %s's roster: %s", card["card_id"], exc)
+        reference = discord.MessageReference(message_id=card["message_id"], channel_id=card["channel_id"],
+                                             fail_if_not_exists=False) if card["message_id"] else None
+        # Past 100 people one message can't ping everyone (Discord's limits): the rest follow
+        for index, (content, batch) in enumerate(ping_messages(text, ids)):
+            kwargs = {"reference": reference} if reference else {}
+            if index == 0 and view is not None:
+                kwargs["view"] = view
+            try:
+                await channel.send(content, allowed_mentions=discord.AllowedMentions(
+                    everyone=False, roles=False, users=[discord.Object(i) for i in batch]), **kwargs)
+            except discord.HTTPException as exc:
+                logger.warning("Couldn't post to event card %s's roster: %s", card["card_id"], exc)
 
     def _can_manage(self, member, card: dict) -> bool:
         if member.id == card["creator_id"]:
@@ -625,13 +656,32 @@ class EventCards(commands.Cog):
                 await self.close(card, CANCELLED if event.status == discord.EventStatus.cancelled else ENDED,
                                  announce=event.status == discord.EventStatus.cancelled)
             return
+        now = time.time()
+        if card is not None and card["starts_at"] <= now - CLOSE_AFTER:
+            await self.close(card, ENDED, announce=False)  # an occurrence long past that nobody closed (the bot was down)
+            card = None
+        if card is not None and event.status == discord.EventStatus.active:
+            # Under way: whatever start time Discord now gives it, it's this card's op
+            await self.bot.db.update_event_card(card["card_id"], **_snapshot(event))
+            if not card["message_id"]:  # its first post failed: post it before it starts
+                await self.send_card(card["card_id"], channel, retry=True)
+            if card["state"] == OPEN:
+                await self.mark_started(await self.bot.db.get_event_card(card["card_id"]))
+            else:
+                await self.refresh(card["card_id"])
+            return
         starts_at = int(event.start_time.timestamp())
         if card is not None and card["starts_at"] != starts_at:
-            if card["state"] == STARTED or card["starts_at"] <= time.time():
+            repeating = bool(card["repeats"]) or (
+                card["state"] == OPEN and card["starts_at"] <= now and starts_at - card["starts_at"] >= CLOSE_AFTER
+                and await self._repeating(card, event))
+            if moved_on(card, starts_at, now, repeating):
                 await self.close(card, ENDED, announce=False)  # that one's over; the next gets its own card
                 card = None
             else:
                 await self.bot.db.move_event_card(card["card_id"], starts_at)
+                if starts_at - now <= REMIND_BEFORE:  # the time-change ping is its reminder: not a second ping
+                    await self.bot.db.claim_event_reminder(card["card_id"])
                 await self.bot.db.update_event_card(card["card_id"], **_snapshot(event))
                 await self.refresh(card["card_id"])
                 await self.ping_roster(card, time_change_text(event.name, starts_at, card["starts_at"]), waiting_too=True)
@@ -642,15 +692,31 @@ class EventCards(commands.Cog):
             await self.post(event, channel, starts_at)
             return
         await self.bot.db.update_event_card(card["card_id"], **_snapshot(event))
-        if event.status == discord.EventStatus.active and card["state"] == OPEN:
-            await self.mark_started(await self.bot.db.get_event_card(card["card_id"]))
+        if not card["message_id"]:  # its first post failed, or the bot stopped before saving it: post it now
+            await self.send_card(card["card_id"], channel, retry=True)
         else:
             await self.refresh(card["card_id"])
+
+    async def _rule(self, event: discord.ScheduledEvent) -> dict | None:
+        """The event's repeat rule (discord.py doesn't keep it). Raises HTTPException."""
+        return (await self.bot.http.get_scheduled_event(event.guild_id, event.id, False)).get("recurrence_rule")
+
+    async def _repeating(self, card: dict, event: discord.ScheduledEvent) -> bool:
+        """Whether a card stored without a repeat rule is for a repeating event after all: the read
+        when it was posted can have failed. Saved when it is; assumed when Discord can't say."""
+        try:
+            text = repeats_text(await self._rule(event))
+        except discord.HTTPException as exc:
+            logger.warning("Couldn't read event %s's repeat rule: %s", event.id, exc)
+            return True
+        if text:
+            await self.bot.db.update_event_card(card["card_id"], repeats=text)
+        return bool(text)
 
     async def post(self, event: discord.ScheduledEvent, channel, starts_at: int) -> None:
         rule = None
         try:
-            rule = (await self.bot.http.get_scheduled_event(event.guild_id, event.id, False)).get("recurrence_rule")
+            rule = await self._rule(event)
         except discord.HTTPException as exc:
             logger.warning("Couldn't read event %s's repeat rule: %s", event.id, exc)
         card_id = await self.bot.db.create_event_card(guild_id=event.guild_id, event_id=event.id, starts_at=starts_at,
@@ -662,16 +728,62 @@ class EventCards(commands.Cog):
             await self.bot.db.save_event_signup(card_id, regular["user_id"], status=placed_status(roles, signups,
                                                 regular["user_id"], role), role=role, queued=time.time(),
                                                 ship=regular["ship"])
+        await self.send_card(card_id, channel)
+
+    async def send_card(self, card_id: int, channel, *, retry: bool = False) -> None:
+        """Post a card's message, pinging Org Events. A failed post is tried again at the next sync
+        (`retry`), which first looks for the card already in the channel - posted, but the bot
+        stopped before saving its id - so it's never posted twice."""
+        if retry and (found := await self._find_posted(channel, card_id)):
+            await self.bot.db.update_event_card(card_id, message_id=found)
+            await self.refresh(card_id)
+            return
         card = await self.bot.db.get_event_card(card_id)
-        org, org_role = await self._org_mention(event.guild_id)
+        org, org_role = await self._org_mention(card["guild_id"])
         view = build_card(card, *await self._parts(card), org)
         try:
-            message = await channel.send(view=view, allowed_mentions=discord.AllowedMentions(
-                everyone=False, users=False, roles=[org_role] if org_role else False))
+            message = await channel.send(view=view, allowed_mentions=_card_mentions(org_role))
         except discord.HTTPException as exc:
-            logger.warning("Couldn't post the card for event %s: %s", event.id, exc)
+            logger.warning("Couldn't post the card for event %s: %s", card["event_id"], exc)
             return
         await self.bot.db.update_event_card(card_id, message_id=message.id)
+
+    async def _find_posted(self, channel, card_id: int) -> int | None:
+        """The id of a message in the channel carrying this card's buttons, if one is there."""
+        try:
+            async for message in channel.history(limit=50):
+                if message.author.bot and card_id in _card_ids(message.components):
+                    return message.id
+        except discord.HTTPException as exc:
+            logger.warning("Couldn't read #events for card %s: %s", card_id, exc)
+        return None
+
+    async def close_missing(self, guild) -> None:
+        """Close cards whose Discord event is gone - deleted while the bot was down, so no delete
+        reached it. Asked of Discord itself before closing: the event list alone could be stale."""
+        present = {event.id for event in guild.scheduled_events}
+        for card in await self.bot.db.open_event_cards(guild.id):
+            if card["event_id"] in present:
+                continue
+            try:
+                try:
+                    event = await guild.fetch_scheduled_event(card["event_id"])
+                except discord.NotFound:
+                    event = None
+                except discord.HTTPException as exc:
+                    logger.warning("Couldn't check event %s: %s", card["event_id"], exc)
+                    continue
+                if event is not None:
+                    await self.sync(event)
+                    continue
+                async with self._locks[-card["event_id"]]:
+                    # Not started and still ahead: it was called off. Otherwise it just finished.
+                    if card["state"] == OPEN and card["starts_at"] > time.time():
+                        await self.close(card, CANCELLED, announce=True)
+                    else:
+                        await self.close(card, ENDED, announce=False)
+            except Exception:  # one card's trouble (a dropped connection, a locked DB) never stops the rest
+                logger.exception("Checking event card %s's event failed", card["card_id"])
 
     # -- the minute loop -------------------------------------------------------------
 
@@ -680,10 +792,12 @@ class EventCards(commands.Cog):
         now = int(time.time())
         try:
             channel = self._channel()
-            if channel is not None and self._ticks % SYNC_EVERY == 0:
+            due = channel is not None and self._ticks % SYNC_EVERY == 0
+            self._ticks += 1  # first: a failing re-read mustn't make every minute a re-read
+            if due:
                 for event in list(channel.guild.scheduled_events):
                     await self.sync(event)
-            self._ticks += 1
+                await self.close_missing(channel.guild)
             for card in await self.bot.db.event_cards_due_reminder(now, REMIND_BEFORE):
                 if await self.bot.db.claim_event_reminder(card["card_id"]):
                     await self.ping_roster(card, reminder_text(card["name"], card["starts_at"], card["voice_channel_id"]))

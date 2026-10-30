@@ -5263,6 +5263,18 @@ they're in sync).
        Server Booster or the red Star Tech Dynamics role above them (27 members) - unless the
        owner takes that role's color off. 32 roles. 4 more tests (28 in all), 12 mutations, all
        caught.
+     - **Audit fixes** (PR #147, the 2026-10-30 full audit's ROLE-1 and ROLE-2):
+       - ROLE-1: every add of New Pilot pinged Mentor, so clicking it on and off pinged Mentor
+         again and again (Onboarding answers too). Now once per member ever, shared by the panel
+         and Onboarding: `new_pilot_pings` (69 tables), claimed before the ping and released
+         (`release_new_pilot_ping`) when the ping didn't arrive, so the next pick tries again;
+         `ping_mentor` returns whether it was delivered. Members pinged about before this shipped
+         aren't in the table, so each can cause one more ping - accepted, not seeded.
+       - ROLE-2: the Activities dropdown answered with a private message and never redrew, and
+         Discord clients keep a select's last picks ticked, so picking again toggled the old ones
+         off. A pick is now answered by re-sending the panel (`edit_message`, the same options,
+         none marked default), then the Added/Removed reply follows privately.
+       - 1 more test (29 in all), 3 tightened; 8 mutations, all caught.
 
 152. **Event cards: sign-ups for Discord's scheduled events in #📅events.**
      The owner's ask (2026-10-30): members on phones couldn't find Discord's Events list. Designed
@@ -5325,6 +5337,49 @@ they're in sync).
        asked for more of the name - "aurora" has 7, "hornet" 12). Checked against UEX's real list
        of 283 ships. Discord has no autofill in a pop-up box; a `/event-ship` command with
        autofill was offered and the owner passed ("that's fine").
+     - **Audit fixes** (PR #147, the 2026-10-30 full audit's EVT-1 to EVT-5, the owner's "fix
+       priority findings"; report `docs/audits/2026-10-30-full-audit-2342dfc.md`):
+       - EVT-1: `refresh()` edited with `AllowedMentions.none()`, and Discord re-reads mentions on
+         an edit, so every redraw (each 10 minutes, every sign-up) dropped the Org Events mention -
+         read live: both cards had `mention_roles: []`. That was the "Contested Tuesdays didn't
+         register its ping" mystery from the PR #144 deploy. Post and redraw now share
+         `_card_mentions` (Org Events only; an edit never notifies again).
+       - EVT-2: a card's row was written before its message; a failed send left it OPEN with no
+         message, never posted. `_sync` now posts an OPEN card with no `message_id`
+         (`send_card(retry=True)`), also before marking it started. The retry first looks in the
+         last 50 messages for one carrying the card's buttons (`_find_posted`, `_card_ids`), so a
+         post whose id the bot didn't get to save is adopted, not posted twice.
+       - EVT-3: any new time after the old start had passed closed the card quietly and posted a
+         new one - an organizer pushing a late op back wiped its roster and re-pinged Org Events.
+         Now only `moved_on()`: a started card, or a repeating event whose start passed and which
+         now starts at least `CLOSE_AFTER` (12h) later. Anything else follows the new time with
+         the roster and the time-change ping. A card stored without a repeat rule asks Discord
+         again (`_repeating`; the read when it was posted can fail), saves what it learns, and
+         assumes "may repeat" when Discord can't say.
+       - EVT-4: an event deleted while the bot was down kept its card and its roster was still
+         reminded. Each 10-minute re-read now ends with `close_missing`: a card whose event isn't in
+         Discord's list is asked about by id (`fetch_scheduled_event`); gone and not yet started
+         means cancelled (said to everyone on it), gone otherwise means over (quiet); Discord not
+         answering leaves it for the next round. Each card is checked on its own, and the tick
+         counter now moves first, so a failure can't make every minute a re-read.
+       - EVT-5: an event under way always takes the started path, whatever start time Discord now
+         gives it (not confirmed whether Discord moves it on an early start; harmless either way).
+         A card 12h or more past its start is closed quietly first, so after downtime last week's
+         card is never "started" for this week's op.
+       - Reviewed before shipping by three adversarial reviewers with skeptics (discord.py
+         behaviour, the card state machine, the role picker): 12 findings confirmed against the
+         first version (the downtime case, the retry missing a started card, the failed rule read,
+         the double post, the unguarded re-read) and all fixed.
+       - Two of the audit's P3s on the same code, folded in on the owner's say-so. EVT-6: a roster
+         ping put every id in `allowed_mentions.users` (Discord's cap is 100, discord.py doesn't
+         clamp) and cut the text at 2,000 characters, so a roster past ~87 lost its tail and past
+         100 every start/reminder/time-change/cancel ping failed. `ping_messages` (events.py)
+         splits it: at most `PING_USERS` (100) members and `PING_CHARS` (2,000) characters a
+         message, everyone once, all replying to the card. EVT-7: the reminder always said
+         "starts in 1 hour"; it's now Discord's live `<t:...:R>` ("in 25 minutes"), and a time
+         change to within the hour claims the reminder, so the roster isn't pinged twice in a row.
+       - 13 more tests (33 in all); 21 mutations, 20 caught, the 21st equivalent (an outer guard
+         catches the same error).
 
 ## Where to look for what
 

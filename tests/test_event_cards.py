@@ -8,8 +8,11 @@ Guarantees under test:
      without roles; Voice and Interested links; no buttons once it's over; a long roster is cut
      with a count, not mid-line.
   3. Posting - one card per occurrence pinging Org Events and nobody else, regulars already on
-     it, never posted twice (not even after it closed); a new time pings the roster once; a past
-     occurrence closes and the next one gets its own card; a cancelled event says so.
+     it, never posted twice (not even after it closed); a redraw keeps the Org Events mention; a
+     post that failed is made at the next sync; a new time pings the roster once, and a late op
+     pushed back keeps its card and roster; a past occurrence of a repeating event closes and the
+     next one gets its own card; an op under way is started, whatever its start time says; a
+     cancelled event says so, and one deleted while the bot was down is found and closed.
   4. Members - joining, switching roles, Maybe and back, leaving moves the wait list up with a
      DM; ships from the menu or typed; every time.
   5. Organizers - only the creator, Event Managers or admins can Start/End or set roles; Start
@@ -33,8 +36,8 @@ from bot.cogs.event_cards import (
 from bot.db.database import Database
 from bot.discord_ui import LAYOUT_TEXT_LIMIT
 from bot.uex.events import (
-    ENDED, GOING, MAYBE, OPEN, ROSTER_BUDGET, STARTED, WAITING, EventRole, Signup, details_text, next_in_line, parse_roles,
-    placed_status, repeats_text, roster_text, ship_matches,
+    ENDED, GOING, MAYBE, OPEN, PING_CHARS, PING_USERS, ROSTER_BUDGET, STARTED, WAITING, EventRole, Signup, details_text,
+    next_in_line, parse_roles, ping_messages, placed_status, repeats_text, roster_text, ship_matches,
 )
 
 GUILD_ID = 1132378045232197694
@@ -195,10 +198,20 @@ def test_custom_ids_match_the_startup_templates():
 class FakeChannel:
     def __init__(self, cid, guild=None, name="Star Citizen 1"):
         self.id, self.guild, self.name, self.sent, self.edits = cid, guild, name, [], []
+        self.fail_sends = 0
 
     async def send(self, content=None, **kwargs):
+        if self.fail_sends:
+            self.fail_sends -= 1
+            raise discord.HTTPException(NS(status=503, reason="Service Unavailable"), "upstream")
         self.sent.append((content, kwargs))
         return NS(id=900 + len(self.sent))
+
+    def history(self, limit=None):
+        async def messages():
+            for message in reversed(getattr(self, "posted", [])):
+                yield message
+        return messages()
 
     def get_partial_message(self, message_id):
         async def edit(**kwargs):
@@ -225,7 +238,9 @@ class World:
     def __init__(self, db, events=(), rule=WEEKLY):
         self.db = db
         self.events = {e.id: e for e in events}
-        self.guild = NS(id=GUILD_ID, get_scheduled_event=self.events.get)
+        self.guild = NS(id=GUILD_ID, get_scheduled_event=self.events.get,
+                        fetch_scheduled_event=AsyncMock(side_effect=discord.NotFound(
+                            NS(status=404, reason="Not Found"), "Unknown Guild Scheduled Event")))
         self.guild.scheduled_events = list(self.events.values())
         self.channel = FakeChannel(EVENTS_CHANNEL_ID, self.guild)
         self.voice = FakeChannel(55, self.guild)
@@ -486,12 +501,235 @@ def test_reminders_go_out_once_and_unended_cards_close(tmp_path, monkeypatch):
         await world.cog.tick.coro(world.cog)
         await world.cog.tick.coro(world.cog)
         assert not await db.claim_event_reminder(card["card_id"])     # claimed once, never again
-        reminders = [c for c, _ in world.channel.sent if c and "starts in 1 hour" in c]
-        assert reminders == [f"**Mining Mondays** starts in 1 hour, at <t:{START}:t>, in <#55>.\n<@1>"]
+        reminders = [c for c, _ in world.channel.sent if c and f"starts <t:{START}:R>" in c]
+        assert reminders == [f"**Mining Mondays** starts <t:{START}:R>, at <t:{START}:t>, in <#55>.\n<@1>"]
         monkeypatch.setattr("bot.cogs.event_cards.time.time", lambda: START + 13 * 3600)
         await world.cog.tick.coro(world.cog)
         assert (await db.get_event_card(card["card_id"]))["state"] == ENDED
     _run(tmp_path, body)
+
+def test_a_redraw_keeps_the_org_events_mention(tmp_path):
+    async def body(db):
+        world = World(db, [_event()])
+        card = await _posted(world)
+        await world.cog.refresh(card["card_id"])
+        _, kwargs = world.channel.edits[-1]
+        mentions = kwargs["allowed_mentions"]
+        assert [r.id for r in mentions.roles] == [ORG_ROLE]   # Discord re-reads mentions on an edit
+        assert mentions.users is False and mentions.everyone is False
+    _run(tmp_path, body)
+
+
+def test_a_card_whose_post_failed_is_posted_at_the_next_sync(tmp_path):
+    async def body(db):
+        world = World(db, [_event()])
+        world.channel.fail_sends = 1
+        card = await _posted(world)
+        assert card["message_id"] is None and world.channel.sent == []
+        await world.cog.sync(world.events[42])
+        card = await db.get_event_card(card["card_id"])
+        assert card["message_id"] == 901 and len(world.channel.sent) == 1
+        assert world.channel.sent[0][1]["allowed_mentions"].roles[0].id == ORG_ROLE
+        assert await db.current_event_card(42) == card                 # the same card, not a second one
+        await world.cog.sync(world.events[42])
+        assert len(world.channel.sent) == 1                            # and only once
+    _run(tmp_path, body)
+
+
+def test_a_late_op_pushed_back_keeps_its_card_and_roster(tmp_path, monkeypatch):
+    async def body(db):
+        for rule, event_id in ((None, 42), (WEEKLY, 43)):              # a one-off, and a weekly op
+            event = _event(event_id)
+            world = World(db, [event], rule=rule)
+            card = await _posted(world)
+            await db.save_event_signup(card["card_id"], 1, status=GOING, role=None, queued=1)
+            monkeypatch.setattr("bot.cogs.event_cards.time.time", lambda: START + 600)   # 10 minutes late
+            event.start_time = datetime.fromtimestamp(START + 1800, timezone.utc)
+            await world.cog.sync(event)
+            moved = await db.current_event_card(event_id)
+            assert moved["card_id"] == card["card_id"] and moved["starts_at"] == START + 1800
+            assert [s["user_id"] for s in await db.get_event_signups(card["card_id"])] == [1]
+            assert world.channel.sent[-1][0].startswith("**Time changed:**")
+            assert sum(1 for c, _ in world.channel.sent if c is None) == 1      # no second card or Org ping
+            monkeypatch.undo()
+    _run(tmp_path, body)
+
+
+def test_an_op_under_way_is_started_whatever_its_start_time_says(tmp_path, monkeypatch):
+    async def body(db):
+        event = _event()
+        world = World(db, [event])
+        card = await _posted(world)
+        await db.save_event_signup(card["card_id"], 1, status=GOING, role=None, queued=1)
+        monkeypatch.setattr("bot.cogs.event_cards.time.time", lambda: START - 1200)
+        event.status = discord.EventStatus.active                      # started 20 minutes early
+        event.start_time = datetime.fromtimestamp(START - 1200, timezone.utc)
+        await world.cog.sync(event)
+        now = await db.get_event_card(card["card_id"])
+        assert now["state"] == STARTED and await db.current_event_card(42) == now
+        texts = [c for c, _ in world.channel.sent if c]
+        assert not any("Time changed" in c for c in texts) and any("<@1>" in c for c in texts)
+        await world.cog.sync(event)                                    # the next re-read changes nothing
+        assert (await db.get_event_card(card["card_id"]))["state"] == STARTED
+    _run(tmp_path, body)
+
+
+def test_an_event_deleted_while_the_bot_was_down_is_found_and_closed(tmp_path, monkeypatch):
+    async def body(db):
+        ahead, done, unsure = _event(42), _event(43, name="Contested Tuesdays"), _event(44, name="Salvage Sundays")
+        old = _event(45, name="Last Week")
+        world = World(db, [unsure, ahead, done, old])     # the one Discord won't answer about comes first
+        cards = {e.id: await _posted(world, e) for e in (unsure, ahead, done, old)}
+        await db.save_event_signup(cards[42]["card_id"], 1, status=GOING, role=None, queued=1)
+        await db.set_event_card_state(cards[43]["card_id"], STARTED, only_from=(OPEN,))
+        await db.set_event_card_state(cards[45]["card_id"], ENDED, only_from=(OPEN,))
+        world.guild.scheduled_events = []                              # all three gone from Discord's list
+        not_found = discord.NotFound(NS(status=404, reason="Not Found"), "Unknown Guild Scheduled Event")
+        world.guild.fetch_scheduled_event.side_effect = lambda event_id: (
+            _raise(discord.HTTPException(NS(status=500, reason="Error"), "boom")) if event_id == 44
+            else _raise(not_found))
+        monkeypatch.setattr("bot.cogs.event_cards.time.time", lambda: START - 7200)
+        await world.cog.tick.coro(world.cog)
+        assert (await db.get_event_card(cards[42]["card_id"]))["state"] == "cancelled"
+        assert world.channel.sent[-1][0] == "**Mining Mondays** was cancelled.\n<@1>"
+        assert (await db.get_event_card(cards[43]["card_id"]))["state"] == ENDED     # under way: just over
+        assert (await db.get_event_card(cards[44]["card_id"]))["state"] == OPEN      # Discord didn't answer
+        asked = sorted(c.args[0] for c in world.guild.fetch_scheduled_event.await_args_list)
+        assert asked == [42, 43, 44]                                   # never about a card already closed
+    _run(tmp_path, body)
+
+def test_a_card_posted_but_never_saved_is_found_not_posted_again(tmp_path):
+    async def body(db):
+        world = World(db, [_event()])
+        card = await _posted(world)
+        await db.update_event_card(card["card_id"], message_id=None)    # the bot stopped before saving it
+        layout = NS(children=[NS(children=[NS(custom_id=f"ev:join:{card['card_id']}", children=None)])])
+        world.channel.posted = [NS(id=901, author=NS(bot=True), components=[layout]),
+                                NS(id=950, author=NS(bot=True), components=[])]
+        await world.cog.sync(world.events[42])
+        assert (await db.get_event_card(card["card_id"]))["message_id"] == 901
+        assert len(world.channel.sent) == 1 and world.channel.edits[-1][0] == 901   # adopted and redrawn
+    _run(tmp_path, body)
+
+
+def test_a_card_whose_post_failed_is_posted_when_the_op_starts(tmp_path):
+    async def body(db):
+        event = _event()
+        world = World(db, [event])
+        world.channel.fail_sends = 1
+        card = await _posted(world)
+        event.status = discord.EventStatus.active
+        await world.cog.sync(event)
+        card = await db.get_event_card(card["card_id"])
+        assert card["message_id"] == 901 and card["state"] == STARTED
+        assert world.channel.sent[0][0] is None                         # the card, then the start ping
+    _run(tmp_path, body)
+
+
+def test_last_weeks_unclosed_card_is_closed_not_started_after_downtime(tmp_path, monkeypatch):
+    async def body(db):
+        event = _event()
+        world = World(db, [event])
+        card = await _posted(world)
+        await db.save_event_signup(card["card_id"], 1, status=GOING, role=None, queued=1)
+        monkeypatch.setattr("bot.cogs.event_cards.time.time", lambda: START + 7 * 86400 + 600)
+        event.status = discord.EventStatus.active                      # next week's op is on
+        event.start_time = datetime.fromtimestamp(START + 7 * 86400, timezone.utc)
+        await world.cog.sync(event)
+        assert (await db.get_event_card(card["card_id"]))["state"] == ENDED
+        assert [c for c, _ in world.channel.sent if c] == []            # last week's roster isn't pinged
+    _run(tmp_path, body)
+
+
+def test_a_card_stored_without_its_repeat_rule_asks_again(tmp_path, monkeypatch):
+    async def body(db):
+        event = _event()
+        world = World(db, [event])
+        world.bot.http.get_scheduled_event.side_effect = discord.HTTPException(
+            NS(status=500, reason="Error"), "boom")
+        card = await _posted(world)
+        assert card["repeats"] is None
+        world.bot.http.get_scheduled_event.side_effect = None          # Discord answers this time: weekly
+        monkeypatch.setattr("bot.cogs.event_cards.time.time", lambda: START + 3600)
+        event.start_time = datetime.fromtimestamp(START + 7 * 86400, timezone.utc)
+        await world.cog.sync(event)
+        assert (await db.get_event_card(card["card_id"]))["state"] == ENDED
+        assert (await db.get_event_card(card["card_id"]))["repeats"] == "Every week"
+        assert (await db.current_event_card(42))["starts_at"] == START + 7 * 86400
+    _run(tmp_path, body)
+
+
+def test_a_failing_event_check_never_stops_reminders(tmp_path, monkeypatch):
+    async def body(db):
+        broken, gone, fine = _event(41, name="Gone Op"), _event(43, name="Deleted Op"), _event(42)
+        world = World(db, [broken, gone, fine])
+        await _posted(world, broken)
+        deleted = await _posted(world, gone)
+        card = await _posted(world, fine)
+        await db.save_event_signup(card["card_id"], 1, status=GOING, role=None, queued=1)
+        world.guild.scheduled_events = [fine]
+        not_found = discord.NotFound(NS(status=404, reason="Not Found"), "Unknown Guild Scheduled Event")
+        world.guild.fetch_scheduled_event.side_effect = lambda event_id: _raise(
+            asyncio.TimeoutError() if event_id == 41 else not_found)
+        monkeypatch.setattr("bot.cogs.event_cards.time.time", lambda: START - 1800)
+        await world.cog.tick.coro(world.cog)
+        assert any(c and f"starts <t:{START}:R>" in c for c, _ in world.channel.sent)  # this same minute
+        assert (await db.get_event_card(deleted["card_id"]))["state"] == "cancelled"   # the next card still checked
+        await world.cog.tick.coro(world.cog)
+        assert world.guild.fetch_scheduled_event.await_count == 2      # one re-read, not one a minute
+    _run(tmp_path, body)
+
+
+def test_a_big_roster_is_pinged_in_messages_discord_accepts():
+    text = "**Mining Mondays is starting now** - jump in <#55>."
+    ids = [10**18 + n for n in range(250)]                       # real ids are ~19 digits
+    messages = ping_messages(text, ids)
+    assert messages[0][0].startswith(text + "\n<@")
+    assert all(len(content) <= PING_CHARS and len(batch) <= PING_USERS for content, batch in messages)
+    assert [uid for _, batch in messages for uid in batch] == ids   # everyone once, in order
+    for content, batch in messages:                               # each message pings exactly its own
+        assert content.count("<@") == len(batch) and all(f"<@{uid}>" in content for uid in batch)
+    assert ping_messages(text, []) == [(text, [])]
+    short = ping_messages(text, list(range(1, 251)))              # short mentions: the 100-member cap binds first
+    assert [len(batch) for _, batch in short] == [100, 100, 50]
+
+
+def test_a_roster_past_100_gets_every_ping(tmp_path):
+    async def body(db):
+        world = World(db, [_event()])
+        card = await _posted(world)
+        for n in range(130):
+            await db.save_event_signup(card["card_id"], 10**18 + n, status=GOING, role=None, queued=n)
+        await world.cog.ping_roster(card, "**Mining Mondays is starting now**!")
+        pings = world.channel.sent[1:]
+        assert len(pings) == 2
+        pinged = [o.id for _, kwargs in pings for o in kwargs["allowed_mentions"].users]
+        assert sorted(pinged) == [10**18 + n for n in range(130)]
+        assert all(len(kwargs["allowed_mentions"].users) <= 100 and kwargs["reference"].message_id == 901
+                   for _, kwargs in pings)
+    _run(tmp_path, body)
+
+
+def test_a_time_change_inside_the_hour_is_its_reminder(tmp_path, monkeypatch):
+    async def body(db):
+        event = _event()
+        world = World(db, [event])
+        monkeypatch.setattr("bot.cogs.event_cards.time.time", lambda: START - 7200)
+        card = await _posted(world)
+        await db.save_event_signup(card["card_id"], 1, status=GOING, role=None, queued=1)
+        event.start_time = datetime.fromtimestamp(START - 5400, timezone.utc)   # moved to 30 minutes from now
+        await world.cog.sync(event)
+        world.cog._ticks = 1
+        await world.cog.tick.coro(world.cog)
+        texts = [c for c, _ in world.channel.sent if c]
+        assert len(texts) == 1 and texts[0].startswith("**Time changed:**")    # one ping, not two
+    _run(tmp_path, body)
+
+
+
+def _raise(exc):
+    raise exc
+
 
 
 def test_command_surface_fits_discords_limits():
