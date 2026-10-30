@@ -888,6 +888,16 @@ CREATE TABLE IF NOT EXISTS member_welcomes (
     PRIMARY KEY (guild_id, user_id)
 );
 
+-- The role picker (bot/cogs/role_picker.py): which role is which, by id, once /rolesetup has
+-- matched or created it - so a role renamed later still works. `name` is the picker's own
+-- name for it (bot/uex/role_picker.py: ALL_ROLES), not necessarily the role's name now.
+CREATE TABLE IF NOT EXISTS role_picker_roles (
+    guild_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    role_id INTEGER NOT NULL,
+    PRIMARY KEY (guild_id, name)
+);
+
 -- Members who pressed "Stop anniversary messages" under the DM: no DM and no post for them.
 CREATE TABLE IF NOT EXISTS anniversary_opt_outs (
     guild_id INTEGER NOT NULL,
@@ -4726,6 +4736,23 @@ class Database:
                 "SELECT user_id, MAX(day) AS day FROM voice_daily WHERE guild_id = ? GROUP BY user_id",
                 (guild_id,))).fetchall()
         return {row["user_id"]: row["day"] for row in rows}
+
+    # -- role picker -----------------------------------------------------------
+
+    async def get_role_picker_roles(self, guild_id: int) -> dict[str, int]:
+        """The picker's role ids for this server, by the picker's name for each."""
+        async with self.connect() as db:
+            rows = await (await db.execute(
+                "SELECT name, role_id FROM role_picker_roles WHERE guild_id = ?", (guild_id,))).fetchall()
+        return {row["name"]: row["role_id"] for row in rows}
+
+    async def save_role_picker_roles(self, guild_id: int, roles: dict[str, int]) -> None:
+        async with self.connect() as db:
+            await db.executemany(
+                """INSERT INTO role_picker_roles (guild_id, name, role_id) VALUES (?, ?, ?)
+                   ON CONFLICT(guild_id, name) DO UPDATE SET role_id = excluded.role_id""",
+                [(guild_id, name, role_id) for name, role_id in roles.items()])
+            await db.commit()
 
     # -- voice ranks -----------------------------------------------------------
 

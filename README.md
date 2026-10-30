@@ -120,8 +120,10 @@ background posting/sale updates are delivered only by private DM.
    - `Attach Files`, for charts and long lists;
    - `Create Private Threads`, `Send Messages in Threads` and `Manage Threads`, for the private
      threads that route tracking, the ship-parts list and the blueprint list use.
-   - `Manage Roles`, for voice ranks: the bot creates the rank roles and gives them out, so its
-     own role must sit above them in Server Settings → Roles.
+   - `Manage Roles`, for voice ranks, veteran roles and the role picker: the bot creates those
+     roles and gives them out, so its own role must sit above them in Server Settings → Roles.
+   - `Mention @everyone, @here and All Roles`, so the role picker can ping Mentor in #staff when
+     someone picks New Pilot (or make Mentor mentionable instead).
 
    Use the generated URL to invite the bot to your server.
 5. (Optional, recommended while developing) Enable Developer Mode in Discord, right-click your
@@ -274,6 +276,7 @@ bot/
     welcome.py            the welcome DM new members get + retry loop, /welcome-preview
     voice_ranks.py        voice-activity ranks + 1-minute loop, /rank, /rank-leaderboard
     welcome_back.py       a DM to members back after 30+ days away (activity times only)
+    role_picker.py        self-serve role panels (buttons + a dropdown), /rolesetup, /rolepanel post
     help.py               /intro (the categorized command guide)
 scripts/
   deploy_and_backup.sh, revert_last_deploy.sh   Pi deploys and rollback (see above)

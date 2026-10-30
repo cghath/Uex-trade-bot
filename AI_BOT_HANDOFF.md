@@ -466,6 +466,10 @@ date - no open item, nothing to record here.
       `event_line`/`years_completed`/`welcome_back_text` in `bot/uex/anniversaries.py`,
       `bot/cogs/welcome_back.py`, tables `member_activity`/`activity_seed_state`. Same condition
       as PR #132. See PROJECT_CONTEXT.md entry 150
+- [ ] PR #140 - The role picker: `bot/cogs/role_picker.py` (`/rolesetup`, `/rolepanel post`,
+      DynamicItem buttons/dropdown), `bot/uex/role_picker.py`, table `role_picker_roles`. Only if
+      aiv2 runs in a server that wants self-serve roles; its #staff channel id is production's.
+      See PROJECT_CONTEXT.md entry 151
 
 ## To port: aiv2 -> production
 

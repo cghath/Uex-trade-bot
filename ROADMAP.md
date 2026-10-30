@@ -221,6 +221,10 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
   Discord Onboarding with a personal welcome, a daily low-effort prompt (poll, screenshot of the
   day), patch-day threads, fewer and busier channels.
 
+- [x] **Role picker**: Shipped 2026-10-30 (PR #140, PROJECT_CONTEXT.md entry 151): `/rolesetup`
+  and `/rolepanel post` - self-serve Activities, Timezone, Experience and Pings roles from
+  buttons and a dropdown, logged in #staff, Mentor pinged for New Pilots.
+
 - [x] **Veteran roles and welcome backs**: Shipped 2026-10-29 (PR #138, PROJECT_CONTEXT.md entry
   150): a role per year at each anniversary (given quietly to everyone already past one), the
   next Discord event in the anniversary DM, and a welcome-back DM after 30+ days away.
