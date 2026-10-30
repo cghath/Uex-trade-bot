@@ -53,6 +53,7 @@ INITIAL_COGS = (
     "bot.cogs.voice_ranks",
     "bot.cogs.welcome_back",
     "bot.cogs.role_picker",
+    "bot.cogs.event_cards",
 )
 
 

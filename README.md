@@ -124,6 +124,7 @@ background posting/sale updates are delivered only by private DM.
      roles and gives them out, so its own role must sit above them in Server Settings → Roles.
    - `Mention @everyone, @here and All Roles`, so the role picker can ping Mentor in #👋welcome when
      someone picks New Pilot (or make Mentor mentionable instead).
+   - `Manage Events`, so an event card's Start and End also start and end the Discord event.
 
    Use the generated URL to invite the bot to your server.
 5. (Optional, recommended while developing) Enable Developer Mode in Discord, right-click your
@@ -277,6 +278,7 @@ bot/
     voice_ranks.py        voice-activity ranks + 1-minute loop, /rank, /rank-leaderboard
     welcome_back.py       a DM to members back after 30+ days away (activity times only)
     role_picker.py        self-serve role panels (buttons + a dropdown), /rolesetup, /rolepanel post
+    event_cards.py        sign-up cards in #events for Discord's scheduled events, /event-roles
     help.py               /intro (the categorized command guide)
 scripts/
   deploy_and_backup.sh, revert_last_deploy.sh   Pi deploys and rollback (see above)

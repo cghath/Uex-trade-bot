@@ -1,7 +1,17 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.73.
+the oldest entry below); the next new entry is 2.74.
+
+---
+
+## 2.73 - 2026-10-30 - Sign up for ops
+
+**New**
+- Every op now gets a card in #📅events: when it starts in your own time, where, and who's coming. Pick a role (or just Join), say Maybe, or Leave - all from the card.
+- A full role puts you on its wait list, and you get a DM if a spot opens.
+- Say which ship you're bringing, and sign up for a weekly op every week with one button.
+- You get a ping an hour before an op you've signed up for, and another when it starts.
 
 ---
 

@@ -5249,6 +5249,57 @@ they're in sync).
        panel picks and Onboarding - goes to a new #role-log (`ROLE_LOG_CHANNEL_ID`) instead.
      - 7 more tests (24 in all), 14 mutations, all caught.
 
+152. **Event cards: sign-ups for Discord's scheduled events in #📅events.**
+     The owner's ask (2026-10-30): members on phones couldn't find Discord's Events list. Designed
+     on a mockup first (the "Event Card Mockup" artifact, real Mining Mondays and Contested Tuesdays
+     data), the look the owner liked from another bot, our own version. `bot/cogs/event_cards.py`,
+     rules and wording in `bot/uex/events.py`.
+     - **A card per occurrence**, from Discord's scheduled events (made in Discord as before; the
+       bot follows `on_scheduled_event_create/update/delete` and re-reads every event each 10
+       minutes, so nothing is missed while it was down). Posted in #📅events pinging Org Events
+       (the role picker's saved role) and nobody else. A message of layout components
+       (`discord.ui.LayoutView`, no embed): title linked to the event, its cover picture,
+       organizer, description, start in each reader's own time with a countdown, Ready by (15
+       minutes before), the voice channel, and "Every week" for a repeating event - never a
+       weekday, which Discord keeps in UTC (Mining Mondays at 7:30 PM Eastern is a UTC Tuesday).
+       A repeating event keeps its event id; each week is a new card (`event_cards`), never
+       posted twice (`event_card_exists`, any state).
+     - **Roles** (`/event-roles event: roles:"Miner 6, Hauler 2, Escort 2"`, the owner's pick of
+       three ways): stored per event id, so they carry over every week; "none" goes back to one
+       Going list with a Join button. A role that's taken away moves its people to "Going - no
+       role yet" (nobody dropped); more spots move the wait list up.
+     - **Joining**: the role menu (or Join), Maybe (its own button, the owner's change: no spot
+       taken, its own list), Leave, Voice (the owner's ask: a big target on a phone) and
+       Interested on Discord. A full role puts you on its wait list (`queued` orders it, reset on a
+       new role or status); a freed spot moves the first one up with a DM. One lock per card, so
+       two clicks can't both take the last spot.
+     - **After joining** (private): what you're bringing - your default ship (trading
+       preferences), then ships you've brought before (`event_ship_history`), Not sure yet, or
+       Another ship... (typed, matched against UEX's ship list; several matches ask which, with a
+       button each) - and "Sign me up every time" on a repeating event (`event_regulars`: put on
+       each new card in their role and ship; Leave skips one week).
+     - **Organizers**: the event's creator, the Event Manager role (1565664577088131234, made by
+       the owner), admins or anyone with Manage Events. Start pings the roster with a Join button
+       for the voice channel and starts the Discord event (the bot has Manage Events since
+       2026-10-30); End closes the card and ends it - for a repeating event Discord then moves to
+       the next one, which gets its own card. Started from Discord itself counts the same, and
+       only one of the two ever pings (`set_event_card_state`'s guarded update).
+     - **Changes**: an hour before, the roster (going and maybe) is reminded once
+       (`claim_event_reminder`). A new time pings everyone on the card once; an occurrence whose
+       time has passed (or that started) closes quietly when Discord moves on; a cancelled or
+       deleted event says so; a card nobody ended closes 12 hours after its start.
+     - The owner chose a 30-minute rule for counting who showed up; attendance (who on the roster
+       was in the voice channel between Start and End) is the next PR, not this one.
+     - On the first start after deploy, every scheduled event already in Discord gets its card
+       (Mining Mondays and Contested Tuesdays), each pinging Org Events once.
+     - Every view and the ship modal use the bot's own bases (`BotLayoutView`, `BotView`,
+       `BotModal`), so a failure still answers the player (`test_failed_interactions`). The
+       biggest possible card (10 long roles, 300 people, a 5,000-character description) stays
+       under Discord's 4,000 characters and 40 components: the roster gets 2,400, the
+       description 800.
+     - Tests in `tests/test_event_cards.py` (20); 23 mutations, all caught after two gaps were
+       closed (a whole ship name inside a longer one, a reminder claimed twice).
+
 ## Where to look for what
 
 Seven docs, deliberately scoped so they don't duplicate each other:
