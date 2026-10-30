@@ -901,6 +901,13 @@ CREATE TABLE IF NOT EXISTS role_picker_roles (
 -- #👋welcome intros (bot/cogs/role_picker.py): who has posted there, so Mentor is pinged for each
 -- member's first post only. welcome_intro_seed marks the one-time read of the channel's history;
 -- until it's done no post counts as a first.
+CREATE TABLE IF NOT EXISTS new_pilot_pings (
+    guild_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    pinged_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (guild_id, user_id)
+);
+
 CREATE TABLE IF NOT EXISTS welcome_intros (
     guild_id INTEGER NOT NULL,
     user_id INTEGER NOT NULL,
@@ -4830,6 +4837,22 @@ class Database:
                 """INSERT INTO role_picker_roles (guild_id, name, role_id) VALUES (?, ?, ?)
                    ON CONFLICT(guild_id, name) DO UPDATE SET role_id = excluded.role_id""",
                 [(guild_id, name, role_id) for name, role_id in roles.items()])
+            await db.commit()
+
+    async def claim_new_pilot_ping(self, guild_id: int, user_id: int) -> bool:
+        """True the first time Mentor is to be pinged about this member picking New Pilot (from a
+        panel or Onboarding); never again, however often they pick it."""
+        async with self.connect() as db:
+            cursor = await db.execute(
+                "INSERT OR IGNORE INTO new_pilot_pings (guild_id, user_id) VALUES (?, ?)", (guild_id, user_id))
+            claimed = cursor.rowcount == 1
+            await db.commit()
+        return claimed
+
+    async def release_new_pilot_ping(self, guild_id: int, user_id: int) -> None:
+        """Undo a claim whose ping didn't arrive, so the member's next New Pilot pick tries again."""
+        async with self.connect() as db:
+            await db.execute("DELETE FROM new_pilot_pings WHERE guild_id = ? AND user_id = ?", (guild_id, user_id))
             await db.commit()
 
     async def claim_welcome_intro(self, guild_id: int, user_id: int) -> bool:

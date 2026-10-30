@@ -13,8 +13,9 @@ Guarantees under test:
      by the startup-registered templates, the Colors buttons with their emoji; refuses until
      /rolesetup has run.
   4. Picking - changes only the member's roles in that group, replies privately, logs in #role-log
-     without pinging the member, pings Mentor (only) in #welcome for New Pilot; an id that isn't a saved
-     picker role does nothing; a refused role change says so and logs nothing.
+     without pinging the member, pings Mentor (only) in #welcome for New Pilot, once per member ever
+     (picking it again only logs); the dropdown answers by re-sending itself with nothing ticked; an id
+     that isn't a saved picker role does nothing; a refused role change says so and logs nothing.
   5. Onboarding - picker roles gained outside the panels are logged in #role-log, all of one
      onboarding in one line; New Pilot pings Mentor in #welcome with the member's timezone; a role a panel
      just gave, Mentor, any other role, or one taken off again before the line is written isn't.
@@ -183,7 +184,8 @@ class FakeGuild:
 def _interaction(db, guild, user, staff, welcome=None):
     return NS(guild=guild, user=user,
               client=NS(db=db, get_channel={ROLE_LOG_CHANNEL_ID: staff, WELCOME_CHANNEL_ID: welcome}.get),
-              response=NS(defer=AsyncMock(), send_message=AsyncMock()), followup=NS(send=AsyncMock()))
+              response=NS(defer=AsyncMock(), send_message=AsyncMock(), edit_message=AsyncMock()),
+              followup=NS(send=AsyncMock()))
 
 
 def _run(tmp_path, body):
@@ -368,11 +370,25 @@ def test_the_dropdown_toggles_each_activity(tmp_path):
         saved = await db.get_role_picker_roles(GUILD_ID)
         member = FakeMember(7, [guild.get_role(saved["Mining"])])
         inter = _interaction(db, guild, member, _staff())
-        menu = RoleMenu("activity")
+        # the panel as Discord hands it back on a click (rebuilt from its custom id), picks ticked
+        posted = RoleMenu("activity", [discord.SelectOption(label=n, value=str(saved[n]))
+                                       for n in ("Mining", "FPS", "Racing")]).item
+        clicked = discord.ui.Select(custom_id=posted.custom_id, options=[
+            discord.SelectOption(label=o.label, value=o.value, default=True) for o in posted.options])
+        menu = await RoleMenu.from_custom_id(inter, clicked, re.fullmatch(MENU_TEMPLATE, posted.custom_id))
         menu.item._values = [str(saved["Mining"]), str(saved["FPS"])]
         await menu.callback(inter)
         assert [r.name for r in member.roles] == ["FPS"]
         assert inter.followup.send.await_args.args[0] == "Added **FPS**. Removed **Mining**."
+        assert inter.followup.send.await_args.kwargs["ephemeral"] is True
+        # answered by re-sending the panel: the same dropdown with nothing ticked, so a later pick starts clean
+        inter.response.defer.assert_not_awaited()
+        fresh = inter.response.edit_message.await_args.kwargs["view"].children[0].item.to_component_dict()
+        before = posted.to_component_dict()
+        assert {k: fresh[k] for k in ("custom_id", "placeholder", "min_values", "max_values")} == {
+            k: before[k] for k in ("custom_id", "placeholder", "min_values", "max_values")}
+        assert [o["value"] for o in fresh["options"]] == [o["value"] for o in before["options"]]
+        assert not any(o.get("default") for o in fresh["options"])
     _run(tmp_path, body)
 
 
@@ -419,6 +435,29 @@ def test_new_pilot_pings_mentor_and_only_mentor(tmp_path):
         await RoleButton("experience", saved["New Pilot"]).callback(_interaction(db, guild, member, staff, welcome))
         assert member.roles == [] and staff.send.await_count == 1   # removing it pings nobody
         assert welcome.send.await_count == 1
+        for _ in range(3):   # toggling it on and off again only logs: Mentor heard once
+            await RoleButton("experience", saved["New Pilot"]).callback(_interaction(db, guild, member, staff, welcome))
+        assert [r.name for r in member.roles] == ["New Pilot"] and staff.send.await_count == 4
+        assert welcome.send.await_count == 1
+    _run(tmp_path, body)
+
+
+def test_a_mentor_ping_that_did_not_arrive_is_tried_at_the_next_pick(tmp_path):
+    async def body(db):
+        guild = FakeGuild()
+        await _set_up(db, guild)
+        saved = await db.get_role_picker_roles(GUILD_ID)
+        staff = _staff()
+        welcome = NS(send=AsyncMock(side_effect=[discord.HTTPException(NS(status=503, reason="Unavailable"), "x"),
+                                                 None]))
+        member = FakeMember(7)
+        pick = lambda: RoleButton("experience", saved["New Pilot"]).callback(  # noqa: E731
+            _interaction(db, guild, member, staff, welcome))
+        await pick()                     # #welcome refuses the ping
+        await pick()                     # off
+        await pick()                     # on again: Mentor is pinged this time
+        assert welcome.send.await_count == 2
+        assert not await db.claim_new_pilot_ping(GUILD_ID, 7)          # and now it's spent
     _run(tmp_path, body)
 
 
@@ -501,6 +540,10 @@ def test_onboarding_roles_are_logged_in_one_line_and_new_pilot_pings_mentor(tmp_
         await _gain(cog, other, role("Salvage"))
         assert staff.send.await_count == 3 and welcome.send.await_count == 2
         assert staff.send.await_args.args[0] == "🎭 <@8> picked **Salvage** via Onboarding."
+        # New Pilot again later (an Onboarding answer changed): logged, Mentor not pinged again
+        other.roles = [r for r in other.roles if r.name != "New Pilot"]
+        await _gain(cog, other, role("New Pilot"))
+        assert staff.send.await_count == 4 and welcome.send.await_count == 2
     _run(tmp_path, body)
 
 
