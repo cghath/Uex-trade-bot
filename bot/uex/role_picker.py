@@ -5,7 +5,7 @@ Four groups, each a panel of its own:
 - Activities: a dropdown; picking a role adds it, picking one you already have removes it.
 - Timezone and Experience: buttons, one role per member - picking one removes the others,
   picking the one you have removes it.
-- Pings: toggle buttons, plus Everything: all four, or none once you have all four.
+- Pings: toggle buttons, plus Everything: all of them, or none once you have them all.
 
 Every role is plain - no permissions, no color, not mentionable. Mentor isn't on a panel: it's
 the staff role pinged in #staff when someone picks New Pilot.
@@ -42,7 +42,8 @@ GROUPS: tuple[RoleGroup, ...] = (
               ("New Pilot", "Getting There", "Veteran")),
     RoleGroup("pings", "🔔 Pings", "Which announcements do you want to be pinged for? Press again to turn one "
               "off, or Everything for all of them.", TOGGLE,
-              ("Org Events", "Patch & Server Status", "Free Fly & Events", "Joint Ops"), everything=True),
+              ("Org Events", "Patch & Server Status", "Free Fly & Events", "Joint Ops", "Streams & Videos"),
+              everything=True),
 )
 GROUPS_BY_KEY = {group.key: group for group in GROUPS}
 
@@ -93,6 +94,26 @@ def log_text(member_mention: str, added: list[str], removed: list[str]) -> str:
 
 def mentor_text(mentor_mention: str, member_mention: str) -> str:
     return f"👋 {mentor_mention} - {member_mention} just picked **{NEW_PILOT_ROLE}**. Say hi and help them get started!"
+
+
+def picker_order(saved: dict[str, int], role_ids: set[int]) -> list[int]:
+    """The picker roles among `role_ids`, in panel order. Mentor and any other role (voice ranks,
+    veteran roles) are left out."""
+    return [saved[name] for name in ALL_ROLES if name != MENTOR_ROLE and saved.get(name) in role_ids]
+
+
+def onboarding_log_text(member_mention: str, added: list[str]) -> str:
+    """The #staff log line for picker roles a member got outside the panels - Discord's Onboarding."""
+    return f"🎭 {member_mention} picked " + ", ".join(f"**{name}**" for name in added) + " via Onboarding."
+
+
+def new_pilot_text(mentor_mention: str, member_mention: str, timezone: str | None) -> str:
+    where = f" ({timezone})" if timezone else ""
+    return f"👋 {mentor_mention} New pilot joined: {member_mention}{where}. Say hi and invite them to the next op."
+
+
+def intro_text(mentor_mention: str, member_mention: str) -> str:
+    return f"👋 {mentor_mention} - first hello from {member_mention}! Give them a reply."
 
 
 KEPT = "kept"        # the saved role id still exists (even if the role was renamed)

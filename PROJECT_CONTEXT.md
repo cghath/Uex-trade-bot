@@ -5215,6 +5215,30 @@ they're in sync).
        once the member has all four - a button, not a fifth role, so announcements still ping just
        the four. `RoleGroup.everything` turns it on per group; only Pings has it. Panels posted
        before it need posting again to show it. 7 more tests, 6 more mutations, all caught.
+     - **Streams & Videos** (PR #142): a fifth ping role, for a member of the server going live or
+       posting a video. The bot doesn't announce streams itself - whatever posts them pings the
+       role. Everything covers it; the Pings panel wraps to two rows (Discord's 5 per row).
+       `/rolesetup` creates it (22 roles); the Pings panel needs posting again to show it.
+     - **Onboarding** (same PR, the owner's ask once Discord Onboarding was live with these same
+       role ids): roles picked there never pass through the panels, so `on_member_update` (and
+       `on_member_join`, in case they're already on) catches picker roles a member gained. A role
+       a panel gave in the last `PANEL_GRACE` (15s, an in-memory note per member and role) is
+       skipped; the rest wait `BATCH_SECONDS` (5s) so one onboarding is one #staff line, "@member
+       picked **Mining**, **Eastern**, **New Pilot** via Onboarding", leaving out any taken off
+       again meanwhile. New Pilot also pings Mentor in #👋welcome: "New pilot joined: @member
+       (Eastern). Say hi and invite them to the next op." Only the saved picker roles count, Mentor
+       excepted - voice ranks, the ops ladder and veteran roles are never picker roles. Staff
+       giving a picker role by hand also reads "via Onboarding"; telling them apart would need
+       the audit log.
+     - **#👋welcome intros:** a member's first post there gets a reply from the bot pinging Mentor
+       ("first hello from @member! Give them a reply."), so every intro gets an answer. `welcome_intros` keeps who has posted; the first start reads
+       the channel's whole history once (`welcome_intro_seed`), and until then nothing counts as a
+       first. Staff (Manage Messages, or Mentor) and Discord's join notices don't count.
+       Message Content isn't needed - only the author.
+     - **Mentor pings in #👋welcome** (the owner's change before merging): both New Pilot pings -
+       the panels' and Onboarding's - and the first-hello reply go to #👋welcome, where the new
+       member is; the role log lines stay in #staff. Nobody but Mentor is pinged.
+     - 7 more tests (24 in all), 14 mutations, all caught.
 
 ## Where to look for what
 

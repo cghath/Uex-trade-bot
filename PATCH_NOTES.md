@@ -1,7 +1,15 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.71.
+the oldest entry below); the next new entry is 2.72.
+
+---
+
+## 2.71 - 2026-10-30 - Streams and videos
+
+**New**
+- A new ping on the Pings panel, Streams & Videos: get pinged when someone from Star Tech Dynamics goes live or posts a new video.
+- Say hello in #👋welcome: our mentors now hear about every first post there, so someone will say hi back.
 
 ---
 
