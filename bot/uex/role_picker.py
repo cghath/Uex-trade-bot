@@ -8,7 +8,7 @@ Four groups, each a panel of its own:
 - Pings: toggle buttons, plus Everything: all of them, or none once you have them all.
 
 Every role is plain - no permissions, no color, not mentionable. Mentor isn't on a panel: it's
-the staff role pinged in #staff when someone picks New Pilot.
+the staff role pinged in #👋welcome when someone picks New Pilot.
 """
 from __future__ import annotations
 
@@ -83,7 +83,7 @@ def change_text(added: list[str], removed: list[str]) -> str:
 
 
 def log_text(member_mention: str, added: list[str], removed: list[str]) -> str:
-    """The #staff log line for one pick."""
+    """The #role-log line for one pick."""
     parts = []
     if added:
         parts.append("added " + ", ".join(f"**{name}**" for name in added))
@@ -103,7 +103,7 @@ def picker_order(saved: dict[str, int], role_ids: set[int]) -> list[int]:
 
 
 def onboarding_log_text(member_mention: str, added: list[str]) -> str:
-    """The #staff log line for picker roles a member got outside the panels - Discord's Onboarding."""
+    """The #role-log line for picker roles a member got outside the panels - Discord's Onboarding."""
     return f"🎭 {member_mention} picked " + ", ".join(f"**{name}**" for name in added) + " via Onboarding."
 
 

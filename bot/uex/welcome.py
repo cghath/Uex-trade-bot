@@ -6,10 +6,20 @@ commands and the bot's channel - nothing more ("just let them get started and so
 and don't overload them"), so no pointer to /intro. The commands are the ones other players use
 most (/multi-stop-route, /ingame-item-finder, /ship-loadout) plus /ship-parts-finder (to compare
 parts), /where-to-mine and /blueprint-search, the owner's picks.
+
+Since 2026-10-30 (the owner's pick of the layouts offered) it first points to the server's new
+places - say hi in #👋welcome, ops in #📅events, roles in Channels & Roles or the role panels,
+the rules - then the commands. It's sent once the member has accepted the rules, so the rules
+are there to look back at, not a step left to do.
 """
 from __future__ import annotations
 
 from bot.uex.anniversaries import COMMUNITY_NAME
+
+WELCOME_CHANNEL_ID = 1565606894482096158  # #👋welcome
+EVENTS_CHANNEL_ID = 1565625163347656704   # #📅events
+ROLES_CHANNEL_ID = 1565594422228557914    # #🙋‍♂️pick-your-roles🙋‍♂️
+RULES_CHANNEL_ID = 1565609767181754399    # #📜rules
 
 HIGHLIGHTS = (
     ("multi-stop-route", "the best trade run for your ship"),
@@ -23,7 +33,11 @@ HIGHLIGHTS = (
 
 def welcome_text(name: str, channel_id: int) -> str:
     lines = [f"👋 **Welcome to {COMMUNITY_NAME}, {name}!**",
-             "We're glad you're here. A few things our bot can help you with:"]
+             f"• Say hi in <#{WELCOME_CHANNEL_ID}> and tell us what you fly",
+             f"• Upcoming ops are in <#{EVENTS_CHANNEL_ID}>",
+             f"• Pick your roles and pings any time in Channels & Roles or <#{ROLES_CHANNEL_ID}>",
+             f"• Server rules: <#{RULES_CHANNEL_ID}>",
+             "",
+             f"Our bot can help too (use it in <#{channel_id}>):"]
     lines += [f"• `/{command}`: {what}" for command, what in HIGHLIGHTS]
-    lines.append(f"You can use it in <#{channel_id}>.")
     return "\n".join(lines)

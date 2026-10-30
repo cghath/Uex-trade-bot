@@ -122,7 +122,7 @@ background posting/sale updates are delivered only by private DM.
      threads that route tracking, the ship-parts list and the blueprint list use.
    - `Manage Roles`, for voice ranks, veteran roles and the role picker: the bot creates those
      roles and gives them out, so its own role must sit above them in Server Settings → Roles.
-   - `Mention @everyone, @here and All Roles`, so the role picker can ping Mentor in #staff when
+   - `Mention @everyone, @here and All Roles`, so the role picker can ping Mentor in #👋welcome when
      someone picks New Pilot (or make Mentor mentionable instead).
 
    Use the generated URL to invite the bot to your server.

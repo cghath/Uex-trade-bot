@@ -1,7 +1,7 @@
 """The welcome DM (bot/uex/welcome.py, bot/cogs/welcome.py).
 
-Guarantees under test: the wording (Star Tech Dynamics in full, the six commands, the channel,
-no /intro); a new member gets it once - never again on a rejoin or a second event - while bots,
+Guarantees under test: the wording (Star Tech Dynamics in full, the server's four places
+first, then the six commands and the bot's channel, no /intro); a new member gets it once - never again on a rejoin or a second event - while bots,
 other servers and members still accepting the rules don't (until they accept); a temporary
 failure is retried by the loop and a refusal isn't; the preview is owner-only.
 """
@@ -17,19 +17,29 @@ from cryptography.fernet import Fernet
 from bot.cogs.anniversaries import ANNIVERSARY_CHANNEL_ID
 from bot.cogs.welcome import Welcome
 from bot.db.database import Database
-from bot.uex.welcome import HIGHLIGHTS, welcome_text
+from bot.uex.welcome import (
+    EVENTS_CHANNEL_ID, HIGHLIGHTS, ROLES_CHANNEL_ID, RULES_CHANNEL_ID, WELCOME_CHANNEL_ID, welcome_text,
+)
 
 GUILD_ID = 1132378045232197694
 
 
-def test_the_welcome_names_the_server_six_commands_and_the_channel_and_nothing_more():
+def test_the_welcome_names_the_server_its_places_six_commands_and_the_channel_and_nothing_more():
     text = welcome_text("Nova", ANNIVERSARY_CHANNEL_ID)
-    assert text.startswith("👋 **Welcome to Star Tech Dynamics, Nova!**")
+    lines = text.split("\n")
+    assert lines[:7] == [
+        "👋 **Welcome to Star Tech Dynamics, Nova!**",
+        f"• Say hi in <#{WELCOME_CHANNEL_ID}> and tell us what you fly",
+        f"• Upcoming ops are in <#{EVENTS_CHANNEL_ID}>",
+        f"• Pick your roles and pings any time in Channels & Roles or <#{ROLES_CHANNEL_ID}>",
+        f"• Server rules: <#{RULES_CHANNEL_ID}>",
+        "",
+        f"Our bot can help too (use it in <#{ANNIVERSARY_CHANNEL_ID}>):",
+    ]
     assert [c for c, _ in HIGHLIGHTS] == ["multi-stop-route", "ingame-item-finder", "ship-loadout", "ship-parts-finder",
                                          "where-to-mine", "blueprint-search"]
-    assert all(f"`/{c}`" in text for c, _ in HIGHLIGHTS)
-    assert text.endswith(f"You can use it in <#{ANNIVERSARY_CHANNEL_ID}>.")
-    assert "/intro" not in text and "STDynamics" not in text and len(text) < 600
+    assert lines[7:] == [f"• `/{c}`: {what}" for c, what in HIGHLIGHTS]
+    assert "/intro" not in text and "STDynamics" not in text and len(text) < 1000
 
 
 class FakeUser:

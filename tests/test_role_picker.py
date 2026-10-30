@@ -10,10 +10,10 @@ Guarantees under test:
      can't ping; admins only.
   3. /rolepanel post - four panels whose buttons and dropdown carry the saved role ids, matched
      by the startup-registered templates; refuses until /rolesetup has run.
-  4. Picking - changes only the member's roles in that group, replies privately, logs in #staff
+  4. Picking - changes only the member's roles in that group, replies privately, logs in #role-log
      without pinging the member, pings Mentor (only) in #welcome for New Pilot; an id that isn't a saved
      picker role does nothing; a refused role change says so and logs nothing.
-  5. Onboarding - picker roles gained outside the panels are logged in #staff, all of one
+  5. Onboarding - picker roles gained outside the panels are logged in #role-log, all of one
      onboarding in one line; New Pilot pings Mentor in #welcome with the member's timezone; a role a panel
      just gave, Mentor, any other role, or one taken off again before the line is written isn't.
   6. #welcome - a member's first post gets a reply there pinging Mentor, once; not before the history
@@ -32,7 +32,7 @@ from cryptography.fernet import Fernet
 
 import bot.cogs.role_picker as role_picker_cog
 from bot.cogs.role_picker import (
-    BUTTON_TEMPLATE, EVERYTHING_TEMPLATE, MENU_TEMPLATE, OUT_OF_DATE, STAFF_CHANNEL_ID, WELCOME_CHANNEL_ID,
+    BUTTON_TEMPLATE, EVERYTHING_TEMPLATE, MENU_TEMPLATE, OUT_OF_DATE, ROLE_LOG_CHANNEL_ID, WELCOME_CHANNEL_ID,
     EverythingButton, RoleButton, RoleMenu, RolePicker, apply_pick,
 )
 from bot.db.database import Database
@@ -144,7 +144,7 @@ class FakeGuild:
 
 def _interaction(db, guild, user, staff, welcome=None):
     return NS(guild=guild, user=user,
-              client=NS(db=db, get_channel={STAFF_CHANNEL_ID: staff, WELCOME_CHANNEL_ID: welcome}.get),
+              client=NS(db=db, get_channel={ROLE_LOG_CHANNEL_ID: staff, WELCOME_CHANNEL_ID: welcome}.get),
               response=NS(defer=AsyncMock(), send_message=AsyncMock()), followup=NS(send=AsyncMock()))
 
 
@@ -377,7 +377,7 @@ def test_a_refused_role_change_says_so_and_logs_nothing(tmp_path):
 # -- 5. Onboarding --------------------------------------------------------------------------------
 
 def _listener(db, guild, staff, welcome):
-    channels = {STAFF_CHANNEL_ID: staff, WELCOME_CHANNEL_ID: welcome}
+    channels = {ROLE_LOG_CHANNEL_ID: staff, WELCOME_CHANNEL_ID: welcome}
     return RolePicker(NS(db=db, get_channel=channels.get), start_loop=False)
 
 
@@ -523,7 +523,7 @@ def test_the_history_read_records_who_already_posted(tmp_path):
             for post in posts:
                 yield post
         welcome = NS(guild=guild, history=history)
-        cog = RolePicker(NS(db=db, get_channel=lambda cid: {STAFF_CHANNEL_ID: staff, WELCOME_CHANNEL_ID: welcome}.get(cid)),
+        cog = RolePicker(NS(db=db, get_channel=lambda cid: {ROLE_LOG_CHANNEL_ID: staff, WELCOME_CHANNEL_ID: welcome}.get(cid)),
                          start_loop=False)
         await cog.read_welcome_history.coro(cog)
         assert await db.welcome_intros_seeded(GUILD_ID)

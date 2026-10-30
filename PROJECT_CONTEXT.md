@@ -5057,6 +5057,13 @@ they're in sync).
      - Tests in `tests/test_welcome.py`. 7 mutations: 6 caught; the seventh was a guard in the
        retry loop for members still pending, which can't happen (a row exists only once they've
        accepted, and Discord never sets `pending` back), so the guard was removed.
+     - **The server's places first** (2026-10-30, PR #143): once the owner added #👋welcome,
+       #📅events, #📜rules, the role panels and Onboarding, the DM opens with four bullets - say
+       hi in #👋welcome, ops in #📅events, roles in Channels & Roles or #🙋‍♂️pick-your-roles🙋‍♂️,
+       the rules - then the same six commands. The owner picked this from three layouts (the
+       others cut the command descriptions). It arrives after the rules are accepted, so #📜rules
+       is for looking back. ~700 characters. The four channel ids live in `bot/uex/welcome.py`;
+       the role picker imports `WELCOME_CHANNEL_ID` from there.
 
 147. **`/ship-loadout` shows a gun's fire rate.**
      The owner's ask (2026-10-14): "add the fire rate to all the weapon stats". `/ship-parts-finder`
@@ -5238,6 +5245,8 @@ they're in sync).
      - **Mentor pings in #👋welcome** (the owner's change before merging): both New Pilot pings -
        the panels' and Onboarding's - and the first-hello reply go to #👋welcome, where the new
        member is; the role log lines stay in #staff. Nobody but Mentor is pinged.
+     - **#role-log** (PR #143): the owner keeps #staff for moderation, so every role log line -
+       panel picks and Onboarding - goes to a new #role-log (`ROLE_LOG_CHANNEL_ID`) instead.
      - 7 more tests (24 in all), 14 mutations, all caught.
 
 ## Where to look for what
