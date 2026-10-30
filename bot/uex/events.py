@@ -23,6 +23,7 @@ REMIND_BEFORE = 60 * 60  # seconds: the roster is reminded this long before the 
 ROSTER_BUDGET = 2400     # characters of roster text; Discord allows 4000 across one card
 DESCRIPTION_LIMIT = 800  # the rest of the card's text, at most ~1,200, fits beside them
 REGULAR_MARK = "🔁"
+SHIP_CHOICES = 25        # a typed ship name matching more than this asks for more of the name
 
 
 @dataclass(frozen=True)
@@ -120,16 +121,30 @@ def repeats_text(rule: dict | None) -> str | None:
     return f"Every {interval} {unit}s"
 
 
-def ship_matches(names: list[str], query: str) -> list[str]:
-    """Ships a typed name could mean: an exact name (any case) alone, else every name that
-    contains it. More than one means asking which."""
+_ROMAN = {"i": "1", "ii": "2", "iii": "3", "iv": "4", "v": "5"}
+
+
+def _searchable(name: str, full: str | None) -> str:
+    """A ship's name and full name (with its maker) to search in, "Mk II" also as "mk 2" and "mk2"."""
+    text = f"{name} {full or ''}".casefold()
+    extra = [f"mk {digit} mk{digit}" for roman, digit in _ROMAN.items() if re.search(rf"\bmk {roman}\b", text)]
+    return " ".join([text, *extra])
+
+
+def ship_matches(ships: list[tuple[str, str | None]], query: str) -> list[str]:
+    """Ships (name, full name) a typed name could mean: an exact name or full name (any case)
+    alone, else every ship whose name holds each typed word, in any order and with or without
+    the maker ("hercules c2", "drake cutlass", "aurora mr" for "Aurora Mk I MR"). Shortest name
+    first, so the base ship leads its variants. More than one means asking which."""
     query = " ".join(query.split()).casefold()
     if not query:
         return []
-    exact = [n for n in names if n.casefold() == query]
+    exact = [name for name, full in ships if query in (name.casefold(), (full or "").casefold())]
     if exact:
         return exact[:1]
-    return sorted({n for n in names if query in n.casefold()})
+    words = query.split()
+    found = {name for name, full in ships if all(word in _searchable(name, full) for word in words)}
+    return sorted(found, key=lambda n: (len(n), n))
 
 
 def _member(signup: Signup, regulars: set[int]) -> str:

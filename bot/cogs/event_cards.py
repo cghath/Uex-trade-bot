@@ -35,7 +35,7 @@ from bot.discord_ui import BotLayoutView, BotModal, BotView
 from bot.uex.events import (
     CANCELLED, ENDED, GOING, MAYBE, OPEN, REMIND_BEFORE, STARTED, WAITING, EventRole, Signup, announce_text,
     cancelled_text, details_text, ended_text, joined_text, mentions, next_in_line, parse_roles, placed_status,
-    promoted_text, reminder_text, repeats_text, roster_text, ship_matches, start_text, time_change_text,
+    SHIP_CHOICES, promoted_text, reminder_text, repeats_text, roster_text, ship_matches, start_text, time_change_text,
 )
 from bot.uex.welcome import EVENTS_CHANNEL_ID
 
@@ -186,20 +186,18 @@ class ShipModal(BotModal, title="What are you bringing?"):
 
 
 class ShipChoice(BotView):
-    """"Which Aurora?" - one button per ship a typed name could mean. Short-lived."""
+    """"Which Aurora?" - a menu of the ships a typed name could mean (up to 25). Short-lived."""
 
     def __init__(self, cog: "EventCards", card_id: int, ships: list[str]) -> None:
         super().__init__(timeout=300)
-        for ship in ships:
-            button = discord.ui.Button(label=ship[:80], style=discord.ButtonStyle.secondary)
-            button.callback = self._pick(cog, card_id, ship)
-            self.add_item(button)
+        self.cog, self.card_id = cog, card_id
+        self.menu = discord.ui.Select(placeholder="Pick your ship", options=[
+            discord.SelectOption(label=ship[:100], value=ship[:100]) for ship in ships[:SHIP_CHOICES]])
+        self.menu.callback = self.pick
+        self.add_item(self.menu)
 
-    @staticmethod
-    def _pick(cog, card_id, ship):
-        async def callback(interaction: discord.Interaction) -> None:
-            await cog.set_ship(interaction, card_id, ship)
-        return callback
+    async def pick(self, interaction: discord.Interaction) -> None:
+        await self.cog.set_ship(interaction, self.card_id, self.menu.values[0])
 
 
 class EventCards(commands.Cog):
@@ -430,16 +428,16 @@ class EventCards(commands.Cog):
         except Exception:
             logger.exception("Couldn't read the ship list for an event card")
             vehicles = []
-        names = [v.get("name") for v in vehicles if v.get("name")]
-        found = ship_matches(names, text) if names else []
-        if not names:
+        ships = [(v["name"], v.get("name_full")) for v in vehicles if v.get("name")]
+        found = ship_matches(ships, text) if ships else []
+        if not ships:
             await self.set_ship(interaction, card_id, " ".join(text.split())[:60], deferred=True)
         elif len(found) == 1:
             await self.set_ship(interaction, card_id, found[0], deferred=True)
         elif not found:
             await interaction.followup.send(f"I don't know a ship called **{text.strip()}** - check the spelling?",
                                             ephemeral=True)
-        elif len(found) > 5:
+        elif len(found) > SHIP_CHOICES:
             await interaction.followup.send(f"**{text.strip()}** matches {len(found)} ships - type a bit more of the name.",
                                             ephemeral=True)
         else:
