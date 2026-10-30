@@ -14,15 +14,18 @@ any `main` sync under **Syncs to main**. Audit reports stay local (`docs/audits/
 
 ## Status
 
-- **Audited up to:** `0e8818b` (2026-10-03). The 2026-10-03 range audit covered
-  `cffa68e..0e8818b`; the 2026-09-25 full-project audit covered everything up to `cffa68e`.
-- **Not yet audited:** `0e8818b..TestBranch` (nothing as of 2026-10-03). The next audit starts at
-  `0e8818b`.
-- **Open findings from the last audit:** 37, none P0. REL-1 is P1 until the listing-delete fix
-  (production PR #115) is proven live; REL-2, REL-3, UX-1, UX-2, LOGIC-1 and MSG-1 to MSG-4 are P2.
-  Fixing them adds new commits, which the next audit covers.
-- **`main`:** at `865a3b3` (production PR #95, 2026-09-30). Everything up to `0e8818b` is audited,
-  but the owner holds the sync until the audit's findings are fixed (2026-10-03).
+- **Audited up to:** `2342dfc` (2026-10-30). The 2026-10-30 full audit covered `0e8818b..2342dfc`
+  and swept the whole repo; the 2026-10-03 range audit covered `cffa68e..0e8818b`; the 2026-09-25
+  full-project audit covered everything up to `cffa68e`.
+- **Not yet audited:** `2342dfc..TestBranch` (nothing as of 2026-10-30). The next audit starts at
+  `2342dfc`.
+- **Open findings:** from 2026-10-30, about 43 P3, none P0 or P1; its 7 P2s (EVT-1 to EVT-5,
+  ROLE-1, ROLE-2) and two P3s (EVT-6, EVT-7) are fixed by production PR #147 (not yet audited
+  itself). From 2026-10-03, 26 of 37 still open (11 fixed): REL-3 to REL-9, UX-4 to UX-12, MSG-2
+  to MSG-4, MSG-7 to MSG-9, LOGIC-4 to LOGIC-7. Fixing them adds new commits, which the next audit
+  covers.
+- **`main`:** at `865a3b3` (production PR #95, 2026-09-30). Everything up to `2342dfc` is audited,
+  but the owner holds the sync until the audits' findings are fixed (2026-10-03).
 
 ## Audits
 
@@ -32,6 +35,7 @@ one. The 2026-09-25 audit re-read the whole repo, so it supersedes everything be
 
 | Date | Commits covered | Kind | Report (local) | Result |
 |---|---|---|---|---|
+| 2026-10-30 | `0e8818b..2342dfc` (75 commits, entries ~131-152, production PRs #116-#146), plus a whole-repo pattern sweep | Full audit: a workflow of 31 read-only agents - 9 auditors (COMM, SAFE, EVLOGIC, TRADE, UX, MSG, DATA, XCUT, REG), a re-check of the 37 open 2026-10-03 findings, a skeptic per P0-P2 finding, a completeness critic and 3 gap auditors; read-only live checks on the Pi | `docs/audits/2026-10-30-full-audit-2342dfc.md` | 81 raw findings, merged to 7 P2 and ~45 P3; no P0/P1. EVT-1 (card redraws strip the Org Events mention) confirmed live and explains the PR #144 deploy note; 11 of the 37 old findings fixed |
 | 2026-10-03 | `cffa68e..0e8818b` (88 commits, entries 87-130, production PRs #64-#115) | Range audit: 4 read-only auditors (REL, UX, MSG, LOGIC), coordinated; each re-checked the 2026-09-25 fixes in its area | `docs/audits/2026-10-03-range-audit-0e8818b.md` | 37 findings (9 REL, 12 UX, 9 MSG, 7 LOGIC); no P0; 1 P1 (REL-1, the 48h relist trusting a delete's "ok") until PR #115 is proven; most 2026-09-25 fixes closed, the rest partly closed with siblings left |
 | 2026-09-25 | whole repo at `cffa68e` | Full-project audit: 3 read-only auditors (UX, MSG, REL), coordinated | `docs/audits/2026-09-25-full-project-audit.md` | 58 findings (20 UX, 21 MSG, 17 REL); fixed in entries 87-112, re-checked by the 2026-10-03 audit |
 | ~2026-09-25 | `370e232..d8a0bc2` | Outside audit | none kept; entry 82 | P1 missing `ship_parts_shopping_entries` migration, unbounded autocomplete latency; fixed (entry 82) |

@@ -487,6 +487,10 @@ date - no open item, nothing to record here.
 - [ ] PR #146 - The role picker's Colors panel (`COLOR_ROLES`, `color_positions` in
       `bot/uex/role_picker.py`, `place_colors` in the cog); goes with PR #140. See
       PROJECT_CONTEXT.md entry 151
+- [ ] PR #147 - Audit fixes: event card lifecycle (`_card_mentions`, `moved_on`, `send_card`,
+      `close_missing`, `open_event_cards`; goes with PR #144) and the role picker's once-only
+      Mentor ping (`new_pilot_pings`) and dropdown reset (goes with PR #140). See
+      PROJECT_CONTEXT.md entries 151 and 152
 
 ## To port: aiv2 -> production
 
