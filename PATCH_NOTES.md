@@ -1,7 +1,14 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.74.
+the oldest entry below); the next new entry is 2.75.
+
+---
+
+## 2.74 - 2026-10-30 - Finding your ship
+
+**Fixed**
+- Typing the ship you're bringing on an op card now finds it however you write it: "aurora mr", "hercules c2", "drake cutlass" or "hornet mk2". When a name fits several ships, pick yours from a list.
 
 ---
 

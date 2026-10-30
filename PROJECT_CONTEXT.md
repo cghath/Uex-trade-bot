@@ -5299,6 +5299,17 @@ they're in sync).
        description 800.
      - Tests in `tests/test_event_cards.py` (20); 23 mutations, all caught after two gaps were
        closed (a whole ship name inside a longer one, a reminder claimed twice).
+     - **Typed ships, fixed the same day** (the owner: "doesn't seem to put in a ship when i type
+       certain ones"; nothing in the log - the bot was answering "I don't know a ship called..."):
+       the first version looked for the whole typed text inside UEX's short name, and UEX's names
+       aren't how people type them - "Aurora MR" is "Aurora Mk I MR", so "aurora mr" found
+       nothing, and neither did "hercules c2", "drake cutlass" or "misc prospector". Now every
+       typed word has to be somewhere in the name or the full name with its maker, in any order,
+       with "Mk II" also read as "mk 2"/"mk2"; an exact name or full name still wins alone.
+       Matches list shortest name first in a menu of up to 25 (was buttons, and anything over 5
+       asked for more of the name - "aurora" has 7, "hornet" 12). Checked against UEX's real list
+       of 283 ships. Discord has no autofill in a pop-up box; a `/event-ship` command with
+       autofill was offered and the owner passed ("that's fine").
 
 ## Where to look for what
 

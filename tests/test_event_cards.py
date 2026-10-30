@@ -77,13 +77,25 @@ def test_repeats_in_words_without_a_weekday():
 
 
 def test_a_typed_ship_means_one_ship_or_asks():
-    names = ["Aurora MR", "Aurora LN", "Arrastra", "C2 Hercules", "Prospector"]
-    assert ship_matches(names, "arrastra") == ["Arrastra"]
-    assert ship_matches(names, "  c2 ") == ["C2 Hercules"]
-    assert ship_matches(names, "aurora") == ["Aurora LN", "Aurora MR"]
-    assert ship_matches(names, "aurora mr") == ["Aurora MR"]
-    assert ship_matches(names, "polaris") == [] and ship_matches(names, " ") == []
-    assert ship_matches(["Arrow", "Arrowhead"], "ARROW") == ["Arrow"]   # a whole name beats a longer one
+    # Names as UEX really has them: a short name and a full name with the maker.
+    ships = [("Aurora Mk I MR", "RSI Aurora Mk I MR"), ("Aurora Mk I LN", "RSI Aurora Mk I LN"),
+             ("Aurora Mk II", "RSI Aurora Mk II"), ("Arrastra", "Argo Arrastra"),
+             ("C2 Hercules Starlifter", "Crusader C2 Hercules Starlifter"), ("Prospector", "MISC Prospector"),
+             ("Cutlass Black", "Drake Cutlass Black"), ("Cutlass Black Best In Show Edition", None),
+             ("F7C Hornet Mk I", "Anvil F7C Hornet Mk I"), ("F7C Hornet Mk II", "Anvil F7C Hornet Mk II")]
+    assert ship_matches(ships, "arrastra") == ["Arrastra"]
+    assert ship_matches(ships, "  c2 ") == ["C2 Hercules Starlifter"]
+    assert ship_matches(ships, "hercules c2") == ["C2 Hercules Starlifter"]          # any order
+    assert ship_matches(ships, "misc prospector") == ["Prospector"]                  # with the maker
+    assert ship_matches(ships, "crusader hercules") == ["C2 Hercules Starlifter"]    # the maker, part of a name
+    assert ship_matches(ships, "aurora mr") == ["Aurora Mk I MR"]                    # words, not one string
+    assert ship_matches(ships, "aurora") == ["Aurora Mk II", "Aurora Mk I LN", "Aurora Mk I MR"]  # shortest first
+    assert ship_matches(ships, "drake cutlass black") == ["Cutlass Black"]           # a full name is exact
+    assert ship_matches(ships, "cutlass black") == ["Cutlass Black"]
+    assert ship_matches(ships, "hornet mk2") == ["F7C Hornet Mk II"]                 # Mk II as mk2
+    assert ship_matches(ships, "hornet mk 1") == ["F7C Hornet Mk I"]                 # and not Mk II's I
+    assert ship_matches(ships, "polaris") == [] and ship_matches(ships, " ") == []
+    assert ship_matches([("Arrow", None), ("Arrowhead", None)], "ARROW") == ["Arrow"]   # a whole name beats a longer one
 
 
 # -- 2. the card ------------------------------------------------------------------------------------
@@ -385,11 +397,17 @@ def test_ships_from_the_menu_or_typed_and_every_time(tmp_path):
         typed.response.send_modal.assert_awaited_once()
         ask = world.interaction(1)
         await world.cog.typed_ship(ask, cid, "aurora")
-        assert _reply(ask) == "Which one?" and len(ask.followup.send.await_args.kwargs["view"].children) == 2
+        assert _reply(ask) == "Which one?"
+        choice = ask.followup.send.await_args.kwargs["view"]
+        assert [o.label for o in choice.menu.options] == ["Aurora LN", "Aurora MR"]
+        picked = world.interaction(1)
+        choice.menu._values = ["Aurora MR"]
+        await choice.pick(picked)
+        assert _reply(picked) == "Got it - you're bringing the **Aurora MR**."
         done = world.interaction(1)
         await world.cog.typed_ship(done, cid, "arras")
         assert _reply(done) == "Got it - you're bringing the **Arrastra**."
-        assert await db.event_ship_history(1) == ["Arrastra", "Prospector"]
+        assert await db.event_ship_history(1) == ["Arrastra", "Aurora MR", "Prospector"]
         every = world.interaction(1)
         await world.cog.on_every(every, cid)
         assert await db.get_event_regulars(42) == [{"user_id": 1, "role": None, "ship": "Arrastra"}]
