@@ -5210,6 +5210,11 @@ they're in sync).
        (the owner granted it) and `/rolesetup` warns without it.
      - Tests in `tests/test_role_picker.py` (17); 17 mutations, all caught. The test caught a
        one-role group removing a member's role on a pick from outside the group.
+     - **Everything on Pings** (the owner's ask the same day, PR #141): a fifth button
+       (`rolepick:all:pings`, `EverythingButton`) giving all four ping roles, or taking them all off
+       once the member has all four - a button, not a fifth role, so announcements still ping just
+       the four. `RoleGroup.everything` turns it on per group; only Pings has it. Panels posted
+       before it need posting again to show it. 7 more tests, 6 more mutations, all caught.
 
 ## Where to look for what
 

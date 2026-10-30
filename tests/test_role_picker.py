@@ -3,7 +3,7 @@
 Guarantees under test:
   1. Rules - the dropdown and the Pings buttons toggle each pick; Timezone and Experience keep
      one role, picking another swaps it, picking the one you have removes it; picks outside the
-     group are ignored.
+     group are ignored. Pings' Everything adds the missing ones, or removes all once you have all.
   2. /rolesetup - creates only what's missing, plain (no permissions, no color, not
      mentionable), matches an existing role by name (any case), keeps a saved role by id even
      after a rename, never duplicates on a second run, warns about a role it can't give or
@@ -25,11 +25,13 @@ import discord
 from cryptography.fernet import Fernet
 
 from bot.cogs.role_picker import (
-    BUTTON_TEMPLATE, MENU_TEMPLATE, OUT_OF_DATE, STAFF_CHANNEL_ID, RoleButton, RoleMenu, RolePicker, apply_pick,
+    BUTTON_TEMPLATE, EVERYTHING_TEMPLATE, MENU_TEMPLATE, OUT_OF_DATE, STAFF_CHANNEL_ID, EverythingButton, RoleButton,
+    RoleMenu, RolePicker, apply_pick,
 )
 from bot.db.database import Database
 from bot.uex.role_picker import (
-    ALL_ROLES, CREATE, GROUPS, KEPT, MATCHED, MULTI, ONE, TOGGLE, change_text, log_text, role_changes, setup_plan,
+    ALL_ROLES, CREATE, GROUPS, KEPT, MATCHED, MULTI, ONE, TOGGLE, change_text, everything_changes, log_text,
+    role_changes, setup_plan,
 )
 
 GUILD_ID = 1132378045232197694
@@ -52,6 +54,13 @@ def test_one_role_groups_swap_and_untoggle():
     assert role_changes(ONE, group, held={1}, picked={42}) == (set(), set())
 
 
+def test_everything_adds_the_missing_ones_or_clears_a_full_set():
+    group = {1, 2, 3, 4}
+    assert everything_changes(group, held={2, 99}) == ({1, 3, 4}, set())
+    assert everything_changes(group, held=set()) == (group, set())
+    assert everything_changes(group, held={1, 2, 3, 4, 99}) == (set(), group)
+
+
 def test_reply_and_log_wording():
     assert change_text(["Mining", "FPS"], ["Pacific"]) == "Added **Mining**, **FPS**. Removed **Pacific**."
     assert change_text([], []) == "No change."
@@ -61,7 +70,8 @@ def test_reply_and_log_wording():
 def test_every_group_fits_a_discord_panel():
     assert [g.key for g in GROUPS] == ["activity", "timezone", "experience", "pings"]
     for group in GROUPS:
-        assert len(group.roles) <= (25 if group.mode == MULTI else 5)
+        assert len(group.roles) + group.everything <= (25 if group.mode == MULTI else 5)
+    assert [g.key for g in GROUPS if g.everything] == ["pings"]
     assert len(ALL_ROLES) == len(set(ALL_ROLES)) == 21
 
 
@@ -204,8 +214,11 @@ def test_panels_carry_the_saved_role_ids(tmp_path):
         assert menu.max_values == 8 and menu.min_values == 1
         for view, group in zip(views[1:], GROUPS[1:]):
             ids = [b.custom_id for b in view.children]
-            assert ids == [f"rolepick:btn:{group.key}:{saved[n]}" for n in group.roles]
-            assert all(re.fullmatch(BUTTON_TEMPLATE, i) for i in ids)
+            expected = [f"rolepick:btn:{group.key}:{saved[n]}" for n in group.roles]
+            assert ids == expected + (["rolepick:all:pings"] if group.key == "pings" else [])
+            assert all(re.fullmatch(BUTTON_TEMPLATE, i) for i in expected)
+        assert re.fullmatch(EVERYTHING_TEMPLATE, views[3].children[-1].custom_id)
+        assert views[3].children[-1].item.label == "Everything"
         assert "Posted the four role panels" in inter.followup.send.await_args.args[0]
     _run(tmp_path, body)
 
@@ -227,6 +240,8 @@ def test_items_rebuild_from_their_custom_ids():
     menu = asyncio.run(RoleMenu.from_custom_id(None, None, re.fullmatch(MENU_TEMPLATE, "rolepick:menu:activity")))
     assert menu.group_key == "activity"
     assert re.fullmatch(BUTTON_TEMPLATE, "rolepick:menu:activity") is None
+    every = asyncio.run(EverythingButton.from_custom_id(None, None, re.fullmatch(EVERYTHING_TEMPLATE, "rolepick:all:pings")))
+    assert every.group_key == "pings"
 
 
 # -- 4. picking -----------------------------------------------------------------------------------
@@ -267,6 +282,30 @@ def test_the_dropdown_toggles_each_activity(tmp_path):
         await menu.callback(inter)
         assert [r.name for r in member.roles] == ["FPS"]
         assert inter.followup.send.await_args.args[0] == "Added **FPS**. Removed **Mining**."
+    _run(tmp_path, body)
+
+
+def test_everything_gives_every_ping_then_takes_them_all_off(tmp_path):
+    async def body(db):
+        guild = FakeGuild()
+        await _set_up(db, guild)
+        saved = await db.get_role_picker_roles(GUILD_ID)
+        mining = guild.get_role(saved["Mining"])
+        member, staff = FakeMember(7, [mining, guild.get_role(saved["Joint Ops"])]), _staff()
+        inter = _interaction(db, guild, member, staff)
+        await EverythingButton("pings").callback(inter)
+        assert {r.name for r in member.roles} == {"Mining", "Org Events", "Patch & Server Status",
+                                                  "Free Fly & Events", "Joint Ops"}
+        assert inter.followup.send.await_args.args[0] == (
+            "Added **Org Events**, **Patch & Server Status**, **Free Fly & Events**.")
+        inter = _interaction(db, guild, member, staff)
+        await EverythingButton("pings").callback(inter)
+        assert member.roles == [mining]
+        assert inter.followup.send.await_args.args[0].startswith("Removed **Org Events**, ")
+        assert staff.send.await_count == 2
+        inter = _interaction(db, guild, member, staff)
+        await EverythingButton("timezone").callback(inter)   # no Everything there
+        assert inter.followup.send.await_args.args[0] == OUT_OF_DATE and member.roles == [mining]
     _run(tmp_path, body)
 
 

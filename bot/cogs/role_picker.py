@@ -7,7 +7,7 @@ roles (bot/uex/role_picker.py has the groups and the rules).
 - /rolepanel post (admins): posts the four panels in a channel.
 
 The panels' buttons and dropdown are DynamicItems registered at startup, each carrying its
-role's id (the dropdown's options carry theirs), so they work through restarts for as long as
+role's id (the dropdown's options carry theirs; Everything needs none), so they work through restarts for as long as
 the message stays up. A pick is only acted on if that id is still one of the picker's saved
 roles, so an old panel can't hand out anything else. Each pick gets a private "Added/Removed"
 reply, and is logged in #staff; picking New Pilot also pings Mentor there.
@@ -23,7 +23,7 @@ from discord.ext import commands
 from bot.delivery import send_to_channel
 from bot.uex.role_picker import (
     CREATE, GROUPS, GROUPS_BY_KEY, MATCHED, MENTOR_ROLE, MULTI, NEW_PILOT_ROLE, RoleGroup, change_text, log_text,
-    mentor_text, role_changes, setup_plan,
+    everything_changes, mentor_text, role_changes, setup_plan,
 )
 
 logger = logging.getLogger("uexbot.role_picker")
@@ -32,6 +32,7 @@ logger = logging.getLogger("uexbot.role_picker")
 STAFF_CHANNEL_ID = 1564673977597567087
 BUTTON_TEMPLATE = r"rolepick:btn:(?P<group>[a-z]+):(?P<role>\d+)"
 MENU_TEMPLATE = r"rolepick:menu:(?P<group>[a-z]+)"
+EVERYTHING_TEMPLATE = r"rolepick:all:(?P<group>[a-z]+)"
 OUT_OF_DATE = "This panel is out of date - ask staff to post a new one."
 REASON = "Role picker"
 
@@ -41,8 +42,9 @@ def _is_admin(interaction: discord.Interaction) -> bool:
     return interaction.guild is not None and perms is not None and perms.administrator
 
 
-async def apply_pick(interaction: discord.Interaction, group_key: str, picked: set[int]) -> None:
-    """Change the member's roles for a pick in one group, reply privately, log it in #staff."""
+async def apply_pick(interaction: discord.Interaction, group_key: str, picked: set[int] | None) -> None:
+    """Change the member's roles for a pick in one group, reply privately, log it in #staff.
+    `picked` None is the group's Everything button."""
     guild, member = interaction.guild, interaction.user
     group = GROUPS_BY_KEY.get(group_key)
     if guild is None or group is None:
@@ -51,10 +53,15 @@ async def apply_pick(interaction: discord.Interaction, group_key: str, picked: s
     await interaction.response.defer(ephemeral=True, thinking=True)
     saved = await interaction.client.db.get_role_picker_roles(guild.id)
     order = [saved[name] for name in group.roles if name in saved]
+    everything = picked is None and group.everything
+    if everything:
+        picked = set(order)
     if not picked or not picked <= set(order) or any(guild.get_role(role_id) is None for role_id in picked):
         await interaction.followup.send(OUT_OF_DATE, ephemeral=True)
         return
-    add, remove = role_changes(group.mode, set(order), {role.id for role in member.roles}, picked)
+    held = {role.id for role in member.roles}
+    add, remove = (everything_changes(set(order), held) if everything
+                   else role_changes(group.mode, set(order), held, picked))
     to_add = [guild.get_role(role_id) for role_id in order if role_id in add]
     to_remove = [role for role in (guild.get_role(role_id) for role_id in order if role_id in remove) if role]
     try:
@@ -99,6 +106,22 @@ class RoleButton(discord.ui.DynamicItem[discord.ui.Button], template=BUTTON_TEMP
         await apply_pick(interaction, self.group_key, {self.role_id})
 
 
+class EverythingButton(discord.ui.DynamicItem[discord.ui.Button], template=EVERYTHING_TEMPLATE):
+    """Every role in a group at once (Pings), or none once the member has them all."""
+
+    def __init__(self, group_key: str) -> None:
+        super().__init__(discord.ui.Button(label="Everything", style=discord.ButtonStyle.primary,
+                                           custom_id=f"rolepick:all:{group_key}"))
+        self.group_key = group_key
+
+    @classmethod
+    async def from_custom_id(cls, interaction: discord.Interaction, item: discord.ui.Button, match, /):
+        return cls(match["group"])
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await apply_pick(interaction, self.group_key, None)
+
+
 class RoleMenu(discord.ui.DynamicItem[discord.ui.Select], template=MENU_TEMPLATE):
     """The Activities dropdown; each option's value is its role's id."""
 
@@ -127,6 +150,8 @@ def panel(group: RoleGroup, roles: list[discord.Role]) -> tuple[str, discord.ui.
     else:
         for role in roles:
             view.add_item(RoleButton(group.key, role.id, role.name))
+        if group.everything:
+            view.add_item(EverythingButton(group.key))
     return f"**{group.title}**\n{group.blurb}", view
 
 
@@ -138,7 +163,7 @@ class RolePicker(commands.Cog):
         self.bot = bot
 
     async def cog_load(self) -> None:
-        self.bot.add_dynamic_items(RoleButton, RoleMenu)
+        self.bot.add_dynamic_items(RoleButton, RoleMenu, EverythingButton)
 
     @app_commands.command(name="rolesetup", description="Admin: create any missing role picker roles and save them.")
     @app_commands.default_permissions(administrator=True)
