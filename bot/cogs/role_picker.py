@@ -10,11 +10,11 @@ The panels' buttons and dropdown are DynamicItems registered at startup, each ca
 role's id (the dropdown's options carry theirs; Everything needs none), so they work through restarts for as long as
 the message stays up. A pick is only acted on if that id is still one of the picker's saved
 roles, so an old panel can't hand out anything else. Each pick gets a private "Added/Removed"
-reply, and is logged in #staff; picking New Pilot also pings Mentor in #👋welcome.
+reply, and is logged in #role-log; picking New Pilot also pings Mentor in #👋welcome.
 
 Roles picked in Discord's Onboarding (the same roles) never pass through the panels, so
 on_member_update catches them: picker roles a member gained that a panel didn't just give
-(PANEL_GRACE) are held for BATCH_SECONDS, so one onboarding is one #staff line, and New Pilot
+(PANEL_GRACE) are held for BATCH_SECONDS, so one onboarding is one #role-log line, and New Pilot
 pings Mentor in #👋welcome with the member's timezone. Every other role - voice ranks, the veteran roles,
 Mentor - is ignored. Staff giving a picker role by hand reads as Onboarding too.
 
@@ -34,6 +34,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from bot.delivery import send_to_channel
+from bot.uex.welcome import WELCOME_CHANNEL_ID
 from bot.uex.role_picker import (
     CREATE, GROUPS, GROUPS_BY_KEY, MATCHED, MENTOR_ROLE, MULTI, NEW_PILOT_ROLE, RoleGroup, change_text, log_text,
     everything_changes, intro_text, mentor_text, new_pilot_text, onboarding_log_text, picker_order, role_changes,
@@ -42,17 +43,17 @@ from bot.uex.role_picker import (
 
 logger = logging.getLogger("uexbot.role_picker")
 
-# #staff on Star Tech Dynamics: every pick is logged here.
-STAFF_CHANNEL_ID = 1564673977597567087
-# #👋welcome: Mentor is pinged here for a New Pilot and for each member's first post.
-WELCOME_CHANNEL_ID = 1565606894482096158
+# #role-log on Star Tech Dynamics: every pick is logged here (not #staff, which the owner keeps for
+# moderation).
+ROLE_LOG_CHANNEL_ID = 1565653911472439356
+# #👋welcome (WELCOME_CHANNEL_ID): Mentor is pinged there for a New Pilot and each member's first post.
 BUTTON_TEMPLATE = r"rolepick:btn:(?P<group>[a-z]+):(?P<role>\d+)"
 MENU_TEMPLATE = r"rolepick:menu:(?P<group>[a-z]+)"
 EVERYTHING_TEMPLATE = r"rolepick:all:(?P<group>[a-z]+)"
 OUT_OF_DATE = "This panel is out of date - ask staff to post a new one."
 REASON = "Role picker"
 PANEL_GRACE = 15.0   # seconds: a role the panels just gave isn't an Onboarding pick
-BATCH_SECONDS = 5.0  # Onboarding's roles for one member, gathered into one #staff line
+BATCH_SECONDS = 5.0  # Onboarding's roles for one member, gathered into one #role-log line
 INTRO_TYPES = (discord.MessageType.default, discord.MessageType.reply)
 
 # (member id, role id) -> when a panel gave it (time.monotonic()), so on_member_update skips it.
@@ -92,7 +93,7 @@ def _is_admin(interaction: discord.Interaction) -> bool:
 
 
 async def apply_pick(interaction: discord.Interaction, group_key: str, picked: set[int] | None) -> None:
-    """Change the member's roles for a pick in one group, reply privately, log it in #staff.
+    """Change the member's roles for a pick in one group, reply privately, log it in #role-log.
     `picked` None is the group's Everything button."""
     guild, member = interaction.guild, interaction.user
     group = GROUPS_BY_KEY.get(group_key)
@@ -128,7 +129,7 @@ async def apply_pick(interaction: discord.Interaction, group_key: str, picked: s
     await interaction.followup.send(change_text(added, removed), ephemeral=True)
     if not added and not removed:
         return
-    await send_to_channel(interaction.client, STAFF_CHANNEL_ID, log_text(member.mention, added, removed),
+    await send_to_channel(interaction.client, ROLE_LOG_CHANNEL_ID, log_text(member.mention, added, removed),
                           label="role picker log", allowed_mentions=discord.AllowedMentions.none())
     if saved.get(NEW_PILOT_ROLE) in add:
         await ping_mentor(interaction.client, guild, saved, lambda mentor: mentor_text(mentor, member.mention),
@@ -251,7 +252,7 @@ class RolePicker(commands.Cog):
             roles = [role for role in roles if role is not None]
             if not roles:
                 return
-            await send_to_channel(self.bot, STAFF_CHANNEL_ID,
+            await send_to_channel(self.bot, ROLE_LOG_CHANNEL_ID,
                                   onboarding_log_text(member.mention, [role.name for role in roles]),
                                   label="onboarding log", allowed_mentions=discord.AllowedMentions.none())
             if saved.get(NEW_PILOT_ROLE) in {role.id for role in roles}:
@@ -346,7 +347,7 @@ class RolePicker(commands.Cog):
         await self.bot.db.save_role_picker_roles(guild.id, ids)
         mentor = guild.get_role(ids.get(MENTOR_ROLE, 0))
         if mentor is not None and not mentor.mentionable and not guild.me.guild_permissions.mention_everyone:
-            problems.append("I can't ping **Mentor** in #staff yet: give my role \"Mention @everyone, @here and "
+            problems.append("I can't ping **Mentor** in #👋welcome yet: give my role \"Mention @everyone, @here and "
                             "All Roles\", or make Mentor mentionable.")
         lines = [f"Role picker roles: {len(ids)} of {len(plan)} ready."]
         if created:

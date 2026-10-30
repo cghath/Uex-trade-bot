@@ -476,6 +476,10 @@ date - no open item, nothing to record here.
       `on_member_join` in `bot/cogs/role_picker.py`) and #welcome first-post Mentor pings (tables
       `welcome_intros`, `welcome_intro_seed`); production's #staff and #welcome ids. Goes with
       PR #140. See PROJECT_CONTEXT.md entry 151
+- [ ] PR #143 - Welcome DM opens with the server's places (#welcome, #events, the role panels,
+      #rules); production's channel ids in `bot/uex/welcome.py`. Only if aiv2 sends the welcome
+      DM. See PROJECT_CONTEXT.md entry 146. Also the role picker's log lines move from #staff to
+      #role-log (`ROLE_LOG_CHANNEL_ID`, entry 151)
 
 ## To port: aiv2 -> production
 

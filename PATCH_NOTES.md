@@ -1,7 +1,14 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.72.
+the oldest entry below); the next new entry is 2.73.
+
+---
+
+## 2.72 - 2026-10-30 - A better first hello
+
+**Changed**
+- New members' welcome message now shows where to say hi, where upcoming ops are posted, where to pick your roles and where the rules are, before the bot commands.
 
 ---
 
