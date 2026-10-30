@@ -11,8 +11,13 @@ Guarantees under test:
   3. /rolepanel post - four panels whose buttons and dropdown carry the saved role ids, matched
      by the startup-registered templates; refuses until /rolesetup has run.
   4. Picking - changes only the member's roles in that group, replies privately, logs in #staff
-     without pinging the member, pings Mentor (only) for New Pilot; an id that isn't a saved
+     without pinging the member, pings Mentor (only) in #welcome for New Pilot; an id that isn't a saved
      picker role does nothing; a refused role change says so and logs nothing.
+  5. Onboarding - picker roles gained outside the panels are logged in #staff, all of one
+     onboarding in one line; New Pilot pings Mentor in #welcome with the member's timezone; a role a panel
+     just gave, Mentor, any other role, or one taken off again before the line is written isn't.
+  6. #welcome - a member's first post gets a reply there pinging Mentor, once; not before the history
+     read, not for anyone who posted before it, not for staff, a join notice or another channel.
 """
 from __future__ import annotations
 
@@ -22,11 +27,13 @@ from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock
 
 import discord
+import pytest
 from cryptography.fernet import Fernet
 
+import bot.cogs.role_picker as role_picker_cog
 from bot.cogs.role_picker import (
-    BUTTON_TEMPLATE, EVERYTHING_TEMPLATE, MENU_TEMPLATE, OUT_OF_DATE, STAFF_CHANNEL_ID, EverythingButton, RoleButton,
-    RoleMenu, RolePicker, apply_pick,
+    BUTTON_TEMPLATE, EVERYTHING_TEMPLATE, MENU_TEMPLATE, OUT_OF_DATE, STAFF_CHANNEL_ID, WELCOME_CHANNEL_ID,
+    EverythingButton, RoleButton, RoleMenu, RolePicker, apply_pick,
 )
 from bot.db.database import Database
 from bot.uex.role_picker import (
@@ -35,6 +42,11 @@ from bot.uex.role_picker import (
 )
 
 GUILD_ID = 1132378045232197694
+
+
+@pytest.fixture(autouse=True)
+def _no_panel_picks_from_other_tests():
+    role_picker_cog._panel_adds.clear()
 
 
 # -- 1. rules -------------------------------------------------------------------------------------
@@ -70,9 +82,10 @@ def test_reply_and_log_wording():
 def test_every_group_fits_a_discord_panel():
     assert [g.key for g in GROUPS] == ["activity", "timezone", "experience", "pings"]
     for group in GROUPS:
-        assert len(group.roles) + group.everything <= (25 if group.mode == MULTI else 5)
+        # a dropdown takes 25 options; buttons wrap 5 to a row, 5 rows to a message
+        assert len(group.roles) + group.everything <= 25
     assert [g.key for g in GROUPS if g.everything] == ["pings"]
-    assert len(ALL_ROLES) == len(set(ALL_ROLES)) == 21
+    assert len(ALL_ROLES) == len(set(ALL_ROLES)) == 22
 
 
 # -- 2. setup plan --------------------------------------------------------------------------------
@@ -129,9 +142,9 @@ class FakeGuild:
         return role
 
 
-def _interaction(db, guild, user, staff):
+def _interaction(db, guild, user, staff, welcome=None):
     return NS(guild=guild, user=user,
-              client=NS(db=db, get_channel=lambda cid: staff if cid == STAFF_CHANNEL_ID else None),
+              client=NS(db=db, get_channel={STAFF_CHANNEL_ID: staff, WELCOME_CHANNEL_ID: welcome}.get),
               response=NS(defer=AsyncMock(), send_message=AsyncMock()), followup=NS(send=AsyncMock()))
 
 
@@ -163,11 +176,11 @@ def test_rolesetup_creates_plain_roles_matches_existing_and_never_duplicates(tmp
             assert kwargs["permissions"].value == 0 and kwargs["mentionable"] is False
             assert kwargs["hoist"] is False and kwargs["colour"] == discord.Colour.default()
         saved = await db.get_role_picker_roles(GUILD_ID)
-        assert saved["Mining"] == 10 and len(saved) == 21
-        assert "Using existing: Mining" in reply and "21 of 21 ready" in reply
+        assert saved["Mining"] == 10 and len(saved) == 22
+        assert "Using existing: Mining" in reply and "22 of 22 ready" in reply
         guild.get_role(saved["Salvage"]).name = "Salvagers"   # renamed later: still the same role
         _, again = await _set_up(db, guild)
-        assert len(guild.created) == 20 and await db.get_role_picker_roles(GUILD_ID) == saved
+        assert len(guild.created) == 21 and await db.get_role_picker_roles(GUILD_ID) == saved
         assert "Created" not in again
     _run(tmp_path, body)
 
@@ -295,9 +308,9 @@ def test_everything_gives_every_ping_then_takes_them_all_off(tmp_path):
         inter = _interaction(db, guild, member, staff)
         await EverythingButton("pings").callback(inter)
         assert {r.name for r in member.roles} == {"Mining", "Org Events", "Patch & Server Status",
-                                                  "Free Fly & Events", "Joint Ops"}
+                                                  "Free Fly & Events", "Joint Ops", "Streams & Videos"}
         assert inter.followup.send.await_args.args[0] == (
-            "Added **Org Events**, **Patch & Server Status**, **Free Fly & Events**.")
+            "Added **Org Events**, **Patch & Server Status**, **Free Fly & Events**, **Streams & Videos**.")
         inter = _interaction(db, guild, member, staff)
         await EverythingButton("pings").callback(inter)
         assert member.roles == [mining]
@@ -314,18 +327,20 @@ def test_new_pilot_pings_mentor_and_only_mentor(tmp_path):
         guild = FakeGuild()
         await _set_up(db, guild)
         saved = await db.get_role_picker_roles(GUILD_ID)
-        staff = _staff()
+        staff, welcome = _staff(), _staff()
         member = FakeMember(7, [guild.get_role(saved["Veteran"])])
-        await RoleButton("experience", saved["New Pilot"]).callback(_interaction(db, guild, member, staff))
+        await RoleButton("experience", saved["New Pilot"]).callback(_interaction(db, guild, member, staff, welcome))
         assert [r.name for r in member.roles] == ["New Pilot"]
-        ping = staff.send.await_args_list[1]
+        assert staff.send.await_count == 1 and welcome.send.await_count == 1   # the log, then the ping in #welcome
+        ping = welcome.send.await_args
         mentor = guild.get_role(saved["Mentor"])
         assert ping.args[0].startswith(f"👋 {mentor.mention} - <@7> just picked **New Pilot**")
         assert ping.kwargs["allowed_mentions"].roles == [mentor]
         assert ping.kwargs["allowed_mentions"].users is False and ping.kwargs["allowed_mentions"].everyone is False
         staff.send.reset_mock()
-        await RoleButton("experience", saved["New Pilot"]).callback(_interaction(db, guild, member, staff))
+        await RoleButton("experience", saved["New Pilot"]).callback(_interaction(db, guild, member, staff, welcome))
         assert member.roles == [] and staff.send.await_count == 1   # removing it pings nobody
+        assert welcome.send.await_count == 1
     _run(tmp_path, body)
 
 
@@ -356,6 +371,165 @@ def test_a_refused_role_change_says_so_and_logs_nothing(tmp_path):
         await apply_pick(inter, "pings", {saved["Joint Ops"]})
         assert "couldn't change your roles" in inter.followup.send.await_args.args[0]
         assert staff.send.await_count == 0
+    _run(tmp_path, body)
+
+
+# -- 5. Onboarding --------------------------------------------------------------------------------
+
+def _listener(db, guild, staff, welcome):
+    channels = {STAFF_CHANNEL_ID: staff, WELCOME_CHANNEL_ID: welcome}
+    return RolePicker(NS(db=db, get_channel=channels.get), start_loop=False)
+
+
+def _member(guild, user_id, roles=()):
+    member = FakeMember(user_id, roles)
+    member.guild, member.bot = guild, False
+    member.guild_permissions = discord.Permissions.none()
+    return member
+
+
+async def _gain(cog, member, *roles):
+    before = NS(roles=list(member.roles))
+    member.roles += list(roles)
+    await cog.on_member_update(before, member)
+
+
+def test_onboarding_roles_are_logged_in_one_line_and_new_pilot_pings_mentor(tmp_path, monkeypatch):
+    monkeypatch.setattr(role_picker_cog, "BATCH_SECONDS", 0.05)
+
+    async def body(db):
+        guild = FakeGuild()
+        await _set_up(db, guild)
+        saved = await db.get_role_picker_roles(GUILD_ID)
+        role = lambda name: guild.get_role(saved[name])  # noqa: E731
+        staff, welcome = _staff(), _staff()
+        cog, member = _listener(db, guild, staff, welcome), _member(guild, 7)
+        # Onboarding's roles can arrive as more than one update; one line either way.
+        await asyncio.gather(_gain(cog, member, role("New Pilot"), role("Mining")),
+                             _gain(cog, member, role("Eastern")))
+        log = staff.send.await_args
+        assert staff.send.await_count == 1
+        assert log.args[0] == "🎭 <@7> picked **Mining**, **Eastern**, **New Pilot** via Onboarding."
+        assert log.kwargs["allowed_mentions"].roles is False and log.kwargs["allowed_mentions"].users is False
+        mentor = role("Mentor")
+        ping = welcome.send.await_args
+        assert welcome.send.await_count == 1
+        assert ping.args[0] == f"👋 {mentor.mention} New pilot joined: <@7> (Eastern). Say hi and invite them to the next op."
+        assert ping.kwargs["allowed_mentions"].roles == [mentor] and ping.kwargs["allowed_mentions"].users is False
+        # Without a timezone, and without New Pilot: no brackets, no ping.
+        other = _member(guild, 8)
+        await _gain(cog, other, role("New Pilot"))
+        assert welcome.send.await_args.args[0].endswith("New pilot joined: <@8>. Say hi and invite them to the next op.")
+        await _gain(cog, other, role("Salvage"))
+        assert staff.send.await_count == 3 and welcome.send.await_count == 2
+        assert staff.send.await_args.args[0] == "🎭 <@8> picked **Salvage** via Onboarding."
+    _run(tmp_path, body)
+
+
+def test_panel_picks_and_other_roles_are_not_logged_as_onboarding(tmp_path, monkeypatch):
+    monkeypatch.setattr(role_picker_cog, "BATCH_SECONDS", 0)
+
+    async def body(db):
+        guild = FakeGuild([FakeRole(1, "Cadet"), FakeRole(2, "1-Year Veteran")])
+        await _set_up(db, guild)
+        saved = await db.get_role_picker_roles(GUILD_ID)
+        staff = _staff()
+        cog, member = _listener(db, guild, staff, _staff()), _member(guild, 7)
+        before = NS(roles=list(member.roles))
+        await apply_pick(_interaction(db, guild, member, staff), "timezone", {saved["Eastern"]})
+        await cog.on_member_update(before, member)   # the gateway event for the panel's own change
+        assert staff.send.await_count == 1             # just the panel's line
+        await _gain(cog, member, guild.get_role(1), guild.get_role(2), guild.get_role(saved["Mentor"]))
+        assert staff.send.await_count == 1             # a voice rank, a veteran role, Mentor
+        # A panel's role is only its own once: the same role given later is Onboarding.
+        await member.remove_roles(guild.get_role(saved["Eastern"]))
+        await _gain(cog, member, guild.get_role(saved["Eastern"]))
+        assert staff.send.await_args.args[0] == "🎭 <@7> picked **Eastern** via Onboarding."
+    _run(tmp_path, body)
+
+
+def test_an_onboarding_role_taken_off_before_the_line_is_written_is_left_out(tmp_path, monkeypatch):
+    monkeypatch.setattr(role_picker_cog, "BATCH_SECONDS", 0.05)
+
+    async def body(db):
+        guild = FakeGuild()
+        await _set_up(db, guild)
+        saved = await db.get_role_picker_roles(GUILD_ID)
+        staff = _staff()
+        cog, member = _listener(db, guild, staff, _staff()), _member(guild, 7)
+        pilot = guild.get_role(saved["New Pilot"])
+
+        async def change_mind():
+            await asyncio.sleep(0.01)
+            await member.remove_roles(pilot)
+        await asyncio.gather(_gain(cog, member, pilot), change_mind())
+        assert staff.send.await_count == 0
+        joined = _member(guild, 9, [guild.get_role(saved["FPS"])])
+        await cog.on_member_join(joined)   # roles already there when the join event comes
+        assert staff.send.await_args.args[0] == "🎭 <@9> picked **FPS** via Onboarding."
+    _run(tmp_path, body)
+
+
+# -- 6. #welcome ----------------------------------------------------------------------------------
+
+def _post(guild, author, *, channel_id=WELCOME_CHANNEL_ID, kind=discord.MessageType.default):
+    post = NS(channel=NS(id=channel_id), guild=guild, author=author, type=kind)
+    post.to_reference = lambda fail_if_not_exists: NS(message=post, fail_if_not_exists=fail_if_not_exists)
+    return post
+
+
+def test_a_first_post_in_welcome_gets_a_reply_pinging_mentor_once(tmp_path):
+    async def body(db):
+        guild = FakeGuild()
+        await _set_up(db, guild)
+        saved = await db.get_role_picker_roles(GUILD_ID)
+        staff, welcome = _staff(), _staff()
+        cog = _listener(db, guild, staff, welcome)
+        old, new = _member(guild, 8), _member(guild, 9)
+        await cog.on_message(_post(guild, new))
+        assert welcome.send.await_count == 0                  # history not read yet
+        await db.seed_welcome_intros(GUILD_ID, {old.id})
+        await cog.on_message(_post(guild, old))
+        await cog.on_message(_post(guild, new, channel_id=123))
+        await cog.on_message(_post(guild, new, kind=discord.MessageType.new_member))
+        assert welcome.send.await_count == 0
+        hello = _post(guild, new)
+        await cog.on_message(hello)
+        mentor = guild.get_role(saved["Mentor"])
+        call = welcome.send.await_args
+        assert call.args[0] == f"👋 {mentor.mention} - first hello from <@9>! Give them a reply."
+        assert call.kwargs["reference"].message is hello and call.kwargs["reference"].fail_if_not_exists is False
+        mentions = call.kwargs["allowed_mentions"]
+        assert mentions.roles == [mentor] and mentions.users is False and mentions.replied_user is False
+        await cog.on_message(_post(guild, new, kind=discord.MessageType.reply))
+        staffer, mentor_member = _member(guild, 10), _member(guild, 11, [mentor])
+        staffer.guild_permissions = discord.Permissions(manage_messages=True)
+        await cog.on_message(_post(guild, staffer))
+        await cog.on_message(_post(guild, mentor_member))
+        assert welcome.send.await_count == 1 and staff.send.await_count == 0
+    _run(tmp_path, body)
+
+
+def test_the_history_read_records_who_already_posted(tmp_path):
+    async def body(db):
+        guild = FakeGuild()
+        await _set_up(db, guild)
+        staff = _staff()
+        posts = [NS(author=NS(id=8, bot=False), type=discord.MessageType.default),
+                 NS(author=NS(id=9, bot=False), type=discord.MessageType.new_member),
+                 NS(author=NS(id=10, bot=True), type=discord.MessageType.default)]
+
+        async def history(limit):
+            for post in posts:
+                yield post
+        welcome = NS(guild=guild, history=history)
+        cog = RolePicker(NS(db=db, get_channel=lambda cid: {STAFF_CHANNEL_ID: staff, WELCOME_CHANNEL_ID: welcome}.get(cid)),
+                         start_loop=False)
+        await cog.read_welcome_history.coro(cog)
+        assert await db.welcome_intros_seeded(GUILD_ID)
+        assert not await db.claim_welcome_intro(GUILD_ID, 8)
+        assert await db.claim_welcome_intro(GUILD_ID, 9)    # only joined - their first post still counts
+        assert await db.claim_welcome_intro(GUILD_ID, 10)
     _run(tmp_path, body)
 
 

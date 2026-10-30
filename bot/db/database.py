@@ -898,6 +898,21 @@ CREATE TABLE IF NOT EXISTS role_picker_roles (
     PRIMARY KEY (guild_id, name)
 );
 
+-- #👋welcome intros (bot/cogs/role_picker.py): who has posted there, so Mentor is pinged for each
+-- member's first post only. welcome_intro_seed marks the one-time read of the channel's history;
+-- until it's done no post counts as a first.
+CREATE TABLE IF NOT EXISTS welcome_intros (
+    guild_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    first_seen TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (guild_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS welcome_intro_seed (
+    guild_id INTEGER PRIMARY KEY,
+    seeded_at TEXT NOT NULL
+);
+
 -- Members who pressed "Stop anniversary messages" under the DM: no DM and no post for them.
 CREATE TABLE IF NOT EXISTS anniversary_opt_outs (
     guild_id INTEGER NOT NULL,
@@ -4753,6 +4768,31 @@ class Database:
                    ON CONFLICT(guild_id, name) DO UPDATE SET role_id = excluded.role_id""",
                 [(guild_id, name, role_id) for name, role_id in roles.items()])
             await db.commit()
+
+    async def claim_welcome_intro(self, guild_id: int, user_id: int) -> bool:
+        """True the first time this member is seen posting in #welcome."""
+        async with self.connect() as db:
+            cursor = await db.execute(
+                "INSERT OR IGNORE INTO welcome_intros (guild_id, user_id) VALUES (?, ?)", (guild_id, user_id))
+            claimed = cursor.rowcount == 1
+            await db.commit()
+        return claimed
+
+    async def seed_welcome_intros(self, guild_id: int, user_ids: set[int]) -> None:
+        """Record who had already posted in #welcome and mark the one-time read done."""
+        async with self.connect() as db:
+            await db.executemany("INSERT OR IGNORE INTO welcome_intros (guild_id, user_id) VALUES (?, ?)",
+                                 [(guild_id, user_id) for user_id in user_ids])
+            await db.execute(
+                "INSERT OR REPLACE INTO welcome_intro_seed (guild_id, seeded_at) VALUES (?, datetime('now'))",
+                (guild_id,))
+            await db.commit()
+
+    async def welcome_intros_seeded(self, guild_id: int) -> bool:
+        async with self.connect() as db:
+            row = await (await db.execute(
+                "SELECT 1 FROM welcome_intro_seed WHERE guild_id = ?", (guild_id,))).fetchone()
+        return row is not None
 
     # -- voice ranks -----------------------------------------------------------
 

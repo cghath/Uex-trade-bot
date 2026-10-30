@@ -472,6 +472,10 @@ date - no open item, nothing to record here.
       See PROJECT_CONTEXT.md entry 151
 - [ ] PR #141 - Pings' Everything button (`EverythingButton`, `everything_changes`,
       `RoleGroup.everything`); goes with PR #140. See PROJECT_CONTEXT.md entry 151
+- [ ] PR #142 - Streams & Videos ping role; the Onboarding listener (`on_member_update`/
+      `on_member_join` in `bot/cogs/role_picker.py`) and #welcome first-post Mentor pings (tables
+      `welcome_intros`, `welcome_intro_seed`); production's #staff and #welcome ids. Goes with
+      PR #140. See PROJECT_CONTEXT.md entry 151
 
 ## To port: aiv2 -> production
 
