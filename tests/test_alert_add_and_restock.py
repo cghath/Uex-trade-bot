@@ -67,7 +67,7 @@ def _interaction(order):
               followup=NS(send=send))
 
 
-def _bot(order, *, commodities=COMMODITIES, uex_error=None):
+def _bot(order, *, commodities=COMMODITIES, uex_error=None, default_ship=None):
     async def get_commodities():
         order.append(("get_commodities", None))
         if uex_error:
@@ -82,8 +82,12 @@ def _bot(order, *, commodities=COMMODITIES, uex_error=None):
         order.append(("add_stock_alert", kwargs))
         return 42
 
+    async def get_default_ship(user_id):
+        return default_ship
+
     return NS(uex=NS(get_commodities=get_commodities),
-              db=NS(add_price_alert=add_price_alert, add_stock_alert=add_stock_alert))
+              db=NS(add_price_alert=add_price_alert, add_stock_alert=add_stock_alert,
+                    get_default_ship=get_default_ship))
 
 
 def _alert_add(commodity, **bot_kwargs):
@@ -205,3 +209,48 @@ def test_an_unsent_combined_message_leaves_every_terminal_to_retry():
     import discord
     user, saved = _poller(send_error=discord.HTTPException(NS(status=503, reason="x"), {"message": "x"}))
     assert len(user.sent) == 1 and saved == []
+
+
+# ---- UX-11 / MSG-4: never "set a ship" to a player who has one ------------------------------
+
+def test_the_confirmation_names_a_saved_default_ship_instead_of_asking_for_one():
+    with_default = _stock_alert_add("Gold", default_ship="Caterpillar")
+    assert "cargo fit checked against your default ship, **Caterpillar**" in with_default[-1][1]
+    assert "set a ship" not in with_default[-1][1]
+    without = _stock_alert_add("Gold")
+    assert "set a ship with /set-trading-preferences" in without[-1][1]
+
+
+def test_a_restock_says_why_there_is_no_cargo_fit_when_a_ship_is_set():
+    one, two = [_terminal(1, 10.0)], [_terminal(1, 10.0), _terminal(2, 11.0)]
+    assert "set a ship" in format_restock_message(7, "Gold", one, None)
+    down = format_restock_message(7, "Gold", one, None, ship_query="Caterpillar", lookup_failed=True)
+    assert "UEX's ship list didn't load" in down and "set a ship" not in down
+    stale = format_restock_message(7, "Gold", two, None, ship_query="Catterpilar")
+    assert "'Catterpilar' didn't match a single ship" in stale and "set a ship" not in stale
+    no_hold = format_restock_message(7, "Gold", one, 0, ship_query="Gladius")
+    assert "'Gladius' has no cargo hold" in no_hold and "set a ship" not in no_hold
+
+
+def test_the_poller_passes_on_why_a_saved_ship_gave_no_cargo_fit():
+    alert = {"id": 7, "user_id": 10, "channel_id": 5, "commodity_name": "Gold", "scope": "personal",
+             "ship_query": None}
+    db = NS(list_active_stock_alerts=AsyncMock(return_value=[alert]),
+            get_stock_alert_terminal_state=AsyncMock(return_value={}),
+            upsert_stock_alert_terminal_state=AsyncMock(),
+            get_default_ship=AsyncMock(return_value="Caterpillar"))
+    uex = NS(get_commodities_prices=AsyncMock(return_value=[
+        {"id_terminal": 1, "terminal_name": "T1", "price_buy": 6, "scu_buy": 100}]),
+        get_vehicles=AsyncMock(side_effect=UexApiError("503")))
+    user = NS(sent=[])
+
+    async def send(content=None, **kwargs):
+        user.sent.append(content)
+
+    user.send = send
+    cog = StockAlerts.__new__(StockAlerts)
+    cog.bot = NS(get_channel=MagicMock(return_value=None), get_user=MagicMock(return_value=user),
+                 fetch_user=AsyncMock(return_value=user), db=db, uex=uex)
+    asyncio.run(cog._poll_stock_alerts_once())
+    assert len(user.sent) == 1 and "UEX's ship list didn't load" in user.sent[0]
+    assert "set a ship" not in user.sent[0]

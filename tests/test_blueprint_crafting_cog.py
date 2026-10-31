@@ -10,6 +10,7 @@ import discord
 
 import pytest
 
+from bot.cogs import blueprint_planner
 from bot.cogs.blueprint_planner import (
     BlueprintResultView,
     ChoiceSelect,
@@ -388,3 +389,48 @@ def test_a_layout_discord_refuses_is_sent_as_the_same_text():
     assert isinstance(view, CraftConfigView) and kwargs["ephemeral"] is True
     assert args[0] == "\n\n".join(recipe.layout_blocks(1, {}, {}, view.options))
     assert [select.placeholder for select in _selectors(view)][0] == "Iron quality (Frame)"
+
+
+# -- the 2026-10-30 audit's Configure crafting findings (BP-10, BP-12, TRD-7) --------------------------
+
+def test_an_add_that_cant_build_a_plan_still_answers_as_a_message_update():
+    """Audit BP-10: answered with a new reply, an Add click reset the 10-minute timeout without giving
+    the grey-out a token that can edit this reply, so the controls could look live after it expired."""
+    from tests.test_blueprint_crafting import _frame_choice
+
+    recipe = _frame_choice()
+    view = CraftConfigView(NS(), recipe, 1, {})
+    interaction = NS(response=NS(defer=AsyncMock(), send_message=AsyncMock()), followup=NS(send=AsyncMock()))
+    asyncio.run(view.add_plan(interaction))
+    interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+    interaction.response.send_message.assert_not_awaited()
+    assert interaction.followup.send.await_args.args[0].startswith("Choose 1 input(s) for Frame")
+
+
+def test_a_choice_between_sub_assemblies_names_them_never_by_path():
+    """Audit BP-12: the menu offered '0.0' and '0.1' while the text said 'Choose 1 of: Iron kit, Tin kit'."""
+    raw = _detail()
+    iron = raw["requirement_groups"][0]["children"][0]
+    tin = dict(iron, uuid="tin", name="Tin")
+    raw["requirement_groups"][0]["children"] = [
+        {"kind": "group", "name": "Iron kit", "required_count": 1, "children": [iron]},
+        {"kind": "group", "name": "Tin kit", "required_count": 1, "children": [tin]},
+    ]
+    recipe = Recipe.parse(raw)
+    view = CraftConfigView(NS(), recipe, 1, {})
+    (choice,) = [select for select in _selectors(view) if isinstance(select, ChoiceSelect)]
+    assert [option.label for option in choice.options] == ["Iron kit", "Tin kit"]
+    assert "Choose 1 of: Iron kit, Tin kit" in view.text()
+
+
+def test_the_plain_text_reply_drops_whole_sections_never_your_craft(monkeypatch):
+    """Audit TRD-7: the text fallback was cut at 1,900 characters, so 'Your craft' (always last) was lost
+    with no notice, possibly mid-line."""
+    blocks = ("## Rifle\n-# Configure crafting", *(f"### Part {n}\n" + "x" * 300 for n in range(10)),
+              "### Your craft\nRecoil **20% better**")
+    monkeypatch.setattr(Recipe, "layout_blocks", lambda *args, **kwargs: blocks)
+    recipe, options = _many_input_recipe(1)
+    text = CraftConfigView(NS(), recipe, 1, options).text()
+    assert len(text) <= 1900 and text.startswith("## Rifle") and text.endswith("### Your craft\nRecoil **20% better**")
+    assert "-# 5 more sections didn't fit in one message." in text and "### Part 4\n" in text and "Part 5" not in text
+    assert blueprint_planner.fit_blocks(blocks[:3]) == "\n\n".join(blocks[:3]), "what fits is unchanged"

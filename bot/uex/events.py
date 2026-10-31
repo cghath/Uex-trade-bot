@@ -109,13 +109,17 @@ def wait_position(signups: list[Signup], user_id: int, role: str | None) -> int:
 def repeats_text(rule: dict | None) -> str | None:
     """A Discord recurrence rule in words. The weekday is left out on purpose: Discord keeps
     it in UTC (Mining Mondays, 7:30 PM Eastern, is a UTC Tuesday) and the start time already
-    shows each reader their own day."""
+    shows each reader their own day. So a daily rule on only some days (Discord's "every
+    weekday") says how many days a week, not which."""
     if not rule:
         return None
     frequency, interval = rule.get("frequency"), rule.get("interval") or 1
     unit = {0: "year", 1: "month", 2: "week", 3: "day"}.get(frequency)
     if unit is None:
         return "Repeats"
+    days = set(rule.get("by_weekday") or ())
+    if unit == "day" and 0 < len(days) < 7:
+        return f"{plural(len(days), 'day')} a week"
     if interval == 1:
         return f"Every {unit}"
     if interval == 2:

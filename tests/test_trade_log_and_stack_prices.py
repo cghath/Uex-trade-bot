@@ -221,3 +221,53 @@ def test_custom_prices_can_be_changed_and_another_strategy_drops_them(tmp_path):
         assert view.price_button not in view.children
 
     asyncio.run(run())
+
+
+def test_a_price_form_submitted_after_its_screen_closed_says_so_and_keeps_nothing(tmp_path):
+    """Audit REL-7: a form sent after the 3-minute timeout redrew a "Set prices" button that
+    could no longer answer; the player only found out on the next click."""
+    db = _db(tmp_path)
+
+    async def run():
+        view, _ = await _batch(db, 2)
+        modal = (await _pick(view, "custom")).response.sent_modal
+        view.stop()  # what the timeout does
+        late = await _fill(modal, ["6000", "6001"])
+        timed_out = late.response.edits[0]
+
+        view2, _ = await _batch(db, 2)
+        modal2 = (await _pick(view2, "custom")).response.sent_modal
+        await view2.cancel.callback(_Interaction(7))
+        after_cancel = (await _fill(modal2, ["6000", "6001"])).response.edits[0]
+        return view, timed_out, view2, after_cancel
+
+    view, timed_out, view2, after_cancel = asyncio.run(run())
+    assert "timed out" in timed_out["content"] and "/inventory-sell" in timed_out["content"]
+    assert view.custom_prices == {} and all(child.disabled for child in timed_out["view"].children)
+    assert "already authorized or cancelled" in after_cancel["content"] and view2.custom_prices == {}
+
+
+# -- UX-5: the form's "lower a minimum and retry" advice works ---------------------------------
+
+
+def test_lowering_a_minimum_then_retrying_the_form_checks_the_new_minimum(tmp_path):
+    db = _db(tmp_path)
+
+    async def run():
+        view, specs = await _batch(db, 1, minimum=5000)
+        modal = (await _pick(view, "custom")).response.sent_modal
+        refused = await _fill(modal, ["4000"])
+        assert "below your minimum of 5,000" in refused.response.edits[0]["content"]
+        assert "/inventory-set-minimum" in refused.response.edits[0]["content"]
+
+        await db.set_inventory_minimum_price(7, specs[0]["inventory_id"], 3000)
+        click = _Interaction(7)
+        await view.price_button.callback(click)
+        retry = click.response.sent_modal
+        await _fill(retry, ["4000"])
+        assert view.custom_prices == {specs[0]["inventory_id"]: 4000}
+
+        await view.confirm.callback(_Interaction(7))
+        return [job["custom_price"] for job in await db.list_active_inventory_jobs(7)]
+
+    assert asyncio.run(run()) == [4000]

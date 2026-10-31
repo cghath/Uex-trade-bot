@@ -61,8 +61,10 @@ DEAL_ROWS = [
 @pytest.fixture(autouse=True)
 def _fresh_pick_cache():
     marketplace_module._listing_picks_cache.clear()
+    marketplace_module._listing_pick_fetches.clear()
     yield
     marketplace_module._listing_picks_cache.clear()
+    marketplace_module._listing_pick_fetches.clear()
 
 
 # -- the pure helpers (bot/uex/marketplace.py) -------------------------------------------
@@ -225,6 +227,31 @@ def test_a_slow_source_is_left_out_rather_than_missing_discords_deadline(monkeyp
     asyncio.run(run())
 
 
+def test_keystrokes_during_a_slow_uex_join_the_running_fetch_instead_of_starting_more(monkeypatch):
+    """Audit REL-8: only a fully answered pick list was kept, so every keystroke while UEX was
+    slow started its own favorites and negotiations calls (8 keystrokes, 16 calls)."""
+    monkeypatch.setattr(autocomplete_module, "AUTOCOMPLETE_BUDGET_SECONDS", 0.05)
+    calls = []
+
+    async def slow_favorites(**kwargs):
+        calls.append(kwargs)
+        await asyncio.sleep(0.3)
+        return FAVORITE_ROWS
+
+    async def run():
+        uex = _uex(get_marketplace_favorites=slow_favorites)
+        interaction = _autocomplete_interaction(uex)
+        for typed in ("P", "Pe", "Pem", "Pemb"):
+            assert 168220 not in [c.value for c in await any_listing_autocomplete(interaction, typed)]
+        assert len(calls) == 1, "the later keystrokes joined the first fetch"
+        await asyncio.sleep(0.4)  # the slow fetch finishes in the background
+        late = await any_listing_autocomplete(interaction, "Pembroke")
+        assert [c.value for c in late] == [168220], "its answer is used once it arrives"
+        assert len(calls) == 1 and uex.get_marketplace_negotiations.await_count == 1
+
+    asyncio.run(run())
+
+
 # -- the "Show details for..." menu -----------------------------------------------------
 
 def test_the_details_menu_offers_each_listing_once():
@@ -370,8 +397,53 @@ def test_a_delete_uex_still_shows_changes_nothing_and_says_so():
     assert "still shows listing #175615" in interaction.followup.send.await_args.args[0]
 
 
+def test_a_delete_uex_accepted_but_couldnt_be_checked_says_it_was_accepted():
+    """Audit TRD-2: a delete that worked but whose read-back failed was reported as "Couldn't delete"."""
+    from bot.uex.exceptions import UexDeleteUnconfirmedError
+
+    async def run():
+        db = NS(get_inventory_post_job_by_listing=AsyncMock(return_value=None),
+                cancel_tracked_inventory_listing=AsyncMock(return_value=True))
+        uex = NS(delete_marketplace_listing=AsyncMock(side_effect=UexDeleteUnconfirmedError("HTTP 503")))
+        view = ConfirmDeleteListingView(NS(db=db, uex=uex), 175615, "sk", 1)
+        interaction = NS(user=NS(id=1), response=NS(edit_message=AsyncMock()), followup=NS(send=AsyncMock()))
+        await view.confirm.callback(interaction)
+        return db, interaction
+
+    db, interaction = asyncio.run(run())
+    db.cancel_tracked_inventory_listing.assert_not_awaited()
+    message = interaction.followup.send.await_args.args[0]
+    assert "accepted the delete of listing #175615" in message and "Couldn't delete" not in message
+
+
 def test_both_commands_pick_by_name_within_discords_limits():
     for command in (Marketplace.marketplace_listing, Marketplace.marketplace_delete_listing):
         (param,) = command.parameters
         assert param.name == "listing" and param.autocomplete
         assert len(str(param.description)) <= 100 and len(str(command.description)) <= 100
+
+
+def test_a_tracked_delete_uex_accepted_but_couldnt_be_checked_holds_the_job_for_confirm_sale():
+    """Audit TRD-2 follow-up: the delete button left a tracked job 'listed' after an accepted but
+    unconfirmed delete, so the next check sent the "disappeared" DM and confirming 0 sold relisted it."""
+    from bot.uex.exceptions import UexDeleteUnconfirmedError
+
+    async def run():
+        db = NS(get_inventory_post_job_by_listing=AsyncMock(return_value={"id": 42}),
+                record_inventory_listing_stock=AsyncMock(return_value={"status": "listed"}),
+                disable_auto_relist=AsyncMock(), mark_inventory_post_needs_confirmation=AsyncMock(),
+                cancel_tracked_inventory_listing=AsyncMock(return_value=True))
+        uex = NS(get_marketplace_listings=AsyncMock(return_value=[{"id": 175615, "in_stock": "2", "is_sold_out": 0}]),
+                 delete_marketplace_listing=AsyncMock(side_effect=UexDeleteUnconfirmedError("HTTP 503")))
+        view = ConfirmDeleteListingView(NS(db=db, uex=uex), 175615, "sk", 1)
+        interaction = NS(user=NS(id=1), response=NS(edit_message=AsyncMock()), followup=NS(send=AsyncMock()))
+        await view.confirm.callback(interaction)
+        return db, interaction
+
+    db, interaction = asyncio.run(run())
+    db.cancel_tracked_inventory_listing.assert_not_awaited()
+    db.disable_auto_relist.assert_awaited_once_with(42)
+    db.mark_inventory_post_needs_confirmation.assert_awaited_once()
+    assert db.mark_inventory_post_needs_confirmation.await_args.args[0] == 42
+    message = interaction.followup.send.await_args.args[0]
+    assert "accepted the delete" in message and "/inventory-confirm-sale job_id:42" in message

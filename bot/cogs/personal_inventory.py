@@ -15,7 +15,7 @@ from discord.ext import commands, tasks
 
 from bot.delivery import fit_lines
 from bot.discord_ui import BotModal, BotView
-from bot.uex.exceptions import UexApiError, UexRejectedError
+from bot.uex.exceptions import UexApiError, UexDeleteUnconfirmedError, UexRejectedError
 from bot.uex.inventory import (
     DEFAULT_MARKETPLACE_TIMEZONE,
     PriceRecommendation,
@@ -180,8 +180,11 @@ def _job_autocomplete(applies: Callable[[dict[str, Any]], bool]):
 
 
 confirm_sale_job_autocomplete = _job_autocomplete(lambda job: job["status"] == "needs_confirmation")
+# A needs-confirmation job with no listing id (a post whose outcome UEX never confirmed) has
+# nothing to cancel: /inventory-confirm-sale resolves it, so it isn't offered here (audit UX-8).
 cancel_post_job_autocomplete = _job_autocomplete(
-    lambda job: job["status"] in {"pending", "listed", "needs_confirmation"})
+    lambda job: job["status"] in {"pending", "listed"}
+    or (job["status"] == "needs_confirmation" and bool(job.get("listing_id"))))
 floor_job_autocomplete = _job_autocomplete(lambda job: job["status"] == "listed" and not job.get("auto_relist"))
 
 
@@ -369,7 +372,8 @@ class SetMinimumPricesView(BotView):
         )
 
     async def resolve_minimum_set(self, interaction: discord.Interaction, inventory_id: int, minimum_price: int) -> None:
-        """Called by SetMinimumModal right after a successful set."""
+        """Called by SetMinimumModal right after a successful set, its interaction already
+        deferred - so every reply here edits the original response."""
         for row in self.selected:
             if int(row["id"]) == inventory_id:
                 row["minimum_price"] = minimum_price
@@ -377,7 +381,7 @@ class SetMinimumPricesView(BotView):
 
         if self.missing_ids:
             self._rebuild()
-            await interaction.response.edit_message(
+            await interaction.edit_original_response(
                 content="Set a minimum price before these can be authorized - never posted or relisted below it.",
                 view=self,
             )
@@ -388,12 +392,12 @@ class SetMinimumPricesView(BotView):
         # its greyed-out buttons back on the message.
         self.stop()
         if result is None:
-            await interaction.response.edit_message(
+            await interaction.edit_original_response(
                 content="None of those stacks currently has unreserved inventory.", embed=None, view=None
             )
             return
         embed, view = result
-        await interaction.response.edit_message(content=None, embed=embed, view=view)
+        await interaction.edit_original_response(content=None, embed=embed, view=view)
         view.origin = interaction
 
 
@@ -421,11 +425,14 @@ class SetMinimumModal(BotModal, title="Set a minimum price"):
             await interaction.response.send_message("Price must be a positive whole number.", ephemeral=True)
             return
 
+        # Acknowledged before the DB write, which can wait on a lock past Discord's 3-second
+        # window: the floor would save while the player saw "did not respond" (audit REL-6).
+        await interaction.response.defer()
         changed = await self.view.cog.bot.db.set_inventory_minimum_price(
             interaction.user.id, self.inventory_id, price
         )
         if not changed:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"Inventory #{self.inventory_id} was not found - it may have been removed.", ephemeral=True
             )
             return
@@ -578,6 +585,16 @@ def stack_name(spec: dict[str, Any]) -> str:
     return f"#{spec['inventory_id']} {spec.get('item_name') or ''}".strip()
 
 
+async def refresh_minimums(db: Any, user_id: int, specs: list[dict[str, Any]]) -> None:
+    """Re-read each stack's minimum price into its spec, so a custom price is checked against
+    the minimum the player has now (one lowered with /inventory-set-minimum since the screen
+    was built counts). A stack that's gone, or has no minimum, keeps the one it had."""
+    for spec in specs:
+        entry = await db.get_inventory_item(user_id, int(spec["inventory_id"]))
+        if entry and entry.get("minimum_price"):
+            spec["minimum_price"] = int(entry["minimum_price"])
+
+
 class StackPricesModal(BotModal, title="Enter custom prices"):
     """A custom price for each of up to five stacks of an /inventory-sell batch, each input
     prefilled with any price already set. Saves the form's prices only if every one is valid;
@@ -602,6 +619,20 @@ class StackPricesModal(BotModal, title="Enter custom prices"):
             self.inputs.append(text_input)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
+        if self.view.resolved or self.view.is_finished():
+            # The form outlived its screen: the 3-minute timeout, or Authorize/Cancel clicked
+            # meanwhile. Redrawing the screen would show buttons that no longer answer, and the
+            # prices only ever lived on it (audit REL-7).
+            self.view.disable()
+            note = ("These posts were already authorized or cancelled, so that form changed nothing."
+                    if not self.view.is_finished() else
+                    "This screen timed out, so those prices weren't kept. Run `/inventory-sell` again.")
+            await interaction.response.edit_message(content=note, view=self.view)
+            return
+        # Each stack's minimum as it is now, not as it was when the authorize screen was built:
+        # the failure note below says to lower one with /inventory-set-minimum and try again,
+        # which did nothing while the form kept checking the old one (audit UX-5).
+        await refresh_minimums(self.view.cog.bot.db, self.view.author_id, self.stacks)
         prices: dict[int, int] = {}
         problems: list[str] = []
         for spec, text_input in zip(self.stacks, self.inputs):
@@ -661,6 +692,11 @@ class CustomPriceModal(BotModal, title="Enter a custom price"):
         if price <= 0:
             await interaction.response.send_message("Price must be a positive whole number.", ephemeral=True)
             return
+        # The minimum as it is now: the advice below to lower it and retry has to work (audit UX-5).
+        spec = {"inventory_id": self.view.entry["id"], "minimum_price": self.minimum_price}
+        await refresh_minimums(self.view.cog.bot.db, self.view.author_id, [spec])
+        self.minimum_price = int(spec["minimum_price"])
+        self.view.entry["minimum_price"] = self.minimum_price
         if price < self.minimum_price:
             await interaction.response.send_message(
                 f"That's below your minimum of **{self.minimum_price:,}** UEC - raise the price, or lower your "
@@ -785,6 +821,8 @@ class LowerFloorModal(BotModal, title="Set a new minimum price"):
         if price <= 0:
             await interaction.response.send_message("Minimum price must be a positive whole number.", ephemeral=True)
             return
+        # Acknowledged before the DB write (audit REL-6), as SetMinimumModal does.
+        await interaction.response.defer()
         ok = await self.view.cog.bot.db.resume_auto_relist_with_new_floor(
             self.view.job_id, self.view.user_id, price
         )
@@ -794,7 +832,7 @@ class LowerFloorModal(BotModal, title="Set a new minimum price"):
             if ok
             else "Couldn't update that job - it may no longer be listed."
         )
-        await interaction.response.edit_message(content=content, embed=None, view=self.view)
+        await interaction.edit_original_response(content=content, embed=None, view=self.view)
 
 
 class FloorReachedView(BotView):
@@ -871,6 +909,12 @@ class PersonalInventory(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
         self.process_inventory_posts.start()
+
+    @property
+    def _unconfirmed_deletes(self) -> dict[int, tuple[int, int]]:
+        """listing id -> (price, floor) of a 48h-relist delete UEX accepted but the bot couldn't yet
+        confirm gone (audit TRD-2). In memory: after a restart it reads as an unexplained disappearance."""
+        return self.__dict__.setdefault("_unconfirmed_deletes_by_listing", {})
 
     def cog_unload(self) -> None:
         self.process_inventory_posts.cancel()
@@ -1197,9 +1241,13 @@ class PersonalInventory(commands.Cog):
     @app_commands.describe(job_id="Which post - pick from the list")
     @app_commands.autocomplete(job_id=cancel_post_job_autocomplete)
     async def inventory_cancel_post(self, interaction: discord.Interaction, job_id: int) -> None:
+        # Deferred before anything else: a pending job's cancel is a DB write that can wait
+        # on a lock past Discord's 3-second window, and a player who sees "did not respond"
+        # retries into "changed state before it could be cancelled" (audit REL-6).
+        await interaction.response.defer(ephemeral=True)
         job = await self.bot.db.get_inventory_post_job(interaction.user.id, job_id)
         if not job:
-            await interaction.response.send_message(f"Inventory job #{job_id} was not found.", ephemeral=True)
+            await interaction.followup.send(f"Inventory job #{job_id} was not found.", ephemeral=True)
             return
         if job["status"] == "pending":
             cancelled = await self.bot.db.cancel_pending_inventory_post(interaction.user.id, job_id)
@@ -1208,23 +1256,26 @@ class PersonalInventory(commands.Cog):
                 if cancelled
                 else f"Job #{job_id} changed state before it could be cancelled."
             )
-            await interaction.response.send_message(message, ephemeral=True)
+            await interaction.followup.send(message, ephemeral=True)
             return
         if job["status"] in {"listed", "needs_confirmation"} and job.get("listing_id"):
             secret_key = await self.bot.db.get_user_secret_key(interaction.user.id)
             if not secret_key:
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     "Relink your UEX account before cancelling the public listing.", ephemeral=True
                 )
                 return
-            await interaction.response.defer(ephemeral=True)
             _, message = await self._cancel_listed_job(job, secret_key=secret_key)
             await interaction.followup.send(message, ephemeral=True)
             return
-        await interaction.response.send_message(
-            f"Job #{job_id} is **{job['status']}** and has no cancellable public or pending post.",
-            ephemeral=True,
-        )
+        if job["status"] == "needs_confirmation":
+            # A post UEX never confirmed: there's no listing id to delete (audit UX-8).
+            message = (f"Job #{job_id} has no listing on record to cancel - UEX never confirmed its post. "
+                       "Check your UEX Marketplace listings, then resolve it with `/inventory-confirm-sale`.")
+        else:
+            message = (f"Job #{job_id} is **{_JOB_STATUS_TEXT.get(job['status'], job['status'])}** "
+                       "and has no cancellable public or pending post.")
+        await interaction.followup.send(message, ephemeral=True)
 
     @app_commands.command(
         name="inventory-resolve-floor",
@@ -1278,6 +1329,25 @@ class PersonalInventory(commands.Cog):
             # has run yet, so there's nothing to leave inconsistent or roll back.
             gone = await self.bot.uex.delete_marketplace_listing(
                 listing_id=int(job["listing_id"]), secret_key=secret_key
+            )
+        except UexDeleteUnconfirmedError as exc:
+            # UEX accepted the delete; only the check that it's gone failed. Hold the job for the
+            # player (needs_confirmation, so /inventory-confirm-sale takes it) and stop auto-relist,
+            # so confirming 0 sold never relists what they asked to cancel.
+            outcome = await self.bot.db.record_inventory_listing_stock(job_id, in_stock=current_stock, sold_out=sold_out)
+            if outcome and outcome["status"] == "sold":
+                return True, (
+                    f"UEX accepted the delete of listing #{job['listing_id']}, and it had already sold out, "
+                    f"so job #{job_id} is done; no stock was released."
+                )
+            await self.bot.db.disable_auto_relist(job_id)
+            await self.bot.db.mark_inventory_post_needs_confirmation(
+                job_id, "Cancellation delete accepted by UEX, but its read-back failed"
+            )
+            return False, (
+                f"UEX accepted the delete of listing #{job['listing_id']}, but checking that it's gone failed "
+                f"({exc}). Job #{job_id} is on hold and won't be relisted: once UEX no longer shows the listing, "
+                f"use `/inventory-confirm-sale job_id:{job_id}` with how many sold (0 if none) to release the rest."
             )
         except UexApiError as exc:
             return False, f"UEX could not confirm deletion of listing #{job['listing_id']}: {exc}"
@@ -1638,6 +1708,11 @@ class PersonalInventory(commands.Cog):
             rows = listings_by_id.get(listing_id)
             if rows is None:
                 continue
+            unconfirmed = self._unconfirmed_deletes.pop(listing_id, None)
+            if not rows and unconfirmed is not None:
+                # The bot's own 48h-relist delete, now confirmed gone: carry on with that relist.
+                await self._relist_lower(job, *unconfirmed)
+                continue
             if not rows:
                 # Fresh listings may be awaiting UEX approval and therefore not visible yet.
                 # Give that path a grace period; after that, disappearance is ambiguous (sold,
@@ -1709,6 +1784,14 @@ class PersonalInventory(commands.Cog):
                         gone = await self.bot.uex.delete_marketplace_listing(
                             listing_id=listing_id, secret_key=secret_key
                         )
+                    except UexDeleteUnconfirmedError as exc:
+                        # UEX accepted the delete; only the check that it's gone failed (audit TRD-2).
+                        # Remembered, so next cycle's "gone" reads as this delete, not an unexplained
+                        # disappearance; a listing still shown then is simply retried.
+                        logger.warning("Listing %s: the 48h relist's delete was accepted but unconfirmed: %s",
+                                       listing_id, exc)
+                        self._unconfirmed_deletes[listing_id] = (current_price, minimum_price)
+                        continue
                     except UexApiError as exc:
                         logger.warning(
                             "Could not delete listing %s for the 48h no-interest relist: %s", listing_id, exc
@@ -1730,36 +1813,7 @@ class PersonalInventory(commands.Cog):
                             "`/inventory-post-now`.",
                         )
                         continue
-                    next_price = max(round(current_price * RELIST_DISCOUNT_RATE), minimum_price)
-                    new_id = await self.bot.db.expire_and_relist_inventory_post(
-                        job_id, datetime.now(timezone.utc), price_override=next_price
-                    )
-                    if new_id:
-                        new_job = await self.bot.db.get_inventory_post_job(int(job["user_id"]), new_id)
-                        posted = False
-                        if new_job and await self.bot.db.claim_inventory_post_job(new_id):
-                            result = await self._post_one_job(new_job, notify=False)
-                            posted = bool(result.get("success"))
-                        if posted:
-                            await self._notify_user(
-                                int(job["user_id"]),
-                                f"No interest yet on **{marketplace_item_link(job['item_name'], job.get('id_item'))}** "
-                                f"after {RELIST_DISCOUNT_INTERVAL_HOURS}h - "
-                                f"relisted as job #{new_id} at **{next_price:,}** UEC/unit (was {current_price:,}).",
-                            )
-                        else:
-                            # The old listing is gone (deleted and read back above) - this
-                            # item currently has NO active UEX listing, whatever went wrong. Never
-                            # claim a successful relist here; _post_one_job already recorded
-                            # the real failure reason on the job itself (notify=False only
-                            # suppressed its own DM, not the DB write).
-                            await self._notify_user(
-                                int(job["user_id"]),
-                                f"No interest yet on **{marketplace_item_link(job['item_name'], job.get('id_item'))}** "
-                                f"after {RELIST_DISCOUNT_INTERVAL_HOURS}h. The old listing was removed to relist "
-                                f"lower, but the new post (job #{new_id}) did not succeed - it currently has "
-                                "**no active listing**. Check `/inventory` and use `/inventory-post-now` to try again.",
-                            )
+                    await self._relist_lower(job, current_price, minimum_price)
                     continue
 
             expiration = _integer(listing.get("date_expiration")) or _integer(job.get("date_expiration"))
@@ -1773,6 +1827,40 @@ class PersonalInventory(commands.Cog):
                         f"Listing #{listing_id} expired with **{stock}** explicitly remaining. A fresh-price relist "
                         f"was safely scheduled as job #{new_id}.",
                     )
+
+    async def _relist_lower(self, job: dict[str, Any], current_price: int, minimum_price: int) -> None:
+        """The 48h no-interest relist, once its old listing is confirmed deleted: a new job at the
+        discounted price, posted at once."""
+        job_id = int(job["id"])
+        next_price = max(round(current_price * RELIST_DISCOUNT_RATE), minimum_price)
+        new_id = await self.bot.db.expire_and_relist_inventory_post(
+            job_id, datetime.now(timezone.utc), price_override=next_price
+        )
+        if new_id:
+            new_job = await self.bot.db.get_inventory_post_job(int(job["user_id"]), new_id)
+            posted = False
+            if new_job and await self.bot.db.claim_inventory_post_job(new_id):
+                result = await self._post_one_job(new_job, notify=False)
+                posted = bool(result.get("success"))
+            if posted:
+                await self._notify_user(
+                    int(job["user_id"]),
+                    f"No interest yet on **{marketplace_item_link(job['item_name'], job.get('id_item'))}** "
+                    f"after {RELIST_DISCOUNT_INTERVAL_HOURS}h - "
+                    f"relisted as job #{new_id} at **{next_price:,}** UEC/unit (was {current_price:,}).",
+                )
+            else:
+                # The old listing is gone (deleted and read back) - this item currently has NO
+                # active UEX listing, whatever went wrong. Never claim a successful relist here;
+                # _post_one_job already recorded the real failure reason on the job itself
+                # (notify=False only suppressed its own DM, not the DB write).
+                await self._notify_user(
+                    int(job["user_id"]),
+                    f"No interest yet on **{marketplace_item_link(job['item_name'], job.get('id_item'))}** "
+                    f"after {RELIST_DISCOUNT_INTERVAL_HOURS}h. The old listing was removed to relist "
+                    f"lower, but the new post (job #{new_id}) did not succeed - it currently has "
+                    "**no active listing**. Check `/inventory` and use `/inventory-post-now` to try again.",
+                )
 
     async def _notify_user(self, user_id: int, message: str) -> None:
         try:

@@ -40,7 +40,8 @@ multiplies everything, so the cheapest win is doing more per turn.
   `grep -n "commodities_routes" docs/UEX_API_2.0_reference.md`
   then `sed -n '<start>,<end>p'` on the hit. The same applies to the root
   `.txt` API captures (`stileron.txt`, `savrilium.txt`, `dump.txt`).
-- **Scope searches — `.venv/` has 2,541 `.py` files against the project's 55.**
+- **Scope searches — `.venv/` has 2,541 `.py` files against the project's ~190
+  (`bot/`, `tests/` and `scripts/`, 2026-10-30).**
   Grep honors `.gitignore` and skips it; Glob and `find` do not, so an
   unscoped `**/*.py` returns overwhelmingly pip internals and buries the real
   files. Prefer Grep, or scope explicitly to `bot/`, `tests/`, `scripts/`.

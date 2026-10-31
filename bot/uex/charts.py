@@ -38,11 +38,13 @@ def render_price_history_chart(
     commodity_name: str,
     terminal_name: str,
     history_rows: list[dict],
+    y_label: str = "aUEC / unit",
 ) -> io.BytesIO | None:
     """Build a price-over-time line chart from /commodities_prices_history rows.
 
     Expects each row to have `date_added` (unix timestamp) and price_buy/price_sell.
-    Returns a PNG in a BytesIO buffer, or None if there's nothing plottable.
+    Returns a PNG in a BytesIO buffer, or None if there's nothing plottable. `y_label` is
+    the price's currency and unit: /marketplace-history's can be UEC per box, say.
     """
     points = []
     for row in history_rows:
@@ -121,7 +123,7 @@ def render_price_history_chart(
 
     # Text stays in ink tokens, never the series color (per house style).
     ax.set_title(f"{commodity_name} at {terminal_name}", color=_INK_PRIMARY, fontsize=13, loc="left", pad=12)
-    ax.set_ylabel("aUEC / unit", color=_INK_SECONDARY, fontsize=10)
+    ax.set_ylabel(y_label, color=_INK_SECONDARY, fontsize=10)
 
     ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"{x:,.0f}"))
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %d"))

@@ -8,6 +8,7 @@ failure is retried by the loop and a refusal isn't; the preview is owner-only.
 from __future__ import annotations
 
 import asyncio
+import logging
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock
 
@@ -151,3 +152,81 @@ def test_the_preview_is_owner_only(tmp_path):
     assert users[5].sent == [] and stranger.kwargs["ephemeral"]
     assert users[1].sent[0].startswith("👋 **Welcome to Star Tech Dynamics, User1!**")
     assert owner.args[0] == "I've sent you the welcome DM." and owner.kwargs["ephemeral"]
+
+
+def test_a_retry_tick_landing_mid_send_never_sends_the_welcome_twice(tmp_path):  # COMM-1
+    """The join's DM is still on its way (its claim is 'pending') when the 10-minute retry tick
+    reads the pending claims: the tick must skip that member, not send a second DM."""
+    async def run():
+        release = asyncio.Event()
+
+        class SlowUser(FakeUser):
+            async def send(self, content=None, **kwargs):
+                await release.wait()
+                self.sent.append(content)
+
+        users = {1: SlowUser()}
+        cog, _bot, guild, members = await _make(tmp_path, users)
+        members[1] = _member(1, guild)
+        join = asyncio.create_task(cog.on_member_join(members[1]))
+        await asyncio.sleep(0.2)                 # the join has claimed and is sending
+        tick = asyncio.create_task(cog.retry_welcomes.coro(cog))
+        await asyncio.sleep(0.2)
+        release.set()
+        await asyncio.gather(join, tick)
+        await cog.retry_welcomes.coro(cog)       # and nothing is left to retry
+        return users[1].sent
+
+    assert len(asyncio.run(run())) == 1
+
+
+def test_owner_tools_are_hidden_from_members_in_the_slash_menu():  # COMM-6
+    from bot.cogs.anniversaries import Anniversaries
+    from bot.cogs.diagnostics import Diagnostics
+    for command in (Welcome.welcome_preview, Anniversaries.anniversary_preview, Diagnostics.command_usage):
+        assert command.default_permissions is not None and command.default_permissions.administrator, command.name
+
+
+def test_the_welcome_back_preview_carries_its_stop_button(tmp_path):  # COMM-3
+    from bot.cogs.welcome_back import StopWelcomeBackButton
+
+    async def run():
+        users = {1: FakeUser()}
+        cog, bot, guild, _members = await _make(tmp_path, users)
+        guild.fetch_scheduled_events = AsyncMock(return_value=[])
+        sent = []
+
+        async def send(content=None, **kwargs):
+            sent.append((content, kwargs))
+        users[1].send = send
+        interaction = NS(user=NS(id=1, display_name="Owner"), response=NS(defer=AsyncMock()),
+                         followup=NS(send=AsyncMock()))
+        await Welcome.welcome_preview.callback(cog, interaction, NS(value="back"))
+        return sent
+
+    ((dm, kwargs),) = asyncio.run(run())
+    (button,) = kwargs["view"].children
+    assert dm.startswith("👋 **Welcome back, Owner!**") and isinstance(button, StopWelcomeBackButton)
+
+
+def test_a_missing_bot_channel_is_logged_once_not_every_tick(tmp_path, caplog):  # COMM-7
+    from bot import delivery
+    delivery._MISSING_WARNED.clear()
+
+    async def run():
+        cog, bot, guild, _members = await _make(tmp_path, {})
+        channel = bot.get_channel(ANNIVERSARY_CHANNEL_ID)
+        bot.get_channel = lambda cid: None       # #stdynamics-bot deleted
+        for _ in range(3):
+            await cog.retry_welcomes.coro(cog)
+        gone = len(caplog.records)
+        bot.get_channel = lambda cid: channel    # back
+        await cog.retry_welcomes.coro(cog)
+        bot.get_channel = lambda cid: None       # and gone again
+        await cog.retry_welcomes.coro(cog)
+        return gone
+
+    with caplog.at_level(logging.WARNING, logger="uexbot.delivery"):
+        gone = asyncio.run(run())
+    assert gone == 1 and len(caplog.records) == 2
+    assert f"Channel {ANNIVERSARY_CHANNEL_ID} not found, so welcome DMs are off" in caplog.records[0].message

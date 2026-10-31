@@ -121,7 +121,8 @@ def season_name(day: date) -> str:
 
 
 def promotion_text(mention: str, rank: str, xp: int) -> str:
-    return f"🎖️ {mention} has been promoted to **{rank}**! ({hours(xp)} of voice time)"
+    """XP, not hours: a minute in Ops is 2 XP, so XP read as time would overstate it (audit COMM-9)."""
+    return f"🎖️ {mention} has been promoted to **{rank}**! ({xp:,} XP)"
 
 
 def op_promotion_text(mention: str, rank: str, ops: int) -> str:

@@ -31,13 +31,16 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections import defaultdict
 from typing import Callable
 
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
-from bot.delivery import Delivery, send_to_channel
+from bot.delivery import Delivery, fit_lines, send_to_channel
+from bot.discord_ui import BotDynamicItem
+from bot.managed_roles import harmless
 from bot.uex.welcome import WELCOME_CHANNEL_ID
 from bot.uex.role_picker import (
     CREATE, GROUPS, GROUPS_BY_KEY, MATCHED, MENTOR_ROLE, MULTI, NEW_PILOT_ROLE, ROLE_COLOURS, ROLE_EMOJI, RoleGroup,
@@ -51,7 +54,8 @@ logger = logging.getLogger("uexbot.role_picker")
 # #role-log on Star Tech Dynamics: every pick is logged here (not #staff, which the owner keeps for
 # moderation).
 ROLE_LOG_CHANNEL_ID = 1565653911472439356
-# The voice rank roles (bot/cogs/voice_ranks.py) the Colors roles go right under.
+# The voice rank roles (bot/cogs/voice_ranks.py) the Colors roles go right under: found by the ids
+# it remembers (managed_roles), by these names only for one it hasn't remembered yet.
 RANK_ROLE_NAMES = {name for name, _ in RANKS + OP_RANKS}
 # #👋welcome (WELCOME_CHANNEL_ID): Mentor is pinged there for a New Pilot and each member's first post.
 BUTTON_TEMPLATE = r"rolepick:btn:(?P<group>[a-z]+):(?P<role>\d+)"
@@ -65,6 +69,8 @@ INTRO_TYPES = (discord.MessageType.default, discord.MessageType.reply)
 
 # (member id, role id) -> when a panel gave it (time.monotonic()), so on_member_update skips it.
 _panel_adds: dict[tuple[int, int], float] = {}
+# (guild id, member id, group key) -> the lock one member's picks in one group take turns on.
+_pick_locks: defaultdict[tuple[int, int, str], asyncio.Lock] = defaultdict(asyncio.Lock)
 
 
 def _note_panel_adds(member_id: int, role_ids: set[int]) -> None:
@@ -121,22 +127,30 @@ async def apply_pick(interaction: discord.Interaction, group_key: str, picked: s
     if not picked or not picked <= set(order) or any(guild.get_role(role_id) is None for role_id in picked):
         await interaction.followup.send(OUT_OF_DATE, ephemeral=True)
         return
-    held = {role.id for role in member.roles}
-    add, remove = (everything_changes(set(order), held) if everything
-                   else role_changes(group.mode, set(order), held, picked))
-    to_add = [guild.get_role(role_id) for role_id in order if role_id in add]
-    to_remove = [role for role in (guild.get_role(role_id) for role_id in order if role_id in remove) if role]
-    _note_panel_adds(member.id, add)
-    try:
-        if to_remove:
-            await member.remove_roles(*to_remove, reason=REASON)
-        if to_add:
-            await member.add_roles(*to_add, reason=REASON)
-    except discord.HTTPException as exc:
-        logger.warning("Role picker couldn't change %s's roles: %s", member.id, exc)
-        await interaction.followup.send("I couldn't change your roles - staff will need to check my permissions.",
-                                        ephemeral=True)
-        return
+    # A click carries the member's roles as they were when it was made, so two quick clicks on a
+    # one-at-a-time panel each kept the other's new role (two Colors). One pick per member and
+    # group at a time, worked out from the roles Discord has now.
+    async with _pick_locks[(guild.id, member.id, group.key)]:
+        try:
+            member = await guild.fetch_member(member.id)
+        except discord.HTTPException as exc:
+            logger.info("Role picker couldn't re-read %s's roles, using the click's: %s", member.id, exc)
+        held = {role.id for role in member.roles}
+        add, remove = (everything_changes(set(order), held) if everything
+                       else role_changes(group.mode, set(order), held, picked))
+        to_add = [guild.get_role(role_id) for role_id in order if role_id in add]
+        to_remove = [role for role in (guild.get_role(role_id) for role_id in order if role_id in remove) if role]
+        _note_panel_adds(member.id, add)
+        try:
+            if to_remove:
+                await member.remove_roles(*to_remove, reason=REASON)
+            if to_add:
+                await member.add_roles(*to_add, reason=REASON)
+        except discord.HTTPException as exc:
+            logger.warning("Role picker couldn't change %s's roles: %s", member.id, exc)
+            await interaction.followup.send("I couldn't change your roles - staff will need to check my permissions.",
+                                            ephemeral=True)
+            return
     added, removed = [role.name for role in to_add], [role.name for role in to_remove]
     await interaction.followup.send(change_text(added, removed), ephemeral=True)
     if not added and not removed:
@@ -150,7 +164,7 @@ async def apply_pick(interaction: discord.Interaction, group_key: str, picked: s
             await db.release_new_pilot_ping(guild.id, member.id)  # didn't arrive: the next pick tries again
 
 
-class RoleButton(discord.ui.DynamicItem[discord.ui.Button], template=BUTTON_TEMPLATE):
+class RoleButton(BotDynamicItem, discord.ui.DynamicItem[discord.ui.Button], template=BUTTON_TEMPLATE):
     """A Timezone, Experience or Pings button; its custom id carries the role's id."""
 
     def __init__(self, group_key: str, role_id: int, label: str = "Role", emoji: str | None = None) -> None:
@@ -166,7 +180,7 @@ class RoleButton(discord.ui.DynamicItem[discord.ui.Button], template=BUTTON_TEMP
         await apply_pick(interaction, self.group_key, {self.role_id})
 
 
-class EverythingButton(discord.ui.DynamicItem[discord.ui.Button], template=EVERYTHING_TEMPLATE):
+class EverythingButton(BotDynamicItem, discord.ui.DynamicItem[discord.ui.Button], template=EVERYTHING_TEMPLATE):
     """Every role in a group at once (Pings), or none once the member has them all."""
 
     def __init__(self, group_key: str) -> None:
@@ -182,7 +196,7 @@ class EverythingButton(discord.ui.DynamicItem[discord.ui.Button], template=EVERY
         await apply_pick(interaction, self.group_key, None)
 
 
-class RoleMenu(discord.ui.DynamicItem[discord.ui.Select], template=MENU_TEMPLATE):
+class RoleMenu(BotDynamicItem, discord.ui.DynamicItem[discord.ui.Select], template=MENU_TEMPLATE):
     """The Activities dropdown; each option's value is its role's id."""
 
     def __init__(self, group_key: str, options: list[discord.SelectOption] | None = None) -> None:
@@ -213,7 +227,8 @@ def panel(group: RoleGroup, roles: list[discord.Role]) -> tuple[str, discord.ui.
                                            for role in roles]))
     else:
         for name, role in zip(group.roles, roles):
-            view.add_item(RoleButton(group.key, role.id, role.name, ROLE_EMOJI.get(name)))
+            # a renamed role's name can run to 100 characters, a button label to 80
+            view.add_item(RoleButton(group.key, role.id, role.name[:80], ROLE_EMOJI.get(name)))
         if group.everything:
             view.add_item(EverythingButton(group.key))
     return f"**{group.title}**\n{group.blurb}", view
@@ -338,7 +353,12 @@ class RolePicker(commands.Cog):
         if not all(name in ids for name in names):
             return ""
         roles = [role for role in await guild.fetch_roles() if role.id != guild.id]
-        ranks = [role for role in roles if role.name in RANK_ROLE_NAMES]
+        # The rank roles voice ranks remembers by id (a rename keeps them); by name, and only one
+        # that grants nothing, for a rank it hasn't remembered yet (audit COMM-8).
+        remembered = {name: role_id for name, role_id in (await self.bot.db.get_managed_roles(guild.id)).items()
+                      if name in RANK_ROLE_NAMES}
+        ranks = [role for role in roles if role.id in remembered.values()
+                 or (role.name in RANK_ROLE_NAMES and role.name not in remembered and harmless(role))]
         if not ranks:
             return ("⚠️ There are no voice rank roles yet, so the color roles stay where they are - drag them above "
                     "any colored role you want a picked color to beat.")
@@ -369,6 +389,12 @@ class RolePicker(commands.Cog):
                           [(role.id, role.name) for role in guild.roles])
         ids: dict[str, int] = {}
         created, matched, problems = [], [], []
+        # One line each for a problem many roles can share (no Manage Roles, my role too low), or
+        # 32 lines of it pass Discord's 2,000 characters and the reply naming the problem fails
+        not_created: list[str] = []
+        create_error = None
+        with_permissions: list[str] = []
+        above_me: list[str] = []
         for name, (action, role_id) in plan.items():
             if action == CREATE:
                 try:
@@ -377,7 +403,8 @@ class RolePicker(commands.Cog):
                                                    mentionable=False,
                                                    reason="Role picker setup (/rolesetup)")
                 except discord.HTTPException as exc:
-                    problems.append(f"Couldn't create **{name}**: {exc}")
+                    not_created.append(f"**{name}**")
+                    create_error = create_error or exc
                     continue
                 created.append(name)
             else:
@@ -385,11 +412,20 @@ class RolePicker(commands.Cog):
                 if action == MATCHED:
                     matched.append(name)
                     if role.permissions.value:
-                        problems.append(f"**{role.name}** already existed with permissions of its own - picking it "
-                                        "gives them.")
+                        with_permissions.append(f"**{role.name}**")
             ids[name] = role.id
             if name != MENTOR_ROLE and not role.is_assignable():
-                problems.append(f"**{role.name}** is above my role, so I can't give it - move my role above it.")
+                above_me.append(f"**{role.name}**")
+        if not_created:
+            problems.append(f"Couldn't create {', '.join(not_created)}: {create_error}")
+        if with_permissions:
+            one = len(with_permissions) == 1
+            problems.append(f"{', '.join(with_permissions)} already existed with permissions of "
+                            f"{'its' if one else 'their'} own - picking {'it' if one else 'one'} gives them.")
+        if above_me:
+            one = len(above_me) == 1
+            problems.append(f"{', '.join(above_me)} {'is' if one else 'are'} above my role, so I can't give "
+                            f"{'it' if one else 'them'} - move my role above {'it' if one else 'them'}.")
         await self.bot.db.save_role_picker_roles(guild.id, ids)
         mentor = guild.get_role(ids.get(MENTOR_ROLE, 0))
         if mentor is not None and not mentor.mentionable and not guild.me.guild_permissions.mention_everyone:
@@ -404,9 +440,8 @@ class RolePicker(commands.Cog):
         placed = await self.place_colors(guild, ids)
         if placed:
             lines.append(placed)
-        if len(ids) == len(plan):
-            lines.append("Next: `/rolepanel post` in your roles channel.")
-        await interaction.followup.send("\n".join(lines), ephemeral=True)
+        footer = "Next: `/rolepanel post` in your roles channel." if len(ids) == len(plan) else None
+        await interaction.followup.send(fit_lines(lines, footer=footer), ephemeral=True)
 
     @rolepanel.command(name="post", description="Admin: post the five role picker panels in a channel.")
     @app_commands.describe(channel="Where to post them, e.g. #pick-your-roles")

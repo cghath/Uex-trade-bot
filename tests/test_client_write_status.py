@@ -204,3 +204,48 @@ def test_get_with_non_ok_status_still_returns_data_not_an_error(tmp_path):
             await client.aclose()
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("body", ["null", "[]", '"maintenance"'])
+def test_a_json_body_that_is_not_an_object_is_a_uex_api_error(body):
+    """Audit REL-5: null, [] or a bare string raised AttributeError from payload.get, which the
+    marketplace snapshot and ship-parts refresh loops (catching only UexApiError) died on."""
+    async def run():
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=body, headers={"content-type": "application/json"})
+
+        client = UexClient("fake", base_url="https://client-test.invalid")
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        try:
+            with pytest.raises(UexApiError, match="Unexpected response"):
+                await client.get_marketplace_trends()
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_a_delete_whose_read_back_fails_says_the_delete_was_accepted():
+    """Audit TRD-2: the DELETE worked, the read-back GET failed, and callers called it a failed delete.
+    It's now its own error, still a UexApiError so no caller ever takes it as gone."""
+    from bot.uex.exceptions import UexDeleteUnconfirmedError
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "DELETE":
+            return httpx.Response(200, json={"status": "ok", "data": None})
+        return httpx.Response(400, json={"status": "error", "message": "boom", "http_code": 400})
+
+    async def run():
+        client = UexClient("fake", base_url="https://client-test.invalid")
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        try:
+            with pytest.raises(UexDeleteUnconfirmedError) as caught:
+                await client.delete_marketplace_listing(listing_id=175615, secret_key="fake")
+        finally:
+            await client.aclose()
+        return caught.value
+
+    error = asyncio.run(run())
+    assert isinstance(error, UexApiError)

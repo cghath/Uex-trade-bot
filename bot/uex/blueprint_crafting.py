@@ -7,7 +7,7 @@ Quantized ore qualities are read from matching material UUIDs, not generic slide
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
 
 
@@ -173,7 +173,8 @@ class Recipe:
     def plan(self, count: int, choices: dict, qualities: dict) -> dict:
         craft_count(count)
         ingredients = []
-        for item in self.selected(choices):
+        selected = self.selected(choices)
+        for item in selected:
             quality = qualities.get(item.path)
             if quality is not None:
                 value = number(quality)
@@ -190,7 +191,11 @@ class Recipe:
                                 'path': item.path})
         return {'blueprint_uuid': self.uuid, 'name': self.name, 'game_version': self.game_version,
                 'craft_count': count, 'choices': {k: list(v) for k, v in choices.items()},
-                'qualities': dict(qualities), 'ingredients': ingredients}
+                # Only the materials this plan uses (audit BP-7): a quality picked for a material that was
+                # then swapped out in a choice stays in the menus, but isn't part of the plan.
+                'qualities': {path: quality for path, quality in qualities.items()
+                              if any(item.path == path for item in selected)},
+                'ingredients': ingredients}
 
     def modifiers(self, choices: dict, qualities: dict) -> dict[str, Decimal | None]:
         result = {}
@@ -270,15 +275,23 @@ class Recipe:
         if known:
             lines.append(self._summary(known, bold=True))
         selected = self.selected(choices)
+        unpicked = [item for item in selected if item.modifiers and qualities.get(item.path) is None]
+        # A material with no quality on offer has no menu (audit TRD-5), so it's never one to "pick", and
+        # "Best possible" leaves out the stats it moves rather than assume a quality that isn't on record.
+        no_menu = dict.fromkeys(item.name for item in unpicked if not options.get(item.path))
         if len(known) < len(totals):
-            if any(item.modifiers and qualities.get(item.path) is None for item in selected):
-                top = {item.path: (options.get(item.path) or (1000,))[-1] for item in selected}
+            if any(options.get(item.path) for item in unpicked):
+                top = {item.path: options[item.path][-1] if options.get(item.path) else qualities.get(item.path)
+                       for item in selected}
                 helps = all(_helps(modifier) for item in selected for modifier in item.modifiers)
                 label = 'Best possible' if helps else 'At top quality'
                 best = self._summary(self.modifiers(choices, top))
                 lines.append(f"-# Pick every quality to see {'the rest' if known else 'it'}."
                              + (f' {label}: {best}' if best else ''))
-            else:  # every quality is picked; what's left is a stat whose effect the wiki doesn't give
+            if no_menu:
+                lines.append(f"-# {', '.join(no_menu)}: no quality on record to pick, so "
+                             f"{'its' if len(no_menu) == 1 else 'their'} effect isn't known")
+            elif not unpicked:  # every quality is picked; what's left is a stat whose effect the wiki doesn't give
                 unknown = dict.fromkeys(self._stat(key).get('label') or key for key in totals if key not in known)
                 lines.append(f"-# {', '.join(unknown)}: the exact effect isn't published")
         elif sum(1 for item in selected if item.modifiers) > 1:
@@ -288,14 +301,16 @@ class Recipe:
 
 def describe_change(value: Decimal, better_when: str | None) -> str:
     """A stat multiplier as a player reads it: '29% better', '11% worse', 'no change' (whole
-    percent; '% higher'/'% lower' for a stat with no better direction)."""
+    percent; '% higher'/'% lower' for a stat with no better direction). Half a percent rounds up,
+    and 'no change' is decided from the rounded figure, never printed as '0% better'."""
     change = (value - Decimal(1)) * 100
-    if abs(change) < Decimal('0.5'):
+    shown = abs(change).quantize(Decimal(1), rounding=ROUND_HALF_UP)
+    if not shown:
         return 'no change'
     if better_when in ('higher', 'lower'):
         good = (change > 0) == (better_when == 'higher')
-        return f"{abs(change):.0f}% {'better' if good else 'worse'}"
-    return f"{abs(change):.0f}% {'higher' if change > 0 else 'lower'}"
+        return f"{shown}% {'better' if good else 'worse'}"
+    return f"{shown}% {'higher' if change > 0 else 'lower'}"
 
 
 def _curve(modifier: dict) -> tuple:
@@ -455,12 +470,27 @@ def obtainable_qualities(detail: dict, ore_uuid: str) -> tuple[int, ...]:
 
 
 def aggregate(plans: list[dict]) -> list[dict]:
+    """The combined shopping list: one row per patch, material, unit and quality, sorted by patch, then
+    name, then quality as a number (audit BP-11: it keyed on the wiki's full build, so one material
+    split in two over a wiki rebuild of the same patch, and it sorted by UUID)."""
     totals = {}
     for plan in plans:
+        patch = game_patch(plan['game_version'])
         for item in plan['ingredients']:
-            # Version and quality remain separate purchasing requirements too.
-            key = (plan['game_version'], item['identity'], item['unit'], item.get('quality'))
+            # Patch and quality remain separate purchasing requirements too.
+            key = (patch, item['identity'], item['unit'], item.get('quality'))
             if key not in totals:
-                totals[key] = dict(item, game_version=plan['game_version'], amount=Decimal(0))
+                totals[key] = dict(item, game_version=patch, amount=Decimal(0))
             totals[key]['amount'] += number(item['amount'])
-    return [dict(row, amount=str(row['amount'])) for _, row in sorted(totals.items(), key=lambda p: str(p[0]))]
+
+    def order(row: dict) -> tuple:
+        quality = row.get('quality')
+        return (row['game_version'], str(row['name']).lower(), row['unit'], quality is not None,
+                number(quality) if quality is not None else Decimal(0), row['identity'])
+
+    return [dict(row, amount=str(row['amount'])) for row in sorted(totals.values(), key=order)]
+
+
+def game_patch(version: str) -> str:
+    """'4.10.1' from the wiki's '4.10.1-LIVE.12660092': the build changes between two days of one patch."""
+    return str(version).split('-')[0]

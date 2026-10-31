@@ -180,4 +180,6 @@ def system_block(system: str, listings: list[ItemListing], *, origin_star_system
 
 def item_footer(omitted: int) -> str:
     more = f" · {omitted} more shop{'' if omitted == 1 else 's'} not shown" if omitted else ""
-    return f"-# UEX prices, up to 24h old{more}"
+    # The bot keeps UEX's figures up to 24h, and each is the last price players reported to UEX, which
+    # can be older still (audit TRD-10), so this never claims how old the price itself is.
+    return f"-# UEX prices, cached up to 24h{more}"

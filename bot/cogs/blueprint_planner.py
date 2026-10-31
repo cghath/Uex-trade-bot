@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import logging
 from decimal import Decimal
 from typing import TYPE_CHECKING
@@ -10,7 +11,7 @@ from typing import TYPE_CHECKING
 import discord
 
 from bot.discord_ui import LAYOUT_TEXT_LIMIT, BotLayoutView, BotView
-from bot.uex.blueprint_crafting import Ingredient, Recipe, aggregate, quality_choice_label
+from bot.uex.blueprint_crafting import Ingredient, Recipe, aggregate, game_patch, quality_choice_label
 
 if TYPE_CHECKING:
     from bot.cogs.blueprints import Blueprints
@@ -22,6 +23,12 @@ NO_MENTIONS = discord.AllowedMentions.none()
 def _amount(value: str) -> str:
     number = Decimal(value)
     return f"{number:f}".rstrip("0").rstrip(".") if number % 1 else f"{number:.0f}"
+
+
+def _ingredient_label(item: dict) -> str:
+    """'Tin (Frame)': a saved plan's material with the part it's for, as the quality menus name it."""
+    aspect = item.get("aspect")
+    return item["name"] if not aspect or aspect == item["name"] else f"{item['name']} ({aspect})"
 
 
 def _pages(lines: list[str], limit: int = 1900) -> list[str]:
@@ -37,12 +44,47 @@ def _pages(lines: list[str], limit: int = 1900) -> list[str]:
     return pages + ([current] if current else [])
 
 
+def fit_blocks(blocks: tuple[str, ...], limit: int = 1900) -> str:
+    """Configure crafting's blocks as one plain message of at most `limit` characters, cut by whole
+    blocks (audit TRD-7): the header and "Your craft" (always last) are kept, and sections that don't
+    fit are left off the end with a note saying so, never sliced mid-line."""
+    text = "\n\n".join(blocks)
+    if len(text) <= limit or len(blocks) < 3:
+        return text[:limit]
+    head, *middle, last = blocks
+
+    def note(left: int) -> str:
+        return f"-# {left} more section{'s' if left != 1 else ''} didn't fit in one message."
+
+    kept: list[str] = []
+    for block in middle:
+        if len("\n\n".join([head, *kept, block, note(len(middle)), last])) > limit:
+            break
+        kept.append(block)
+    return "\n\n".join([head, *kept, note(len(middle) - len(kept)), last])[:limit]
+
+
+def _thread_home(channel) -> discord.TextChannel | None:
+    """Where a private list thread can be made: this text channel, or the text channel a thread is in
+    (audit BP-8). A forum post, a voice or stage channel's chat can't hold a private thread."""
+    if isinstance(channel, discord.TextChannel):
+        return channel
+    if isinstance(channel, discord.Thread) and isinstance(channel.parent, discord.TextChannel):
+        return channel.parent
+    return None
+
+
+NO_THREAD_HERE = ("I can't start your private blueprint list from here: it needs a regular text channel "
+                  "(not a forum post, or a voice or stage channel's chat). Try again from one.")
+
+
 class ShoppingService:
     def __init__(self, bot) -> None:
         self.bot = bot
         # One get-or-create at a time per player and server (audit REL-16): without it, two
         # quick clicks each found no thread, each created one, and one was left orphaned.
         self._thread_locks: dict[tuple[int, int], asyncio.Lock] = {}
+        self._adding: set[tuple[int, int, str]] = set()
 
     async def _thread(self, interaction: discord.Interaction) -> discord.Thread | None:
         if interaction.guild_id is None:
@@ -69,11 +111,12 @@ class ShoppingService:
                 except (discord.Forbidden, discord.HTTPException):
                     logger.warning("Could not reuse blueprint thread %s", thread.id)
 
-        if not isinstance(interaction.channel, discord.TextChannel):
+        home = _thread_home(interaction.channel)
+        if home is None:
             return None
         thread = None
         try:
-            thread = await interaction.channel.create_thread(
+            thread = await home.create_thread(
                 name=f"Blueprint list - {interaction.user.display_name}"[:100],
                 type=discord.ChannelType.private_thread, invitable=False, auto_archive_duration=1440,
             )
@@ -104,13 +147,30 @@ class ShoppingService:
             quality = f" · quality {row['quality']}" if row.get("quality") is not None else ""
             lines.append(f"• {row['name']}: {_amount(row['amount'])} {row['unit']}{quality} · game {row['game_version']}")
         lines.extend(["", "**Blueprint plans**"])
+        current = await self._current_patch()
         for entry in entries:
             plan = entry["plan"]
-            choices = ", ".join(f"{k}={v}" for k, v in sorted(plan["choices"].items())) or "fixed recipe"
-            qualities = ", ".join(f"{k}={v}" for k, v in sorted(plan["qualities"].items())) or "unspecified"
+            patch = game_patch(plan["game_version"])
+            # A plan keeps the amounts of the patch it was added on (audit BP-11), so say when that's not today's.
+            older = f" (before {current}: its amounts may have changed)" if current and patch != current else ""
+            # Materials by name, not by recipe path ("0.0=1000"), and only those the plan uses (audit BP-7).
+            chosen = [f"{p}.{index}" for p, indexes in sorted(plan["choices"].items()) for index in indexes]
+            uses = [_ingredient_label(item) for item in plan["ingredients"]
+                    if any(item.get("path") == p or str(item.get("path")).startswith(f"{p}.") for p in chosen)]
+            qualities = [f"{_ingredient_label(item)} {item['quality']}" for item in plan["ingredients"]
+                         if item.get("quality") is not None]
             lines.append(f"• #{entry['id']} · Craft {plan['craft_count']} {plan['name']} · UUID {plan['blueprint_uuid']} · "
-                         f"game {plan['game_version']} · choices {choices} · qualities {qualities}")
+                         f"game {patch}{older}" + (f" · chose {', '.join(uses)}" if uses else "")
+                         + (f" · quality {', '.join(qualities)}" if qualities else ""))
         return _pages(lines)
+
+    async def _current_patch(self) -> str | None:
+        try:
+            state = await self.bot.db.get_blueprint_snapshot_state()
+        except Exception:
+            logger.warning("Couldn't read the blueprint snapshot's patch for the shopping list", exc_info=True)
+            return None
+        return game_patch(state.game_version) if state is not None else None
 
     async def refresh(self, thread: discord.Thread, user_id: int, guild_id: int) -> None:
         pages = await self.render(user_id, guild_id)
@@ -138,10 +198,26 @@ class ShoppingService:
         if interaction.guild_id is None:
             await interaction.followup.send("Blueprint lists are available in a server.", ephemeral=True)
             return False
+        # A second click on the same plan while the first is still saving is a double click, not a
+        # second plan (audit BP-6): each click is its own interaction, so request_id never caught it.
+        # Checked and claimed with no await between, so the second click always sees the first.
+        key = (interaction.user.id, interaction.guild_id, json.dumps(plan, sort_keys=True, default=str))
+        if key in self._adding:
+            await interaction.followup.send("Already adding that plan - it'll show in your list in a moment.",
+                                            ephemeral=True)
+            return False
+        self._adding.add(key)
+        try:
+            return await self._add(interaction, plan)
+        finally:
+            self._adding.discard(key)
+
+    async def _add(self, interaction: discord.Interaction, plan: dict) -> bool:
         thread = await self._thread(interaction)
         if thread is None:
-            await interaction.followup.send("I couldn't create your private blueprint thread. Check thread permissions.",
-                                            ephemeral=True)
+            await interaction.followup.send(
+                "I couldn't create your private blueprint thread. Check thread permissions."
+                if _thread_home(interaction.channel) is not None else NO_THREAD_HERE, ephemeral=True)
             return False
         try:
             await self.bot.db.add_blueprint_plan(interaction.user.id, interaction.guild_id, str(interaction.id), plan)
@@ -167,7 +243,10 @@ class ShoppingService:
     async def open(self, interaction: discord.Interaction) -> None:
         thread = await self._thread(interaction)
         if thread is None or interaction.guild_id is None:
-            await interaction.followup.send("I couldn't open a private blueprint thread from this channel.", ephemeral=True)
+            await interaction.followup.send(
+                "I couldn't open a private blueprint thread from this channel."
+                if interaction.guild_id is None or _thread_home(interaction.channel) is not None else NO_THREAD_HERE,
+                ephemeral=True)
             return
         try:
             await self.refresh(thread, interaction.user.id, interaction.guild_id)
@@ -190,7 +269,13 @@ class ShoppingView(BotView):
 
     async def _owner(self, interaction: discord.Interaction) -> dict | None:
         row = await self.service.bot.db.get_blueprint_thread_owner(getattr(interaction.channel, "id", 0))
-        if row is None or row["user_id"] != interaction.user.id:
+        if row is None:
+            # No list is saved for this thread any more: its owner's list moved to a new thread when this one
+            # couldn't be reopened (audit BP-9), so this isn't "another player's" list.
+            await interaction.response.send_message(
+                "This list is no longer in use. Use /blueprint-list to open the current one.", ephemeral=True)
+            return None
+        if row["user_id"] != interaction.user.id:
             await interaction.response.send_message("This shopping list belongs to another player.", ephemeral=True)
             return None
         return row
@@ -266,10 +351,10 @@ class QualitySelect(discord.ui.Select):
 
 class ChoiceSelect(discord.ui.Select):
     def __init__(self, parent: "_CraftConfig", group) -> None:
-        names = []
-        for path in group.children:
-            item = next((item for item in parent.recipe.inputs if item.path == path), None)
-            names.append(item.name if item else path)
+        # A choice between sub-assemblies names them as the "Choose N of" text does, never by path (audit BP-12).
+        names = [next((item.name for item in parent.recipe.inputs if item.path == path),
+                      next((child.name for child in parent.recipe.groups if child.path == path), path))
+                 for path in group.children]
         options = [discord.SelectOption(label=name[:100], value=str(index)) for index, name in enumerate(names[:25])]
         super().__init__(placeholder=f"{group.name}: choose {group.required}"[:150], options=options,
                          min_values=group.required, max_values=group.required)
@@ -327,12 +412,15 @@ class _CraftConfig:
         raise NotImplementedError
 
     async def add_plan(self, interaction: discord.Interaction) -> None:
+        # Deferred first, even when the plan isn't complete (audit BP-10): a click deferred this way
+        # (no "thinking...") can still edit this reply, so the timeout's grey-out always has a token
+        # under 10 minutes old. A click answered with a new message can't, yet resets the timeout.
+        await interaction.response.defer(ephemeral=True)
         try:
             plan = self.recipe.plan(self.count, self.choices, self.qualities)
         except ValueError as exc:
-            await interaction.response.send_message(str(exc), ephemeral=True)
+            await interaction.followup.send(str(exc), ephemeral=True)
             return
-        await interaction.response.defer(ephemeral=True)
         await self.cog.shopping.add(interaction, plan)
 
     async def turn_page(self, interaction: discord.Interaction, delta: int) -> None:
@@ -409,7 +497,7 @@ class CraftConfigView(_CraftConfig, BotView):
             self.next_button.disabled = self.page >= self.page_count - 1
 
     def text(self) -> str:
-        return "\n\n".join(self.blocks())[:1900]
+        return fit_blocks(self.blocks())
 
     async def update(self, interaction: discord.Interaction) -> None:
         self._show_page()

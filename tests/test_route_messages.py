@@ -189,3 +189,49 @@ def test_mixed_routes_names_every_saved_filter_when_nothing_fits(monkeypatch):
     text = asyncio.run(run())
     assert "with auto-load at both ends" in text, "auto-load is checked at both terminals, not just the origin"
     assert "Your saved capital-ship access and auto-load-only settings are on" in text
+
+
+# -- UX-4: no option that doesn't exist, and a saved budget named ------------------------------
+
+def test_saved_capital_ship_access_is_never_offered_as_an_option_on_the_command():
+    alone = saved_filters_hint(saved_filter_labels(capital_ship_access=True))
+    assert alone == " Your saved capital-ship access setting is on - change it with /set-trading-preferences."
+    mixed = saved_filters_hint(saved_filter_labels(capital_ship_access=True, auto_load_only=True))
+    assert "set the auto-load-only option on this command to override" in mixed
+    assert "set those options" not in mixed
+
+
+def test_a_saved_budget_is_named():
+    hint = saved_filters_hint(saved_filter_labels(budget=250_000.0, auto_load_only=True))
+    assert "Your saved budget of 250,000 aUEC and auto-load-only settings are on" in hint
+    assert "set those options on this command to override them" in hint
+    assert saved_filter_labels(budget=None) == []
+
+
+def test_mixed_routes_names_a_saved_budget_and_only_the_options_it_has(monkeypatch):
+    from types import SimpleNamespace as NS
+
+    from bot.cogs import prices as prices_module
+    from bot.uex.trading_preferences import DEFAULT_TRADING_PREFERENCES
+
+    monkeypatch.setattr(prices_module, "build_mixed_routes", lambda *args, **kwargs: [])
+
+    async def run(**options):
+        prefs = dict(DEFAULT_TRADING_PREFERENCES, capital_ship_access=True, budget=40_000.0)
+        db = NS(get_default_ship=AsyncMock(return_value="Ship"), get_trading_preferences=AsyncMock(return_value=prefs),
+                get_mixed_route_market_rows=AsyncMock(return_value=[]))
+        uex = NS(get_vehicles=AsyncMock(return_value=[dict(name="Ship", scu=100, pad_type="M")]),
+                 get_space_stations=AsyncMock(return_value=[]))
+        cog = Prices.__new__(Prices)
+        cog.bot = NS(db=db, uex=uex)
+        interaction = _Interaction()
+        await cog.mixed_routes.callback(cog, interaction, **options)
+        return interaction.texts()
+
+    saved = asyncio.run(run())
+    assert "within your saved budget" in saved
+    assert "Your saved budget of 40,000 aUEC and capital-ship access settings are on" in saved
+    assert "set the budget option on this command to override" in saved
+    passed = asyncio.run(run(budget=10_000))
+    assert "within that budget" in passed and "budget of" not in passed, "a budget passed here isn't the saved one"
+    assert "Your saved capital-ship access setting is on - change it with /set-trading-preferences." in passed

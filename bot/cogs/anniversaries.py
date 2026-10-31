@@ -9,10 +9,11 @@ restart or an outage neither repeats one nor loses it. The DM's "Stop anniversar
 button works for good, through restarts (a DynamicItem).
 
 Each anniversary also gives the member that year's veteran role ("1-Year Veteran", ...),
-replacing the last; the roles are created by name when first needed (Manage Roles, which voice
-ranks needs too). Every VETERAN_CHECK_HOURS - and at startup - everyone's veteran role is put
-right quietly: that gave the members already past an anniversary theirs when this shipped, and
-fixes a role change that failed. A member who stopped the messages still gets the role. The DM
+replacing the last; the roles are created when first needed, then remembered by id
+(bot/managed_roles.py; Manage Roles, which voice ranks needs too). The DM and post name the role
+only when the member really has it. Every VETERAN_CHECK_HOURS - and at startup - everyone's
+veteran role is put right quietly: that gave the members already past an anniversary theirs when
+this shipped, and fixes a role change that failed. A member who stopped the messages still gets the role. The DM
 ends with the server's next Discord event (next_event_line), when there is one.
 """
 from __future__ import annotations
@@ -24,7 +25,9 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
-from bot.delivery import Delivery, owner_only_mentions, send_dm, send_to_channel
+from bot.delivery import Delivery, home_channel, owner_only_mentions, send_dm, send_to_channel
+from bot.discord_ui import BotDynamicItem
+from bot.managed_roles import ManagedRoles, harmless
 from bot.uex.anniversaries import (
     COMMUNITY_NAME, Event, due_anniversary, dm_text, event_line, is_veteran_role, post_text, upcoming,
     veteran_role_name, years_completed,
@@ -45,7 +48,7 @@ def _name(member: discord.abc.User) -> str:
     return discord.utils.escape_mentions(discord.utils.escape_markdown(member.display_name))
 
 
-class StopAnniversariesButton(discord.ui.DynamicItem[discord.ui.Button], template=STOP_TEMPLATE):
+class StopAnniversariesButton(BotDynamicItem, discord.ui.DynamicItem[discord.ui.Button], template=STOP_TEMPLATE):
     """Under every anniversary DM: no more DMs or posts for this member."""
 
     def __init__(self, guild_id: int) -> None:
@@ -58,14 +61,15 @@ class StopAnniversariesButton(discord.ui.DynamicItem[discord.ui.Button], templat
         return cls(int(match["guild"]))
 
     async def callback(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)  # first: the write can wait on a busy database
         await interaction.client.db.set_anniversary_opt_out(self.guild_id, interaction.user.id, True)
         view = discord.ui.View(timeout=None)
         view.add_item(ResumeAnniversariesButton(self.guild_id))
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"You won't receive anniversary messages from {COMMUNITY_NAME} again.", view=view, ephemeral=True)
 
 
-class ResumeAnniversariesButton(discord.ui.DynamicItem[discord.ui.Button], template=RESUME_TEMPLATE):
+class ResumeAnniversariesButton(BotDynamicItem, discord.ui.DynamicItem[discord.ui.Button], template=RESUME_TEMPLATE):
     """Undoes a stop."""
 
     def __init__(self, guild_id: int) -> None:
@@ -78,8 +82,9 @@ class ResumeAnniversariesButton(discord.ui.DynamicItem[discord.ui.Button], templ
         return cls(int(match["guild"]))
 
     async def callback(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
         await interaction.client.db.set_anniversary_opt_out(self.guild_id, interaction.user.id, False)
-        await interaction.response.send_message("Anniversary messages are back on.", ephemeral=True)
+        await interaction.followup.send("Anniversary messages are back on.", ephemeral=True)
 
 
 async def next_event_line(guild: discord.Guild, now: datetime) -> str | None:
@@ -103,6 +108,7 @@ class Anniversaries(commands.Cog):
     def __init__(self, bot: commands.Bot, *, start_loop: bool = True) -> None:
         self.bot = bot
         self._roles_warned = False
+        self.roles = ManagedRoles(bot, reason="Veteran role")
         if start_loop:
             self.check_anniversaries.start()
             self.sync_veteran_roles.start()
@@ -127,9 +133,8 @@ class Anniversaries(commands.Cog):
 
     async def send_due(self, now: datetime) -> int:
         """Send every anniversary due at `now`; how many members were handled."""
-        channel = self.bot.get_channel(ANNIVERSARY_CHANNEL_ID)
+        channel = home_channel(self.bot, ANNIVERSARY_CHANNEL_ID, feature="anniversaries")
         if channel is None:
-            logger.warning("Anniversary channel %s not found; nothing sent", ANNIVERSARY_CHANNEL_ID)
             return 0
         guild = channel.guild
         opted_out = await self.bot.db.get_anniversary_opt_outs(guild.id)
@@ -155,45 +160,56 @@ class Anniversaries(commands.Cog):
         guild_id = guild.id
         status = await self.bot.db.claim_anniversary(guild_id, member.id, moment.year, years)
         label = f"{years}-year anniversary"
+        veteran = False
         if status["dm"] == "pending" or status["post"] == "pending":
-            await self.set_veteran_role(guild, member, years)
+            veteran = await self.set_veteran_role(guild, member, years)
         if status["dm"] == "pending":
-            outcome = await send_dm(self.bot, member.id, dm_text(_name(member), years, member.joined_at, event),
+            outcome = await send_dm(self.bot, member.id,
+                                    dm_text(_name(member), years, member.joined_at, event, veteran=veteran),
                                     label=label, view=dm_view(guild_id))
             if outcome in _STATUS:
                 await self.bot.db.set_anniversary_status(guild_id, member.id, moment.year, part="dm",
                                                          status=_STATUS[outcome])
         if status["post"] == "pending":
-            outcome = await send_to_channel(self.bot, ANNIVERSARY_CHANNEL_ID, post_text(member.mention, years, member.joined_at),
+            outcome = await send_to_channel(self.bot, ANNIVERSARY_CHANNEL_ID,
+                                            post_text(member.mention, years, member.joined_at, veteran=veteran),
                                             label=label, allowed_mentions=owner_only_mentions(member.id))
             if outcome in _STATUS:
                 await self.bot.db.set_anniversary_status(guild_id, member.id, moment.year, part="post",
                                                          status=_STATUS[outcome])
 
-    async def set_veteran_role(self, guild: discord.Guild, member: discord.Member, years: int) -> None:
+    async def set_veteran_role(self, guild: discord.Guild, member: discord.Member, years: int) -> bool:
         """Give `member` the veteran role for `years` and take away any other; nothing before a
-        first anniversary. A failure is logged, never raised: the message still goes out, and
-        the next check tries again."""
+        first anniversary. True when they hold it now. A failure is logged, never raised: the
+        message still goes out (without naming the role), and the next check tries again."""
         if years < 1:
-            return
-        name = veteran_role_name(years)
+            return False
         try:
-            role = discord.utils.get(guild.roles, name=name) or await guild.create_role(name=name, reason="Veteran role")
-            stale = [r for r in member.roles if is_veteran_role(r.name) and r != role]
+            role = await self.roles.get(guild, veteran_role_name(years))
+            # Last year's role: one the bot remembers, or (made before roles were remembered)
+            # one by the veteran name that grants nothing.
+            veteran_ids = {role_id for name, role_id in (await self.roles.ids(guild)).items() if is_veteran_role(name)}
+            stale = [r for r in member.roles if r.id != role.id
+                     and (r.id in veteran_ids or (is_veteran_role(r.name) and harmless(r)))]
             if stale:
                 await member.remove_roles(*stale, reason="Veteran role")
             if role not in member.roles:
                 await member.add_roles(role, reason="Veteran role")
+            return True
         except discord.HTTPException as exc:
             if not self._roles_warned:
                 logger.warning("Couldn't set veteran roles (needs Manage Roles): %s", exc)
                 self._roles_warned = True
+            return False
+        except Exception:  # the remembered ids couldn't be read (a busy database)
+            logger.exception("Couldn't set the veteran role for member %s", member.id)
+            return False
 
     @tasks.loop(hours=VETERAN_CHECK_HOURS)
     async def sync_veteran_roles(self) -> None:
         """Everyone's veteran role, put right quietly (no message)."""
         try:
-            channel = self.bot.get_channel(ANNIVERSARY_CHANNEL_ID)
+            channel = home_channel(self.bot, ANNIVERSARY_CHANNEL_ID, feature="anniversaries")
             if channel is None:
                 return
             now = datetime.now(timezone.utc)
@@ -209,6 +225,7 @@ class Anniversaries(commands.Cog):
 
     @app_commands.command(name="anniversary-preview",
                           description="Owner only: send yourself the anniversary DM and see the channel post.")
+    @app_commands.default_permissions(administrator=True)  # hidden from members (audit COMM-6)
     async def anniversary_preview(self, interaction: discord.Interaction) -> None:
         if not await self.bot.is_owner(interaction.user):
             await interaction.response.send_message("This command is for the bot's owner.", ephemeral=True)

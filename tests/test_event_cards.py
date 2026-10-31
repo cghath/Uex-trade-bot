@@ -8,7 +8,7 @@ Guarantees under test:
      without roles; Voice and Interested links; no buttons once it's over; a long roster is cut
      with a count, not mid-line.
   3. Posting - one card per occurrence pinging Org Events and nobody else, regulars already on
-     it, never posted twice (not even after it closed); a redraw keeps the Org Events mention; a
+     it (not one who left the server), never posted twice (not even after it closed); a redraw keeps the Org Events mention; a
      post that failed is made at the next sync; a new time pings the roster once, and a late op
      pushed back keeps its card and roster; a past occurrence of a repeating event closes and the
      next one gets its own card; an op under way is started, whatever its start time says; a
@@ -17,11 +17,15 @@ Guarantees under test:
      DM; ships from the menu or typed; every time.
   5. Organizers - only the creator, Event Managers or admins can Start/End or set roles; Start
      pings the roster once and starts the Discord event; /event-roles moves people off a role
-     that's gone and up from a wait list that got more room; reminders go out once.
+     that's gone and up from a wait list that got more room; reminders go out once, a refused one
+     the next minute.
+  6. Failures - a card button that raises still answers the member; long names and typed ships
+     never make a message Discord refuses.
 """
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from datetime import datetime, timezone
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock
@@ -30,11 +34,11 @@ import discord
 from cryptography.fernet import Fernet
 
 from bot.cogs.event_cards import (
-    BUTTON_TEMPLATE, EVENT_MANAGER_ROLE_ID, EVENTS_CHANNEL_ID, MENU_TEMPLATE, NOT_MANAGER, OTHER_SHIP, CardButton,
-    EventCards, RoleMenu, build_card,
+    BUTTON_TEMPLATE, EVENT_MANAGER_ROLE_ID, EVENTS_CHANNEL_ID, MENU_TEMPLATE, NOT_MANAGER, NOT_SURE, OTHER_SHIP,
+    CardButton, EventCards, RoleMenu, build_card,
 )
 from bot.db.database import Database
-from bot.discord_ui import LAYOUT_TEXT_LIMIT
+from bot.discord_ui import LAYOUT_TEXT_LIMIT, UNEXPECTED_ERROR_MESSAGE
 from bot.uex.events import (
     ENDED, GOING, MAYBE, OPEN, PING_CHARS, PING_USERS, ROSTER_BUDGET, STARTED, WAITING, EventRole, Signup, details_text,
     next_in_line, parse_roles, ping_messages, placed_status, repeats_text, roster_text, ship_matches,
@@ -75,6 +79,10 @@ def test_repeats_in_words_without_a_weekday():
     assert repeats_text(WEEKLY) == "Every week"
     assert repeats_text({"frequency": 2, "interval": 2}) == "Every other week"
     assert repeats_text({"frequency": 3, "interval": 1}) == "Every day"
+    # Discord's "every weekday" is a daily rule on five (UTC) days: not every day (audit EVT-14)
+    assert repeats_text({"frequency": 3, "interval": 1, "by_weekday": [0, 1, 2, 3, 4]}) == "5 days a week"
+    assert repeats_text({"frequency": 3, "interval": 1, "by_weekday": [5, 6]}) == "2 days a week"
+    assert repeats_text({"frequency": 3, "interval": 1, "by_weekday": list(range(7))}) == "Every day"
     assert repeats_text({"frequency": 1, "interval": 3}) == "Every 3 months"
     assert repeats_text(None) is None
 
@@ -725,6 +733,144 @@ def test_a_time_change_inside_the_hour_is_its_reminder(tmp_path, monkeypatch):
         assert len(texts) == 1 and texts[0].startswith("**Time changed:**")    # one ping, not two
     _run(tmp_path, body)
 
+
+
+def test_a_regular_who_left_the_server_is_not_put_on_new_cards(tmp_path):
+    async def body(db):
+        # Audit EVT-8: a regular who'd left kept an Escort spot every week, the member next in line waiting.
+        await db.set_event_roles(42, [("Escort", 1)])
+        await db.set_event_regular(42, 1, "Escort", "Arrow")         # has left Star Tech Dynamics
+        await db.set_event_regular(42, 2, "Escort", None)
+        world = World(db, [_event()])
+        world.guild.chunked, world.guild.get_member = True, {2: NS(id=2)}.get
+        card = await _posted(world)
+        assert [(s["user_id"], s["status"]) for s in await db.get_event_signups(card["card_id"])] == [(2, GOING)]
+        assert [r["user_id"] for r in await db.get_event_regulars(42)] == [2]   # off every card from now on
+        # Until discord.py holds the whole member list, nobody is taken for gone
+        other = world.events[43] = _event(43, name="Contested Tuesdays")
+        await db.set_event_regular(43, 3, None, None)
+        world.guild.chunked = False
+        card = await _posted(world, other)
+        assert [s["user_id"] for s in await db.get_event_signups(card["card_id"])] == [3]
+    _run(tmp_path, body)
+
+
+def test_a_reminder_that_could_not_be_posted_is_tried_the_next_minute(tmp_path, monkeypatch):
+    async def body(db):
+        # Audit EVT-9: the reminder was claimed, then lost when Discord refused the post.
+        world = World(db, [_event()])
+        card = await _posted(world)
+        await db.save_event_signup(card["card_id"], 1, status=GOING, role=None, queued=1)
+        world.cog._ticks = 1
+        monkeypatch.setattr("bot.cogs.event_cards.time.time", lambda: START - 1800)
+        world.channel.fail_sends = 1                                   # Discord has a bad minute
+        await world.cog.tick.coro(world.cog)
+        assert len(world.channel.sent) == 1                            # only the card itself
+        await world.cog.tick.coro(world.cog)
+        await world.cog.tick.coro(world.cog)
+        assert [c for c, _ in world.channel.sent if c] == [
+            f"**Mining Mondays** starts <t:{START}:R>, at <t:{START}:t>, in <#55>.\n<@1>"]   # once, a minute late
+    _run(tmp_path, body)
+
+
+def test_a_time_change_ping_that_failed_inside_the_hour_leaves_the_reminder_to_go(tmp_path, monkeypatch):
+    async def body(db):
+        event = _event()
+        world = World(db, [event])
+        monkeypatch.setattr("bot.cogs.event_cards.time.time", lambda: START - 7200)
+        card = await _posted(world)
+        await db.save_event_signup(card["card_id"], 1, status=GOING, role=None, queued=1)
+        event.start_time = datetime.fromtimestamp(START - 5400, timezone.utc)   # moved to 30 minutes from now
+        world.channel.fail_sends = 1                                   # the time-change ping is refused
+        await world.cog.sync(event)
+        world.cog._ticks = 1
+        await world.cog.tick.coro(world.cog)
+        texts = [c for c, _ in world.channel.sent if c]
+        assert texts == [f"**Mining Mondays** starts <t:{START - 5400}:R>, at <t:{START - 5400}:t>, in <#55>.\n<@1>"]
+    _run(tmp_path, body)
+
+
+def test_a_failed_reminder_never_undoes_a_time_change_ping_sent_meanwhile(tmp_path, monkeypatch):
+    async def body(db):
+        # The minute's reminder is slow to be refused; meanwhile the event moves inside the hour and its
+        # time-change ping (the new time's reminder) goes out. Releasing the old claim meant a second ping.
+        event = _event()
+        world = World(db, [event])
+        card = await _posted(world)
+        await db.save_event_signup(card["card_id"], 1, status=GOING, role=None, queued=1)
+        world.cog._ticks = 1
+        monkeypatch.setattr("bot.cogs.event_cards.time.time", lambda: START - 1800)
+        ping_roster = world.cog.ping_roster
+
+        async def slow_refusal(card, text, **kwargs):
+            if event.start_time.timestamp() == START:                 # the tick's reminder, still pending
+                event.start_time = datetime.fromtimestamp(START - 600, timezone.utc)
+                await world.cog.sync(event)
+                return False                                          # ...and then Discord refuses it
+            return await ping_roster(card, text, **kwargs)
+        monkeypatch.setattr(world.cog, "ping_roster", slow_refusal)
+        await world.cog.tick.coro(world.cog)
+        await world.cog.tick.coro(world.cog)
+        texts = [c for c, _ in world.channel.sent if c]
+        assert len(texts) == 1 and texts[0].startswith("**Time changed:**")   # one ping, not a second reminder
+        assert (await db.get_event_card(card["card_id"]))["reminded"] == 1
+    _run(tmp_path, body)
+
+
+def test_event_roles_only_says_the_card_was_updated_when_there_is_one(tmp_path):
+    async def body(db):
+        world = World(db, [_event()])                                  # no card for it (yet)
+        before = world.interaction(9)
+        await EventCards.event_roles.callback(world.cog, before, "42", "Miner 6")
+        assert _reply(before).endswith("Used every time until you change them.")       # audit EVT-11
+        await _posted(world)
+        after = world.interaction(9)
+        await EventCards.event_roles.callback(world.cog, after, "42", "Miner 6")
+        assert _reply(after).endswith(f"The card in <#{EVENTS_CHANNEL_ID}> is updated.")
+    _run(tmp_path, body)
+
+
+def test_a_long_voice_channel_name_still_makes_the_start_ping(tmp_path):
+    async def body(db):
+        world = World(db, [_event()])
+        world.voice.name = "🔊" + "V" * 99                              # Discord allows 100 characters
+        card = await _posted(world)
+        await world.cog.on_join(world.interaction(1), card["card_id"])
+        assert await world.cog.mark_started(card)
+        label = world.channel.sent[-1][1]["view"].children[0].label
+        assert len(label) == 80 and label.startswith("Join 🔊VVV")      # a button label holds 80 (audit EVT-12)
+    _run(tmp_path, body)
+
+
+def test_a_ship_typed_as_a_menu_value_while_uex_is_down_never_breaks_the_menu(tmp_path):
+    async def body(db):
+        # Audit EVT-13: kept as typed, "~other" repeated the menu's own value, and Discord refused the reply.
+        world = World(db, [_event()])
+        cid = (await _posted(world))["card_id"]
+        await world.cog.on_join(world.interaction(1), cid)
+        world.bot.uex.get_vehicles.side_effect = RuntimeError("UEX is down")
+        for typed in ("~other", "~none", "Polaris"):
+            await world.cog.typed_ship(world.interaction(1), cid, typed)
+        join = world.interaction(1)
+        await world.cog.on_join(join, cid)
+        menu = next(i for i in join.followup.send.await_args.kwargs["view"].children
+                    if getattr(i, "custom_id", "") == f"ev:ship:{cid}")
+        assert [o.value for o in menu.item.options] == ["Polaris", NOT_SURE, OTHER_SHIP]
+    _run(tmp_path, body)
+
+
+def test_a_card_button_that_fails_tells_the_member_instead_of_thinking_forever(tmp_path):
+    async def body(db):
+        # Audit UI-1: discord.py only logs what a DynamicItem raises; the member stayed on "thinking...".
+        world = World(db, [_event()])
+        cid = (await _posted(world))["card_id"]
+        for item, handler in ((CardButton(cid, "join"), "on_join"), (RoleMenu(cid, kind="ship"), "on_ship")):
+            click = world.interaction(1)
+            click.response.is_done = lambda: True                      # deferred: "thinking..."
+            setattr(world.cog, handler, AsyncMock(side_effect=sqlite3.OperationalError("database is locked")))
+            await item.callback(click)
+            assert _reply(click) == UNEXPECTED_ERROR_MESSAGE
+    _run(tmp_path, body)
 
 
 def _raise(exc):

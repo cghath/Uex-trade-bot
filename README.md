@@ -41,7 +41,10 @@ This bot is designed to be added to one server and used by everyone in it, each 
 UEX account. `/link-uex-account` opens a private Discord form (a modal) where you paste your UEX
 secret key — modals aren't posted in the channel and aren't visible to other members, unlike
 regular slash command options. Once linked, your key is encrypted at rest (see "Security notes"
-below) and used only when *you* run a command like `/uex-trades`. Everything else — `/price`,
+below) and used only for your own UEX data: when *you* run a command like `/uex-trades`, by the
+negotiation alerts and automatic inventory posts you turn on, and by this server's `/leaderboard`,
+which anyone in it can run and which shows your verified UEX sell revenue (`/unlink-uex-account`
+takes you off). Everything else — `/price`,
 `/best-route`, alerts, the local trade ledger — already worked per-user or used public data, so
 no changes were needed there.
 
@@ -112,8 +115,11 @@ background posting/sale updates are delivered only by private DM.
 2. Bot tab → Reset Token → copy it. This is `DISCORD_BOT_TOKEN`.
 3. Under **Bot** → Privileged Gateway Intents, switch on **Server Members** and leave Presence and
    Message Content off. Server Members lets the bot see who's a member and when they joined, for
-   server anniversaries, veteran roles and the welcome DMs; without it Discord refuses the bot's connection at startup. The bot only
-   uses slash commands, buttons and forms, so it never needs to read messages.
+   server anniversaries, veteran roles and the welcome DMs; without it Discord refuses the bot's connection at startup. The bot
+   never reads what anyone writes (Message Content stays off). It does note who posted and when: in
+   any channel, for welcome-back DMs (it reads the last 30 days of channel history once to start), and
+   in #👋welcome, to answer a member's first post. Two posts ping a role on purpose: the Mentor ping
+   in #👋welcome and an event card's @Org Events mention.
 4. Under **OAuth2 → URL Generator**, check the `bot` and `applications.commands` scopes, then these
    permissions:
    - `View Channels`, `Send Messages`, `Embed Links`, `Read Message History`;

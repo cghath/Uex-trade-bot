@@ -132,6 +132,11 @@ class Blueprints(commands.Cog):
         self._recipe_lock = asyncio.Lock()
         self._recipe_retry_after = 0.0
         self._index: BlueprintIndex | None = None
+        # Bumped whenever a sync clears the index, so a read that began before it never stores the old
+        # index afterwards (audit BP-4).
+        self._index_generation = 0
+        # The last shrunken crawl each sync refused, as (game version, count) - see _plausible.
+        self._refused_shrink: dict[str, tuple[str, int]] = {}
         self._detail_cache: dict[tuple[str, str], tuple[float, dict]] = {}
         self._quality_cache: dict[str, tuple[float, tuple[int, ...]]] = {}
         self.shopping = ShoppingService(bot)
@@ -186,56 +191,92 @@ class Blueprints(commands.Cog):
             # between them, or a patch landed mid-crawl) the rows can't be trusted to be the version we'd
             # label them with - saving them would mark old data as the new patch, and the snapshot would then
             # read as "current" for a week. Reject and retry on the next cycle.
-            row_versions = {row.get("game_version") for row in rows if isinstance(row, dict)}
+            # Normalised as get_game_version and sync_recipes do (audit BP-5), so padding never rejects every cycle.
+            row_versions = {str(row.get("game_version") or "").strip() for row in rows if isinstance(row, dict)}
             if row_versions != {remote_version}:
                 raise SnapshotRejected(
                     f"rows report game version(s) {sorted(str(v) for v in row_versions)} but the API served "
                     f"{remote_version!r} a moment earlier - keeping the previous snapshot, will retry"
                 )
             missions = parse_missions(rows)
-            if not sync_result_is_plausible(len(missions), state.mission_count if state else None):
+            if not self._plausible("contracts", remote_version, len(missions), state.mission_count if state else None):
                 raise SnapshotRejected(
                     f"{len(missions)} usable missions from {len(rows)} rows "
                     f"(previous snapshot: {state.mission_count if state else 'none'})"
                 )
             counts = await self.bot.db.replace_blueprint_snapshot(missions, game_version=remote_version, synced_at=now)
             self._index = None
+            self._index_generation += 1
             logger.info("Blueprint snapshot synced: %d missions, %d blueprints (game %s)", *counts, remote_version)
             return "synced"
 
-    async def sync_recipes(self, *, force: bool = False) -> Literal["synced", "current"]:
+    def _plausible(self, kind: str, version: str, count: int, previous: int | None) -> bool:
+        """sync_result_is_plausible, except that a shrink the crawl confirms on two cycles in a row (same
+        game version, same count) is accepted (audit BP-2). A refused sync never moves the stored count
+        it's compared with, so a patch that really removed over half the blueprints was refused on every
+        cycle for good. A broken crawl rarely comes back exactly the same twice."""
+        if sync_result_is_plausible(count, previous):
+            self._refused_shrink.pop(kind, None)
+            return True
+        if self._refused_shrink.get(kind) == (version, count):
+            logger.warning("Blueprint %s: accepting %d (previously %s), the same count twice running for game %s",
+                           kind, count, previous, version)
+            self._refused_shrink.pop(kind, None)
+            return True
+        self._refused_shrink[kind] = (version, count)
+        return False
+
+    async def sync_recipes(self, *, force: bool = False, on_demand: bool = False) -> Literal["synced", "current"]:
         """Bring the stored recipes (what each blueprint takes, for material:) up to date, as
         sync_snapshot does the contracts: only when the game version changed or they're a week old,
         never with rows of another version, never with a count far below the last one. Raises
-        WikiApiError or SnapshotRejected, leaving the previous recipes untouched."""
+        WikiApiError or SnapshotRejected, leaving the previous recipes untouched.
+
+        `on_demand` is a player's material: with no recipes stored, decided under the lock (audit BP-3):
+        a player who waited behind another's crawl uses the recipes it stored or, if it just failed, is
+        refused for RECIPE_RETRY_SECONDS rather than starting a crawl of their own."""
         async with self._recipe_lock:
             state = await self.bot.db.get_blueprint_recipe_state()
-            remote_version = await self._client.get_game_version()
-            now = datetime.now(timezone.utc).replace(tzinfo=None)
-            if not force and snapshot_is_current(
-                state[0] if state else None, state[1] if state else None, remote_version, now,
-            ):
-                return "current"
-            rows = await self._client.get_blueprints()
-            row_versions = {str(row.get("game_version") or "").strip() for row in rows if isinstance(row, dict)}
-            if row_versions != {remote_version}:
-                raise SnapshotRejected(
-                    f"recipe rows report game version(s) {sorted(str(v) for v in row_versions)} but the API "
-                    f"served {remote_version!r} a moment earlier - keeping the previous recipes, will retry"
-                )
-            recipes = parse_blueprint_rows(rows)
-            if not sync_result_is_plausible(len(recipes), state[2] if state else None):
-                raise SnapshotRejected(
-                    f"{len(recipes)} usable blueprints from {len(rows)} rows "
-                    f"(previous recipes: {state[2] if state else 'none'})"
-                )
-            count = await self.bot.db.replace_blueprint_recipes(recipes, game_version=remote_version, synced_at=now)
-            logger.info("Blueprint recipes synced: %d blueprints (game %s)", count, remote_version)
-            return "synced"
+            if on_demand:
+                if state is not None:
+                    return "current"
+                if time.monotonic() < self._recipe_retry_after:
+                    raise SnapshotRejected("a recipe sync failed moments ago; waiting before trying again")
+            try:
+                return await self._sync_recipes_locked(state, force=force)
+            except (WikiApiError, SnapshotRejected):
+                if on_demand:
+                    self._recipe_retry_after = time.monotonic() + RECIPE_RETRY_SECONDS
+                raise
+
+    async def _sync_recipes_locked(self, state, *, force: bool) -> Literal["synced", "current"]:
+        remote_version = await self._client.get_game_version()
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        if not force and snapshot_is_current(
+            state[0] if state else None, state[1] if state else None, remote_version, now,
+        ):
+            return "current"
+        rows = await self._client.get_blueprints()
+        row_versions = {str(row.get("game_version") or "").strip() for row in rows if isinstance(row, dict)}
+        if row_versions != {remote_version}:
+            raise SnapshotRejected(
+                f"recipe rows report game version(s) {sorted(str(v) for v in row_versions)} but the API "
+                f"served {remote_version!r} a moment earlier - keeping the previous recipes, will retry"
+            )
+        recipes = parse_blueprint_rows(rows)
+        if not self._plausible("recipes", remote_version, len(recipes), state[2] if state else None):
+            raise SnapshotRejected(
+                f"{len(recipes)} usable blueprints from {len(rows)} rows "
+                f"(previous recipes: {state[2] if state else 'none'})"
+            )
+        count = await self.bot.db.replace_blueprint_recipes(recipes, game_version=remote_version, synced_at=now)
+        logger.info("Blueprint recipes synced: %d blueprints (game %s)", count, remote_version)
+        return "synced"
 
     async def get_index(self, *, sync_if_missing: bool) -> BlueprintIndex | None:
         if self._index is not None:
             return self._index
+        generation = self._index_generation
         refs = await self.bot.db.get_blueprint_refs()
         if not refs and sync_if_missing:
             try:
@@ -243,11 +284,14 @@ class Blueprints(commands.Cog):
             except (WikiApiError, SnapshotRejected) as exc:
                 logger.warning("On-demand blueprint sync failed: %s", exc)
                 return None
+            generation = self._index_generation
             refs = await self.bot.db.get_blueprint_refs()
         if not refs:
             return None
-        self._index = BlueprintIndex(refs)
-        return self._index
+        index = BlueprintIndex(refs)
+        if generation == self._index_generation:  # no sync cleared the index while the refs were read
+            self._index = index
+        return index
 
     # -- drop chance (per blueprint, fetched lazily) ---------------------------------------------
 
@@ -439,10 +483,9 @@ class Blueprints(commands.Cog):
             if time.monotonic() < self._recipe_retry_after:
                 return unavailable
             try:
-                await self.sync_recipes()
+                await self.sync_recipes(on_demand=True)
             except (WikiApiError, SnapshotRejected) as exc:
                 logger.warning("On-demand blueprint recipe sync failed: %s", exc)
-                self._recipe_retry_after = time.monotonic() + RECIPE_RETRY_SECONDS
                 return unavailable
         names = [name for name, _uses in await self.bot.db.get_material_names()]
         name = next((n for n in names if n.lower() == query.lower()), None)
@@ -468,8 +511,15 @@ class Blueprints(commands.Cog):
         await self.deliver(send, await self.default_blueprint(use, craft_quantity))
 
     async def default_blueprint(self, use: MaterialUse, craft_quantity: int = 1) -> SearchResult:
-        state = await self.bot.db.get_blueprint_recipe_state()
-        detail = await self._detail_for(use.uuid, state[0]) if state is not None else None
+        # The contracts' game version first, as search() uses, then the recipes' (audit BP-1): the two sync
+        # apart, and while the recipes lag a patch the detail matches only the contracts' version.
+        contracts = await self.bot.db.get_blueprint_snapshot_state()
+        recipes = await self.bot.db.get_blueprint_recipe_state()
+        detail = None
+        for version in dict.fromkeys(v for v in (contracts and contracts.game_version, recipes and recipes[0]) if v):
+            detail = await self._detail_for(use.uuid, version)
+            if detail is not None:
+                break
         recipe = None
         if detail is not None:
             try:

@@ -67,9 +67,12 @@ class LinkUexModal(BotModal, title="Link your UEX account"):
             linked = f"Your UEX account is linked as **{discord.utils.escape_markdown(str(name))}**."
         else:
             linked = "Your UEX account is linked."
+        # Not "only your own requests" (audit MSG-7): /leaderboard reads it whenever anyone
+        # runs it, and the alerts and automatic posts a player turns on use it in the background.
         await interaction.followup.send(
-            f"{linked} It's stored encrypted and only used for your "
-            "own requests (e.g. /uex-trades). Use /unlink-uex-account any time to remove it.\n"
+            f"{linked} It's stored encrypted and only used for your own UEX data: commands you run "
+            "(e.g. /uex-trades), negotiation alerts and automatic inventory posts you turn on, and this "
+            "server's /leaderboard. Use /unlink-uex-account any time to remove it.\n"
             f"{LEADERBOARD_NOTE}\n"
             "Run /intro to see what else this unlocks - negotiation alerts, daily digests, "
             "stock/marketplace alerts, and automatic inventory posting.",

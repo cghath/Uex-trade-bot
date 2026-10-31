@@ -503,3 +503,32 @@ def test_failed_dm_delivery_is_retried_not_permanently_discarded(tmp_path):
         assert await db.is_negotiation_message_seen(1, 42) is True
 
     asyncio.run(run())
+
+
+def _enable_failing_with(error):
+    from types import SimpleNamespace as NS
+
+    async def run():
+        cog = NegotiationAlerts.__new__(NegotiationAlerts)
+        cog.bot = NS(db=NS(get_user_secret_key=AsyncMock(return_value="sk"),
+                           set_negotiation_alerts_enabled=AsyncMock()))
+        cog._seed_baseline = AsyncMock(side_effect=error)
+        interaction = _FakeInteraction(42)
+        await cog.negotiation_alerts.callback(cog, interaction, True)
+        cog.bot.db.set_negotiation_alerts_enabled.assert_not_awaited()
+        (message,), _ = interaction.followup.sent[0]
+        return message
+
+    return asyncio.run(run())
+
+
+def test_a_uex_outage_while_enabling_doesnt_blame_the_players_key():
+    """MSG-2: any failure, a timeout included, used to say the linked key probably wasn't valid."""
+    from bot.uex.exceptions import UexApiError, UexAuthError
+
+    outage = _enable_failing_with(UexApiError("ReadTimeout"))
+    assert outage.startswith("Couldn't enable negotiation alerts, so they're still off.")
+    assert "usually temporary" in outage
+    assert "secret key" not in outage and "link-uex-account" not in outage
+    bad_key = _enable_failing_with(UexAuthError("invalid_secret_key"))
+    assert "/link-uex-account" in bad_key, "a key UEX rejects is still the key's fault"

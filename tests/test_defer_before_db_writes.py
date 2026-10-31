@@ -13,7 +13,13 @@ from bot.cogs.account import Account, LinkUexModal
 from bot.cogs.digest import Digest
 from bot.cogs.marketplace_alerts import MarketplaceAlerts
 from bot.cogs.negotiation_alerts import NegotiationAlerts
-from bot.cogs.personal_inventory import PersonalInventory
+from bot.cogs.personal_inventory import (
+    FloorReachedView,
+    LowerFloorModal,
+    PersonalInventory,
+    SetMinimumModal,
+    SetMinimumPricesView,
+)
 from bot.cogs.scanner import Scanner
 from bot.cogs.trades import Trades
 from bot.cogs.trading_preferences import TradingPreferences
@@ -45,7 +51,8 @@ def _cog(cls, db):
     return cog
 
 
-CHANNEL = NS(id=5, mention="#deals")
+# Manage Channels in it: /set-scanner-channel checks the target channel (audit UX-12).
+CHANNEL = NS(id=5, mention="#deals", permissions_for=lambda member: NS(manage_channels=True))
 
 CASES = {
     "/trade-log-add": (Trades, lambda cog, i: Trades.trade_log_add.callback(
@@ -104,3 +111,65 @@ def test_the_link_account_form_defers_before_saving_the_key():
     interaction.response.defer.assert_awaited_once_with(ephemeral=True, thinking=True)
     assert db.calls == [("set_user_secret_key", 1)]
     assert "linked" in interaction.followup.send.await_args.args[0]
+
+
+# -- Audit REL-6: the write paths entry 100's sweep missed -----------------------------------
+
+class _PendingJobDb(_RecordingDb):
+    async def get_inventory_post_job(self, user_id, job_id):
+        self.calls.append(("get_inventory_post_job", self._interaction.response.defer.await_count))
+        return {"id": job_id, "status": "pending"}
+
+
+def test_inventory_cancel_post_defers_before_cancelling_a_pending_job():
+    async def run():
+        interaction = _interaction()
+        db = _PendingJobDb(interaction)
+        await PersonalInventory.inventory_cancel_post.callback(_cog(PersonalInventory, db), interaction, 4)
+        return interaction, db
+
+    interaction, db = asyncio.run(run())
+    interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+    assert ("cancel_pending_inventory_post", 1) in db.calls, db.calls
+    assert interaction.followup.send.await_args.kwargs == {"ephemeral": True}
+
+
+def _form_interaction():
+    interaction = _interaction()
+    interaction.edit_original_response = AsyncMock()
+    return interaction
+
+
+def test_the_minimum_price_form_defers_before_saving_the_floor():
+    async def run():
+        interaction = _form_interaction()
+        db = _RecordingDb(interaction)
+        row = {"id": 3, "item_name": "Gold", "quantity": 5, "minimum_price": None}
+        view = SetMinimumPricesView(_cog(PersonalInventory, db), 1, [row], [row])
+        modal = SetMinimumModal(view, 3)
+        modal.price_input._value = "500,000"
+        await modal.on_submit(interaction)
+        return interaction, db
+
+    interaction, db = asyncio.run(run())
+    interaction.response.defer.assert_awaited_once_with()
+    assert db.calls == [("set_inventory_minimum_price", 1)]
+    # The write found nothing (None), so the reply is a private followup, not an edit.
+    assert "was not found" in interaction.followup.send.await_args.args[0]
+    assert interaction.followup.send.await_args.kwargs == {"ephemeral": True}
+
+
+def test_the_lower_floor_form_defers_before_resuming_the_job():
+    async def run():
+        interaction = _form_interaction()
+        db = _RecordingDb(interaction)
+        view = FloorReachedView(_cog(PersonalInventory, db), {"id": 5, "user_id": 1})
+        modal = LowerFloorModal(view)
+        modal.price_input._value = "700000"
+        await modal.on_submit(interaction)
+        return interaction, db
+
+    interaction, db = asyncio.run(run())
+    interaction.response.defer.assert_awaited_once_with()
+    assert db.calls == [("resume_auto_relist_with_new_floor", 1)]
+    interaction.edit_original_response.assert_awaited_once()

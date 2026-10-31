@@ -1,7 +1,39 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.77.
+the oldest entry below); the next new entry is 2.78.
+
+---
+
+## 2.77 - 2026-10-30 - A big round of fixes
+
+**Changed**
+- `/set-scanner-channel` is now for admins (Manage Channels). Anyone can still check for deals with `/scan-now`, and scanner channels already set keep working.
+- Welcome-back messages have a "Stop welcome-back messages" button (and "Turn them back on"). They're paused until the bot has 30 days of voice history (late November), so nobody gets one after only a few days away.
+- `/intro` lists only the commands everyone can use, and the owner's preview commands no longer show in your command menu.
+- `/marketplace-history` charts one currency and unit at a time, labels the chart with it, and says how many price changes in other currencies were left out.
+- Rank-up posts show XP (Ops time counts double) instead of calling it voice time.
+
+**Fixed**
+- Op cards: a regular who left the server is no longer signed up each week; a reminder Discord refuses is tried again a minute later; the start ping works with a long voice channel name; ops that repeat on some days say "5 days a week", not "Every day".
+- Buttons on op cards, role panels and DMs now tell you when something goes wrong, instead of leaving you on "thinking...".
+- Two quick clicks on a one-at-a-time role panel (like Colors) no longer leave you with two of its roles.
+- Rank and veteran roles keep working if staff rename them, and the bot never hands out a look-alike role with the same name.
+- A new member can no longer get the welcome message twice, and anniversary messages only mention the veteran role when it was really given.
+- Price and restock alerts no longer go off on another commodity whose name contains yours (a Gold alert on Golden Medmon).
+- Marketplace alerts: a listing posted between setting the alert and its first check is announced, not skipped; a minimum quality above the maximum is refused with a reason.
+- Stock alerts use your saved default ship, and say why when there's no cargo-fit estimate.
+- `/inventory-sell` and `/inventory-post-now`: lowering a minimum with `/inventory-set-minimum` and retrying the custom-price form now works, and a form sent after the screen timed out says so.
+- Setting a minimum, cancelling a post, turning the scanner off and reporting a hedge no longer show "did not respond" when the bot is busy.
+- Deleting a listing: if UEX took the delete but the bot couldn't check it, you're told that instead of "Couldn't delete", and the job is held for `/inventory-confirm-sale`. `/inventory-cancel-post` no longer offers a post UEX never confirmed.
+- `/negotiation-alerts` no longer blames your UEX key when UEX is down or slow; linking your account says exactly where your key is used.
+- Routes: commands that find nothing describe your saved settings correctly; route tracking's reroute no longer waits on a slow UEX, says when only the best-paying buyers were checked, and shows "0.4 Gm away", not "0 Gm away"; Track this route copies the whole route even from its second part; old route pages keep their last lines.
+- `/ship-parts-finder` and `/ship-loadout` work inside a thread; a long parts list continues below the message instead of becoming a .txt file; Refresh during a slow load no longer leaves dead menus; a short wiki outage no longer blanks part stats for a day.
+- `/ship-loadout`: Budget now prefers guns that get through heavy-fighter armor for an empty slot, a long "Keeping stock" list splits over pages, and "Add all" clears parts an earlier profile added in slots the new one keeps stock.
+- Configure crafting: no "Pick every quality" for a material with no quality, no "0% better", "Your craft" always kept when the reply is long, and sub-assembly choices named in the menu.
+- Blueprint shopping list: a double click saves once; plans name their materials and qualities; one line per material per patch, sorted by name; Add and `/blueprint-list` work in a thread; an old list's buttons point you to the current one.
+- `/blueprint-search material:` keeps Configure crafting on blueprints unlocked by default right after a patch.
+- `/ingame-item-finder` says prices are "cached up to 24h" rather than at most 24h old.
 
 ---
 
@@ -40,7 +72,7 @@ the oldest entry below); the next new entry is 2.77.
 - Every op now gets a card in #📅events: when it starts in your own time, where, and who's coming. Pick a role (or just Join), say Maybe, or Leave - all from the card.
 - A full role puts you on its wait list, and you get a DM if a spot opens.
 - Say which ship you're bringing, and sign up for a weekly op every week with one button.
-- You get a ping an hour before an op you've signed up for, and another when it starts.
+- You get a ping an hour before an op you've signed up for, and another when an organizer starts it.
 
 ---
 
@@ -299,7 +331,7 @@ the oldest entry below); the next new entry is 2.77.
 ## 2.40 - 2026-10-01 - Suspicious prices flagged
 
 **Added**
-- `/best-route`, `/mixed-routes`, `/multi-stop-route` and `/intelligence-brief` - A route warns when its buy or sell price is 4x or more off what every other terminal charges for that commodity. It could be a real deal or a UEX data error, so check before you fly. This would have caught UEX once listing Fresh Food at 2,614 instead of about 21,614.
+- `/best-route`, `/mixed-routes`, `/multi-stop-route` and `/intelligence-brief` - A route warns when its buy or sell price is 4x or more off the typical price (the median of 3 or more other terminals) for that commodity. It could be a real deal or a UEX data error, so check before you fly. This would have caught UEX once listing Fresh Food at 2,614 instead of about 21,614.
 
 ---
 

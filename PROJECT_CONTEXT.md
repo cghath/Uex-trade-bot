@@ -5381,6 +5381,55 @@ they're in sync).
        - 13 more tests (33 in all); 21 mutations, 20 caught, the 21st equivalent (an outer guard
          catches the same error).
 
+153. **The rest of the 2026-10-30 audit: its P3s and the 2026-10-03 findings still open.**
+     The owner's "fix everything else" after PR #147. Report `docs/audits/2026-10-30-full-audit-2342dfc.md`
+     (P3 ids there) and `docs/audits/2026-10-03-range-audit-0e8818b.md` (REL/UX/MSG/LOGIC ids). One PR,
+     built as five themes in parallel worktrees (an implementer each, two adversarial reviewers, a
+     skeptic per review finding, a fixer); 15 review findings confirmed and fixed before merging.
+     The owner's decisions: welcome-back gets its own Stop button; `/set-scanner-channel` is
+     admins only; the owner-only previews are hidden from members.
+     - **Event cards and buttons:** EVT-8 a regular who left (only once the member list is fully
+       loaded, `guild.chunked`) is dropped from new cards; EVT-9 a reminder that posted nothing is
+       released (`release_event_reminder`, scoped to the card's start time so it can't undo a
+       time change's claim) and retried next minute; EVT-11, EVT-12 (label cut to 80), EVT-13
+       (saved ships starting "~" left out of the menu), EVT-14 ("5 days a week"). UI-1:
+       `BotDynamicItem` (bot/discord_ui.py) wraps every DynamicItem's callback the way
+       `BotView.on_error` does - all 11 in bot/cogs, checked by a sweep test. ROLE-3 a lock per
+       guild, member and group plus a fresh `fetch_member`; ROLE-4 shared warnings on one line and
+       `fit_lines`; ROLE-5 labels cut to 80.
+     - **Old reliability and logic:** REL-3 (wiki 401/403/407/451 and non-JSON 200s are "unavailable",
+       not cached as "no detail"), REL-4, REL-5 (a non-object JSON body is a `UexApiError`; the
+       ship-parts refresh guards its own list too), REL-6 (defer before every DB write it named,
+       plus the hedge report modal), REL-7, REL-8 (one shared in-flight fetch per user and source
+       for listing pickers), REL-9 (reroute distance lookups time-boxed to 10s), LOGIC-4
+       (`rows_for_known_commodity` in the price and stock alert pollers), LOGIC-5, LOGIC-7
+       (`quality_range_error`). LOGIC-6 skipped: every PDC port in the wiki's 299 ships carries
+       the PDC tag the rule already checks.
+     - **Old UX and wording:** UX-4..UX-9, UX-10 (`/intro` lists only commands with no
+       `default_permissions`, since its reply is public), UX-11/MSG-4 (the saved default ship),
+       UX-12 (`/set-scanner-channel`: `default_permissions(manage_channels=True)` plus a runtime
+       check; existing channels keep working; Turn off points members at `/scan-now`), MSG-2,
+       MSG-3 (`group_marketplace_history_by_currency_unit`), MSG-7, MSG-8 (ROADMAP and patch note
+       2.40 wording), MSG-9 (one decimal). Left: MSG-9's second half (the authorize embed with
+       per-stack custom prices) and `/marketplace-index-status` staying visible to members.
+     - **Community:** COMM-1 (an in-memory "sending now" set, checked and filled with no await
+       between); COMM-2 (the seed also reads public archived threads and forum posts; welcome-backs
+       wait until `voice_daily` covers 30 days, around 2026-11-25, rather than read "no voice
+       record" as away); COMM-3 (`welcome_back_opt_outs`, Stop/Turn back on DynamicItems);
+       COMM-4; COMM-5; COMM-6 (`default_permissions(administrator=True)` on `/welcome-preview`,
+       `/anniversary-preview`, `/command-usage`); COMM-7 (`home_channel` logs a missing channel once
+       per feature); COMM-8 (`bot/managed_roles.py`, table `managed_roles`: rank and veteran roles
+       by saved id, matched by name only on first adoption and then only a role that grants
+       nothing, the one most members hold; a deleted role is made again; `/rolesetup`'s colour
+       placement reads the same ids); COMM-9 (XP, not "voice time"); DOC-2.
+     - **Trading, crafting, blueprints, docs:** TRD-1 (the first poll baselines only listings
+       added before the alert), TRD-2 (`UexDeleteUnconfirmedError`; the job is held for
+       `/inventory-confirm-sale`, which then never relists stock the player cancelled), TRD-3..TRD-10,
+       BP-1..BP-12 (BP-10 mostly a misreading of discord.py: a component defer without thinking
+       is a message update; the failed-Add path now defers too), DOC-1 (README and `main.py` on
+       what the bot reads and pings), DOC-3, OPS-1 (`discord.py>=2.7.0`).
+     - Not fixed, by decision: EVT-15, EVT-16, ROLE-6, TEST-1 (see the report). 71 tables.
+
 ## Where to look for what
 
 Seven docs, deliberately scoped so they don't duplicate each other:

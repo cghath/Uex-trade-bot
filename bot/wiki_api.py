@@ -31,6 +31,9 @@ MAX_RETRY_AFTER_SECONDS = 30.0
 # A safety valve: 786 blueprint missions are ~8 pages today. A response claiming wildly more is a bug
 # or a changed API, not something to crawl.
 MAX_PAGES = 40
+# Refusals that say nothing about the item asked for - an auth wall, a proxy or a block in
+# front of the API - so not a definite "no such item" answer (audit REL-3).
+_ACCESS_REFUSED_STATUSES = frozenset({401, 403, 407, 451})
 _UUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 
 
@@ -100,7 +103,11 @@ class WikiApiClient:
 
     async def _get_json(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         """GET with bounded retries on the failures worth retrying (network errors, 429, 5xx),
-        honouring Retry-After. Any other 4xx, a non-JSON body, or a non-object body is final."""
+        honouring Retry-After. An access refusal (401/403/407/451), a non-JSON body (a
+        maintenance or block page served as 200) or a non-object body is final but means the
+        wiki didn't really answer: WikiUnavailableError, so a caller caching misses doesn't
+        cache it for a day as "no such item" (audit REL-3). Any other 4xx is a definite
+        WikiApiError."""
         last: Exception | None = None
         for attempt in range(1, MAX_ATTEMPTS + 1):
             delay = float(2 ** attempt)
@@ -114,15 +121,17 @@ class WikiApiClient:
                     retry_after = response.headers.get("Retry-After", "")
                     if retry_after.isdigit():
                         delay = min(float(retry_after), MAX_RETRY_AFTER_SECONDS)
+                elif response.status_code in _ACCESS_REFUSED_STATUSES:
+                    raise WikiUnavailableError(f"HTTP {response.status_code} from {path}")
                 elif response.status_code != 200:
                     raise WikiApiError(f"HTTP {response.status_code} from {path}")
                 else:
                     try:
                         body = response.json()
                     except ValueError as exc:
-                        raise WikiApiError(f"{path} returned invalid JSON") from exc
+                        raise WikiUnavailableError(f"{path} returned invalid JSON") from exc
                     if not isinstance(body, dict):
-                        raise WikiApiError(f"{path} returned an unexpected JSON shape")
+                        raise WikiUnavailableError(f"{path} returned an unexpected JSON shape")
                     return body
             if attempt < MAX_ATTEMPTS:
                 logger.info("Wiki API %s failed (%s); retrying in %.0fs", path, last, delay)

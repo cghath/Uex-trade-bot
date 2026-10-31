@@ -24,7 +24,7 @@ from bot.delivery import (
 from bot.discord_ui import send_alert_remove_picker
 from bot.uex.exceptions import UexApiError, describe_uex_api_error
 from bot.uex.marketplace import format_quality_range
-from bot.uex.trading import resolve_tradeable_commodity, rows_for_commodity, unknown_commodity_message
+from bot.uex.trading import resolve_tradeable_commodity, rows_for_known_commodity, unknown_commodity_message
 
 logger = logging.getLogger("uexbot.alerts")
 
@@ -244,14 +244,18 @@ class Alerts(commands.Cog):
 
             try:
                 # UEX matches commodity_name as a SUBSTRING - a Gold alert fired on Golden
-                # Medmon's 71,000.
-                rows, others = rows_for_commodity(rows, commodity_name)
-                if others:
+                # Medmon's 71,000. The name was resolved against UEX's own list when the
+                # alert was set, so only that exact commodity counts - even when no Gold row
+                # came back this poll, which the lenient filter took as partial typing and
+                # fired on Golden Medmon's rows anyway (audit LOGIC-4).
+                matched = rows_for_known_commodity(rows, commodity_name)
+                if not matched:
                     logger.warning(
-                        "Skipping price alerts for '%s': it matches several commodities (%s), none exactly",
-                        commodity_name, ", ".join(others),
+                        "Skipping price alerts for '%s': no price row names it exactly (got %s)",
+                        commodity_name, ", ".join(sorted({str(r.get("commodity_name")) for r in rows})),
                     )
                     continue
+                rows = matched
                 best_sell = max((r.get("price_sell") or 0 for r in rows), default=0)
                 best_buy_candidates = [r.get("price_buy") or 0 for r in rows if (r.get("price_buy") or 0) > 0]
                 best_buy = min(best_buy_candidates) if best_buy_candidates else None

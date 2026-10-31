@@ -124,6 +124,14 @@ def test_a_stat_change_reads_as_better_or_worse_in_whole_percent():
     assert crafting.describe_change(Decimal('1.2'), 'neutral') == '20% higher'
 
 
+def test_a_half_percent_change_rounds_up_and_is_never_shown_as_zero_percent():
+    """Audit TRD-6: Decimal's :.0f rounds half to even, so x1.005 read '0% better' and 2.5% read '2%'."""
+    assert crafting.describe_change(Decimal('1.005'), 'higher') == '1% better'
+    assert crafting.describe_change(Decimal('0.995'), 'higher') == '1% worse'
+    assert crafting.describe_change(Decimal('1.025'), 'higher') == '3% better'
+    assert crafting.describe_change(Decimal('1.00499'), 'higher') == 'no change'
+
+
 # -- Configure crafting's text (option A, the owner's pick 2026-10-04) --------------------------------
 
 OPTIONS = {'0.0': (325, 521, 1000), '1.0': (325, 521, 1000), '2.0': (325, 521, 1000)}
@@ -247,7 +255,22 @@ def test_no_best_possible_line_is_left_empty():
         group['modifiers'] = [m for m in group['modifiers'] if m['label'] == 'Power Pips']
     recipe = crafting.Recipe.parse(raw)
     result = recipe.layout_blocks(1, {}, {}, {})[-1]
-    assert result.splitlines() == ['### Your craft', '-# Pick every quality to see it.']
+    assert result.splitlines() == ['### Your craft', "-# Silicon: no quality on record to pick, so its effect isn't known"], "no menu to pick from, so never 'Pick every quality'"
+
+
+def test_a_material_with_no_quality_menu_is_never_asked_for_and_never_assumed_at_top_quality():
+    """Audit TRD-5: a material with no qualities on offer has no menu, yet the reply said 'Pick every
+    quality' and quoted a Best possible that assumed quality 1000 for it."""
+    recipe = crafting.Recipe.parse(_fixture('blueprint_crafting_shield.json'))
+    shell, other, third = (item.path for item in recipe.inputs)
+    options = {shell: (), other: (330, 1000), third: (1000,)}
+    result = recipe.layout_blocks(1, {}, {other: 1000, third: 1000}, options)[-1]
+    assert result.splitlines() == ['### Your craft', 'Max. Shield Strength **21% better**',
+                                   "-# Stileron: no quality on record to pick, so its effect isn't known"]
+    partly = recipe.layout_blocks(1, {}, {third: 1000}, options)[-1]
+    assert partly.splitlines()[-2:] == [
+        '-# Pick every quality to see it. Best possible: Max. Shield Strength 21% better',
+        "-# Stileron: no quality on record to pick, so its effect isn't known"], "Integrity needs the Shell's quality"
 
 
 def test_parts_that_overlap_or_arent_straight_lines_stay_unpublished():
@@ -258,3 +281,32 @@ def test_parts_that_overlap_or_arent_straight_lines_stay_unpublished():
     integrity = copy.deepcopy(shell.modifiers[0])
     integrity['value_segments'][1]['modifier_at_end'] = None
     assert crafting.modifier_at(integrity, 900) is None
+
+
+# -- the 2026-10-30 audit's plan findings (BP-7, BP-11) ----------------------------------------------
+
+def _frame_choice():
+    raw = rifle()
+    raw['requirement_groups'][0]['children'].append(
+        dict(raw['requirement_groups'][0]['children'][0], uuid='tin', name='Tin'))
+    return crafting.Recipe.parse(raw)
+
+
+def test_a_plan_keeps_only_the_qualities_of_materials_it_uses():
+    """Audit BP-7: Iron picked at 1000, then Frame switched to Tin - the plan kept Iron's quality."""
+    plan = _frame_choice().plan(1, {'0': [1]}, {'0.0': 1000, '1.0': 500})
+    assert plan['qualities'] == {'1.0': 500}
+    assert [(item['name'], item['quality']) for item in plan['ingredients']][0] == ('Tin', None)
+
+
+def test_the_combined_list_merges_one_patchs_builds_and_sorts_by_name_then_quality():
+    """Audit BP-11: keyed on the full wiki build and sorted by UUID, so one material split in two
+    over a rebuild of the same patch, and quality 1000 came before 500."""
+    recipe = crafting.Recipe.parse(rifle())
+    plans = [recipe.plan(1, {}, {'0.0': 1000, '2.0': 500}), recipe.plan(1, {}, {'0.0': 1000, '2.0': 500}),
+             recipe.plan(1, {}, {})]
+    plans[1]['game_version'] = '4.10.0-LIVE.99999999'
+    rows = [(row['name'], row.get('quality'), row['amount'], row['game_version']) for row in crafting.aggregate(plans)]
+    assert rows == [('Hephaestanite', None, '0.06', '4.10.0'),
+                    ('Iron', None, '0.06', '4.10.0'),
+                    ('Iron', 500, '0.04', '4.10.0'), ('Iron', 1000, '0.08', '4.10.0')]

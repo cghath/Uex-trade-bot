@@ -103,19 +103,29 @@ def _member(user_id, joined, *, bot=False, name=None):
     return FakeMember(user_id, joined, bot=bot, name=name)
 
 
+def _role(role_id, name, permissions=0):
+    return NS(id=role_id, name=name, permissions=NS(value=permissions), managed=False)
+
+
 class FakeGuild:
+    """`roles` is discord.py's cache. Like the real create_role, a created role isn't in it (the
+    gateway adds it later): it goes in `created`."""
+
     def __init__(self, members, *, events=(), can_manage_roles=True):
-        self.id, self.members, self.roles, self.events = GUILD_ID, members, [], list(events)
+        self.id, self.members, self.roles, self.created, self.events = GUILD_ID, members, [], [], list(events)
         self.can_manage_roles = can_manage_roles
 
     def get_member(self, uid):
         return next((m for m in self.members if m.id == uid), None)
 
+    def get_role(self, role_id):
+        return next((r for r in self.roles if r.id == role_id), None)
+
     async def create_role(self, name, reason=None):
         if not self.can_manage_roles:
             raise discord.Forbidden(NS(status=403, reason="Forbidden"), "Missing Permissions")
-        role = NS(id=9000 + len(self.roles), name=name)
-        self.roles.append(role)
+        role = _role(9000 + len(self.created), name)
+        self.created.append(role)
         return role
 
     async def fetch_scheduled_events(self):
@@ -225,12 +235,12 @@ def test_a_missed_anniversary_is_caught_up_within_the_day_and_not_after(tmp_path
 def test_stop_and_resume_buttons_and_an_opted_out_member_gets_nothing(tmp_path):
     async def run():
         cog, bot, channel, users = await _make(tmp_path, [_member(1, JOINED)])
-        click = NS(user=NS(id=1), client=bot, response=NS(send_message=AsyncMock()))
+        click = NS(user=NS(id=1), client=bot, response=NS(defer=AsyncMock()), followup=NS(send=AsyncMock()))
         await StopAnniversariesButton(GUILD_ID).callback(click)
         stopped = await bot.db.get_anniversary_opt_outs(GUILD_ID)
         await cog.send_due(NOW)
         silent = (list(users[1].sent), list(channel.sent))
-        reply = click.response.send_message.await_args
+        reply = click.followup.send.await_args
         await ResumeAnniversariesButton(GUILD_ID).callback(click)
         await cog.send_due(NOW + timedelta(minutes=5))
         return stopped, silent, reply, users, channel, await bot.db.get_anniversary_opt_outs(GUILD_ID)
@@ -241,6 +251,28 @@ def test_stop_and_resume_buttons_and_an_opted_out_member_gets_nothing(tmp_path):
     (resume,) = reply.kwargs["view"].children
     assert resume.custom_id == f"anniversary:resume:{GUILD_ID}" and resume.item.label == "Turn them back on"
     assert resumed == set() and len(users[1].sent) == 1 and len(channel.sent) == 1
+
+
+def test_the_buttons_answer_before_writing_to_the_database(tmp_path):  # COMM-5
+    async def run():
+        _cog, bot, _channel, _users = await _make(tmp_path, [_member(1, JOINED)])
+        order = []
+        real = bot.db.set_anniversary_opt_out
+
+        async def write(*args):
+            order.append("write")
+            return await real(*args)
+        bot.db.set_anniversary_opt_out = write
+        click = NS(user=NS(id=1), client=bot, response=NS(defer=AsyncMock(side_effect=lambda **k: order.append("defer"))),
+                   followup=NS(send=AsyncMock()))
+        await StopAnniversariesButton(GUILD_ID).callback(click)
+        await ResumeAnniversariesButton(GUILD_ID).callback(click)
+        return order, click
+
+    order, click = asyncio.run(run())
+    assert order == ["defer", "write", "defer", "write"]
+    assert click.response.defer.await_args.kwargs == {"ephemeral": True}
+    assert click.followup.send.await_args.args[0] == "Anniversary messages are back on."
 
 
 def test_a_display_name_cannot_ping_or_format(tmp_path):

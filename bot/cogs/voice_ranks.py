@@ -7,8 +7,8 @@ member. Nothing is read but channel membership and the mute/deafen flags: never 
 needs no catching up: the next minute simply sees whoever is in voice then, and an op in progress
 is saved every minute and carried on.
 
-Rank roles are created by name the first time they're needed (the bot needs Manage Roles, with its
-own role above the rank roles). Each person holds only their highest rank, and only their highest
+Rank roles are created the first time they're needed, then remembered by id (bot/managed_roles.py;
+the bot needs Manage Roles, with its own role above the rank roles). Each person holds only their highest rank, and only their highest
 op rank. A rank-up is claimed in voice_members before it's announced in #stdynamics-bot, so it's
 never announced twice; roles are also put right every RECONCILE_MINUTES, so a failed role change
 fixes itself.
@@ -24,7 +24,8 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from bot.cogs.anniversaries import ANNIVERSARY_CHANNEL_ID
-from bot.delivery import owner_only_mentions, send_to_channel
+from bot.delivery import home_channel, owner_only_mentions, send_to_channel
+from bot.managed_roles import ManagedRoles
 from bot.uex.voice_ranks import (
     DAILY_CAP_MINUTES, OP_GRACE_MINUTES, OP_RANKS, OPS_XP_PER_MINUTE, RANKS, OpSession, bar, counted_members,
     counts, hours, op_attendees, op_promotion_text, op_step, progress, promotion_text, rank_index, rank_name,
@@ -69,6 +70,7 @@ class VoiceRanks(commands.Cog):
         self.op_session: OpSession | None = None
         self._session_loaded = False
         self._roles_warned = False
+        self.roles = ManagedRoles(bot, reason="Voice rank")
         if start_loop:
             self.tick.start()
             self.reconcile.start()
@@ -78,7 +80,7 @@ class VoiceRanks(commands.Cog):
         self.reconcile.cancel()
 
     def _guild(self) -> discord.Guild | None:
-        channel = self.bot.get_channel(ANNOUNCE_CHANNEL_ID)
+        channel = home_channel(self.bot, ANNOUNCE_CHANNEL_ID, feature="voice ranks")
         return channel.guild if channel is not None else None
 
     # -- the minute -----------------------------------------------------------
@@ -162,20 +164,21 @@ class VoiceRanks(commands.Cog):
                               allowed_mentions=owner_only_mentions(user_id))
 
     async def _rank_roles(self, guild: discord.Guild) -> dict[str, discord.Role]:
-        """Every rank and op-rank role by name, created when missing. Empty when the bot can't
-        manage roles (warned once in the log)."""
+        """Every rank and op-rank role by the ladder's name for it, created when missing. Empty
+        when the bot can't manage roles (warned once in the log), or the remembered ids can't be
+        read: never raised, so a claimed rank-up is still announced."""
         found = {}
         for name, _ in RANKS + OP_RANKS:
-            role = discord.utils.get(guild.roles, name=name)
-            if role is None:
-                try:
-                    role = await guild.create_role(name=name, reason="Voice rank")
-                except discord.HTTPException as exc:
-                    if not self._roles_warned:
-                        logger.warning("Can't create voice rank roles (needs Manage Roles): %s", exc)
-                        self._roles_warned = True
-                    return {}
-            found[name] = role
+            try:
+                found[name] = await self.roles.get(guild, name)
+            except discord.HTTPException as exc:
+                if not self._roles_warned:
+                    logger.warning("Can't create voice rank roles (needs Manage Roles): %s", exc)
+                    self._roles_warned = True
+                return {}
+            except Exception:
+                logger.exception("Couldn't look up the voice rank roles")
+                return {}
         return found
 
     async def _set_rank_role(self, guild: discord.Guild, member: discord.Member,
@@ -229,7 +232,8 @@ class VoiceRanks(commands.Cog):
             rank_text(_name(member), row, next((r["minutes"] for r in week if r["user_id"] == member.id), 0)),
             allowed_mentions=discord.AllowedMentions.none())
 
-    @app_commands.command(name="rank-leaderboard", description="Who has spent the most time in voice: this week, this season or all time.")
+    @app_commands.command(name="rank-leaderboard",
+                          description="The most voice XP (time with others, double in Ops): this week, this season or all time.")
     @app_commands.describe(period="Which standings to show")
     @app_commands.choices(period=[
         app_commands.Choice(name="This week", value="week"),

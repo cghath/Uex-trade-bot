@@ -25,9 +25,11 @@ from bot.uex.marketplace import (
     filter_listings_by_quality,
     find_item_id_by_name,
     format_quality_range,
+    listed_before,
     marketplace_item_link,
     parse_listing_quality,
     parse_uex_number,
+    quality_range_error,
 )
 
 logger = logging.getLogger("uexbot.marketplace_alerts")
@@ -68,6 +70,9 @@ class MarketplaceAlerts(commands.Cog):
         max_quality: app_commands.Range[float, 0, QUALITY_MAX] | None = None,
         delivery: app_commands.Choice[str] | None = None,
     ) -> None:
+        if (quality_error := quality_range_error(min_quality, max_quality)) is not None:
+            await interaction.response.send_message(quality_error, ephemeral=True)
+            return
         scope = delivery_scope(delivery)
         # Deferred before any DB write: a write can wait on a lock past Discord's
         # 3-second window, and a player who sees "did not respond" retries into a
@@ -167,17 +172,22 @@ class MarketplaceAlerts(commands.Cog):
 
         # A new alert's first look records what's already listed without announcing it: those
         # listings aren't new (audit UX-2; /negotiation-alerts seeds a baseline the same way).
-        # Done even when nothing matches yet, or the first real listing would be swallowed.
-        already_listed = [listing["id"] for listing in listings if listing.get("id") is not None]
+        # Done even when nothing matches yet, or the first real listing would be swallowed. Only
+        # what was up before the alert was set counts (audit TRD-1): this first look can come up to
+        # a poll interval later, and a listing posted in between is announced now like any other.
         watching = []
         for alert in group_alerts:
             if alert.get("baseline_done", 1):
                 watching.append(alert)
                 continue
+            already_listed = [listing["id"] for listing in listings if listing.get("id") is not None
+                              and listed_before(listing, alert.get("created_at"))]
             try:
                 await self.bot.db.mark_marketplace_alert_baseline(alert["id"], already_listed)
             except Exception:
                 logger.exception("Marketplace alert #%s couldn't record its starting listings", alert["id"])
+                continue
+            watching.append(alert)
         group_alerts = watching
 
         listings = exclude_sold_out(listings)

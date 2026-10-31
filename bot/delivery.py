@@ -134,6 +134,24 @@ async def send_dm(bot: Any, user_id: int, content: str | None = None, *, label: 
         return outcome
 
 
+_MISSING_WARNED: set[tuple[int, str]] = set()
+
+
+def home_channel(bot: Any, channel_id: int, *, feature: str) -> Any:
+    """The channel a feature finds Star Tech Dynamics by (#stdynamics-bot, #events), or None.
+    With it gone (deleted, or recreated with a new id) the feature stops, so the log says so -
+    once, not every minute, and again if it goes missing after coming back (audit COMM-7)."""
+    channel = bot.get_channel(channel_id)
+    key = (channel_id, feature)
+    if channel is not None:
+        _MISSING_WARNED.discard(key)
+    elif key not in _MISSING_WARNED and getattr(bot, "is_ready", lambda: True)():
+        _MISSING_WARNED.add(key)
+        logger.warning("Channel %s not found, so %s are off until it's back (if it was recreated, its id "
+                       "in the code needs updating)", channel_id, feature)
+    return channel
+
+
 async def send_to_channel(bot: Any, channel_id: int | None, content: str | None = None, *, label: str,
                           **send_kwargs: Any) -> Delivery | None:
     """Post in one channel; None when the bot can't see that channel at all."""

@@ -25,7 +25,7 @@ from typing import Any
 
 import httpx
 
-from .exceptions import UexApiError, UexAuthError, UexRateLimitError, UexRejectedError
+from .exceptions import UexApiError, UexAuthError, UexDeleteUnconfirmedError, UexRateLimitError, UexRejectedError
 
 logger = logging.getLogger(__name__)
 
@@ -301,6 +301,12 @@ class UexClient:
                 payload = response.json()
             except ValueError as exc:
                 raise UexApiError(f"Non-JSON response from {path}: {response.text[:200]}") from exc
+            if not isinstance(payload, dict):
+                # JSON, but not UEX's {status, data, message} object (null, a list, a bare
+                # string): .get() below would raise AttributeError, which the loops that
+                # catch only UexApiError don't expect - two of them stopped for good on it
+                # (audit REL-5).
+                raise UexApiError(f"Unexpected response from {path} (HTTP {response.status_code}): {response.text[:200]}")
 
             status = payload.get("status")
             message = payload.get("message", "")
@@ -660,7 +666,8 @@ class UexClient:
         """Delete one of the calling player's own marketplace listings, then read it back: True
         once UEX no longer lists it, False when it still does after one short retry - the caller
         must then not treat it as gone (release stock, relist, say "deleted"). Raises UexApiError
-        when the delete is refused or the read-back fails.
+        when the delete is refused, and UexDeleteUnconfirmedError (a UexApiError) when it was
+        accepted but the read-back failed.
 
         The read-back is here, not in each caller, because a delete's "ok" alone proved nothing on
         2026-10-02 and all three callers (the 48h relist, /inventory-cancel-post and the
@@ -675,12 +682,16 @@ class UexClient:
         await self._delete(
             "marketplace_listings", params={"id": listing_id, "is_production": 1}, secret_key=secret_key,
         )
-        for attempt in range(2):
-            if attempt:
-                await asyncio.sleep(DELETE_RECHECK_SECONDS)
-            rows = await self.get_marketplace_listings(id=listing_id, use_cache=False)
-            if not any(str(row.get("id")) == str(listing_id) for row in rows):
-                return True
+        try:
+            for attempt in range(2):
+                if attempt:
+                    await asyncio.sleep(DELETE_RECHECK_SECONDS)
+                rows = await self.get_marketplace_listings(id=listing_id, use_cache=False)
+                if not any(str(row.get("id")) == str(listing_id) for row in rows):
+                    return True
+        except UexApiError as exc:
+            # The delete itself was accepted; say so, so a caller never reports it as refused (audit TRD-2).
+            raise UexDeleteUnconfirmedError(str(exc)) from exc
         return False
 
     async def get_marketplace_prices_history(self, **filters: Any) -> list[dict[str, Any]]:

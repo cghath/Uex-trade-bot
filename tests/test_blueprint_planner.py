@@ -220,3 +220,119 @@ def test_clear_button_says_nothing_changed_when_the_clear_itself_fails(tmp_path)
         service.refresh.assert_not_awaited()
 
     asyncio.run(run())
+
+
+# -- the 2026-10-30 audit's shopping-list findings (BP-6..BP-11) --------------------------------------
+
+async def _service_with_thread(tmp_path, monkeypatch, name):
+    db = Database(tmp_path / name, Fernet(Fernet.generate_key()))
+    await db.init()
+    thread = FakeThread()
+    channel = FakeChannel(thread)
+    monkeypatch.setattr(blueprint_planner.discord, "TextChannel", FakeChannel)
+    monkeypatch.setattr(blueprint_planner.discord, "Thread", FakeThread)
+    return db, channel, thread, ShoppingService(NS(db=db, get_channel=lambda _id: None, fetch_channel=AsyncMock()))
+
+
+def test_a_double_click_on_add_saves_the_plan_once(tmp_path, monkeypatch):
+    """Audit BP-6: every click is its own interaction, so the request_id dedupe never caught a second
+    click and the combined amounts doubled."""
+    async def run():
+        db, channel, _, service = await _service_with_thread(tmp_path, monkeypatch, "double.sqlite")
+        first, second = _interaction(channel, interaction_id=301), _interaction(channel, interaction_id=302)
+        results = await asyncio.gather(service.add(first, _plan()), service.add(second, _plan()))
+        return results, await db.get_blueprint_plans(1, 10), second
+
+    results, plans, second = asyncio.run(run())
+    assert results == [True, False] and len(plans) == 1
+    assert "Already adding" in second.followup.send.await_args.args[0]
+
+
+def test_add_from_inside_a_thread_starts_the_list_in_that_threads_channel(tmp_path, monkeypatch):
+    """Audit BP-8: from a thread nothing was saved and the player was told to check thread permissions."""
+    async def run():
+        db, channel, _, service = await _service_with_thread(tmp_path, monkeypatch, "in_thread.sqlite")
+        inside = FakeThread()
+        inside.parent = channel
+        saved = await service.add(_interaction(inside), _plan())
+        return saved, channel, await db.get_blueprint_plans(1, 10)
+
+    saved, channel, plans = asyncio.run(run())
+    assert saved and len(plans) == 1
+    channel.create_thread.assert_awaited_once()
+
+
+def test_add_from_a_forum_post_or_voice_chat_says_why_not_thread_permissions(tmp_path, monkeypatch):
+    async def run():
+        db, _, _, service = await _service_with_thread(tmp_path, monkeypatch, "voice.sqlite")
+        forum_post = FakeThread()
+        forum_post.parent = NS(id=5)  # a forum channel, not a text channel
+        answers = []
+        for channel in (NS(id=7), forum_post):  # a voice channel's chat, then a forum post
+            interaction = _interaction(channel)
+            assert not await service.add(interaction, _plan())
+            answers.append(interaction.followup.send.await_args.args[0])
+            interaction = _interaction(channel)
+            await service.open(interaction)
+            answers.append(interaction.followup.send.await_args.args[0])
+        return answers, await db.get_blueprint_plans(1, 10)
+
+    answers, plans = asyncio.run(run())
+    assert plans == [] and all(answer == blueprint_planner.NO_THREAD_HERE for answer in answers)
+    assert "permissions" not in blueprint_planner.NO_THREAD_HERE
+
+
+def test_an_old_lists_buttons_say_it_is_no_longer_in_use_not_another_players(tmp_path):
+    """Audit BP-9: when the saved thread couldn't be reopened, a new one replaced it, and the old one's
+    buttons told its own owner the list 'belongs to another player'."""
+    async def run():
+        db = Database(tmp_path / "orphan.sqlite", Fernet(Fernet.generate_key()))
+        await db.init()
+        await db.set_blueprint_thread(1, 10, 101, 201)  # the list moved to thread 101
+        interaction = _interaction(NS(id=100), user_id=1)
+        row = await ShoppingView(ShoppingService(NS(db=db)))._owner(interaction)
+        return row, interaction
+
+    row, interaction = asyncio.run(run())
+    assert row is None
+    message = interaction.response.send_message.await_args.args[0]
+    assert "another player" not in message and "/blueprint-list" in message
+
+
+def _choice_plan(choice: int, qualities: dict):
+    raw = json.loads((Path(__file__).parent / "fixtures" / "blueprint_crafting_rifle.json").read_text(encoding="utf-8-sig"))
+    alternative = dict(raw["requirement_groups"][0]["children"][0], uuid="tin", name="Tin")
+    raw["requirement_groups"][0]["children"].append(alternative)
+    raw["requirement_groups"][0]["required_count"] = 1
+    return Recipe.parse(raw).plan(1, {"0": [choice]}, qualities)
+
+
+def test_the_list_names_materials_and_their_qualities_never_recipe_paths(tmp_path):
+    """Audit BP-7: a quality picked for Iron, then Frame switched to Tin, stayed in the plan, and the line
+    read 'choices 0=[1] · qualities 0.0=1000, 1.0=500'."""
+    async def run():
+        db = Database(tmp_path / "names.sqlite", Fernet(Fernet.generate_key()))
+        await db.init()
+        await db.add_blueprint_plan(1, 10, "r1", _choice_plan(1, {"0.0": 1000, "1.0": 500}))
+        return "\n".join(await ShoppingService(NS(db=db)).render(1, 10))
+
+    text = asyncio.run(run())
+    line = next(line for line in text.splitlines() if line.startswith("• #"))
+    assert "chose Tin (Frame)" in line and "quality Hephaestanite (Stock) 500" in line
+    assert "0.0=" not in line and "1000" not in line and "choices" not in line, line
+
+
+def test_a_plan_from_an_older_patch_says_so(tmp_path):
+    async def run():
+        db = Database(tmp_path / "stale.sqlite", Fernet(Fernet.generate_key()))
+        await db.init()
+        await db.add_blueprint_plan(1, 10, "r1", _plan())  # the fixture's game 4.10.0
+        service = ShoppingService(NS(db=db))
+        db.get_blueprint_snapshot_state = AsyncMock(return_value=NS(game_version="4.11.0-LIVE.2"))
+        stale = "\n".join(await service.render(1, 10))
+        db.get_blueprint_snapshot_state = AsyncMock(return_value=NS(game_version="4.10.0-LIVE.9"))
+        return stale, "\n".join(await service.render(1, 10))
+
+    stale, current = asyncio.run(run())
+    assert "game 4.10.0 (before 4.11.0: its amounts may have changed)" in stale
+    assert "may have changed" not in current and "LIVE" not in current, "a rebuild of the same patch isn't older"

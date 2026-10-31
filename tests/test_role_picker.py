@@ -7,7 +7,9 @@ Guarantees under test:
   2. /rolesetup - creates only what's missing, plain (no permissions, not mentionable, no color but
      a Colors role's own), matches an existing role by name (any case), keeps a saved role by id
      even after a rename, never duplicates on a second run, warns about a role it can't give or
-     can't ping; admins only. It puts the Colors roles right under the lowest voice rank role,
+     can't ping, a problem many roles share in one line of a reply Discord accepts; admins only. It
+     puts the Colors roles right under the lowest voice rank role (by
+     the id voice ranks remembers, so a renamed one still counts and a staff look-alike doesn't),
      moving nothing above it and nothing at all once they're there, and says so when it can't.
   3. /rolepanel post - five panels whose buttons and dropdown carry the saved role ids, matched
      by the startup-registered templates, the Colors buttons with their emoji; refuses until
@@ -15,7 +17,8 @@ Guarantees under test:
   4. Picking - changes only the member's roles in that group, replies privately, logs in #role-log
      without pinging the member, pings Mentor (only) in #welcome for New Pilot, once per member ever
      (picking it again only logs); the dropdown answers by re-sending itself with nothing ticked; an id
-     that isn't a saved picker role does nothing; a refused role change says so and logs nothing.
+     that isn't a saved picker role does nothing; a refused role change says so and logs nothing;
+     two quick clicks on a one-at-a-time panel leave one role.
   5. Onboarding - picker roles gained outside the panels are logged in #role-log, all of one
      onboarding in one line; New Pilot pings Mentor in #welcome with the member's timezone; a role a panel
      just gave, Mentor, any other role, or one taken off again before the line is written isn't.
@@ -36,7 +39,7 @@ from cryptography.fernet import Fernet
 import bot.cogs.role_picker as role_picker_cog
 from bot.cogs.role_picker import (
     BUTTON_TEMPLATE, EVERYTHING_TEMPLATE, MENU_TEMPLATE, OUT_OF_DATE, ROLE_LOG_CHANNEL_ID, WELCOME_CHANNEL_ID,
-    EverythingButton, RoleButton, RoleMenu, RolePicker, apply_pick,
+    EverythingButton, RoleButton, RoleMenu, RolePicker, apply_pick, panel,
 )
 from bot.db.database import Database
 from bot.uex.role_picker import (
@@ -50,6 +53,7 @@ GUILD_ID = 1132378045232197694
 @pytest.fixture(autouse=True)
 def _no_panel_picks_from_other_tests():
     role_picker_cog._panel_adds.clear()
+    role_picker_cog._pick_locks.clear()   # each test runs its own event loop
 
 
 # -- 1. rules -------------------------------------------------------------------------------------
@@ -157,6 +161,13 @@ class FakeGuild:
         self.id, self.roles, self.created = GUILD_ID, list(roles), []
         self.me = NS(guild_permissions=discord.Permissions(mention_everyone=mention_everyone))
         self.moves, self.move_error = [], None
+        self.members = {}   # what fetch_member answers with: the member's roles as Discord has them now
+        self.create_error = None
+
+    async def fetch_member(self, user_id):
+        if user_id not in self.members:
+            raise discord.NotFound(NS(status=404, reason="Not Found"), "Unknown Member")
+        return self.members[user_id]
 
     async def fetch_roles(self):
         return [FakeRole(self.id, "@everyone", position=0)] + list(self.roles)
@@ -173,6 +184,8 @@ class FakeGuild:
         return next((r for r in self.roles if r.id == role_id), None)
 
     async def create_role(self, **kwargs):
+        if self.create_error:
+            raise self.create_error
         self.created.append(kwargs)
         for other in self.roles:   # like Discord: a new role goes in at the bottom, the rest move up
             other.position += 1
@@ -238,6 +251,27 @@ def test_rolesetup_warns_about_roles_it_cannot_give_or_ping(tmp_path):
     _run(tmp_path, body)
 
 
+def test_rolesetup_says_a_problem_every_role_shares_once_in_a_reply_discord_accepts(tmp_path):
+    async def body(db):
+        # Audit ROLE-4: a warning per role passed 2,000 characters, so the reply naming the problem failed.
+        # My role under every picker role, each one already there with permissions of its own:
+        guild = FakeGuild([FakeRole(100 + i, name, permissions=8, assignable=False) for i, name in enumerate(ALL_ROLES)])
+        _, reply = await _set_up(db, guild)
+        assert len(reply) <= 2000 and "32 of 32 ready" in reply
+        assert reply.endswith("Next: `/rolepanel post` in your roles channel.")
+        above = [line for line in reply.split("\n") if "above my role" in line]
+        assert len(above) == 1 and "**Mining**" in above[0] and "**Teal**" in above[0]
+        assert above[0].endswith("are above my role, so I can't give them - move my role above them.")
+        assert reply.count("already existed with permissions of their own") == 1
+        # Without Manage Roles nothing can be made: one line, the error said once
+        bare = FakeGuild()
+        bare.create_error = discord.Forbidden(NS(status=403, reason="Forbidden"), "Missing Permissions")
+        _, reply = await _set_up(db, bare)
+        assert len(reply) <= 2000 and reply.count("Couldn't create") == 1 and reply.count("Missing Permissions") == 1
+        assert "**Eastern**" in reply and "0 of 32 ready" in reply and "Next:" not in reply
+    _run(tmp_path, body)
+
+
 def test_rolesetup_and_panel_post_are_admin_only(tmp_path):
     async def body(db):
         cog = RolePicker.__new__(RolePicker)
@@ -287,6 +321,22 @@ def test_rolesetup_says_when_it_cant_move_the_colors(tmp_path):
     _run(tmp_path, body)
 
 
+def test_rolesetup_finds_the_rank_roles_voice_ranks_remembers_not_names(tmp_path):  # COMM-8
+    async def body(db):
+        guild = FakeGuild([FakeRole(900, "Admiral", position=6), FakeRole(901, "Operator ⭐", position=5),
+                           FakeRole(902, "Star Citizen", position=4),
+                           FakeRole(904, "Officer", permissions=8, position=3),   # a staff look-alike
+                           FakeRole(903, "Mining", position=2)])
+        await db.save_managed_role(GUILD_ID, "Admiral", 900)
+        await db.save_managed_role(GUILD_ID, "Operator", 901)                     # renamed by staff
+        _, reply = await _set_up(db, guild)
+        assert "Moved the color roles right under **Operator ⭐**" in reply
+        by_id = {role.id: role for role in guild.roles}
+        saved = await db.get_role_picker_roles(GUILD_ID)
+        assert min(by_id[saved[name]].position for name, _, _ in COLOR_ROLES) > by_id[904].position
+    _run(tmp_path, body)
+
+
 # -- 3. /rolepanel post ---------------------------------------------------------------------------
 
 def test_panels_carry_the_saved_role_ids(tmp_path):
@@ -314,6 +364,14 @@ def test_panels_carry_the_saved_role_ids(tmp_path):
         assert views[4].children[0].item.label == "Orange" and views[1].children[0].item.emoji is None
         assert "Posted the five role panels" in inter.followup.send.await_args.args[0]
     _run(tmp_path, body)
+
+
+def test_a_role_renamed_past_80_characters_still_makes_a_panel_discord_accepts():
+    async def go():
+        group = next(g for g in GROUPS if g.key == "timezone")
+        _, view = panel(group, [FakeRole(100 + i, "L" * 100) for i in range(len(group.roles))])
+        assert all(len(button.item.label) == 80 for button in view.children)   # a button label holds 80
+    asyncio.run(go())
 
 
 def test_panel_post_waits_for_rolesetup(tmp_path):
@@ -360,6 +418,37 @@ def test_picking_a_timezone_swaps_it_and_logs_without_pinging(tmp_path):
         assert log.args[0] == "🎭 <@7> added **Eastern** and removed **Pacific**."
         assert log.kwargs["allowed_mentions"].users is False and log.kwargs["allowed_mentions"].roles is False
         assert staff.send.await_count == 1
+    _run(tmp_path, body)
+
+
+class SlowMember(FakeMember):
+    """A role change takes a moment, like the real request, so two clicks overlap."""
+
+    async def add_roles(self, *roles, reason=None):
+        await asyncio.sleep(0.05)
+        await super().add_roles(*roles, reason=reason)
+
+
+def test_two_quick_clicks_on_a_one_at_a_time_panel_leave_one_role(tmp_path):
+    async def body(db):
+        # Audit ROLE-3: each click worked from the roles it carried, so Orange then Teal gave both.
+        guild = FakeGuild()
+        await _set_up(db, guild)
+        saved = await db.get_role_picker_roles(GUILD_ID)
+        member = guild.members[7] = SlowMember(7)            # the member as Discord holds them
+
+        def click():                                         # a click carries the roles as they were
+            snapshot = FakeMember(7, member.roles)
+            snapshot.add_roles, snapshot.remove_roles = member.add_roles, member.remove_roles
+            return _interaction(db, guild, snapshot, _staff())
+        clicks = {"Orange": click(), "Teal": click()}
+        await asyncio.gather(*(apply_pick(inter, "colors", {saved[name]}) for name, inter in clicks.items()))
+        # Which click reaches the lock first is up to timing (each reads the DB first, on its own
+        # thread); either way one color is left, and the later click says it swapped the other out.
+        assert len(member.roles) == 1
+        kept = member.roles[0].name
+        other = next(name for name in clicks if name != kept)
+        assert clicks[kept].followup.send.await_args.args[0] == f"Added **{kept}**. Removed **{other}**."
     _run(tmp_path, body)
 
 

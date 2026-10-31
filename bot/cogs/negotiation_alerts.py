@@ -15,7 +15,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from bot.delivery import Delivery, fit_message, send_dm
-from bot.uex.exceptions import UexApiError
+from bot.uex.exceptions import UexApiError, describe_uex_api_error
 from bot.uex.marketplace import marketplace_item_link, parse_uex_number
 
 logger = logging.getLogger("uexbot.negotiation_alerts")
@@ -65,10 +65,10 @@ class NegotiationAlerts(commands.Cog):
         try:
             seeded = await self._seed_baseline(interaction.user.id, secret_key)
         except UexApiError as exc:
+            # Only an auth error is the key's fault: a timeout, an outage or a rate limit
+            # isn't, and re-linking wouldn't help (audit MSG-2).
             await interaction.followup.send(
-                f"Couldn't enable negotiation alerts - UEX rejected the check: {exc}\n"
-                "This usually means your linked secret key isn't valid. Check `/uex-account-status`, "
-                "re-link with `/link-uex-account` if needed, then try again.",
+                f"Couldn't enable negotiation alerts, so they're still off. {describe_uex_api_error(exc)}",
                 ephemeral=True,
             )
             return

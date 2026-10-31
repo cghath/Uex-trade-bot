@@ -31,6 +31,12 @@ class UexAuthError(UexRejectedError):
     enough to touch data."""
 
 
+class UexDeleteUnconfirmedError(UexApiError):
+    """A DELETE UEX answered "ok", whose read-back (is the listing gone?) then failed. The delete most
+    likely worked; only the check didn't (audit TRD-2). Still a UexApiError, so a caller that doesn't
+    tell the two apart keeps treating it as unconfirmed, never as gone."""
+
+
 class UexNotFoundError(UexApiError):
     """Raised when the API returns no matching data for a lookup."""
 

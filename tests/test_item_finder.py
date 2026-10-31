@@ -210,7 +210,7 @@ def test_the_header_counts_shops_and_the_footer_says_how_many_were_left_out():
     assert item_header("P4-AR Rifle", 16, "Area 18 (Cubby Blast)") == \
         "## P4-AR Rifle\n-# 16 shops sell it · prices in aUEC · from Area 18 (Cubby Blast)"
     assert "1 shop sells it" in item_header("X", 1, "Y")
-    assert item_footer(0) == "-# UEX prices, up to 24h old"
+    assert item_footer(0) == "-# UEX prices, cached up to 24h", "the price itself can be older (audit TRD-10)"
     assert item_footer(1).endswith("1 more shop not shown") and item_footer(5).endswith("5 more shops not shown")
 
 
@@ -356,7 +356,7 @@ def test_ingame_item_finder_happy_path_sorts_closest_first_grouped_by_system():
     assert lines[0].startswith("- **Near Armory**"), "closest terminal must be listed first"
     assert "1,300" in lines[0] and "2 Gm" in lines[0]
     assert "1,200" in lines[1] and "50 Gm" in lines[1]
-    assert footer == "-# UEX prices, up to 24h old"
+    assert footer == "-# UEX prices, cached up to 24h"
 
 
 def test_ingame_item_finder_groups_results_into_one_field_per_star_system():

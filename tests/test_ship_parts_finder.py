@@ -128,7 +128,7 @@ def test_partial_thread_setup_is_deleted_and_does_not_save_an_entry(tmp_path, mo
     saved, entries, mapping, thread, interaction = asyncio.run(run())
     assert not saved and entries == [] and mapping is None
     thread.delete.assert_awaited_once()
-    assert "couldn't create" in interaction.followup.send.await_args.args[0]
+    assert "couldn't open your private ship parts thread" in interaction.followup.send.await_args.args[0]
 
 
 def test_persistent_controls_reject_a_non_owner(tmp_path):
@@ -248,18 +248,36 @@ def test_remove_entry_select_reports_when_the_db_delete_fails():
     assert "couldn't remove" in interaction.followup.send.await_args.args[0]
 
 
-def test_oversized_private_list_uses_one_safe_attachment():
+def _refreshed(pages):
     async def run():
         thread = FakeThread()
         db = NS(get_ship_parts_thread=AsyncMock(return_value={"message_id": 200}))
         service = ShipPartsShoppingService(NS(db=db))
-        service.render = AsyncMock(return_value=["x" * 1900, "@everyone second page"])
+        service.render = AsyncMock(return_value=pages)
         await service.refresh(thread, 1, 10)
         return thread
 
-    thread = asyncio.run(run())
-    kwargs = thread.message.edit.await_args.kwargs
+    return asyncio.run(run()).message.edit.await_args.kwargs
+
+
+def test_a_list_past_one_message_goes_on_in_embeds_not_an_attachment():
+    """UX-6: a second page (about 18 parts) used to turn the whole list into a .txt file."""
+    kwargs = _refreshed(["x" * 1900, "@everyone second page", "third page"])
+    assert kwargs["content"] == "x" * 1900 and kwargs["attachments"] == []
+    assert [embed.description for embed in kwargs["embeds"]] == ["@everyone second page", "third page"]
+    assert kwargs["allowed_mentions"] == ship_parts_finder.NO_MENTIONS
+
+
+def test_a_short_list_has_no_embeds_left_from_a_longer_one():
+    kwargs = _refreshed(["one page"])
+    assert kwargs["content"] == "one page" and kwargs["embeds"] == [] and kwargs["attachments"] == []
+
+
+def test_oversized_private_list_uses_one_safe_attachment():
+    """Past what a message's embeds can hold, the whole list is one attachment."""
+    kwargs = _refreshed(["x" * 1900] * 5)
     assert len(kwargs["content"]) < 2000 and kwargs["allowed_mentions"] == ship_parts_finder.NO_MENTIONS
+    assert kwargs["embeds"] == []
     assert len(kwargs["attachments"]) == 1
     assert kwargs["attachments"][0].filename == "ship-parts-list.txt"
 
@@ -1235,6 +1253,34 @@ def test_a_slow_load_finishing_after_a_newer_pick_is_dropped():
     slow.edit_original_response.assert_not_awaited()
 
 
+@pytest.mark.parametrize("fails", [False, True])
+def test_a_slow_load_finishing_after_refresh_replaced_the_browser_is_dropped(fails):
+    """Audit REL-4: ↻ Refresh stops the old browser and draws a new one; the old browser's
+    slow load then finished and drew its own menus back over it - menus nothing answers."""
+    async def run():
+        release = asyncio.Event()
+
+        async def candidates(port, *, category=None, limit=None, origin_id=None):
+            await release.wait()
+            if fails:
+                raise ship_parts_finder.WikiApiError("boom")
+            return [dict(_detail("JS-300"), type="PowerPlant")]
+
+        power = ShipPort(name="hardpoint_power_plant", port_type="PowerPlant", size_min=1, size_max=1)
+        view = ship_parts_finder.PartsBrowserView(NS(candidates_for_port=candidates),
+                                                    {"id": 100, "name": "Avenger Titan"}, (1, "Origin"),
+                                                    {"Power Plants": [power]})
+        slow = _component_interaction()
+        task = asyncio.create_task(view.show_category(slow, "Power Plants"))
+        await asyncio.sleep(0)
+        view.stop()  # what _rebuild_browser does to the browser Refresh replaces
+        release.set()
+        await task
+        return slow
+
+    asyncio.run(run()).edit_original_response.assert_not_awaited()
+
+
 def test_picking_a_new_slot_drops_the_previous_slots_parts_right_away():
     async def run():
         release = asyncio.Event()
@@ -1260,3 +1306,39 @@ def test_picking_a_new_slot_drops_the_previous_slots_parts_right_away():
     candidates_mid_load, part_selects_mid_load = asyncio.run(run())
     assert candidates_mid_load == [] and part_selects_mid_load == [], \
         "the S3 slot's parts can't be picked (and locked in under the S4 slot) while it loads"
+
+
+# -- UX-9: run inside a thread ------------------------------------------------------------------
+
+class RunThread:
+    """The thread a command was run in, e.g. a route thread: its parent is a text channel."""
+
+    def __init__(self, parent):
+        self.parent = parent
+
+
+def _lock_in_from(tmp_path, monkeypatch, where):
+    async def run():
+        db = Database(tmp_path / "in-thread.sqlite", Fernet(Fernet.generate_key()))
+        await db.init()
+        monkeypatch.setattr(ship_parts_finder.discord, "TextChannel", FakeChannel)
+        monkeypatch.setattr(ship_parts_finder.discord, "Thread", RunThread)
+        bot = NS(db=db, get_channel=lambda _id: None, fetch_channel=AsyncMock())
+        interaction = _interaction(where)
+        saved = await _lock_in(ShipPartsShoppingService(bot), interaction)
+        return saved, await db.get_ship_parts_entries(1, 10), interaction
+
+    return asyncio.run(run())
+
+
+def test_run_inside_a_thread_the_private_list_is_made_in_that_threads_channel(tmp_path, monkeypatch):
+    channel = FakeChannel(FakeThread())
+    saved, entries, _ = _lock_in_from(tmp_path, monkeypatch, RunThread(channel))
+    assert saved and [entry["item_name"] for entry in entries] == ["PowerBolt"]
+    channel.create_thread.assert_awaited_once()
+
+
+def test_run_where_no_private_thread_can_go_says_where_to_run_it(tmp_path, monkeypatch):
+    saved, entries, interaction = _lock_in_from(tmp_path, monkeypatch, RunThread(NS()))  # e.g. a forum post
+    assert not saved and entries == []
+    assert "Run this in a server text channel" in interaction.followup.send.await_args.args[0]

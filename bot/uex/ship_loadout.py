@@ -16,7 +16,8 @@ The owner's decisions (2026-10-01):
   energy per projectile. The S3 Mantis (32 physical a round) did nothing to any of them. A gun
   that gets through ranks ahead of one that doesn't (ARMOR_REFERENCE, beats_armor) - before the
   5% band, which research found is the right width as a tiebreak but the wrong tool for this.
-  Budget buys a gun only when it beats stock head to head this way and loses no DPS.
+  Budget buys a gun only when it beats stock head to head this way and loses no DPS; with no
+  stock gun to beat (an empty slot, a stock scattergun), one that gets through still comes first.
 - Scatterguns are never recommended (nobody uses them at the moment, the owner's call; their
   wiki DPS also counts every pellet of a shot, which put them first in S1-S3). A stock one is
   always worth replacing.
@@ -298,7 +299,9 @@ def rank_candidates(candidates: list[dict], category: str, profile: str, stock: 
     beats `stock`'s (every rated part, for an empty slot) and ranks those by key stat per aUEC;
     a stock part with no key stat of its own leaves Budget nothing it can call an upgrade. A gun
     slot never ranks a scattergun, and any other gun beats a stock one; otherwise Budget's gun
-    must also beat stock head to head (gun_at_least_as_good) with at least stock's DPS."""
+    must also beat stock head to head (gun_at_least_as_good) with at least stock's DPS. With no
+    stock gun to beat, a gun that gets through heavy-fighter armor still ranks ahead of every one
+    that doesn't, as in the other profiles (audit TRD-3)."""
     rated = [c for c in candidates if key_stat(c) is not None]
     if category == GUNS_CATEGORY:
         rated = [c for c in rated if not is_scattergun(c)]
@@ -320,7 +323,8 @@ def rank_candidates(candidates: list[dict], category: str, profile: str, stock: 
                     and gun_at_least_as_good(c, stock) and not gun_at_least_as_good(stock, c)]
         return sorted(upgrades, key=lambda c: (-value_per_auec(c),) + tiebreak_key(c, category) + shop_key(c))
     upgrades = [c for c in rated if value_per_auec(c) is not None and (floor is None or key_stat(c) > floor)]
-    return sorted(upgrades, key=lambda c: (-value_per_auec(c),) + tiebreak_key(c, category) + shop_key(c))
+    return sorted(upgrades, key=lambda c: (category == GUNS_CATEGORY and not _gets_through(c), -value_per_auec(c))
+                  + tiebreak_key(c, category) + shop_key(c))
 
 
 @dataclass(frozen=True)
@@ -571,6 +575,15 @@ def purchases(picks: list[SlotPick]) -> list[tuple[LoadoutSlot, dict]]:
     """Every (slot, part) to buy - one per slot, so "2x S3 Wing Gun" is two entries. Kept stock
     is never in it: that's what "Add all to shopping list" saves."""
     return [(slot, pick.part) for pick in picks if pick.part is not None for slot in pick.group.slots]
+
+
+def stock_slots(picks: list[SlotPick]) -> list[LoadoutSlot]:
+    """Every slot the loadout keeps its stock part in because stock is the better pick: where
+    "Add all to shopping list" takes off a part an earlier profile locked in, so the list
+    matches the loadout (audit UX-7). Not a slot left alone for want of data (no stats,
+    nothing sold, stock unknown, only scatterguns): the loadout has no say there."""
+    return [slot for pick in picks if pick.part is None and pick.reason in (STOCK_IS_BEST, NOTHING_BEATS_STOCK)
+            for slot in pick.group.slots]
 
 
 def total_cost(picks: list[SlotPick]) -> float:
@@ -877,10 +890,30 @@ def loadout_blocks(header: str, entries: list[str], kept: list[str]) -> tuple[st
     return tuple(blocks)
 
 
+def _split_kept_section(header: str, section: str, budget: int) -> list[str]:
+    """`section` as one or more sections that each fit a page alone (the header and the "Keeping
+    stock" heading included), cut only between its lines, each part under the section's heading."""
+    def fits(text: str) -> bool:
+        return len("\n\n".join(loadout_blocks(header, [], [text]))) <= budget
+
+    if fits(section):
+        return [section]
+    heading, *lines = section.split("\n")
+    parts, current = [], [heading]
+    for line in lines:
+        if len(current) > 1 and not fits("\n".join([*current, line])):
+            parts.append("\n".join(current))
+            current = [heading]
+        current.append(line)
+    return parts + ["\n".join(current)]
+
+
 def paginate_loadout(header: str, entries: list[str], kept: list[str], budget: int) -> list[tuple[str, ...]]:
     """Pages of blocks, each at most `budget` characters with the blocks joined by blank lines,
-    the header on every page, no entry or section ever cut: a big ship's loadout can run past
-    one message. Always at least one page."""
+    the header on every page, no entry or line ever cut: a big ship's loadout can run past one
+    message. A kept-stock section too long for a page of its own is split between its lines, its
+    heading repeated (audit TRD-4). Always at least one page."""
+    kept = [part for section in kept for part in _split_kept_section(header, section, budget)]
     pages: list[tuple[str, ...]] = []
     page_entries: list[str] = []
     page_kept: list[str] = []

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 
@@ -93,6 +94,21 @@ def parse_uex_number(raw: Any) -> float | None:
         return None
 
 
+def listed_before(listing: dict, created_at: str | None) -> bool:
+    """Whether a listing was already up when an alert was set (`created_at`, SQLite's naive UTC
+    'YYYY-MM-DD HH:MM:SS'), going by its UEX `date_added` (unix seconds, sometimes a string). An alert's
+    first poll can come up to a poll interval after it was set, so a listing posted in between is new,
+    not "already up" (audit TRD-1). Without a usable date either side, it counts as already up."""
+    added = parse_uex_number(listing.get("date_added"))
+    if added is None or not created_at:
+        return True
+    try:
+        created = datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return True
+    return added < created.timestamp()
+
+
 QUALITY_MAX = 1000
 
 
@@ -103,6 +119,18 @@ def format_quality_range(min_quality: float | None, max_quality: float | None) -
     lo = f"{min_quality:.0f}" if min_quality is not None else "0"
     hi = f"{max_quality:.0f}" if max_quality is not None else str(QUALITY_MAX)
     return f"{lo}-{hi}"
+
+
+def quality_range_error(min_quality: float | None, max_quality: float | None) -> str | None:
+    """The reply for a minimum quality above the maximum, or None when the range is fine.
+    Such a range matches nothing: an alert that could never fire, a search always empty
+    (audit LOGIC-7)."""
+    if min_quality is not None and max_quality is not None and min_quality > max_quality:
+        return (
+            f"The minimum quality ({min_quality:.0f}) is above the maximum ({max_quality:.0f}), "
+            "so nothing could match. Swap them, or leave one out."
+        )
+    return None
 
 
 def parse_listing_quality(raw: Any) -> float | None:
@@ -453,6 +481,31 @@ def reshape_marketplace_history_rows(rows: list[dict]) -> list[dict]:
         )
     reshaped.sort(key=lambda r: r["date_added"])
     return reshaped
+
+
+def group_marketplace_history_by_currency_unit(
+    rows: list[dict],
+) -> list[tuple[tuple[str | None, str | None], list[dict]]]:
+    """/marketplace_prices_history rows split by (currency, unit), the biggest group first
+    (ties: the one with the latest row). An item listed in UEC per unit, WIF per unit and UEC
+    per box has three prices that don't compare, and drawn as one line they read as wild
+    swings under an "aUEC / unit" axis (audit MSG-3) - so one group is charted, labelled from
+    its own currency and unit. A blank currency or unit is None."""
+    groups: dict[tuple[str | None, str | None], list[dict]] = {}
+    for row in rows:
+        currency = str(row.get("currency") or "").strip().upper() or None
+        unit = str(row.get("unit") or "").strip() or None
+        groups.setdefault((currency, unit), []).append(row)
+
+    def latest(group: list[dict]) -> float:
+        return max((parse_uex_number(row.get("date_added")) or 0.0) for row in group)
+
+    return sorted(groups.items(), key=lambda item: (len(item[1]), latest(item[1])), reverse=True)
+
+
+def marketplace_price_label(currency: str | None, unit: str | None) -> str:
+    """The axis label for one currency/unit group, e.g. "UEC / unit"."""
+    return f"{currency or 'price'} / {unit or 'unit'}"
 
 
 def filter_listings_by_quality(

@@ -49,23 +49,26 @@ _LAYOUT_NOTE_ROOM = 300
 @dataclass
 class RoutePage:
     """One page: a route's embed (None for a text-only page), its plain-text version, what
-    Track this route starts (None when it can't be tracked), and, for a route laid out
-    with layout components, its text blocks (see layout_pages)."""
+    Track this route starts (None when it can't be tracked), for a route laid out with layout
+    components, its text blocks (see layout_pages), and for one part of a route split over
+    several text pages, the whole route's text (what Track this route copies, audit TRD-8)."""
 
     embed: discord.Embed | None
     text: str
     route: TrackableRoute | None = None
     blocks: tuple[str, ...] = ()
+    full_text: str = ""
 
 
 def text_pages(text: str, *, route: TrackableRoute | None = None, header: str = "") -> list[RoutePage]:
     """A route too long for an embed, as plain-text pages - split over as many as it takes,
-    so nothing is dropped."""
-    room = MAX_MESSAGE_CHARS - len(header) - 2 - _PART_NOTE_ROOM
+    so nothing is dropped. Each also leaves room for EXPIRED_NOTE above it: when the buttons
+    closed, a full page lost its last lines (often a disclosure or the footer) to it (audit TRD-9)."""
+    room = MAX_MESSAGE_CHARS - len(header) - 1 - len(EXPIRED_NOTE) - 2 - _PART_NOTE_ROOM
     chunks = chunk_lines(text.splitlines(), max_length=max(room, 200))
     if len(chunks) == 1:
         return [RoutePage(None, chunks[0], route)]
-    return [RoutePage(None, f"{chunk}\n-# (part {i} of {len(chunks)})", route)
+    return [RoutePage(None, f"{chunk}\n-# (part {i} of {len(chunks)})", route, full_text=text)
             for i, chunk in enumerate(chunks, 1)]
 
 

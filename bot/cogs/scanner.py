@@ -48,7 +48,20 @@ class Scanner(commands.Cog):
         description="Set the channel for quality-matched raw-material deal alerts.",
     )
     @app_commands.describe(channel="The channel to post steal alerts in")
+    # Admins only (the owner's call, audit UX-12): every 15 minutes this posts deals in the
+    # channel, so a member could aim it at any channel. Hidden from members, and checked here
+    # too since a server can change who sees a command.
+    @app_commands.guild_only()
+    @app_commands.default_permissions(manage_channels=True)
+    @app_commands.checks.has_permissions(manage_channels=True)
     async def set_scanner_channel(self, interaction: discord.Interaction, channel: discord.TextChannel) -> None:
+        # Manage Channels where it runs isn't enough: it has to be the target channel's too.
+        if not channel.permissions_for(interaction.user).manage_channels:
+            await interaction.response.send_message(
+                f"You need the Manage Channels permission in {channel.mention} to post deal alerts there.",
+                ephemeral=True,
+            )
+            return
         # Deferred before any DB write: a write can wait on a lock past Discord's
         # 3-second window, and a player who sees "did not respond" retries into a
         # duplicate (audit REL-8).
@@ -69,9 +82,13 @@ class Scanner(commands.Cog):
     async def scanner_status(self, interaction: discord.Interaction) -> None:
         channel_id = await self.bot.db.get_scanner_channel(interaction.user.id)
         if channel_id is None:
+            # /set-scanner-channel is for admins (audit UX-12): don't point a member at it.
+            if interaction.permissions.manage_channels:
+                setup = "Run /set-scanner-channel to start getting quality-matched material deal alerts."
+            else:
+                setup = "Run /scan-now to check for quality-matched material deals any time."
             await interaction.response.send_message(
-                "Raw Materials Deal Scanner not set up yet. Run /set-scanner-channel to start getting "
-                "quality-matched material deal alerts.",
+                f"Raw Materials Deal Scanner not set up yet. {setup}",
                 ephemeral=True,
             )
             return
@@ -214,13 +231,22 @@ class ScannerOffView(BotView):
         if interaction.user.id != self.user_id:
             await interaction.response.send_message("This button isn't for you.", ephemeral=True)
             return
+        # Acknowledged before the DB write, which can wait on a lock past Discord's
+        # 3-second window: the scanner would turn off while the player saw "did not
+        # respond" (audit REL-6).
+        await interaction.response.defer()
         was_on = await self.db.clear_scanner_channel(self.user_id)
         button.disabled = True
-        await interaction.response.edit_message(
-            content=("Raw Materials Deal Scanner turned off. Run /set-scanner-channel to turn it back on."
-                     if was_on else "The Raw Materials Deal Scanner was already off."),
-            view=self,
-        )
+        # /set-scanner-channel is for admins (audit UX-12): a member who set the scanner up
+        # before that is pointed at /scan-now instead, as /scanner-status does.
+        if not was_on:
+            content = "The Raw Materials Deal Scanner was already off."
+        elif interaction.permissions.manage_channels:
+            content = "Raw Materials Deal Scanner turned off. Run /set-scanner-channel to turn it back on."
+        else:
+            content = ("Raw Materials Deal Scanner turned off. Turning it back on is up to an admin; "
+                       "/scan-now checks for deals any time.")
+        await interaction.edit_original_response(content=content, view=self)
         self.stop()
 
 

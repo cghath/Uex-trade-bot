@@ -98,20 +98,24 @@ def _stamp(joined: datetime, style: str) -> str:
     return f"<t:{int(joined.timestamp())}:{style}>"
 
 
-def dm_text(name: str, years: int, joined: datetime, event: str | None = None) -> str:
+def dm_text(name: str, years: int, joined: datetime, event: str | None = None, *, veteran: bool = True) -> str:
+    """`veteran`: the member really holds this year's veteran role - the line naming it is left out
+    when giving it failed (audit COMM-4)."""
     lines = [f"🎉 **Happy anniversary, {name}!**",
              f"Today marks {_years(years)} since you joined **{COMMUNITY_NAME}**, on {_stamp(joined, 'D')} at "
-             f"{_stamp(joined, 't')}. Thank you for being part of the community. We're glad to have you with us. 🥳",
-             f"🎖️ You've earned the **{veteran_role_name(years)}** role."]
+             f"{_stamp(joined, 't')}. Thank you for being part of the community. We're glad to have you with us. 🥳"]
+    if veteran:
+        lines.append(f"🎖️ You've earned the **{veteran_role_name(years)}** role.")
     if event:
         lines.append(event)
     return "\n".join(lines)
 
 
-def post_text(mention: str, years: int, joined: datetime) -> str:
+def post_text(mention: str, years: int, joined: datetime, *, veteran: bool = True) -> str:
+    role = f", and is now a **{veteran_role_name(years)}**" if veteran else ""
     return (f"🎊 **Happy server anniversary!** 🎊\n"
-            f"{mention} joined **{COMMUNITY_NAME}** {_years(years)} ago today, on {_stamp(joined, 'D')}, "
-            f"and is now a **{veteran_role_name(years)}**. Thank you for being part of the community! 🎉")
+            f"{mention} joined **{COMMUNITY_NAME}** {_years(years)} ago today, on {_stamp(joined, 'D')}{role}. "
+            f"Thank you for being part of the community! 🎉")
 
 
 # The welcome-back DM (bot/cogs/welcome_back.py): for a member back after this long away.
