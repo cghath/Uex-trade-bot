@@ -441,10 +441,14 @@ def test_two_quick_clicks_on_a_one_at_a_time_panel_leave_one_role(tmp_path):
             snapshot = FakeMember(7, member.roles)
             snapshot.add_roles, snapshot.remove_roles = member.add_roles, member.remove_roles
             return _interaction(db, guild, snapshot, _staff())
-        orange, teal = click(), click()
-        await asyncio.gather(apply_pick(orange, "colors", {saved["Orange"]}), apply_pick(teal, "colors", {saved["Teal"]}))
-        assert [r.name for r in member.roles] == ["Teal"]
-        assert teal.followup.send.await_args.args[0] == "Added **Teal**. Removed **Orange**."
+        clicks = {"Orange": click(), "Teal": click()}
+        await asyncio.gather(*(apply_pick(inter, "colors", {saved[name]}) for name, inter in clicks.items()))
+        # Which click reaches the lock first is up to timing (each reads the DB first, on its own
+        # thread); either way one color is left, and the later click says it swapped the other out.
+        assert len(member.roles) == 1
+        kept = member.roles[0].name
+        other = next(name for name in clicks if name != kept)
+        assert clicks[kept].followup.send.await_args.args[0] == f"Added **{kept}**. Removed **{other}**."
     _run(tmp_path, body)
 
 
