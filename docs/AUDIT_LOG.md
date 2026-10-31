@@ -19,11 +19,11 @@ any `main` sync under **Syncs to main**. Audit reports stay local (`docs/audits/
   full-project audit covered everything up to `cffa68e`.
 - **Not yet audited:** `2342dfc..TestBranch` (nothing as of 2026-10-30). The next audit starts at
   `2342dfc`.
-- **Open findings:** from 2026-10-30, about 43 P3, none P0 or P1; its 7 P2s (EVT-1 to EVT-5,
-  ROLE-1, ROLE-2) and two P3s (EVT-6, EVT-7) are fixed by production PR #147 (not yet audited
-  itself). From 2026-10-03, 26 of 37 still open (11 fixed): REL-3 to REL-9, UX-4 to UX-12, MSG-2
-  to MSG-4, MSG-7 to MSG-9, LOGIC-4 to LOGIC-7. Fixing them adds new commits, which the next audit
-  covers.
+- **Open findings:** from 2026-10-30, none to speak of: the P2s and EVT-6/EVT-7 are fixed by
+  production PR #147, the rest by PR #148 (neither audited yet), except four left by decision
+  (EVT-15, EVT-16, ROLE-6, TEST-1). From 2026-10-03, all fixed by PR #148 except LOGIC-6 (shown
+  unreachable), MSG-9's second half and `/marketplace-index-status`'s visibility (UX-10). The next
+  audit starts at `2342dfc` and covers both PRs.
 - **`main`:** at `865a3b3` (production PR #95, 2026-09-30). Everything up to `2342dfc` is audited,
   but the owner holds the sync until the audits' findings are fixed (2026-10-03).
 
