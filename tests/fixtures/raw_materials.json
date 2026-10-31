@@ -1,0 +1,275 @@
+{
+ "source": "UEX /commodities, is_raw rows only, fetched 2026-10-01",
+ "commodities": [
+  {
+   "id": 2,
+   "name": "Agricium (Ore)",
+   "is_raw": 1,
+   "is_refinable": 1
+  },
+  {
+   "id": 6,
+   "name": "Aluminum (Ore)",
+   "is_raw": 1,
+   "is_refinable": 1
+  },
+  {
+   "id": 8,
+   "name": "Aphorite",
+   "is_raw": 1,
+   "is_refinable": 0
+  },
+  {
+   "id": 199,
+   "name": "Aslarite (Raw)",
+   "is_raw": 1,
+   "is_refinable": 1
+  },
+  {
+   "id": 167,
+   "name": "Beradom",
+   "is_raw": 1,
+   "is_refinable": 0
+  },
+  {
+   "id": 12,
+   "name": "Beryl (Raw)",
+   "is_raw": 1,
+   "is_refinable": 1
+  },
+  {
+   "id": 14,
+   "name": "Bexalite (Raw)",
+   "is_raw": 1,
+   "is_refinable": 1
+  },
+  {
+   "id": 16,
+   "name": "Borase (Ore)",
+   "is_raw": 1,
+   "is_refinable": 1
+  },
+  {
+   "id": 213,
+   "name": "Caranite (Raw)",
+   "is_raw": 1,
+   "is_refinable": 0
+  },
+  {
+   "id": 165,
+   "name": "Cobalt (Raw)",
+   "is_raw": 1,
+   "is_refinable": 1
+  },
+  {
+   "id": 182,
+   "name": "Construction Material Pebbles",
+   "is_raw": 1,
+   "is_refinable": 1
+  },
+  {
+   "id": 181,
+   "name": "Construction Material Rubble",
+   "is_raw": 1,
+   "is_refinable": 1
+  },
+  {
+   "id": 183,
+   "name": "Construction Material Salvage",
+   "is_raw": 1,
+   "is_refinable": 1
+  },
+  {
+   "id": 217,
+   "name": "Construction Pieces",
+   "is_raw": 1,
+   "is_refinable": 1
+  },
+  {
+   "id": 21,
+   "name": "Copper (Ore)",
+   "is_raw": 1,
+   "is_refinable": 1
+  },
+  {
+   "id": 23,
+   "name": "Corundum (Raw)",
+   "is_raw": 1,
+   "is_refinable": 1
+  },
+  {
+   "id": 105,
+   "name": "Decari Pod",
+   "is_raw": 1,
+   "is_refinable": 0
+  },
+  {
+   "id": 26,
+   "name": "Diamond (Raw)",
+   "is_raw": 1,
+   "is_refinable": 1
+  },
+  {
+   "id": 28,
+   "name": "Dolivine",
+   "is_raw": 1,
+   "is_refinable": 0
+  },
+  {
+   "id": 169,
+   "name": "Feynmaline",
+   "is_raw": 1,
+   "is_refinable": 0
+  },
+  {
+   "id": 168,
+   "name": "Glacosite",
+   "is_raw": 1,
+   "is_refinable": 0
+  },
+  {
+   "id": 34,
+   "name": "Gold (Ore)",
+   "is_raw": 1,
+   "is_refinable": 1
+  },
+  {
+   "id": 36,
+   "name": "Hadanite",
+   "is_raw": 1,
+   "is_refinable": 0
+  },
+  {
+   "id": 40,
+   "name": "Hephaestanite (Raw)",
+   "is_raw": 1,
+   "is_refinable": 1
+  },
+  {
+   "id": 125,
+   "name": "Ice (Raw)",
+   "is_raw": 1,
+   "is_refinable": 0
+  },
+  {
+   "id": 42,
+   "name": "Inert Materials",
+   "is_raw": 1,
+   "is_refinable": 0
+  },
+  {
+   "id": 45,
+   "name": "Iron (Ore)",
+   "is_raw": 1,
+   "is_refinable": 1
+  },
+  {
+   "id": 173,
+   "name": "Jaclium (Ore)",
+   "is_raw": 1,
+   "is_refinable": 1
+  },
+  {
+   "id": 46,
+   "name": "Janalite",
+   "is_raw": 1,
+   "is_refinable": 0
+  },
+  {
+   "id": 48,
+   "name": "Laranite (Raw)",
+   "is_raw": 1,
+   "is_refinable": 1
+  },
+  {
+   "id": 185,
+   "name": "Lindinium (Ore)",
+   "is_raw": 1,
+   "is_refinable": 1
+  },
+  {
+   "id": 210,
+   "name": "Ouratite (Raw)",
+   "is_raw": 1,
+   "is_refinable": 1
+  },
+  {
+   "id": 59,
+   "name": "Quantainium (Raw)",
+   "is_raw": 1,
+   "is_refinable": 1
+  },
+  {
+   "id": 61,
+   "name": "Quartz (Raw)",
+   "is_raw": 1,
+   "is_refinable": 1
+  },
+  {
+   "id": 163,
+   "name": "Riccite (Ore)",
+   "is_raw": 1,
+   "is_refinable": 1
+  },
+  {
+   "id": 212,
+   "name": "Sadaryx (Raw)",
+   "is_raw": 1,
+   "is_refinable": 0
+  },
+  {
+   "id": 187,
+   "name": "Savrilium (Ore)",
+   "is_raw": 1,
+   "is_refinable": 1
+  },
+  {
+   "id": 161,
+   "name": "Silicon (Raw)",
+   "is_raw": 1,
+   "is_refinable": 1
+  },
+  {
+   "id": 162,
+   "name": "Stileron (Raw)",
+   "is_raw": 1,
+   "is_refinable": 1
+  },
+  {
+   "id": 74,
+   "name": "Taranite (Raw)",
+   "is_raw": 1,
+   "is_refinable": 1
+  },
+  {
+   "id": 176,
+   "name": "Tin (Ore)",
+   "is_raw": 1,
+   "is_refinable": 1
+  },
+  {
+   "id": 76,
+   "name": "Titanium (Ore)",
+   "is_raw": 1,
+   "is_refinable": 1
+  },
+  {
+   "id": 189,
+   "name": "Torite (Ore)",
+   "is_raw": 1,
+   "is_refinable": 1
+  },
+  {
+   "id": 78,
+   "name": "Tungsten (Ore)",
+   "is_raw": 1,
+   "is_refinable": 1
+  },
+  {
+   "id": 198,
+   "name": "Wuotan Seed",
+   "is_raw": 1,
+   "is_refinable": 0
+  }
+ ]
+}

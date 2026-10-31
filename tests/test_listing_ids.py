@@ -62,7 +62,9 @@ def test_search_results_show_each_listings_id(tmp_path):
     sent = _run(tmp_path, handler, "marketplace_search", "Laranite")
     embed = sent[-1][1]["embed"]
     assert "listing #55512" in embed.fields[0].value
-    assert "/marketplace-listing <id>" in embed.footer.text
+    # The details menu below replaced "/marketplace-listing <id>" (PROJECT_CONTEXT.md entry 119).
+    assert "pick one below" in embed.footer.text
+    assert [o.value for o in sent[-1][1]["view"].select.options] == ["55512"]
 
 
 def test_favorites_show_the_listing_id_not_the_favourite_rows_own(tmp_path):
@@ -74,9 +76,10 @@ def test_favorites_show_the_listing_id_not_the_favourite_rows_own(tmp_path):
             return _ok([{"id": 777, "id_item": 12}])
         return _ok([])
 
-    message = _run(tmp_path, handler, "my_favorites")[-1][0][0]
+    (message,), kwargs = _run(tmp_path, handler, "my_favorites")[-1]
     assert message.startswith("Listing #777 — ") and "#3 " not in message
-    assert "/marketplace-listing <id>" in message
+    assert message.endswith("Pick one below for its full details.")
+    assert [o.value for o in kwargs["view"].select.options] == ["777"], "the listing's id, not the favorite's"
 
 
 def test_negotiations_show_the_listing_id_not_the_negotiations_own(tmp_path):

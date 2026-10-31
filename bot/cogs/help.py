@@ -14,7 +14,8 @@ from discord.ext import commands
 # Display order + grouping. A command name not listed here still appears, under "Other".
 # These remain available as slash commands but are implementation health checks rather than
 # normal player tools, so they do not add noise to /intro.
-HIDDEN_COMMANDS = {"marketplace-index-status", "command-usage"}
+HIDDEN_COMMANDS = {"marketplace-index-status", "command-usage", "anniversary-preview", "welcome-preview",
+                   "rolesetup", "rolepanel", "event-roles"}
 
 CATEGORIES: list[tuple[str, str, list[str]]] = [
     ("💰 Prices & Routes", "Terminal prices, profitable hauls, and ranked live routes.", [
@@ -25,8 +26,8 @@ CATEGORIES: list[tuple[str, str, list[str]]] = [
     ("📊 Commodity Trends", "Trade volume, price movement, and commodity price charts.", [
         "trending", "movers", "commodity-history",
     ]),
-    ("🚀 Ships", "Where to buy a ship, and the parts that fit it.", [
-        "ship-parts-finder", "where-to-buy-ship",
+    ("🚀 Ships", "Where to buy a ship, the parts that fit it, and a recommended loadout.", [
+        "ship-parts-finder", "ship-loadout", "where-to-buy-ship",
     ]),
     ("⚙️ Trading Preferences", "Save your default ship, budget and route filters once, instead of every call.", [
         "set-trading-preferences", "clear-trading-preferences", "my-trading-preferences",
@@ -34,6 +35,9 @@ CATEGORIES: list[tuple[str, str, list[str]]] = [
     ("🔔 Alerts & Notifications", "Price targets, Marketplace matches, restocks, and DM delivery checks.", [
         "alert-add", "stock-alert-add", "marketplace-alert-add",
         "alert-list", "alert-remove", "negotiation-alerts", "test-dm",
+    ]),
+    ("🎖️ Voice Ranks", "Ranks earned from time in voice with others, and for ops attended. Never audio.", [
+        "rank", "rank-leaderboard",
     ]),
     ("🧾 Trade Log & Leaderboard", "Your personal ledger, UEX-recorded history, and server standings.", [
         "trade-log-add", "trade-log", "uex-trades", "leaderboard",

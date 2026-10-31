@@ -9,7 +9,7 @@ Guarantees under test (CONTRIBUTING.md test plan):
   3. Answers - exact / typo / ambiguous / unknown / unavailable each give the right kind of reply; the mission's
      reward chance shows as 'always' or '25%'; a failed detail lookup degrades to 'unavailable', never blocks.
   4. Discord limits - oversized results fall back to text pages that still carry the disclosure, and so does a
-     rejected embed send. Autocomplete is bounded and never syncs.
+     rejected layout send. Autocomplete is bounded and never syncs.
 """
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ import httpx
 from cryptography.fernet import Fernet
 
 from bot.cogs import blueprints as blueprints_module
-from bot.cogs.blueprints import Blueprints, POOL_DISCLOSURE, blueprint_autocomplete
+from bot.cogs.blueprints import Blueprints, blueprint_autocomplete
 from bot.db.database import Database
 from bot.uex.blueprints import BlueprintMission, BlueprintRef, parse_missions
 from bot.wiki_api import WikiApiClient
@@ -115,26 +115,38 @@ def _utcnow() -> datetime:
 
 
 class FakeFollowup:
-    def __init__(self, fail_embeds: bool = False):
+    def __init__(self, fail_layouts: bool = False):
         self.sent: list[dict] = []
-        self.fail_embeds = fail_embeds
+        self.fail_layouts = fail_layouts
 
     async def send(self, **kwargs):
-        if self.fail_embeds and "embed" in kwargs:
+        if self.fail_layouts and _is_layout(kwargs):
             raise discord.HTTPException(NS(status=400, reason="Bad Request"), "Invalid Form Body")
         self.sent.append(kwargs)
 
 
-def _interaction(cog, *, events=None, fail_embeds=False):
+def _interaction(cog, *, events=None, fail_layouts=False):
     async def defer(**_):
         if events is not None:
             events.append("defer")
 
-    return NS(response=NS(defer=defer), followup=FakeFollowup(fail_embeds), client=NS(get_cog=lambda name: cog))
+    return NS(response=NS(defer=defer), followup=FakeFollowup(fail_layouts), client=NS(get_cog=lambda name: cog))
 
 
 def _search_command(cog, interaction, query):
     return Blueprints.blueprint_search.callback(cog, interaction, query)
+
+
+# Part of the reply's lead sentence: the pool's per-blueprint odds aren't published.
+DISCLOSURE = "the odds of getting this one aren't published"
+
+
+def _is_layout(kwargs: dict) -> bool:
+    return isinstance(kwargs.get("view"), discord.ui.LayoutView)
+
+
+def _layout_text(view) -> str:
+    return "\n".join(item.content for item in view.walk_children() if isinstance(item, discord.ui.TextDisplay))
 
 
 def _text_of(sent: list[dict]) -> str:
@@ -142,9 +154,8 @@ def _text_of(sent: list[dict]) -> str:
     for kwargs in sent:
         if "content" in kwargs:
             parts.append(kwargs["content"])
-        if "embed" in kwargs:
-            e = kwargs["embed"]
-            parts.append(e.title + "\n" + (e.description or "") + "\n" + "\n".join(f.value for f in e.fields) + "\n" + (e.footer.text or ""))
+        if _is_layout(kwargs):
+            parts.append(_layout_text(kwargs["view"]))
     return "\n".join(parts)
 
 
@@ -163,7 +174,7 @@ def test_a_first_search_acknowledges_discord_before_any_network_work_then_answer
     wiki, interaction = asyncio.run(run())
     assert wiki.events[0] == "defer", "the interaction must be acknowledged before the first-use sync crawls the API"
     assert wiki.count("missions:") == 1 and wiki.count("version") == 1
-    assert "Blueprint: " + BATTERY in _text_of(interaction.followup.sent)
+    assert "## " + BATTERY in _text_of(interaction.followup.sent)
 
 
 def test_a_crawl_where_the_api_repeats_a_mission_still_syncs_with_the_distinct_count(tmp_path):
@@ -304,7 +315,7 @@ def test_first_use_while_the_api_is_down_says_so_instead_of_failing_the_command(
         return interaction.followup.sent
 
     sent = asyncio.run(run())
-    assert len(sent) == 1 and "embed" not in sent[0] and "isn't available right now" in sent[0]["content"]
+    assert len(sent) == 1 and not _is_layout(sent[0]) and "isn't available right now" in sent[0]["content"]
 
 
 # -- 3. answers ---------------------------------------------------------------------------------
@@ -318,12 +329,11 @@ def test_a_found_blueprint_shows_its_contracts_with_the_25_percent_and_always_la
         return interaction.followup.sent
 
     (sent,) = asyncio.run(run())
-    embed = sent["embed"]
-    body = "\n".join(f.value for f in embed.fields)
-    assert embed.title == f"Blueprint: {BATTERY}"
+    body = _layout_text(sent["view"])
+    assert body.startswith(f"## {BATTERY}")
     assert "Additional Resources For Research" in body and "25% chance to grant one" in body
-    assert "pool of 7" in body, "the contract's pool size is shown, not per-item odds"
-    assert POOL_DISCLOSURE in embed.footer.text and VERSION in embed.footer.text
+    assert "one of the 7 blueprints in its pool" in body, "the contract's pool size is shown, not per-item odds"
+    assert DISCLOSURE in body and f"game {VERSION.split('-')[0]}" in body
     assert "1/" not in body
 
 
@@ -340,7 +350,7 @@ def test_detail_lookups_use_the_blueprint_id_from_the_link_never_the_crafted_ite
     item_ids = {b["uuid"] for r in ROWS for b in r["blueprints"]}
     asked = {entry.split(":", 1)[1] for entry in wiki.log if entry.startswith("detail:")}
     assert asked and not (asked & item_ids), "a lookup used a crafted-item id, which the real API 404s"
-    assert "25% chance to grant one" in "".join(f.value for f in result.embed.fields)
+    assert "25% chance to grant one" in "\n".join(result.blocks)
 
 
 def test_an_always_rewarded_contract_says_so(tmp_path):
@@ -349,7 +359,7 @@ def test_an_always_rewarded_contract_says_so(tmp_path):
         return await cog.search("antium arms maroon")
 
     result = asyncio.run(run())
-    assert result.status == "found" and "always grants one" in "".join(f.value for f in result.embed.fields)
+    assert result.status == "found" and "always grants one" in "\n".join(result.blocks)
 
 
 def test_a_typo_is_corrected_and_says_what_it_did(tmp_path):
@@ -359,7 +369,7 @@ def test_a_typo_is_corrected_and_says_what_it_did(tmp_path):
 
     result = asyncio.run(run())
     assert result.status == "found" and result.name == "Antium Arms Maroon"
-    assert "you typed “antium arms maron”" in result.embed.description
+    assert "you typed “antium arms maron”" in result.blocks[0]
 
 
 def test_an_ambiguous_name_lists_real_candidates_and_never_picks_one(tmp_path):
@@ -368,7 +378,7 @@ def test_an_ambiguous_name_lists_real_candidates_and_never_picks_one(tmp_path):
         return await cog.search("prism"), {r.name for r in await db.get_blueprint_refs()}
 
     result, names = asyncio.run(run())
-    assert result.status == "ambiguous" and result.embed is None and result.name is None
+    assert result.status == "ambiguous" and result.blocks == () and result.name is None
     listed = [line[2:] for line in result.pages[0].splitlines() if line.startswith("• ")]
     assert len(listed) >= 2 and set(listed) <= names
 
@@ -393,8 +403,8 @@ def test_a_failed_detail_lookup_still_answers_and_marks_the_chance_unavailable(t
         return interaction.followup.sent
 
     (sent,) = asyncio.run(run())
-    body = "\n".join(f.value for f in sent["embed"].fields)
-    assert "reward chance unavailable" in body and "Additional Resources For Research" in body
+    body = _layout_text(sent["view"])
+    assert "reward chance is unavailable" in body and "Additional Resources For Research" in body
     assert "always" not in body and "25%" not in body, "no chance may be invented when the lookup failed"
 
 
@@ -446,24 +456,24 @@ def test_an_oversized_result_falls_back_to_text_pages_that_keep_the_disclosure(t
         return interaction.followup.sent
 
     sent = asyncio.run(run())
-    assert all("embed" not in kwargs for kwargs in sent), "60 givers cannot fit one embed"
+    assert not any(_is_layout(kwargs) for kwargs in sent), "60 givers cannot fit one layout"
     assert 2 <= len(sent) <= blueprints_module.MAX_TEXT_PAGES
     assert all(len(kwargs["content"]) <= 2000 for kwargs in sent)
-    assert POOL_DISCLOSURE in sent[-1]["content"], "the disclosure must survive on the last page"
-    assert "ILLEGAL" in "".join(k["content"] for k in sent), "warnings survive the fallback too"
+    assert DISCLOSURE in sent[0]["content"], "the disclosure leads the first page"
+    assert "llegal" in "".join(k["content"] for k in sent), "warnings survive the fallback too"
 
 
-def test_a_rejected_embed_send_falls_back_to_the_same_facts_as_text(tmp_path):
+def test_a_rejected_layout_send_falls_back_to_the_same_facts_as_text(tmp_path):
     async def run():
         cog, _ = await _make(tmp_path, FakeWiki(), seed=True)
-        interaction = _interaction(cog, fail_embeds=True)
+        interaction = _interaction(cog, fail_layouts=True)
         await _search_command(cog, interaction, BATTERY)
         return interaction.followup.sent
 
     sent = asyncio.run(run())
     text = "\n".join(k["content"] for k in sent)
-    assert all("embed" not in k for k in sent)
-    assert "25% chance to grant one" in text and POOL_DISCLOSURE in text and VERSION in text
+    assert not any(_is_layout(k) for k in sent)
+    assert "25% chance to grant one" in text and DISCLOSURE in text and f"game {VERSION.split('-')[0]}" in text
 
 
 def test_a_result_too_long_for_five_pages_shows_a_prefix_and_says_exactly_how_much_was_left_out(tmp_path):
@@ -482,17 +492,17 @@ def test_a_result_too_long_for_five_pages_shows_a_prefix_and_says_exactly_how_mu
     result, sent = asyncio.run(run())
     text = "\n".join(result.pages)
     shown = 400 - result.omitted
-    assert result.status == "found" and 0 < result.omitted < 400 and result.embed is None
+    assert result.status == "found" and 0 < result.omitted < 400 and result.blocks == ()
     assert len(result.pages) <= blueprints_module.MAX_TEXT_PAGES and all(len(p) <= 2000 for p in result.pages)
-    assert f"Showing {shown} of 400 contract groups - {result.omitted} more didn't fit" in result.pages[0]
+    assert f"Showing {shown} of 400 contracts - {result.omitted} more didn't fit" in result.pages[0]
     assert text.count("Deliberately Long Contract Title Number") == shown, "the notice's count is what is actually listed"
     # Groups display sorted by giver name (a string sort, so "Number 10" precedes "Number 2"): what is shown must be
     # exactly the first `shown` of that order - a prefix with no gap in the middle.
     display_order = sorted(range(400), key=lambda i: f"Mission Giver Corporation Number {i}".lower())
     listed = {i for i in range(400) if f"Contract Title Number {i} " in text}
     assert listed == set(display_order[:shown])
-    assert POOL_DISCLOSURE in result.pages[-1], "the pool disclosure survives truncation"
-    assert all("embed" not in kwargs for kwargs in sent), "an embed can only show the full list, so truncation goes as text"
+    assert DISCLOSURE in result.pages[0], "the pool disclosure survives truncation"
+    assert not any(_is_layout(kwargs) for kwargs in sent), "a layout only shows the full list, so truncation goes as text"
 
 
 def test_a_complete_result_reports_nothing_omitted(tmp_path):
@@ -501,7 +511,7 @@ def test_a_complete_result_reports_nothing_omitted(tmp_path):
         return await cog.search(BATTERY)
 
     result = asyncio.run(run())
-    assert result.omitted == 0 and result.embed is not None and "Showing" not in "\n".join(result.pages)
+    assert result.omitted == 0 and result.blocks and "Showing" not in "\n".join(result.pages)
 
 
 def test_no_reply_can_ping_anyone_however_the_query_is_written(tmp_path):
@@ -513,8 +523,8 @@ def test_no_reply_can_ping_anyone_however_the_query_is_written(tmp_path):
         cog, _ = await _make(tmp_path, FakeWiki(), seed=True)
         interaction = _interaction(cog)
         await _search_command(cog, interaction, hostile)
-        # ...and the same guarantee when the embed is rejected and the text path runs instead.
-        typo = _interaction(cog, fail_embeds=True)
+        # ...and the same guarantee when the layout is rejected and the text path runs instead.
+        typo = _interaction(cog, fail_layouts=True)
         await _search_command(cog, typo, "antium arms maron @everyone")
         found = _interaction(cog)
         await _search_command(cog, found, BATTERY)
@@ -573,10 +583,10 @@ def test_search_bounds_the_query_before_it_reaches_the_fuzzy_matcher(tmp_path, m
     assert len(seen) == 1 and len(seen[0]) <= blueprints_module.MAX_QUERY_CHARS
 
 
-def test_a_result_cut_short_as_text_never_also_ships_a_full_embed(tmp_path, monkeypatch):
-    """The embed can only show the whole list. If the text pages had to omit groups, an embed that happens to
+def test_a_result_cut_short_as_text_never_also_ships_a_full_layout(tmp_path, monkeypatch):
+    """The layout can only show the whole list. If the text pages had to omit groups, a layout that happens to
     fit would show everything while `omitted` (and so the model's tool text) says some were left out - the
-    two must never disagree. Shrinks the page limits so a small, embed-sized result gets truncated as text."""
+    two must never disagree. Shrinks the page limits so a small, layout-sized result gets truncated as text."""
     monkeypatch.setattr(blueprints_module, "TEXT_PAGE_LIMIT", 300)
     monkeypatch.setattr(blueprints_module, "MAX_TEXT_PAGES", 3)
 
@@ -589,7 +599,7 @@ def test_a_result_cut_short_as_text_never_also_ships_a_full_embed(tmp_path, monk
 
     result = asyncio.run(run())
     assert result.omitted > 0, "the shrunken limits must actually force truncation for this to test anything"
-    assert result.embed is None
+    assert result.blocks == ()
 
 
 def test_the_command_option_itself_refuses_an_over_long_query():

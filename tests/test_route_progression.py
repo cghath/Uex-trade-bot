@@ -29,6 +29,7 @@ from bot.cogs.route_progression import (
 )
 from bot.cogs.route_progression import _embed_with_outcome
 from bot.db.database import Database
+from bot.route_pages import RouteLayoutPagesView, RoutePage
 from bot.uex.route_progression import (
     SUPPRESSION_HOURS,
     describe_leg_outcome,
@@ -4452,3 +4453,77 @@ def test_failed_abandon_queue_write_does_not_claim_that_background_recovery_is_q
         )
 
     asyncio.run(run())
+
+
+
+# -- the route copied into its thread ------------------------------------------------------
+# Regression (PR #125): the copy at the top of a tracking thread came from the clicked
+# message's embed. /multi-stop-route's layout message has none, so its threads started with
+# no route in them. The button now hands over the page showing.
+
+_LAYOUT_BLOCKS = ("## #1 · A → B → C", "### Leg 1 · A → B\n⚠️ Crosses systems: `Stanton` → `Pyro`",
+                  "-# Prices can change before you arrive")
+
+
+def _layout_page() -> RoutePage:
+    return RoutePage(None, "\n\n".join(_LAYOUT_BLOCKS), _trackable_route(), _LAYOUT_BLOCKS)
+
+
+def _thread_sends(tmp_path, *, page=None, message=None, send=None, via_button=False) -> list:
+    """Start tracking (or click Track this route on a one-page layout) and return the
+    thread's sends, in order."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db})()
+        cog._active_legs = {}
+        thread = _FakeTrackingThread(600)
+        if send is not None:
+            thread.send = send
+        channel = _FakeTextChannel()
+        channel.create_thread = AsyncMock(return_value=thread)
+        interaction = _FakeStartTrackingInteraction(channel=channel)
+        interaction.message = message
+        if via_button:
+            view = RouteLayoutPagesView([page], owner_id=2, tracking_cog=cog)
+            await view.track.callback(interaction)
+        else:
+            await cog.start_tracking(interaction, _trackable_route(), page=page)
+        assert await db.get_route_progression_thread(600) is not None, "tracking started"
+        return thread.send.call_args_list
+
+    return asyncio.run(run())
+
+
+def test_tracking_a_laid_out_route_copies_it_into_the_thread_first(tmp_path):
+    sends = _thread_sends(tmp_path, page=_layout_page(), via_button=True)
+    copy = sends[0].kwargs["view"]
+    assert isinstance(copy, discord.ui.LayoutView)
+    assert [item.content for item in copy.walk_children() if isinstance(item, discord.ui.TextDisplay)] == list(
+        _LAYOUT_BLOCKS)
+    assert not any(isinstance(item, discord.ui.Button) for item in copy.walk_children()), "no paging buttons"
+    assert sends[1].args[0].startswith("Tracking **Test Route**")
+
+
+def test_tracking_an_embed_route_copies_its_embed(tmp_path):
+    embed = discord.Embed(title="#1 Gold")
+    sends = _thread_sends(tmp_path, page=RoutePage(embed, "**#1 Gold**", _trackable_route()))
+    assert sends[0].kwargs == {"embed": embed}
+
+
+def test_a_route_copy_discord_refuses_is_posted_as_its_text(tmp_path):
+    async def refuse_layouts(*args, **kwargs):
+        if isinstance(kwargs.get("view"), discord.ui.LayoutView):
+            raise discord.HTTPException(NS(status=400, reason="Bad Request"), "Invalid Form Body")
+
+    sends = _thread_sends(tmp_path, page=_layout_page(), send=AsyncMock(side_effect=refuse_layouts))
+    assert isinstance(sends[0].kwargs["view"], discord.ui.LayoutView), "the layout was tried first"
+    assert sends[1].args[0] == _layout_page().text
+    assert sends[2].args[0].startswith("Tracking **Test Route**"), "tracking still starts"
+
+
+def test_without_a_page_the_clicked_messages_embed_is_copied(tmp_path):
+    embed = discord.Embed(title="#1 Gold")
+    sends = _thread_sends(tmp_path, message=NS(embeds=[embed]))
+    assert sends[0].kwargs == {"embed": embed}

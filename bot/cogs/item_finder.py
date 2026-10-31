@@ -16,10 +16,18 @@ from discord.ext import commands
 from bot.autocomplete import gather_within
 from bot.cogs.prices import terminal_name_autocomplete
 from bot.uex.exceptions import UexApiError, describe_uex_api_error
-from bot.uex.item_finder import format_item_listing_line, rank_item_listings
+from bot.uex.item_finder import (
+    highlights_block,
+    item_footer,
+    item_header,
+    place_and_vendor_text,
+    rank_item_listings,
+    split_place_and_vendor,
+    system_block,
+)
 from bot.uex.client import fetch_terminal_distances
 from bot.uex.marketplace import find_item_id_by_name
-from bot.uex.route_presentation import add_chunked_fields, chunk_lines
+from bot.uex.route_presentation import chunk_lines
 
 logger = logging.getLogger(__name__)
 
@@ -142,67 +150,40 @@ class ItemFinder(commands.Cog):
             return
 
         shown = ranked[:MAX_RESULTS_SHOWN]
-        # Grouped by star system as separate fields instead of one flat list - repeating
-        # "Pyro →" (or any system) on every single line got noisy fast on real data, where
-        # a widely-stocked item can list a dozen+ shops in the same system. dict preserves
-        # insertion order, and `shown` is already closest-first (same-system-as-origin
-        # listings sort first per rank_item_listings), so the origin's own system - if it
-        # has any results - is naturally the first group shown.
-        #
-        # Each line shows place (not the raw "Vendor - Place" terminal name) as the
-        # primary, bold label so results are actually navigable, with vendor alongside it
-        # so two shops at the same place (e.g. two different gun stores both at Checkmate)
-        # stay distinguishable. Deliberately plain text, not a monospace table - a fixed
-        # column width either truncated two different real places down to identical
-        # displayed text, or (once widened to fix that) got wide enough that Discord wraps
-        # it inside an embed field and breaks the column alignment anyway. Plain
-        # proportional text just wraps gracefully instead, at any name length.
-        lines_by_system: dict[str, list[str]] = {}
+        # Grouped by star system instead of one flat list - repeating "Pyro" on every line got
+        # noisy fast on real data, where a widely-stocked item lists a dozen+ shops in one
+        # system. dict keeps insertion order, and `shown` is already closest-first (the origin's
+        # own system sorts first per rank_item_listings), so its group comes first. Each shop
+        # names its place (not the raw "Vendor - Place" terminal name) with the vendor beside
+        # it, so two shops at the same place stay distinguishable.
+        by_system: dict[str, list] = {}
         for listing in shown:
-            system_label = listing.star_system_name or "Unknown system"
-            lines_by_system.setdefault(system_label, []).append(
-                format_item_listing_line(listing, origin_star_system=origin_star_system)
-            )
-
-        # Footer set BEFORE add_chunked_fields runs (not after), matching this codebase's
-        # established convention (see /price's and /where-to-mine's identical ordering) -
-        # its len(embed) budget check needs the footer's real length already counted.
-        footer = "Prices from UEX Corp, cached up to 24h · distances cached up to 12h."
-        if len(ranked) > len(shown):
-            footer += f" · {len(ranked) - len(shown)} more shop(s) omitted, showing the closest {len(shown)}."
-
-        embed = discord.Embed(
-            title=f"{item_display} — Where to Buy",
-            description=f"Closest to **{origin_name}** first. Prices in aUEC.",
-            color=discord.Color.blurple(),
-        )
-        embed.set_footer(text=footer)
-
-        # All-or-nothing across every system group, not per group - the same
-        # disclose-don't-drop guarantee add_chunked_fields already gives one field, applied
-        # here so a result list that doesn't fully fit never sends with some systems shown
-        # and others silently missing.
-        all_fit = all(
-            add_chunked_fields(embed, name=system_label, lines=lines)
-            for system_label, lines in lines_by_system.items()
-        )
-        if all_fit:
-            await interaction.followup.send(embed=embed)
-            return
-
-        # Plain-text fallback for a result list too large for one embed - same
-        # disclose-don't-drop pattern as /mixed-routes'/multi-stop-route's own fallbacks.
-        fallback_lines = [
-            f"**{item_display} — Where to Buy**",
-            f"Closest to **{origin_name}** first. Prices in aUEC.",
-            "",
+            by_system.setdefault(listing.star_system_name or "Unknown system", []).append(listing)
+        origin = place_and_vendor_text(*split_place_and_vendor({"terminal_name": origin_name}))
+        blocks = [
+            item_header(item_display, len(ranked), origin),
+            highlights_block(ranked, origin_star_system=origin_star_system),
+            "\n\n".join(system_block(system, listings, origin_star_system=origin_star_system)
+                         for system, listings in by_system.items()),
+            item_footer(len(ranked) - len(shown)),
         ]
-        for system_label, lines in lines_by_system.items():
-            fallback_lines.append(f"**{system_label}**")
-            fallback_lines.extend(lines)
-            fallback_lines.append("")
-        fallback_lines.append(footer)
-        for chunk in chunk_lines(fallback_lines, max_length=1900):
+
+        # One layout (the owner's pick, 2026-10-03): the shops shown are capped at
+        # MAX_RESULTS_SHOWN, well inside Discord's 4,000 characters. If Discord refuses it
+        # anyway, the same blocks go as text - the same facts, nothing dropped.
+        layout = discord.ui.LayoutView()
+        container = discord.ui.Container(accent_colour=discord.Colour.blurple())
+        for index, block in enumerate(blocks):
+            if index:
+                container.add_item(discord.ui.Separator())
+            container.add_item(discord.ui.TextDisplay(block))
+        layout.add_item(container)
+        try:
+            await interaction.followup.send(view=layout)
+            return
+        except discord.HTTPException as exc:
+            logger.warning("Item finder layout send failed (%s); falling back to text", exc)
+        for chunk in chunk_lines("\n\n".join(blocks).split("\n"), max_length=1900):
             await interaction.followup.send(content=chunk)
 
     async def _fetch_distances(self, origin_id: int, terminal_ids: list[int]) -> dict[int, float | None]:

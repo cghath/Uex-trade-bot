@@ -154,8 +154,12 @@ def test_part_block_marks_the_selected_part_and_says_how_to_save_it():
 
 
 def test_part_block_without_price_or_distance_says_so():
-    block = format_part_block({"name": "Ecouter"}, shared=[])
+    # With a location but no distance UEX could price: said. Without a location at all
+    # (no _distance_gm key): nothing, not "distance unknown" (2026-10-03 audit MSG-5).
+    block = format_part_block({"name": "Ecouter", "_distance_gm": None}, shared=[])
     assert block.split("\n")[1] == "no shop price on record · distance unknown"
+    block = format_part_block({"name": "Ecouter", "_price_buy": 900.0}, shared=[])
+    assert block.split("\n")[1] == "900 aUEC"
 
 
 def test_pages_keep_order_and_never_drop_a_part():
@@ -223,6 +227,10 @@ def test_port_labels_are_cleaned_up():
     assert format_port_label("hardpoint_weapon_class2_nose", 4, 4) == "Nose (S4)"
     assert format_port_label("hardpoint_missilerack_right_wing", 3, 3) == "Right Wing Missile Rack (S3)"
     assert format_port_label("hardpoint_turret", 2, 4) == "Turret (S2-4)"
+    assert format_port_label("hardpoint_pdc_top_right", 2, 2) == "PDC Top Right (S2)"
+    # A gimbal's own gun port says nothing to a player: left out of a path.
+    assert format_port_label("hardpoint_right_lower_turret/hardpoint_weapon_left/hardpoint_class_2") == (
+        "Right Lower Turret · Left")
     assert format_port_label("hardpoint_radar") == "Radar"
 
 

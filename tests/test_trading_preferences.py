@@ -1,11 +1,10 @@
 """Saved trading preferences: pure formatting, DB round-trip, and route-command wiring.
 
 Feature: store per-user defaults for space-only terminals, capital-ship access,
-auto-loading, preferred system, risk tolerance, and starting budget, applied by every
-route command whenever its matching option is left unset (budget only applies to the
-commands that take a budget option at all: /mixed-routes, /multi-stop-route,
-/route-from-multi, /route-on-the-way). Risk tolerance is stored and shown but not yet
-enforced by any route command - a deliberate scoping decision, not an oversight.
+auto-loading, preferred system, and starting budget, applied by every route command
+whenever its matching option is left unset (budget only applies to the commands that
+take a budget option at all). A saved risk tolerance was removed on 2026-09-30
+(PROJECT_CONTEXT.md entry 114); tests/test_risk_tolerance.py covers its removal.
 """
 from __future__ import annotations
 
@@ -46,21 +45,12 @@ def test_describe_active_preferences_only_reports_what_it_was_told_about():
     assert note == "Filters: auto-load-only, system: Pyro"
 
 
-def test_describe_active_preferences_covers_all_five_fields():
+def test_describe_active_preferences_covers_all_four_fields():
     note = describe_active_preferences(
-        space_only=True, capital_ship_access=True, auto_load_only=True,
-        system="Stanton", risk_tolerance="low",
+        space_only=True, capital_ship_access=True, auto_load_only=True, system="Stanton",
     )
-    # Capital-ship access and risk tolerance have no per-command option: always saved.
-    assert note == (
-        "Filters: space-only, capital-ship access (saved), auto-load-only, "
-        "system: Stanton, risk tolerance: low (saved)"
-    )
-
-
-def test_describe_active_preferences_high_risk_tolerance_is_not_shown_as_active():
-    # "high" means no restriction - the same no-op default as an unset preference.
-    assert describe_active_preferences(risk_tolerance="high") is None
+    # Capital-ship access has no per-command option: always saved.
+    assert note == "Filters: space-only, capital-ship access (saved), auto-load-only, system: Stanton"
 
 
 def test_format_trading_preferences_shows_defaults_clearly():
@@ -69,18 +59,16 @@ def test_format_trading_preferences_shows_defaults_clearly():
     assert "Capital-ship access required: **No**" in text
     assert "Auto-load only: **No**" in text
     assert "Preferred system: **Any (no restriction)**" in text
-    assert "Risk tolerance: **High (no restriction, default)**" in text
 
 
 def test_format_trading_preferences_shows_set_values():
     prefs = {
         "space_only": True, "capital_ship_access": True, "auto_load_only": True,
-        "preferred_system": "Pyro", "risk_tolerance": "low",
+        "preferred_system": "Pyro",
     }
     text = format_trading_preferences(prefs)
     assert "Space-only terminals: **Yes**" in text
     assert "Preferred system: **Pyro**" in text
-    assert "Risk tolerance: **low**" in text
 
 
 def test_format_trading_preferences_shows_default_budget_as_not_set():
@@ -132,7 +120,7 @@ def test_set_trading_preferences_only_changes_fields_that_were_passed(tmp_path):
         assert prefs["preferred_system"] == "Pyro"
         assert prefs["auto_load_only"] is True
         assert prefs["capital_ship_access"] is False
-        assert prefs["risk_tolerance"] is None
+        assert prefs["budget"] is None
 
     asyncio.run(run())
 
@@ -441,7 +429,7 @@ def test_set_trading_preferences_command_requires_at_least_one_option(tmp_path):
         interaction = _FakeInteraction(1)
         await cog.set_trading_preferences.callback(
             cog, interaction, ship=None, space_only=None, capital_ship_access=None,
-            auto_load_only=None, system=None, risk_tolerance=None,
+            auto_load_only=None, system=None,
         )
         message = interaction.response.send_message.call_args.args[0]
         assert "at least one option" in message
@@ -459,7 +447,7 @@ def test_set_trading_preferences_command_budget_alone_counts_as_an_option(tmp_pa
         interaction = _FakeInteraction(1)
         await cog.set_trading_preferences.callback(
             cog, interaction, ship=None, budget=500_000.0, space_only=None,
-            capital_ship_access=None, auto_load_only=None, system=None, risk_tolerance=None,
+            capital_ship_access=None, auto_load_only=None, system=None,
         )
         interaction.response.defer.assert_awaited_once()
         message = interaction.followup.send.call_args.args[0]
@@ -478,7 +466,7 @@ def test_set_trading_preferences_command_updates_and_confirms(tmp_path):
         interaction = _FakeInteraction(1)
         await cog.set_trading_preferences.callback(
             cog, interaction, ship=None, space_only=True, capital_ship_access=None,
-            auto_load_only=None, system=None, risk_tolerance=None,
+            auto_load_only=None, system=None,
         )
         interaction.response.defer.assert_awaited_once()
         message = interaction.followup.send.call_args.args[0]
@@ -501,7 +489,7 @@ def test_set_trading_preferences_command_any_system_choice_clears_preference(tmp
         any_choice = app_commands.Choice(name="Any (no restriction)", value="any")
         await cog.set_trading_preferences.callback(
             cog, interaction, ship=None, space_only=None, capital_ship_access=None,
-            auto_load_only=None, system=any_choice, risk_tolerance=None,
+            auto_load_only=None, system=any_choice,
         )
         assert (await db.get_trading_preferences(1))["preferred_system"] is None
 
@@ -518,7 +506,7 @@ def test_set_trading_preferences_command_sets_ship_with_validation(tmp_path):
         interaction = _FakeInteraction(1)
         await cog.set_trading_preferences.callback(
             cog, interaction, ship="Cutlass", space_only=None, capital_ship_access=None,
-            auto_load_only=None, system=None, risk_tolerance=None,
+            auto_load_only=None, system=None,
         )
         interaction.response.defer.assert_awaited_once()
         message = interaction.followup.send.call_args.args[0]
@@ -541,7 +529,7 @@ def test_set_trading_preferences_command_rejects_an_ambiguous_ship(tmp_path):
         interaction = _FakeInteraction(1)
         await cog.set_trading_preferences.callback(
             cog, interaction, ship="Nonexistent Ship", space_only=None,
-            capital_ship_access=None, auto_load_only=None, system=None, risk_tolerance=None,
+            capital_ship_access=None, auto_load_only=None, system=None,
         )
         interaction.response.defer.assert_awaited_once()
         message = interaction.followup.send.call_args.args[0]
@@ -575,7 +563,7 @@ def test_set_trading_preferences_command_defers_before_the_ship_lookup(tmp_path)
         cog.bot = NS(db=db, uex=NS(get_vehicles=fetch_vehicles))
         await cog.set_trading_preferences.callback(
             cog, interaction, ship="Ship", space_only=None, capital_ship_access=None,
-            auto_load_only=None, system=None, risk_tolerance=None,
+            auto_load_only=None, system=None,
         )
         interaction.followup.send.assert_awaited_once()
 
@@ -858,12 +846,11 @@ def test_top_routes_send_ranked_routes_shows_active_preferences_in_footer(monkey
             display_limit=5,
             auto_load_only=True,
             system="Pyro",
-            risk_tolerance="low",
             system_saved=True,
         )
         assert sent, "expected a followup"
         header = sent[0]["content"]  # the intro text above the route
         # Audit MSG-8: the saved ones are marked, the one set on the command isn't.
-        assert "Filters: auto-load-only, system: Pyro (saved), risk tolerance: low (saved)" in header, header
+        assert "Filters: auto-load-only, system: Pyro (saved)" in header, header
 
     asyncio.run(run())

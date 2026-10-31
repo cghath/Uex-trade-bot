@@ -19,8 +19,9 @@ from bot.uex.trading_preferences import DEFAULT_TRADING_PREFERENCES, UNSET
 
 logger = logging.getLogger("uexbot.database")
 
-from bot.uex.marketplace import compute_liquidity_score
+from bot.uex.marketplace import compute_liquidity_score, sell_count_unknown
 from bot.uex.route_confidence import coalesce_report_count
+from bot.uex.blueprint_materials import BlueprintRecipe, MaterialUse
 from bot.uex.blueprints import BlueprintMission, BlueprintRef, SnapshotState
 
 # How long hourly liquidity snapshots are kept on the bot's own disk: twice the longest
@@ -78,8 +79,9 @@ CREATE TABLE IF NOT EXISTS user_ship_preference (
 
 -- Saved route-filtering defaults, applied whenever a route command's matching option is
 -- left unset so a user doesn't have to repeat the same options every call. risk_tolerance
--- has no per-command option: route commands always apply it (bot/uex/commodity_risk.py's
--- RISK_TOLERANCE_EXCLUDES). preferred_system/risk_tolerance/ship_name NULL means "no preference
+-- is no longer read or written: the setting was removed on 2026-09-30 (PROJECT_CONTEXT.md
+-- entry 114), and the column stays only because this schema is additive-only; any value in
+-- it is ignored. preferred_system/ship_name NULL means "no preference
 -- set", not "explicitly disabled". ship_name supersedes the older user_ship_preference
 -- table (kept, but no longer written to, purely as the one-time migration source run in
 -- Database.init() - see _migrate_ship_preference_into_trading_preferences) - the user's
@@ -122,7 +124,10 @@ CREATE TABLE IF NOT EXISTS marketplace_alerts (
     -- Where it arrives, as on price_alerts. Rows from before the option existed were DMs.
     scope TEXT NOT NULL DEFAULT 'personal' CHECK (scope IN ('personal', 'global')),
     guild_id INTEGER,
-    channel_id INTEGER
+    channel_id INTEGER,
+    -- 0 until the poller first records what's already listed, without announcing it
+    -- (audit UX-2). Alerts from before the column existed had already been polling: 1.
+    baseline_done INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE INDEX IF NOT EXISTS idx_marketplace_alerts_active ON marketplace_alerts (active);
@@ -764,6 +769,221 @@ CREATE TABLE IF NOT EXISTS blueprint_pool_entries (
 
 CREATE INDEX IF NOT EXISTS idx_blueprint_pool_by_blueprint ON blueprint_pool_entries (blueprint_uuid);
 
+-- What every blueprint makes and the materials it takes, from the wiki API's blueprint listing - what
+-- /blueprint-search material: reads. Its own snapshot (replace_blueprint_recipes, one transaction,
+-- never patched in place) with its own state row, synced beside the contracts but apart from them, so
+-- a failure in one can't hold back or mix with the other. Every blueprint is kept; which ones a
+-- player can get is decided at read time against the contract snapshot (get_material_uses).
+CREATE TABLE IF NOT EXISTS blueprint_recipe_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    game_version TEXT NOT NULL,
+    synced_at TEXT NOT NULL,
+    blueprint_count INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS blueprint_outputs (
+    blueprint_uuid TEXT PRIMARY KEY,
+    output_name TEXT NOT NULL,
+    output_type TEXT NOT NULL DEFAULT '',
+    is_default INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS blueprint_materials (
+    blueprint_uuid TEXT NOT NULL,
+    material TEXT NOT NULL,
+    PRIMARY KEY (blueprint_uuid, material)
+);
+
+CREATE INDEX IF NOT EXISTS idx_blueprint_materials_by_material ON blueprint_materials (material);
+
+-- Server anniversaries (bot/cogs/anniversaries.py): one row per member per anniversary, claimed
+-- before anything is sent so a restart or an overlapping check can never send one twice. The DM
+-- and the channel post are tracked apart: 'pending' is tried again on the next check (a temporary
+-- failure), 'sent' and 'skipped' (Discord refused it for good, e.g. DMs closed) are final.
+CREATE TABLE IF NOT EXISTS member_anniversaries (
+    guild_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    anniversary_year INTEGER NOT NULL,
+    years INTEGER NOT NULL,
+    dm_status TEXT NOT NULL DEFAULT 'pending' CHECK (dm_status IN ('pending', 'sent', 'skipped')),
+    post_status TEXT NOT NULL DEFAULT 'pending' CHECK (post_status IN ('pending', 'sent', 'skipped')),
+    claimed_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (guild_id, user_id, anniversary_year)
+);
+
+-- Voice ranks (bot/cogs/voice_ranks.py; rules in bot/uex/voice_ranks.py). Only minutes in voice
+-- are stored, never audio. voice_members: lifetime totals and the highest rank already announced
+-- (claimed before the announcement, so it's never made twice). voice_daily: one row per person per
+-- UTC day, for the daily cap and the weekly/seasonal leaderboards.
+CREATE TABLE IF NOT EXISTS voice_members (
+    guild_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    xp INTEGER NOT NULL DEFAULT 0,
+    minutes INTEGER NOT NULL DEFAULT 0,
+    rank_index INTEGER NOT NULL DEFAULT -1,
+    ops INTEGER NOT NULL DEFAULT 0,
+    op_rank_index INTEGER NOT NULL DEFAULT -1,
+    PRIMARY KEY (guild_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS voice_daily (
+    guild_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    day TEXT NOT NULL,
+    minutes INTEGER NOT NULL DEFAULT 0,
+    xp INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (guild_id, user_id, day)
+);
+CREATE INDEX IF NOT EXISTS idx_voice_daily_day ON voice_daily (guild_id, day);
+
+-- The op in progress in the Ops channels, saved every minute so a restart carries on with it.
+CREATE TABLE IF NOT EXISTS voice_op_session (
+    guild_id INTEGER PRIMARY KEY,
+    started_at TEXT NOT NULL,
+    minutes INTEGER NOT NULL,
+    quiet INTEGER NOT NULL,
+    present TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+-- Every op that ended (30+ minutes with 3+ people) and who attended it.
+CREATE TABLE IF NOT EXISTS voice_ops (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id INTEGER NOT NULL,
+    started_at TEXT NOT NULL,
+    ended_at TEXT NOT NULL,
+    minutes INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS voice_op_attendance (
+    op_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    minutes INTEGER NOT NULL,
+    PRIMARY KEY (op_id, user_id)
+);
+
+-- Welcome back (bot/cogs/welcome_back.py): when each member was last seen posting or joining
+-- voice - only the time, never what they said. activity_seed_state marks the one-time read of
+-- the last 30 days of chat as done; until then a member with no row isn't known to be away.
+CREATE TABLE IF NOT EXISTS member_activity (
+    guild_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    last_active TEXT NOT NULL,
+    PRIMARY KEY (guild_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS activity_seed_state (
+    guild_id INTEGER PRIMARY KEY,
+    seeded_at TEXT NOT NULL
+);
+
+-- The welcome DM (bot/cogs/welcome.py): one row per member, ever - claimed before sending so a
+-- rejoin or a restart never sends it twice. 'pending' is retried for a day; 'sent' and 'skipped'
+-- (Discord refused it, e.g. DMs closed) are final.
+CREATE TABLE IF NOT EXISTS member_welcomes (
+    guild_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'sent', 'skipped')),
+    claimed_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (guild_id, user_id)
+);
+
+-- The role picker (bot/cogs/role_picker.py): which role is which, by id, once /rolesetup has
+-- matched or created it - so a role renamed later still works. `name` is the picker's own
+-- name for it (bot/uex/role_picker.py: ALL_ROLES), not necessarily the role's name now.
+CREATE TABLE IF NOT EXISTS role_picker_roles (
+    guild_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    role_id INTEGER NOT NULL,
+    PRIMARY KEY (guild_id, name)
+);
+
+-- #👋welcome intros (bot/cogs/role_picker.py): who has posted there, so Mentor is pinged for each
+-- member's first post only. welcome_intro_seed marks the one-time read of the channel's history;
+-- until it's done no post counts as a first.
+CREATE TABLE IF NOT EXISTS welcome_intros (
+    guild_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    first_seen TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (guild_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS welcome_intro_seed (
+    guild_id INTEGER PRIMARY KEY,
+    seeded_at TEXT NOT NULL
+);
+
+-- Event cards (bot/cogs/event_cards.py): one card per occurrence of a Discord scheduled event,
+-- posted in #events. The event's name, picture and so on are copied here so a card can still
+-- be drawn once the event itself is gone (cancelled). A repeating event keeps its event_id from
+-- week to week; each week is a new card.
+CREATE TABLE IF NOT EXISTS event_cards (
+    card_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id INTEGER NOT NULL,
+    event_id INTEGER NOT NULL,
+    starts_at INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT,
+    cover_url TEXT,
+    creator_id INTEGER,
+    voice_channel_id INTEGER,
+    repeats TEXT,
+    channel_id INTEGER NOT NULL,
+    message_id INTEGER,
+    state TEXT NOT NULL DEFAULT 'open' CHECK (state IN ('open', 'started', 'ended', 'cancelled')),
+    reminded INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_event_cards_event ON event_cards (event_id, starts_at);
+
+-- An event's roles and spots (/event-roles), by its Discord event id, so they carry over to every
+-- week of a repeating event. No rows: everyone just joins.
+CREATE TABLE IF NOT EXISTS event_roles (
+    event_id INTEGER NOT NULL,
+    position INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    capacity INTEGER NOT NULL,
+    PRIMARY KEY (event_id, position)
+);
+
+-- Who's on a card. `queued` (unix time) orders a role's wait list: it's reset whenever the
+-- member's role or status changes, so switching roles puts you at the back of the new one's line.
+CREATE TABLE IF NOT EXISTS event_signups (
+    card_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('going', 'maybe', 'waiting')),
+    role TEXT,
+    ship TEXT,
+    queued REAL NOT NULL,
+    PRIMARY KEY (card_id, user_id)
+);
+
+-- Regulars ("Sign me up every time"): put on each new card of the event in this role and ship.
+CREATE TABLE IF NOT EXISTS event_regulars (
+    event_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    role TEXT,
+    ship TEXT,
+    PRIMARY KEY (event_id, user_id)
+);
+
+-- Ships each member has said they're bringing, newest first in the card's ship menu.
+CREATE TABLE IF NOT EXISTS event_ship_history (
+    user_id INTEGER NOT NULL,
+    ship TEXT NOT NULL,
+    last_used TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (user_id, ship)
+);
+
+-- Members who pressed "Stop anniversary messages" under the DM: no DM and no post for them.
+CREATE TABLE IF NOT EXISTS anniversary_opt_outs (
+    guild_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    opted_out_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (guild_id, user_id)
+);
+
 -- One row per (command, user), aggregated rather than one row per invocation - matches this
 -- project's standing preference for keeping the Pi's own storage footprint lean (see
 -- CLAUDE.local.md) over a raw per-event log nobody needs the individual rows of; still
@@ -870,6 +1090,7 @@ class Database:
             await self._migrate_negotiation_message_seen_scope(db)
             await self._migrate_ship_parts_entries_port_name(db)
             await self._migrate_ship_preference_into_trading_preferences(db)
+            await self._repair_unknown_sell_count_scores(db)
             # Must run before the two CREATE UNIQUE INDEX statements below - see
             # _migrate_dedupe_route_progression_pending_actions's own docstring.
             await self._migrate_dedupe_route_progression_pending_actions(db)
@@ -1097,6 +1318,39 @@ class Database:
                WHERE s.user_id NOT IN (SELECT user_id FROM ship_preference_migrated)"""
         )
 
+    async def _repair_unknown_sell_count_scores(self, db: aiosqlite.Connection) -> None:
+        """Undo the false 0/100 sellability ratings a missing UEX sell count used to produce
+        (bot/uex/marketplace.py: sell_count_unknown). UEX never sends a sell count of 0, only a
+        number or null, and null used to be stored as 0 sellers with a 0 score - so a liquidity
+        row with no sell listings and a 0 score is always one of those. On the Pi on
+        2026-10-17: 2,004 hourly snapshots over 25 items from 2026-10-03 on, and 30 items rated
+        0 (Ouratite's real 67.41 among them).
+
+        Each such current rating goes back to the item's last real snapshot (its counts too,
+        and that snapshot's hour as last_updated); one with no real snapshot left in the 7 days
+        kept is removed, as unrated, rather than left at a false 0; the false snapshots are
+        deleted, so the digest and /liquidity-trends stop showing a crash that never happened.
+        Idempotent and a no-op from then on: update_liquidity_scores no longer writes rows
+        without a sell count."""
+        real = """FROM liquidity_score_snapshots AS x
+                  WHERE x.id_item = liquidity_scores.id_item AND x.listings_count_sell > 0
+                  ORDER BY x.recorded_hour DESC LIMIT 1"""
+        false_zero = "listings_count_sell = 0 AND score = 0"
+        restored = await db.execute(
+            f"""UPDATE liquidity_scores
+                SET (score, negotiations_success, negotiations_open, listings_count, listings_count_sell,
+                     listings_count_buy, last_updated) = (
+                    SELECT x.score, x.negotiations_success, x.negotiations_open, x.listings_count,
+                           x.listings_count_sell, x.listings_count_buy, x.recorded_hour {real})
+                WHERE {false_zero} AND EXISTS (SELECT 1 {real})"""
+        )
+        unrated = await db.execute(f"DELETE FROM liquidity_scores WHERE {false_zero}")
+        snapshots = await db.execute(f"DELETE FROM liquidity_score_snapshots WHERE {false_zero}")
+        if restored.rowcount or unrated.rowcount or snapshots.rowcount:
+            logger.info("Liquidity repair: %d rating(s) restored to their last real score, %d with none left "
+                        "removed, %d false-zero snapshot(s) deleted",
+                        restored.rowcount, unrated.rowcount, snapshots.rowcount)
+
     async def _migrate_dedupe_route_progression_pending_actions(self, db: aiosqlite.Connection) -> None:
         """Audit-confirmed defect #4 (2026-09-15 follow-up audit): the two partial UNIQUE
         indexes on route_progression_pending_actions (idx_..._leg_unique, idx_...
@@ -1316,6 +1570,9 @@ class Database:
             "ALTER TABLE ship_parts_reference ADD COLUMN editable INTEGER NOT NULL DEFAULT 1",
             "ALTER TABLE ship_parts_reference ADD COLUMN required_tags TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE ship_parts_reference ADD COLUMN equipped_uuid TEXT NOT NULL DEFAULT ''",
+            # A new marketplace alert's first poll records what's already listed rather than
+            # announcing it (audit UX-2); existing alerts had already been polling, hence 1.
+            "ALTER TABLE marketplace_alerts ADD COLUMN baseline_done INTEGER NOT NULL DEFAULT 1",
         ]
         for statement in migrations:
             try:
@@ -2801,10 +3058,12 @@ class Database:
     # -- saved trading preferences (route-filter defaults + default ship) ----
 
     async def get_trading_preferences(self, user_id: int) -> dict[str, Any]:
-        """Always returns all 7 fields, defaulted, so callers never null-check a missing row."""
+        """Always returns all 6 fields, defaulted, so callers never null-check a missing row.
+        Selects only those columns: the retired risk_tolerance column is never read (entry 114)."""
         async with self.connect() as db:
             cursor = await db.execute(
-                "SELECT * FROM user_trading_preferences WHERE user_id = ?", (user_id,)
+                f"SELECT {', '.join(DEFAULT_TRADING_PREFERENCES)} FROM user_trading_preferences WHERE user_id = ?",
+                (user_id,),
             )
             row = await cursor.fetchone()
         if row is None:
@@ -2814,7 +3073,6 @@ class Database:
             "capital_ship_access": bool(row["capital_ship_access"]),
             "auto_load_only": bool(row["auto_load_only"]),
             "preferred_system": row["preferred_system"],
-            "risk_tolerance": row["risk_tolerance"],
             "ship_name": row["ship_name"],
             "budget": row["budget"],
         }
@@ -2831,13 +3089,14 @@ class Database:
         capital_ship_access: bool | object = UNSET,
         auto_load_only: bool | object = UNSET,
         preferred_system: str | None | object = UNSET,
-        risk_tolerance: str | None | object = UNSET,
         ship_name: str | None | object = UNSET,
         budget: float | None | object = UNSET,
     ) -> dict[str, Any]:
         """Partial update: a field left at UNSET (the default) keeps its current value -
         only fields the caller explicitly passes are changed, so a single-option
-        /set-trading-preferences call never resets the other 6.
+        /set-trading-preferences call never resets the other 5. The retired risk_tolerance
+        column (entry 114) is never named, so a new row leaves it NULL and an old row's
+        value is left alone, unread.
 
         Built as ONE atomic INSERT ... ON CONFLICT DO UPDATE whose DO UPDATE SET clause
         names ONLY the columns the caller actually passed - not a Python-side
@@ -2860,7 +3119,6 @@ class Database:
             ("capital_ship_access", capital_ship_access),
             ("auto_load_only", auto_load_only),
             ("preferred_system", preferred_system),
-            ("risk_tolerance", risk_tolerance),
             ("ship_name", ship_name),
             ("budget", budget),
         ):
@@ -2928,8 +3186,9 @@ class Database:
         async with self.connect() as db:
             cursor = await db.execute(
                 """INSERT INTO marketplace_alerts
-                   (user_id, keyword, operation, target_price, min_quality, max_quality, scope, guild_id, channel_id)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   (user_id, keyword, operation, target_price, min_quality, max_quality, scope, guild_id, channel_id,
+                    baseline_done)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""",
                 (user_id, keyword, operation, target_price, min_quality, max_quality, scope, guild_id, channel_id),
             )
             await db.commit()
@@ -2967,6 +3226,17 @@ class Database:
             )
             rows = await cursor.fetchall()
             return {row["listing_id"] for row in rows}
+
+    async def mark_marketplace_alert_baseline(self, alert_id: int, listing_ids: list[int]) -> None:
+        """A new alert's first look: every listing already up is seen, so only listings posted
+        after it notify (audit UX-2). One transaction, so a crash can't leave it half-done."""
+        async with self.connect() as db:
+            await db.executemany(
+                "INSERT OR IGNORE INTO marketplace_alert_seen_listings (alert_id, listing_id) VALUES (?, ?)",
+                [(alert_id, listing_id) for listing_id in listing_ids],
+            )
+            await db.execute("UPDATE marketplace_alerts SET baseline_done = 1 WHERE id = ?", (alert_id,))
+            await db.commit()
 
     async def mark_marketplace_listing_seen(self, alert_id: int, listing_id: int) -> None:
         async with self.connect() as db:
@@ -3208,11 +3478,16 @@ class Database:
             return 0
 
         count = 0
+        unknown = []
         async with self.connect() as db:
             for row in activity_rows:
                 item_name = row.get("item_name")
                 id_item = row.get("id_item")
                 if not item_name or id_item is None:
+                    continue
+                if sell_count_unknown(row):
+                    # Not rescored: its last real score and snapshots stand (sell_count_unknown).
+                    unknown.append(item_name)
                     continue
 
                 score = compute_liquidity_score(row)
@@ -3253,6 +3528,9 @@ class Database:
                 )
                 count += 1
             await db.commit()
+        if unknown:
+            logger.info("Liquidity: no sell-listing count from UEX for %d item(s), kept their last score: %s",
+                        len(unknown), ", ".join(sorted(unknown)[:20]))
         await self.prune_liquidity_snapshots()
         return count
 
@@ -4365,6 +4643,519 @@ class Database:
             blueprint_count=row["blueprint_count"],
         )
 
+    async def replace_blueprint_recipes(
+        self, recipes: list[BlueprintRecipe], *, game_version: str, synced_at: datetime | None = None,
+    ) -> int:
+        """Replace every stored recipe with `recipes` in ONE transaction, as
+        replace_blueprint_snapshot does for contracts: a failure anywhere leaves the previous
+        recipes intact, and an empty list is refused outright. Returns how many were stored."""
+        if not recipes:
+            raise ValueError("refusing to replace the blueprint recipes with zero blueprints")
+        stamp = (synced_at or datetime.now(timezone.utc)).replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S")
+        async with self.connect() as db:
+            try:
+                await db.execute("DELETE FROM blueprint_materials")
+                await db.execute("DELETE FROM blueprint_outputs")
+                await db.executemany(
+                    "INSERT INTO blueprint_outputs (blueprint_uuid, output_name, output_type, is_default) VALUES (?, ?, ?, ?)",
+                    [(r.uuid, r.name, r.output_type, 1 if r.is_default else 0) for r in recipes],
+                )
+                await db.executemany(
+                    "INSERT INTO blueprint_materials (blueprint_uuid, material) VALUES (?, ?)",
+                    [(r.uuid, material) for r in recipes for material in r.materials],
+                )
+                await db.execute(
+                    """INSERT INTO blueprint_recipe_state (id, game_version, synced_at, blueprint_count)
+                       VALUES (1, ?, ?, ?)
+                       ON CONFLICT(id) DO UPDATE SET game_version = excluded.game_version,
+                           synced_at = excluded.synced_at, blueprint_count = excluded.blueprint_count""",
+                    (game_version, stamp, len(recipes)),
+                )
+                await db.commit()
+            except BaseException:
+                await db.rollback()
+                raise
+        return len(recipes)
+
+    async def get_blueprint_recipe_state(self) -> tuple[str, datetime, int] | None:
+        """(game version, synced at, blueprint count) of the stored recipes, or None."""
+        async with self.connect() as db:
+            row = await (await db.execute(
+                "SELECT game_version, synced_at, blueprint_count FROM blueprint_recipe_state WHERE id = 1")).fetchone()
+        if row is None:
+            return None
+        return row["game_version"], datetime.strptime(row["synced_at"], "%Y-%m-%d %H:%M:%S"), row["blueprint_count"]
+
+    # A blueprint a player can get: one a stored contract awards, or one unlocked by default.
+    _OBTAINABLE = ("(o.is_default = 1 OR o.blueprint_uuid IN (SELECT blueprint_uuid FROM blueprint_pool_entries))")
+
+    async def get_material_names(self) -> list[tuple[str, int]]:
+        """Every material used in a blueprint a player can get, with how many such blueprints
+        use it, most-used first - the material option's autocomplete."""
+        async with self.connect() as db:
+            rows = await (await db.execute(
+                f"""SELECT m.material, COUNT(*) AS uses FROM blueprint_materials m
+                    JOIN blueprint_outputs o ON o.blueprint_uuid = m.blueprint_uuid
+                    WHERE {self._OBTAINABLE}
+                    GROUP BY m.material COLLATE NOCASE ORDER BY uses DESC, m.material""")).fetchall()
+        return [(row["material"], row["uses"]) for row in rows]
+
+    async def get_material_uses(self, material: str) -> list[MaterialUse]:
+        """The blueprints a player can get that use `material` (matched ignoring case), by name."""
+        async with self.connect() as db:
+            rows = await (await db.execute(
+                f"""SELECT o.blueprint_uuid, o.output_name, o.output_type, o.is_default FROM blueprint_materials m
+                    JOIN blueprint_outputs o ON o.blueprint_uuid = m.blueprint_uuid
+                    WHERE m.material = ? COLLATE NOCASE AND {self._OBTAINABLE}
+                    ORDER BY o.output_name, o.blueprint_uuid""", (material,))).fetchall()
+        return [MaterialUse(row["blueprint_uuid"], row["output_name"], row["output_type"], bool(row["is_default"]))
+                for row in rows]
+
+    # -- server anniversaries -----------------------------------------------------------------
+
+    async def claim_anniversary(self, guild_id: int, user_id: int, anniversary_year: int, years: int) -> dict[str, str]:
+        """This member's anniversary row for that year, created (both parts pending) if it
+        isn't there yet: {"dm": status, "post": status}."""
+        async with self.connect() as db:
+            await db.execute(
+                """INSERT OR IGNORE INTO member_anniversaries (guild_id, user_id, anniversary_year, years)
+                   VALUES (?, ?, ?, ?)""", (guild_id, user_id, anniversary_year, years))
+            await db.commit()
+            row = await (await db.execute(
+                """SELECT dm_status, post_status FROM member_anniversaries
+                   WHERE guild_id = ? AND user_id = ? AND anniversary_year = ?""",
+                (guild_id, user_id, anniversary_year))).fetchone()
+        return {"dm": row["dm_status"], "post": row["post_status"]}
+
+    async def set_anniversary_status(self, guild_id: int, user_id: int, anniversary_year: int, *,
+                                     part: str, status: str) -> None:
+        """Record how one part ("dm" or "post") went: 'sent', 'skipped' or still 'pending'."""
+        column = {"dm": "dm_status", "post": "post_status"}[part]
+        async with self.connect() as db:
+            await db.execute(
+                f"UPDATE member_anniversaries SET {column} = ? WHERE guild_id = ? AND user_id = ? AND anniversary_year = ?",
+                (status, guild_id, user_id, anniversary_year))
+            await db.commit()
+
+    async def set_anniversary_opt_out(self, guild_id: int, user_id: int, opted_out: bool) -> None:
+        async with self.connect() as db:
+            if opted_out:
+                await db.execute("INSERT OR IGNORE INTO anniversary_opt_outs (guild_id, user_id) VALUES (?, ?)",
+                                 (guild_id, user_id))
+            else:
+                await db.execute("DELETE FROM anniversary_opt_outs WHERE guild_id = ? AND user_id = ?",
+                                 (guild_id, user_id))
+            await db.commit()
+
+    async def claim_welcome(self, guild_id: int, user_id: int) -> str:
+        """This member's welcome status, created as 'pending' if they've never had one."""
+        async with self.connect() as db:
+            await db.execute("INSERT OR IGNORE INTO member_welcomes (guild_id, user_id) VALUES (?, ?)",
+                             (guild_id, user_id))
+            await db.commit()
+            row = await (await db.execute(
+                "SELECT status FROM member_welcomes WHERE guild_id = ? AND user_id = ?", (guild_id, user_id))).fetchone()
+        return row["status"]
+
+    async def set_welcome_status(self, guild_id: int, user_id: int, status: str) -> None:
+        async with self.connect() as db:
+            await db.execute("UPDATE member_welcomes SET status = ? WHERE guild_id = ? AND user_id = ?",
+                             (status, guild_id, user_id))
+            await db.commit()
+
+    async def get_pending_welcomes(self, guild_id: int) -> list[int]:
+        """Members whose welcome failed only for now, claimed within the last day."""
+        async with self.connect() as db:
+            rows = await (await db.execute(
+                """SELECT user_id FROM member_welcomes WHERE guild_id = ? AND status = 'pending'
+                   AND claimed_at >= datetime('now', '-1 day')""", (guild_id,))).fetchall()
+        return [row["user_id"] for row in rows]
+
+    # -- welcome back ----------------------------------------------------------
+
+    async def touch_member_activity(self, guild_id: int, user_id: int, now: str) -> str | None:
+        """Record `now` as this member's last activity; returns the one it replaces (None if
+        they had none). One transaction, so two events at once can't both see the old time."""
+        async with self.connect() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            row = await (await db.execute(
+                "SELECT last_active FROM member_activity WHERE guild_id = ? AND user_id = ?",
+                (guild_id, user_id))).fetchone()
+            await db.execute(
+                """INSERT INTO member_activity (guild_id, user_id, last_active) VALUES (?, ?, ?)
+                   ON CONFLICT(guild_id, user_id) DO UPDATE SET last_active = MAX(last_active, excluded.last_active)""",
+                (guild_id, user_id, now))
+            await db.commit()
+        return row["last_active"] if row else None
+
+    async def seed_member_activity(self, guild_id: int, seen: dict[int, str]) -> None:
+        """Record what the one-time history read found (user_id -> last seen), keeping whichever
+        time is later, and mark the read done."""
+        async with self.connect() as db:
+            await db.executemany(
+                """INSERT INTO member_activity (guild_id, user_id, last_active) VALUES (?, ?, ?)
+                   ON CONFLICT(guild_id, user_id) DO UPDATE SET last_active = MAX(last_active, excluded.last_active)""",
+                [(guild_id, uid, when) for uid, when in seen.items()])
+            await db.execute(
+                "INSERT OR REPLACE INTO activity_seed_state (guild_id, seeded_at) VALUES (?, datetime('now'))",
+                (guild_id,))
+            await db.commit()
+
+    async def member_activity_seeded(self, guild_id: int) -> bool:
+        async with self.connect() as db:
+            row = await (await db.execute(
+                "SELECT 1 FROM activity_seed_state WHERE guild_id = ?", (guild_id,))).fetchone()
+        return row is not None
+
+    async def voice_last_days(self, guild_id: int) -> dict[int, str]:
+        """Each member's last day with voice time (voice ranks' voice_daily), as 'YYYY-MM-DD'."""
+        async with self.connect() as db:
+            rows = await (await db.execute(
+                "SELECT user_id, MAX(day) AS day FROM voice_daily WHERE guild_id = ? GROUP BY user_id",
+                (guild_id,))).fetchall()
+        return {row["user_id"]: row["day"] for row in rows}
+
+    # -- role picker -----------------------------------------------------------
+
+    async def get_role_picker_roles(self, guild_id: int) -> dict[str, int]:
+        """The picker's role ids for this server, by the picker's name for each."""
+        async with self.connect() as db:
+            rows = await (await db.execute(
+                "SELECT name, role_id FROM role_picker_roles WHERE guild_id = ?", (guild_id,))).fetchall()
+        return {row["name"]: row["role_id"] for row in rows}
+
+    async def save_role_picker_roles(self, guild_id: int, roles: dict[str, int]) -> None:
+        async with self.connect() as db:
+            await db.executemany(
+                """INSERT INTO role_picker_roles (guild_id, name, role_id) VALUES (?, ?, ?)
+                   ON CONFLICT(guild_id, name) DO UPDATE SET role_id = excluded.role_id""",
+                [(guild_id, name, role_id) for name, role_id in roles.items()])
+            await db.commit()
+
+    async def claim_welcome_intro(self, guild_id: int, user_id: int) -> bool:
+        """True the first time this member is seen posting in #welcome."""
+        async with self.connect() as db:
+            cursor = await db.execute(
+                "INSERT OR IGNORE INTO welcome_intros (guild_id, user_id) VALUES (?, ?)", (guild_id, user_id))
+            claimed = cursor.rowcount == 1
+            await db.commit()
+        return claimed
+
+    async def seed_welcome_intros(self, guild_id: int, user_ids: set[int]) -> None:
+        """Record who had already posted in #welcome and mark the one-time read done."""
+        async with self.connect() as db:
+            await db.executemany("INSERT OR IGNORE INTO welcome_intros (guild_id, user_id) VALUES (?, ?)",
+                                 [(guild_id, user_id) for user_id in user_ids])
+            await db.execute(
+                "INSERT OR REPLACE INTO welcome_intro_seed (guild_id, seeded_at) VALUES (?, datetime('now'))",
+                (guild_id,))
+            await db.commit()
+
+    async def welcome_intros_seeded(self, guild_id: int) -> bool:
+        async with self.connect() as db:
+            row = await (await db.execute(
+                "SELECT 1 FROM welcome_intro_seed WHERE guild_id = ?", (guild_id,))).fetchone()
+        return row is not None
+
+    # -- event cards -----------------------------------------------------------
+
+    _EVENT_CARD_FIELDS = ("name", "description", "cover_url", "creator_id", "voice_channel_id")
+
+    async def create_event_card(self, *, guild_id: int, event_id: int, starts_at: int, channel_id: int,
+                                repeats: str | None, **fields: Any) -> int:
+        """A new card for one occurrence; `fields` are the event's name, description, cover_url,
+        creator_id and voice_channel_id."""
+        async with self.connect() as db:
+            cursor = await db.execute(
+                """INSERT INTO event_cards (guild_id, event_id, starts_at, channel_id, repeats, name, description,
+                                            cover_url, creator_id, voice_channel_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (guild_id, event_id, starts_at, channel_id, repeats,
+                 *(fields.get(name) for name in self._EVENT_CARD_FIELDS)))
+            await db.commit()
+        return cursor.lastrowid
+
+    async def update_event_card(self, card_id: int, **fields: Any) -> None:
+        """Refresh a card's copy of the event (any of name, description, cover_url, creator_id,
+        voice_channel_id, message_id)."""
+        allowed = (*self._EVENT_CARD_FIELDS, "message_id")
+        names = [name for name in allowed if name in fields]
+        if not names:
+            return
+        async with self.connect() as db:
+            await db.execute(f"UPDATE event_cards SET {', '.join(f'{n} = ?' for n in names)} WHERE card_id = ?",
+                             (*(fields[n] for n in names), card_id))
+            await db.commit()
+
+    async def get_event_card(self, card_id: int) -> dict[str, Any] | None:
+        async with self.connect() as db:
+            row = await (await db.execute("SELECT * FROM event_cards WHERE card_id = ?", (card_id,))).fetchone()
+        return dict(row) if row else None
+
+    async def current_event_card(self, event_id: int) -> dict[str, Any] | None:
+        """The event's card still open or under way, if any."""
+        async with self.connect() as db:
+            row = await (await db.execute(
+                """SELECT * FROM event_cards WHERE event_id = ? AND state IN ('open', 'started')
+                   ORDER BY card_id DESC LIMIT 1""", (event_id,))).fetchone()
+        return dict(row) if row else None
+
+    async def event_card_exists(self, event_id: int, starts_at: int) -> bool:
+        """Whether this occurrence ever had a card, in any state - so a closed one isn't posted again."""
+        async with self.connect() as db:
+            row = await (await db.execute(
+                "SELECT 1 FROM event_cards WHERE event_id = ? AND starts_at = ?", (event_id, starts_at))).fetchone()
+        return row is not None
+
+    async def move_event_card(self, card_id: int, starts_at: int) -> None:
+        """The event's time changed: the card follows it and is reminded afresh."""
+        async with self.connect() as db:
+            await db.execute("UPDATE event_cards SET starts_at = ?, reminded = 0 WHERE card_id = ?", (starts_at, card_id))
+            await db.commit()
+
+    async def set_event_card_state(self, card_id: int, state: str, *, only_from: tuple[str, ...]) -> bool:
+        """Move a card to `state` if it's in one of `only_from`; False when it wasn't (someone
+        else already did), so only one caller ever announces a change."""
+        async with self.connect() as db:
+            cursor = await db.execute(
+                f"UPDATE event_cards SET state = ? WHERE card_id = ? AND state IN ({','.join('?' * len(only_from))})",
+                (state, card_id, *only_from))
+            changed = cursor.rowcount == 1
+            await db.commit()
+        return changed
+
+    async def claim_event_reminder(self, card_id: int) -> bool:
+        async with self.connect() as db:
+            cursor = await db.execute(
+                "UPDATE event_cards SET reminded = 1 WHERE card_id = ? AND reminded = 0", (card_id,))
+            claimed = cursor.rowcount == 1
+            await db.commit()
+        return claimed
+
+    async def event_cards_due_reminder(self, now: int, before: int) -> list[dict[str, Any]]:
+        """Open cards starting within `before` seconds that haven't been reminded."""
+        async with self.connect() as db:
+            rows = await (await db.execute(
+                """SELECT * FROM event_cards WHERE state = 'open' AND reminded = 0 AND starts_at > ?
+                   AND starts_at <= ?""", (now, now + before))).fetchall()
+        return [dict(row) for row in rows]
+
+    async def stale_event_cards(self, started_before: int) -> list[dict[str, Any]]:
+        """Cards still open or under way for an occurrence that started before `started_before`."""
+        async with self.connect() as db:
+            rows = await (await db.execute(
+                "SELECT * FROM event_cards WHERE state IN ('open', 'started') AND starts_at < ?",
+                (started_before,))).fetchall()
+        return [dict(row) for row in rows]
+
+    async def get_event_roles(self, event_id: int) -> list[tuple[str, int]]:
+        async with self.connect() as db:
+            rows = await (await db.execute(
+                "SELECT name, capacity FROM event_roles WHERE event_id = ? ORDER BY position", (event_id,))).fetchall()
+        return [(row["name"], row["capacity"]) for row in rows]
+
+    async def set_event_roles(self, event_id: int, roles: list[tuple[str, int]]) -> None:
+        async with self.connect() as db:
+            await db.execute("DELETE FROM event_roles WHERE event_id = ?", (event_id,))
+            await db.executemany("INSERT INTO event_roles (event_id, position, name, capacity) VALUES (?, ?, ?, ?)",
+                                 [(event_id, i, name, capacity) for i, (name, capacity) in enumerate(roles)])
+            await db.commit()
+
+    async def get_event_signups(self, card_id: int) -> list[dict[str, Any]]:
+        """Everyone on a card, in the order they took their place."""
+        async with self.connect() as db:
+            rows = await (await db.execute(
+                "SELECT user_id, status, role, ship FROM event_signups WHERE card_id = ? ORDER BY queued, user_id",
+                (card_id,))).fetchall()
+        return [dict(row) for row in rows]
+
+    async def save_event_signup(self, card_id: int, user_id: int, *, status: str, role: str | None,
+                                queued: float, ship: Any = UNSET) -> None:
+        """Put a member on a card with this status and role (their ship is kept unless given)."""
+        async with self.connect() as db:
+            if ship is UNSET:
+                await db.execute(
+                    """INSERT INTO event_signups (card_id, user_id, status, role, queued) VALUES (?, ?, ?, ?, ?)
+                       ON CONFLICT(card_id, user_id) DO UPDATE SET status = excluded.status, role = excluded.role,
+                       queued = excluded.queued""", (card_id, user_id, status, role, queued))
+            else:
+                await db.execute(
+                    """INSERT INTO event_signups (card_id, user_id, status, role, ship, queued) VALUES (?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(card_id, user_id) DO UPDATE SET status = excluded.status, role = excluded.role,
+                       ship = excluded.ship, queued = excluded.queued""", (card_id, user_id, status, role, ship, queued))
+            await db.commit()
+
+    async def set_event_signup_ship(self, card_id: int, user_id: int, ship: str | None) -> bool:
+        async with self.connect() as db:
+            cursor = await db.execute("UPDATE event_signups SET ship = ? WHERE card_id = ? AND user_id = ?",
+                                      (ship, card_id, user_id))
+            changed = cursor.rowcount == 1
+            await db.commit()
+        return changed
+
+    async def set_event_signup_status(self, card_id: int, user_id: int, status: str, role: str | None) -> None:
+        """Change status and role without losing the member's place in line (a move up from the wait
+        list, a role the organizer took away)."""
+        async with self.connect() as db:
+            await db.execute("UPDATE event_signups SET status = ?, role = ? WHERE card_id = ? AND user_id = ?",
+                             (status, role, card_id, user_id))
+            await db.commit()
+
+    async def delete_event_signup(self, card_id: int, user_id: int) -> bool:
+        async with self.connect() as db:
+            cursor = await db.execute("DELETE FROM event_signups WHERE card_id = ? AND user_id = ?", (card_id, user_id))
+            removed = cursor.rowcount == 1
+            await db.commit()
+        return removed
+
+    async def get_event_regulars(self, event_id: int) -> list[dict[str, Any]]:
+        async with self.connect() as db:
+            rows = await (await db.execute(
+                "SELECT user_id, role, ship FROM event_regulars WHERE event_id = ? ORDER BY rowid", (event_id,))).fetchall()
+        return [dict(row) for row in rows]
+
+    async def set_event_regular(self, event_id: int, user_id: int, role: str | None, ship: str | None) -> None:
+        async with self.connect() as db:
+            await db.execute(
+                """INSERT INTO event_regulars (event_id, user_id, role, ship) VALUES (?, ?, ?, ?)
+                   ON CONFLICT(event_id, user_id) DO UPDATE SET role = excluded.role, ship = excluded.ship""",
+                (event_id, user_id, role, ship))
+            await db.commit()
+
+    async def delete_event_regular(self, event_id: int, user_id: int) -> bool:
+        async with self.connect() as db:
+            cursor = await db.execute("DELETE FROM event_regulars WHERE event_id = ? AND user_id = ?", (event_id, user_id))
+            removed = cursor.rowcount == 1
+            await db.commit()
+        return removed
+
+    async def record_event_ship(self, user_id: int, ship: str) -> None:
+        async with self.connect() as db:
+            await db.execute(
+                """INSERT INTO event_ship_history (user_id, ship, last_used) VALUES (?, ?, strftime('%Y-%m-%d %H:%M:%f'))
+                   ON CONFLICT(user_id, ship) DO UPDATE SET last_used = excluded.last_used""", (user_id, ship))
+            await db.commit()
+
+    async def event_ship_history(self, user_id: int, limit: int = 20) -> list[str]:
+        async with self.connect() as db:
+            rows = await (await db.execute(
+                "SELECT ship FROM event_ship_history WHERE user_id = ? ORDER BY last_used DESC LIMIT ?",
+                (user_id, limit))).fetchall()
+        return [row["ship"] for row in rows]
+
+    # -- voice ranks -----------------------------------------------------------
+
+    async def credit_voice_minute(self, guild_id: int, day: str, credits: list[tuple[int, int]],
+                                  cap_minutes: int) -> list[tuple[int, int, int]]:
+        """One minute of voice for each (user_id, xp for the minute), in one transaction. A person
+        already at `cap_minutes` for `day` gets nothing. Returns (user_id, xp before, xp after) for
+        everyone credited."""
+        if not credits:
+            return []
+        credited = []
+        async with self.connect() as db:
+            for user_id, xp in credits:
+                row = await (await db.execute(
+                    "SELECT minutes FROM voice_daily WHERE guild_id = ? AND user_id = ? AND day = ?",
+                    (guild_id, user_id, day))).fetchone()
+                if row is not None and row["minutes"] >= cap_minutes:
+                    continue
+                await db.execute(
+                    """INSERT INTO voice_daily (guild_id, user_id, day, minutes, xp) VALUES (?, ?, ?, 1, ?)
+                       ON CONFLICT(guild_id, user_id, day) DO UPDATE SET minutes = minutes + 1, xp = xp + excluded.xp""",
+                    (guild_id, user_id, day, xp))
+                await db.execute(
+                    """INSERT INTO voice_members (guild_id, user_id, xp, minutes) VALUES (?, ?, ?, 1)
+                       ON CONFLICT(guild_id, user_id) DO UPDATE SET xp = xp + excluded.xp, minutes = minutes + 1""",
+                    (guild_id, user_id, xp))
+                total = await (await db.execute(
+                    "SELECT xp FROM voice_members WHERE guild_id = ? AND user_id = ?", (guild_id, user_id))).fetchone()
+                credited.append((user_id, total["xp"] - xp, total["xp"]))
+            await db.commit()
+        return credited
+
+    async def claim_voice_rank(self, guild_id: int, user_id: int, index: int, *, ops: bool = False) -> bool:
+        """Record `index` as this person's announced rank (or op rank) if it's higher than the one
+        recorded. True when this call raised it - only then is the rank-up announced."""
+        column = "op_rank_index" if ops else "rank_index"
+        async with self.connect() as db:
+            cursor = await db.execute(
+                f"UPDATE voice_members SET {column} = ? WHERE guild_id = ? AND user_id = ? AND {column} < ?",
+                (index, guild_id, user_id, index))
+            await db.commit()
+        return cursor.rowcount > 0
+
+    async def get_voice_member(self, guild_id: int, user_id: int) -> dict[str, Any] | None:
+        async with self.connect() as db:
+            row = await (await db.execute(
+                "SELECT * FROM voice_members WHERE guild_id = ? AND user_id = ?", (guild_id, user_id))).fetchone()
+        return dict(row) if row else None
+
+    async def get_voice_members(self, guild_id: int) -> list[dict[str, Any]]:
+        async with self.connect() as db:
+            rows = await (await db.execute("SELECT * FROM voice_members WHERE guild_id = ?", (guild_id,))).fetchall()
+        return [dict(row) for row in rows]
+
+    async def voice_totals_since(self, guild_id: int, since: str | None) -> list[dict[str, Any]]:
+        """Everyone's XP and minutes from `since` (a UTC day, inclusive; None for all time), most
+        XP first."""
+        async with self.connect() as db:
+            rows = await (await db.execute(
+                """SELECT user_id, SUM(xp) AS xp, SUM(minutes) AS minutes FROM voice_daily
+                   WHERE guild_id = ? AND day >= ? GROUP BY user_id HAVING SUM(xp) > 0
+                   ORDER BY SUM(xp) DESC, user_id""", (guild_id, since or ""))).fetchall()
+        return [dict(row) for row in rows]
+
+    async def load_op_session(self, guild_id: int) -> dict[str, Any] | None:
+        async with self.connect() as db:
+            row = await (await db.execute("SELECT * FROM voice_op_session WHERE guild_id = ?", (guild_id,))).fetchone()
+        return dict(row) if row else None
+
+    async def save_op_session(self, guild_id: int, session: dict[str, Any] | None) -> None:
+        """The op in progress (started_at, minutes, quiet, present as JSON, updated_at - the minute
+        it was saved, by the cog's clock), or None once over."""
+        async with self.connect() as db:
+            if session is None:
+                await db.execute("DELETE FROM voice_op_session WHERE guild_id = ?", (guild_id,))
+            else:
+                await db.execute(
+                    """INSERT INTO voice_op_session (guild_id, started_at, minutes, quiet, present, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(guild_id) DO UPDATE SET started_at = excluded.started_at,
+                           minutes = excluded.minutes, quiet = excluded.quiet, present = excluded.present,
+                           updated_at = excluded.updated_at""",
+                    (guild_id, session["started_at"], session["minutes"], session["quiet"], session["present"],
+                     session["updated_at"]))
+            await db.commit()
+
+    async def record_op(self, guild_id: int, started_at: str, ended_at: str, minutes: int,
+                        attendees: dict[int, int]) -> list[tuple[int, int]]:
+        """Log an op that ended and count it for each attendee (user_id -> minutes there), in one
+        transaction with clearing the saved session. Returns (user_id, ops attended now)."""
+        counted = []
+        async with self.connect() as db:
+            cursor = await db.execute(
+                "INSERT INTO voice_ops (guild_id, started_at, ended_at, minutes) VALUES (?, ?, ?, ?)",
+                (guild_id, started_at, ended_at, minutes))
+            for user_id, present in sorted(attendees.items()):
+                await db.execute("INSERT INTO voice_op_attendance (op_id, user_id, minutes) VALUES (?, ?, ?)",
+                                 (cursor.lastrowid, user_id, present))
+                await db.execute(
+                    """INSERT INTO voice_members (guild_id, user_id, ops) VALUES (?, ?, 1)
+                       ON CONFLICT(guild_id, user_id) DO UPDATE SET ops = ops + 1""", (guild_id, user_id))
+                row = await (await db.execute(
+                    "SELECT ops FROM voice_members WHERE guild_id = ? AND user_id = ?", (guild_id, user_id))).fetchone()
+                counted.append((user_id, row["ops"]))
+            await db.execute("DELETE FROM voice_op_session WHERE guild_id = ?", (guild_id,))
+            await db.commit()
+        return counted
+
+    async def get_anniversary_opt_outs(self, guild_id: int) -> set[int]:
+        async with self.connect() as db:
+            rows = await (await db.execute(
+                "SELECT user_id FROM anniversary_opt_outs WHERE guild_id = ?", (guild_id,))).fetchall()
+        return {row["user_id"] for row in rows}
+
     async def get_blueprint_refs(self) -> list[BlueprintRef]:
         """Every distinct blueprint any stored mission can award - the autocomplete/matching universe."""
         async with self.connect() as db:
@@ -4652,6 +5443,26 @@ class Database:
                     FROM command_usage_by_user
                     WHERE command_name = ? {exclude_clause}
                     ORDER BY use_count DESC, last_used_at DESC""",
+                params,
+            )).fetchall()
+            return [dict(row) for row in rows]
+
+    async def get_real_command_usage(self, owner_ids: set[int]) -> list[dict[str, Any]]:
+        """Every (command, user) row except owner_ids' - other players' usage, which is all
+        /command-usage's report shows (the owner asked for that alone, 2026-10-06). One
+        query rather than get_command_users per command: a row written before usernames were
+        tracked borrows the same player's name from another command's row."""
+        owner_ids = owner_ids or set()
+        # Built conditionally, never as a NULL placeholder - see get_command_users.
+        if owner_ids:
+            exclude_clause = f"WHERE user_id NOT IN ({','.join('?' for _ in owner_ids)})"
+            params: tuple = tuple(owner_ids)
+        else:
+            exclude_clause, params = "", ()
+        async with self.connect() as db:
+            rows = await (await db.execute(
+                f"""SELECT command_name, user_id, username, use_count, last_used_at
+                    FROM command_usage_by_user {exclude_clause}""",
                 params,
             )).fetchall()
             return [dict(row) for row in rows]

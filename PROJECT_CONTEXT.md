@@ -1383,7 +1383,7 @@ they're in sync).
       it - every occurrence is labeled "(not yet enforced)" so this isn't mistaken for a
       real guarantee. Building the actual filter (against `is_illegal`/`is_explosive`/
       `is_volatile_qt`/`is_volatile_time`/`is_buggy`) is future work. (Built later: see
-      entry 104.)
+      entry 104. Then removed altogether: see entry 114.)
 
     A real scoping gap, surfaced deliberately rather than silently: **space-only and
     capital-ship-access preferences only affect `/mixed-routes` and `/multi-stop-route`**,
@@ -3722,6 +3722,8 @@ they're in sync).
      - Tests: `tests/test_risk_tolerance.py` (26). Each change was undone one at a time (13 in
        all, including each of the four mixed-cargo pools separately), and its test failed
        every time.
+     - Superseded by entry 114: the setting and all of this filtering were removed the same
+       day. The ⚠️ cargo-risk labels stay.
 
 105. **One delivery choice for all three alert types, and each says how often it fires.** Audit
      finding UX-12, decided with the user on 2026-09-30.
@@ -3835,7 +3837,8 @@ they're in sync).
        - Filters that came from saved preferences are marked "(saved)", e.g. "Filters:
          auto-load-only (saved), system: Stanton (saved), risk tolerance: low (saved)".
          Capital-ship access and risk tolerance have no per-command option, so they're
-         always saved.
+         always saved. (Risk tolerance has since been removed, from the footer and
+         `/intelligence-brief` too: entry 114.)
        - The mixed-cargo commands share `_filters_note` in `bot/cogs/prices.py`. Their
          "surface terminals excluded" fragment is gone, since the Filters line says
          space-only. "Capital access confirmed at ..." stays: it's a fact about the routes,
@@ -4045,9 +4048,1287 @@ they're in sync).
        moved to the per-stack prices. Each change was undone one at a time (12 in all),
        and its test failed every time.
 
+114. **The saved risk tolerance is removed; the ⚠️ cargo-risk labels stay.** Decided by the
+     user on 2026-09-30, after research into what entry 104's filter actually did. Supersedes
+     entry 104.
+     - What the research found:
+       - Only UEX's illegal flag ever changed a result. UEX flags 18 commodities illegal (11
+         traded at terminals), 2 explosive, 1 volatile in quantum travel, 2 unstable over
+         time and 0 buggy, and none of the non-illegal flagged ones can form a route:
+         Detatrine has no buyer, and raw Quantainium, Diluthermex and Zeta-Prolanide have no
+         terminal rows. So Low and Medium behaved identically.
+       - What players haul is clean. On the Pi, 1 of 169 tracked buy legs was a flagged
+         commodity (Human Food Bars); Laranite, Gold, refined Quantainium, Agricium,
+         Taranite and Bexalite are all unflagged.
+       - `/mixed-routes` and `/multi-stop-route` almost never suggest flagged cargo (0-1 of
+         the top 5; filtering cost under 1% of profit), because black-market terminals
+         rarely report demand. `/top-routes` is where it showed: once a ship is set, 1-3 of
+         the top 10 are illegal goods (Osoian Hides, Neon, E'tam), often #1, and filtering
+         cost 8-25% of top-10 profit.
+       - Usage on the Pi: 11 players have saved preferences. Risk tolerance was unset for
+         5, High (the same as off) for 5, Medium for 1 and Low for none.
+       - The illegal flag is coarse: Neon and Human Food Bars are only restricted in some
+         jurisdictions, yet carry the same flag as WiDoW.
+     - So a three-level setting almost nobody used, whose two filtering levels behaved the
+       same, wasn't worth its surface. The labels already tell players what they're
+       hauling, and removing it fits the "trim for new users" direction.
+     - Removed:
+       - The `risk-tolerance` option on `/set-trading-preferences` (`RISK_TOLERANCE_CHOICES`
+         in `bot/cogs/trading_preferences.py`), its line in `/my-trading-preferences` and
+         the command's confirmation (`format_trading_preferences`), and "risk tolerance:
+         ..." in every route footer (`describe_active_preferences` no longer takes it).
+       - The filtering and its helpers: `RISK_TOLERANCE_EXCLUDES`, `RISK_TOLERANCE_SKIPS`,
+         `outside_risk_tolerance` and `within_risk_tolerance` (`bot/uex/commodity_risk.py`),
+         and `risk_tolerance_hint` plus the unused `RISK_TOLERANCE_LEVELS`
+         (`bot/uex/trading_preferences.py`). Every use went with them: `/top-routes`
+         (`_send_ranked_routes`), the market pools of `/mixed-routes`, `/multi-stop-route`
+         (both forms) and `/diminishing-returns`, `/intelligence-brief`, every "Hedge:"
+         suggestion (`/best-route`'s two branches, the ranked list, a tracking thread's
+         buy-side shortfall hedge), the empty-result hints, and `/best-route`'s "Outside
+         your saved risk tolerance" note.
+     - Kept: `commodity_risk_labels`, `format_commodity_risk` and
+       `has_commodity_risk_metadata`, so every "⚠️ Cargo risk: ..." line (and "risk metadata
+       unavailable") still shows on `/best-route`, `/top-routes`, `/mixed-routes`,
+       `/multi-stop-route` and `/intelligence-brief`.
+     - Database: the `risk_tolerance` column stays in `user_trading_preferences`, since the
+       schema is additive-only and the column has held real values. Nothing reads or writes
+       it. It's out of `DEFAULT_TRADING_PREFERENCES`; `get_trading_preferences` selects only
+       the six live columns; `set_trading_preferences` no longer takes it, so a new row
+       leaves it NULL and an old row's value sits there unread. `/clear-trading-preferences`
+       still deletes the whole row.
+     - Command surface: still 65 commands, and `/set-trading-preferences` has six options.
+       A walk of the command tree found every name, description and choice within
+       Discord's limits.
+     - Tests: `tests/test_risk_tolerance.py`, rewritten (20). Each test that needs a saved
+       value writes it straight into the old column. They check that the option is gone,
+       that the DB keeps the column but never reads or writes it (through an update, a
+       restart and a clear), that no reply or footer mentions it, that `/top-routes`,
+       `/best-route`, the mixed-cargo pools, `/intelligence-brief` and all four hedge paths
+       leave nothing out, and that flagged cargo keeps its label on each route command.
+       Run against the code from before this change, all 20 fail, each because goods were
+       left out or the setting was shown. `tests/test_preference_scope.py` also fails if any
+       route command's code mentions `risk_tolerance`.
+     - Gap found afterwards: the labels covered each route's own cargo but not its hedge
+       lines, so an illegal hedge showed up unflagged. Fixed in entry 115.
+115. **Hedge and backup-route cargo carry their ⚠️ cargo-risk label.** Found by a workflow
+     audit of PR #96 on 2026-09-30. Entry 114 removed the risk-tolerance filter because every
+     route labels risky cargo, but only each route's own cargo was labelled.
+     - The gap: a "Hedge:" line (`/best-route`'s two branches, `/top-routes`' ranked list, a
+       tracking thread's "this could fill it" message) and the other cargo in a backup load
+       (`_load_lines` in `bot/uex/backup_routes.py`) printed `cargo_item_line` alone: name,
+       SCU and profit. With the filter gone, an illegal hedge such as WiDoW or Neon showed
+       up with no warning anywhere. On a tracking thread that message has no other route
+       context at all.
+     - Fix: `cargo_item_line(item, risk=True)` appends `format_commodity_risk(item.source)`,
+       the same label `cargo_item_warnings` gives `/mixed-routes`' cargo, "metadata
+       unavailable" included. The hedge rows already carry the flags, since
+       `get_mixed_route_market_rows` joins `commodity_reference`. The player's own commodity
+       in a backup load ("(yours)") and the unsold-cargo reroute line stay unlabelled: that
+       cargo is already bought.
+     - Backup loads never went through the risk filter, so their gap predates PR #96. It's
+       the same promise, so it's fixed here too.
+     - Tests: PR #96's three hedge tests only checked that a flagged hedge appears; they now
+       require the label on the hedge line itself. New:
+       `test_cargo_besides_the_players_own_carries_its_risk_label` in
+       `tests/test_backup_routes.py`.
+
+116. **A listing looked up by id comes back as a list again; inventory reconciliation was
+     stalled.** Found while checking the 2026-10-01 deploy's log, not by a report.
+     - The symptom: from 2026-09-30 10:15 UTC, every 5-minute inventory cycle failed with
+       `KeyError: 0` at `listing = rows[0]` in `_reconcile_listed_jobs`
+       (`bot/cogs/personal_inventory.py`), 202 times before it was noticed. The outer guard
+       from entry 87 kept the loop alive, but each cycle stopped there, so tracked listings
+       weren't reconciled, repriced or posted.
+     - The cause, checked live: UEX answers `/marketplace_listings?id=N` with the one
+       listing as a bare object, or `false` when there's none; `id_item=` gets a normal
+       list. `get_marketplace_listings` passed the object through, and all seven `id=`
+       callers read `rows[0]`. It first fired 45 minutes after jobs 5 and 6 were posted
+       (09:30 UTC), about when UEX approval would make them visible: the first tracked
+       listings that an `id=` lookup actually found. Whether UEX always answered `id=` this
+       way or changed recently isn't known. The Pi's logs (back to 2026-09-22) show this
+       error only from the reconcile loop, and nobody ran the other `id=` paths against a
+       live listing in that time.
+     - The same object also broke `/marketplace-listing`, `/marketplace-delete-listing`
+       (and its tracked-listing stock check), `/inventory-cancel-post` on a live listing, and
+       the item-link lookups in `/my-favorites`, `/my-negotiations` and negotiation alerts:
+       each read `rows[0]`.
+     - Fix: `get_marketplace_listings` wraps a bare object in a list, in one place, so
+       every caller gets the list it expects.
+     - Why tests missed it: the reconcile harness mocked an `id=` lookup answered with a
+       one-row list, a shape UEX never sends. It now returns the bare object (and asserts the
+       `id` it was asked for), so every reconcile test runs against the real shape; undoing
+       the fix reproduces the production `KeyError: 0` in 9 tests. New:
+       `tests/test_listing_by_id.py` (the object, `false`, `{}`, and a list).
+
+117. **`/refinery-advisor` prices five more ores, and signs negative yields.** Ported from
+     aiv2 commit `f2785ae` (AI_BOT_HANDOFF.md, aiv2 -> production).
+     - The gap: the advisor found an ore's sell price only through the raw row's own
+       `id_parent`. Checked live on 2026-10-01: 5 of 32 refinable ores (Taranite, Lindinium,
+       Savrilium, Torite, Aslarite) have `id_parent` 0 there, while their refined row still
+       links back to the raw one. Those five got no sell price at all.
+     - Fix: `refined_form` (`bot/uex/refinery.py`) tries the raw row's link first, then a
+       single refined row linking back. Two back-links count as no answer, and a forward
+       link to another raw row is ignored. Against live data, 30 of 32 ores now resolve, up
+       from 25; the other two (Jaclium, Construction Pieces) have no refined form, and none
+       of the 25 changed target.
+     - `format_yield_bonus` signs the bonus itself: the old `+{bonus}%` template showed a
+       negative bonus as "+-3%".
+     - Tests: five from aiv2 in `tests/test_refinery.py`, one of them through the real
+       `/refinery-advisor` callback. Each change was undone one at a time (6 in all), and
+       its test failed every time.
+
+118. **Every name lookup prices only the commodity asked for.** Ported from aiv2 commit
+     `c4f1aa6` (AI_BOT_HANDOFF.md, aiv2 -> production), core fix only: aiv2's chat price
+     tool, `price_summary.py` and evals have no production counterpart.
+     - The bug: `/commodities_prices?commodity_name=` matches by case-insensitive SUBSTRING,
+       and all seven name lookups used the mixed rows as-is. Checked live on 2026-10-01: 10
+       of 158 tradeable commodities pull in others. The best sell price was wrong for Gold
+       (71,000 from Golden Medmon; Gold's own is 31,000), Diamond (99,000 from Diamond
+       Laminate; 8,600) and Carbon (26,000 from Carbon-Silk; 430). Tin listed Astatine first
+       and Jaclium listed Jaclium (Ore) first, so `/best-route` took the wrong
+       `id_commodity` from `rows[0]`. The other five (Borase, Copper, Hydrogen, Iron, Ship
+       Ammunition) mixed in their ore or size variants.
+     - Fix, in `bot/uex/trading.py`:
+       - `rows_for_commodity` serves typed names (`/price`, `/best-route`,
+         `/commodity-history` and both alert pollers). It keeps the exact name's rows. A
+         partial name that only one commodity matches keeps them all. When several match
+         and none exactly, it returns their names, and the commands ask "which one do you
+         mean?" (`ambiguous_commodity_text`); the pollers log and skip.
+       - `rows_for_known_commodity` serves names taken from UEX's own catalog (the
+         trending/top-routes refresh, `/refinery-advisor`'s sell price): by `id_commodity`
+         when both sides have one, else the exact name. It has no partial-name leniency.
+       - `/price` now says in text when no terminal buys or sells the commodity
+         (`no_terminal_trades_text`), instead of sending an embed with no fields.
+     - Production's price and stock alerts already store an exact catalog name (PR #80), so
+       the pollers' filter always finds the exact match. It still removes the other
+       commodity's rows, which is the part that mattered.
+     - One change from aiv2: `ambiguous_commodity_text` ends a list of more than five names
+       with "and N more". aiv2's " ..." plus the sentence's own period read "Name 4 ....".
+       Logged in AI_BOT_HANDOFF.md, production -> aiv2.
+     - Live check: no catalog commodity loses all its rows, and the typed-name and id
+       filters agree on all 158 names.
+     - Tests: `tests/test_exact_commodity_lookups.py` (a fake UEX that matches by substring;
+       `/best-route` runs through its real callback over an `httpx.MockTransport`), plus
+       additions to `test_trading.py`, `test_price_command.py` and `test_refinery.py`. Each
+       change was undone one at a time (13 in all: every call site, each helper rule, the
+       empty-embed reply and the wording), and a test failed every time.
+
+119. **Marketplace listings are picked by name, not typed by id.** Asked for by the owner
+     on 2026-10-01: `/marketplace-listing` and `/marketplace-delete-listing` took a bare
+     `listing_id` that players had to copy out of another command's reply.
+     - Both commands' option is now `listing`, an autocomplete; typing an id still works.
+       `/marketplace-delete-listing` lists the player's own active listings.
+       `/marketplace-listing` lists those, then their favorites, then their open deals, each
+       once, marked "Yours", "Favorite" or "Deal".
+     - A player's own listings come from `/marketplace_listings?username=`. The username is
+       the one their linked key belongs to (`UexClient.get_user_username`, `/user`, cached an
+       hour). Checked live on 2026-10-01: `/user?username=cheeno` and the listings' own
+       `user_username` agree, and `?username=cheeno` returned all three of the owner's
+       listings, including one (#170683) the inventory loop doesn't track.
+     - The pick list is kept 60 seconds per player, because Discord asks on every keystroke
+       and the client never caches favorites or deals. A delete drops it. Each source is
+       fetched with `gather_within`, so a slow one is left out instead of missing Discord's
+       3-second deadline. A list missing a source is shown but not kept.
+     - `/marketplace-search`, `/my-favorites` and `/my-negotiations` put a "Show details
+       for..." menu under their results (`ListingDetailsView`), so browsing never needs an id.
+       Picking one replies privately to whoever picked, so anyone can use the menu on a
+       public search. It greys out after 10 minutes, inside Discord's 15-minute window for
+       editing an ephemeral message. `/marketplace-listing` and the menu share one builder,
+       `Marketplace.listing_detail`. Discord refuses a menu with no options, so
+       `send_with_details` sends a list whose rows carried no listing id without one.
+     - Pure helpers in `bot/uex/marketplace.py`: `listing_choices_from_rows` (a favorite's or
+       deal's listing id is `id_listing`, not its own `id`), `merge_listing_choices`,
+       `listing_choice_label` (100 characters at most; the title gives way, never the id or
+       price) and `match_listing_choices` (a typed number matches the id's start).
+     - The first draft named the pick-list cache and its fetch function both `_listing_picks`,
+       so the function replaced the cache and a delete raised `TypeError`. The existing
+       double-click delete test caught it; ruff doesn't flag a redefinition of a name that's
+       already used.
+     - Tests: `tests/test_listing_pickers.py` (19), plus `tests/test_listing_ids.py` now
+       checking that each menu offers the listing's own id (a favorite's row id is not one).
+       Each change was undone one at a time (18 in all), and a test failed every time.
+
+120. **`/where-to-mine` and `/refinery-advisor` accept a misspelled ore.** Ported from aiv2
+     commit `c3c14ec` (fix #1 of six; the rest are aiv2's AI chat and evals). Both commands
+     autocomplete their ore, but a player can still send what they typed without picking a
+     suggestion, and "Quantanium" then failed outright.
+     - Both lookups (`resolve_mineable_commodity`, `resolve_raw_commodity`) now end in a typo
+       tier, `resolve_raw_material_name` (`bot/uex/trading.py`), after their exact and
+       unique-substring tiers. It matches by difflib ratio against the names with their
+       "(Raw)"/"(Ore)" tag stripped (`without_form_tag`), and only resolves when the best
+       name scores at least 0.7 and leads the next by 0.1 (`_resolve_fuzzy_name`, aiv2's
+       calibration). Two real materials sharing a stripped name are never merged.
+     - The refinery lookup only accepts refinable ores, but scores the typo against every raw
+       material (`compete_with`): scored against refinable ores alone, "Ahorite" (Aphorite,
+       not refinable) resolved to Torite.
+     - aiv2's fix #2 (bare "Area 18"/"New Babbage"/"Orison" resolving to the city's TDD) has
+       no production counterpart: production has no free-text terminal resolver.
+     - Checked against the live raw-material list, saved as `tests/fixtures/raw_materials.json`
+       (45 raw, 32 refinable): every name with one letter dropped or two adjacent letters
+       swapped resolves to the right ore or declines, never to another ore. `/where-to-mine`:
+       541 right, 104 declined, 0 wrong, the same as aiv2 measured; the refinery: 372 right,
+       0 wrong.
+     - Tests: `tests/test_ore_typos.py`, two of them through the real commands. Each change
+       was undone one at a time (8 in all), and a test failed every time.
+
+121. **Route commands warn when a price disagrees with every other terminal.** Ported from
+     aiv2 commit `a6bd024`, which had itself ported production's own never-merged
+     `feature/price-outlier-detection` branch (`c63ca73`, 2026-09-22, 79 commits behind by
+     now; its PROJECT_CONTEXT entry 78 was never merged and that number went to another
+     entry). Rebuilt on today's commands rather than merging that branch.
+     - The incident: UEX showed Rayari Kaltag buying Fresh Food at 2,614 aUEC/SCU while every
+       other terminal agreed around 21,614, an ~8x gap confirmed in-game as a UEX data error.
+       No existing signal caught it: route confidence rewards freshness, report counts and
+       availability, and the bulk snapshot `/mixed-routes` and `/multi-stop-route` read has no
+       report counts at all (`/commodities_prices_all` sends them NULL).
+     - `bot/uex/price_outliers.py` compares one terminal's buy or sell price with the median of
+       every OTHER terminal's price for the same commodity and side in the same data, needing at
+       least 3 others, and flags it at 4x or more either way. The warning says the price
+       disagrees, never which number is right.
+     - `price_outlier_warnings` (`bot/uex/route_presentation.py`) words it once for everyone.
+       `cargo_item_warnings` takes an optional `price_outlier_index`, built once per command
+       from the market data it already loaded (no extra UEX calls): `/mixed-routes`,
+       `/multi-stop-route` (through `_send_multi_stop_routes`) and `/intelligence-brief`, from
+       the whole snapshot before any filtering. `/best-route` checks both of its branches
+       against the commodity's own `/commodities_prices` rows (exact-commodity since entry
+       118).
+     - Not covered, as in aiv2: `/top-routes`, whose entries are different commodities with no
+       per-commodity listing in memory; and the hedge ("backup load") lines.
+     - Live check on 2026-10-01, `/commodities_prices_all`: 2,528 prices had 3+ others to
+       compare with; none reached 4x. The largest gaps were 3.4x (Iron and Copper selling for
+       about a third of the median at Pickers Field and Rappel), plausibly real regional prices,
+       so the warning stays quiet day to day.
+     - Tests: `tests/test_price_outliers.py` (19), including every wired command run end to
+       end with the real incident's prices. Each change was undone one at a time (13 in all),
+       and a test failed every time.
+
+122. **`/ship-loadout`: a recommended part for every slot on a ship.** A new command in the
+     `ShipPartsFinder` cog (`INITIAL_COGS` unchanged; 65 -> 66 commands), plus a "Recommend a
+     loadout" button in `/ship-parts-finder`'s browser that opens it for the ship and location
+     being browsed. Built on the browser's own candidates (`candidates_for_port`: sold, fits
+     size and tags, not locked), so it never recommends a part the browser wouldn't list.
+     - The owner's decisions: four profiles. Balanced takes each category's key stat
+       (`ranking_stat`); Stealth the lowest EM (a cooler's IR only breaks EM ties); Tank shield HP for
+       shields and `durability.health` for every other component; Budget the most key stat
+       per aUEC, only among parts that beat the stock part. Guns go by DPS in all four.
+       Wherever the stock part is already the best pick, the line says "keep stock" with its
+       stat; a purchase shows "(was X stock)". Power is a total, never a warning ("⚡ **16** power
+       pips in total, from the power plant."), and never changes a pick. Out of
+       scope for v1: missiles themselves, damage types, fewer shops, fitting to the power
+       budget.
+     - Pure logic in `bot/uex/ship_loadout.py` (profiles, keep-stock, grouping into "2x S3 Wing
+       Gun" lines, cost, the power total, the message lines and paging). The cog's
+       `_loadout_slots` reads the ship's slots and each stock part's wiki detail;
+       `LoadoutView` re-picks from the loaded candidates on a profile switch, with no lookups.
+     - A gun hardpoint keeps its stock mount. Under a gimbal the slot is the gimbal's own gun
+       slot (`loadout_gun_ports` -> `child_gun_ports`), and the size comes from the gimbal's
+       ports: every stock VariPuck gimbal on the live wiki (4.10.1) holds a gun of its own size
+       (S3 gimbal, S3 gun), not one size down. The stock gun inside it is named only by the
+       wiki's single-vehicle endpoint, so `WikiApiClient.get_vehicle_stock_ports` (new) reads
+       `GET /vehicles/{uuid}` after the same exact-name match `get_vehicle_loadout` uses, and
+       the cog caches its port-path -> uuid map per ship for a day. Without it, a gun line says
+       "stock part unknown" rather than treating the slot as empty, and Budget keeps stock.
+       The map records a slot the tree lists with nothing in it as `""` (really empty); a path
+       it doesn't list at all (a mount row that came back with no `ports`) is "stock part
+       unknown" too, never an empty slot, so Budget keeps its beats-stock guard. A mount
+       inside a stock mount (a turret holding gimbals) is followed down to the gun slot, up to
+       `MAX_MOUNT_DEPTH` (3) levels, so a gimbal's mount rank is never compared with a gun's
+       DPS. A swappable turret whose own gun slots are in the loadout is kept the same way:
+       no "buy a new turret" line beside guns sized for the stock one, which "Add all" would
+       have saved together.
+     - Every lookup in one loadout shares one deadline, `LOADOUT_TIME_BUDGET_SECONDS` (90),
+       instead of the browser's 45 s per slot; slot shapes load their candidates once however
+       many slots share them. What the wiki didn't answer for is said in the header, "it" or
+       "they" by count: stock parts (no comparison), gun slots whose mount it didn't answer
+       for (left out, since the mount sizes the gun - a slot that only takes a gun keeps its
+       own size and stays, with its stock part unknown), turrets whose own gun slots never
+       loaded (left out, as the browser says), and sold parts (counted once per category).
+     - In a DM there is no thread to post in, so the command says loadouts are server-only
+       before the build, not after it. "Add all" and "Recommend a loadout" both have a
+       check-then-set guard (`ConfirmListingView`'s pattern), so a double click saves, or
+       builds, once. The profile choices name the stat ("the best main stat in every slot:
+       DPS, shield HP, ...") instead of the code's "key stat".
+     - "Add all to shopping list" saves every purchase, never a kept-stock line, through the new
+       `ShipPartsShoppingService.lock_in_many`: one thread lookup, one list refresh and one
+       reply. Each entry uses the slot's browser key (the hardpoint's own name for a gun), so it
+       replaces what the browser saved there. Only the player who opened the loadout can use
+       it. It is posted in the private ship parts thread, like the browser, and pages past
+       Discord's 2,000 characters.
+     - Live check on 2026-10-01 (live UEX and wiki, fresh cache, nothing sent to Discord):
+       Avenger Titan built in 7.5 s, Gladius 6.5 s, Perseus 4.0 s, X1 0.1 s. Titan Balanced:
+       keep the Revenant nose gun and racks, 2x Dominance-3 for the wings (930 vs 547 DPS),
+       520,274 aUEC total, 16 power pips. The Perseus's remote-turret gimbal
+       guns resolve two levels deep. The Cutlass Black has no slots: see the revision below.
+     - Tests: `tests/test_ship_loadout.py` (99, the pure logic) and
+       `tests/test_ship_loadout_command.py` (51, end to end through the real
+       `candidates_for_port` and a real database), plus `tests/test_wiki_api.py` for the new
+       client call. The pure rules were mutation-checked earlier (72/72 killed); each piece of
+       the Discord wiring was then undone one at a time (35 in all), and a test failed every
+       time. A pre-merge review then found the gaps above (silent turret-gun loss, the
+       unlisted-path and mount-in-mount stock cases, the turret-plus-guns contradiction, the
+       DM ordering, no double-click guards, jargon and grammar) plus 25 mutations its own run
+       saw survive. A second run (46 mutations: each fix undone, and each surviving
+       mutation re-applied) killed all 46.
+     - Revised the same day, after the owner's review of the first build:
+       - Power: the first build compared every part's maximum draw with the plants' output and
+         warned on 16 of 32 profile builds across 8 live ships (never on Stealth, so 16 of the
+         other 24), stock loadouts included (the Titan's own parts: 22.1 against 15). The
+         owner's call: no ship is meant to run every part at max, so the warning went. The
+         footer now shows the loadout's total power pips, what its plants make (`power_total`,
+         `PowerTotal.line`). The cooling check went with it: it never fired, and rested on
+         the same maximum draw. A plant with no output figure makes the total "at least",
+         never a guess. The plant's own line says "pips" too, so one message never names the
+         unit two ways (the browser still says "segments").
+       - Stealth: EM matters more (the owner's call), so every component goes by lowest EM and
+         a cooler's IR only breaks EM ties. Real coolers tie on EM often (the Bracer and
+         Ultra-Flow are both EM 1,490), so a Stealth cooler line shows both figures
+         (`shown_stat`: "EM 250 / IR 2,330 (was EM 1,490 / IR 7,260 stock)").
+       - Ships the wiki lists twice: `WikiApiClient.get_vehicle_loadout` raises the new
+         `WikiDuplicateNameError` when several /vehicles rows share the exact name. The finder
+         tries UEX's full name next, then says so in `/ship-parts-finder` and `/ship-loadout`
+         ("⚠️ The Star Citizen Wiki lists more than one ship named **Cutlass Black** ... Known
+         issue") instead of "no supported component slots". Not just the Cutlass Black: 12
+         ships UEX lists (Carrack, Cutlass Black/Blue/Red, Eclipse, F8C Lightning, Hammerhead,
+         Idris-P, Polaris, S-65 Stingray, Valkyrie, Zeus Mk II CL; the wiki's list on
+         2026-10-01), none with saved slots on the Pi. The real fix is open (ROADMAP.md,
+         "Ships the wiki lists twice"). `get_vehicle_stock_ports` still declines duplicates
+         rather than guess.
+       - Live check after (same ships, fresh cache): Titan Balanced 16 pips, Stealth 13 (a
+         quieter plant), Perseus 48 from its 2 plants; the Cutlass Black, Carrack and Polaris
+         get the warning. Each change undone in turn (17 mutations) failed a test every time.
+123. **`/ship-loadout` guns and point defense: no scatterguns, alpha breaks DPS ties, stock
+     PDCs kept.** The owner's
+     review of the live Perseus loadout (entry 122): every profile put a Dominance-3
+     Scattergun in its turrets, and nobody uses scatterguns at the moment. The wiki's DPS for
+     one counts all 8 pellets of a shot (`vehicle_weapon.modes[].pellets_per_shot`), so on
+     the live wiki (4.10.1) a scattergun had the most DPS in S1, S2 and S3 (Dominance-1/2/3,
+     Havoc, Hellion, Predator). Alpha damage (`vehicle_weapon.damage.alpha_total`, damage
+     per shot with every pellet) was asked for as a tiebreaker, "a fairly important stat".
+     - `is_scattergun` (`bot/uex/ship_loadout.py`) reads `vehicle_weapon.type` ("Laser
+       Scattergun", "Ballistic Scattergun", "Plasma Scattergun" live), else the name. A gun
+       slot never ranks one (`rank_candidates`), in any profile. A stock one sorts after
+       every other gun (`merit_key` leads with the flag), so it's always replaced, and
+       Budget treats any other gun as an upgrade over it. A slot where only scatterguns are
+       sold keeps its stock part with the reason `ONLY_SCATTERGUNS`.
+     - Guns go by DPS, then alpha, in Balanced, Stealth and Tank (Budget is still DPS per
+       aUEC, beating stock). Measured on live candidates for 6 ships: 6 exact DPS ties, so
+       the tiebreak decides real picks. The Avenger Titan's nose now buys the AD4B over its
+       stock Revenant Gatling (both 1,266 DPS; 84.4 vs 63.3 alpha), and the Tarantula GT-870
+       Mark 1 now ranks above the 9-Series Longsword (both 202.5 DPS). An unknown alpha sorts
+       last.
+     - A gun line shows both figures (`shown_stat`: "1,266 DPS / 84.4 alpha (was 1,266 DPS /
+       63.3 alpha stock)"), like a Stealth cooler's EM and IR, so a tie-broken pick doesn't
+       read as no improvement.
+     - Live check after (fresh cache): the Perseus's turret guns keep their stock Mantis
+       (853 DPS) in every profile; no scattergun anywhere across the Perseus, Avenger Titan,
+       Gladius, Arrow and Hawk. Each rule undone in turn (11 mutations) failed a test every
+       time. The command tests' made-up top gun was the Dominance-3 Scattergun; it's now an
+       "M5A Cannon" with the same made-up numbers, plus a test that a cheap, high-DPS
+       scattergun for sale is skipped in all four profiles through the real command.
+     - Point defense: the same Perseus loadout swapped all six PDCs for the PPB-116
+       "Pepperbox" (177,872 aUEC each). Both are `PDCTurret`s on the wiki, and turrets rank by
+       the gun size they hold (Pepperbox S5, Swarm S1), which says nothing about point
+       defense. The owner: the stock ones are better, since they shoot down incoming missiles
+       and never run out of ammo. Every stock PDC on the wiki is the M2C "Swarm" (103 slots,
+       11 ships), so `is_point_defense` (stock `sub_type` "PDCTurret", or a slot requiring
+       the "PDC" tag) makes `pick_for_slot` keep stock with `POINT_DEFENSE` as the reason, in
+       every profile, even when the stock part's stats didn't load. The kept line leaves out
+       the turret rank, since that isn't why it's kept. Port labels now say "PDC", not "Pdc"
+       (`format_port_label`, so the finder too). Live: the Perseus keeps its six Swarms in
+       all four profiles; Balanced drops from 2,722,980 to 1,379,200 aUEC. 6 more mutations,
+       all caught.
+     - Not changed: `/ship-parts-finder`'s own list still ranks guns by DPS alone, so
+       scatterguns still top it, and still lists the Pepperbox for PDC slots; it lists every
+       part, so that's a separate call.
+124. **`/ship-loadout`: guns inside locked turrets, and alpha within 5% DPS.** The owner's
+     review of the live Idris-M loadout: it listed the nose railgun, PDCs and components but
+     none of the turret guns. Two separate gaps, both found in the live wiki (4.10.1):
+     - Manned turrets are port type `TurretBase`, which `parse_ports` drops (not in
+       `PORT_TYPE_TO_UEX_CATEGORY`; UEX sells none), so the Idris-M's six S5 manned turrets
+       and its S7 front turret never became slots at all.
+     - Its remote turrets are parsed, but every port inside them is locked: each holds a
+       locked VariPuck gimbal (`editable: False` in the turret's own item detail), so
+       `child_gun_ports` finds no gun slots. The gun inside each gimbal is unlocked, and only
+       the single-vehicle tree (`get_vehicle_stock_ports`) shows it: `hardpoint_front_left_turret
+       /turret_left/hardpoint_class_2`, editable, a Revenant Gatling. The Perseus worked only
+       because its remote turrets' gimbal slots aren't locked.
+     - Fix, loadout only: `locked_turret_gun_ports` (`bot/uex/ship_loadout.py`) reads every
+       unlocked `WeaponGun` port below a top-level `Turret`/`TurretBase` in that tree, down to
+       the cog's `MAX_MOUNT_DEPTH`, skipping PDCs (they keep their stock turret, entry 123).
+       The cog caches them with the stock uuids (`_vehicle_stock_tree`, was
+       `_vehicle_stock_uuids`) and `_loadout_slots` adds them as gun slots for any turret it
+       doesn't already cover, so the Perseus's remote-turret guns aren't added twice. The
+       slots are named by their full path, which is also their shopping-list key.
+     - Live: the Idris-M now lists 22 turret guns (8x S4 remote, 12x S5 manned, 2x S7 front),
+       and manned-turret guns that were missing elsewhere appear too: 4 on the Perseus, 4 on
+       the Constellation Andromeda, 4 on the Redeemer.
+     - Labels: a path leaves out the gimbal's own `hardpoint_class_N` gun port
+       (`format_port_label`, so 'Right Lower Turret · Left'); a word shared across the
+       separator reads once ('Front Turret · Turret' -> 'Front Turret'); and a slot already
+       ending in "gun" isn't given another ('S10 Nose Railgun', not 'Nose Railgun Gun').
+     - Alpha: the owner agreed to widen entry 123's exact-tie rule. Guns within `DPS_BAND`
+       (5%) of each other count as level, and the higher alpha wins between them
+       (`gun_at_least_as_good` for keep-stock, `_rank_guns` for ranking: the band is
+       measured from the highest-DPS gun left, so it doesn't chain down the list). Live: the
+       Omnisky IX (546.8 DPS, 218.7 alpha) now beats the CF-337 Panther (545.6, 43.7). Budget
+       still ranks by DPS per aUEC. How often the band changes a pick across every weapon is
+       saved for a later session (ROADMAP.md), as is a re-check after the next game patch's
+       weapon damage changes.
+     - 17 mutations, each undone in turn, all caught.
+     - Not changed: `/ship-parts-finder` still doesn't list guns inside locked or manned
+       turrets (ROADMAP.md).
+125. **`/ship-loadout`: a Done button.** The owner's request after using the live Idris-M
+     loadout: once the parts are on the shopping list, the loadout message has done its job
+     but sat in the private ship parts thread until it went idle (30 minutes), and a player
+     can't delete a bot's message themselves. Done (row 1, beside "Add all to shopping
+     list") deletes the message; anything already added stays on the list, a message of its
+     own. Owner-only, like every loadout button.
+     - The first version was an ordinary view button, and the owner spotted the gap before
+       merge: it greyed out with the rest at the idle timeout, and stopped answering after a
+       restart - exactly the stale messages it exists to clear. Done now follows the
+       browser's ↻ Refresh pattern (`RefreshBrowserButton`): a non-dispatchable
+       `_LoadoutDoneStub` in the view, and one `LoadoutDoneButton` DynamicItem registered at
+       `cog_load`, with the owner's id in its custom_id (`ship-loadout:done:<owner>`). Not a
+       DynamicItem inside the view itself: discord.py unregisters a view's DynamicItem
+       patterns bot-wide when that view closes.
+     - The idle timeout greys out everything but Done (`BotView.grey_out` gained `keep=`) and
+       says "**Done** still removes this message." The cog tracks live loadouts by message id
+       (`_loadouts`, set in `_post_loadout`, dropped at timeout or Done), so Done stops a live
+       view before deleting its message and its timeout never edits a message that's gone.
+       If Discord refuses the delete, a live view greys out (Done still works) and the player
+       is told to try again. A loadout posted before a restart has no live view; Done just
+       deletes it.
+     - Tests in `tests/test_ship_loadout_command.py` (live, idle, after a restart, someone
+       else's, a refused delete) and `tests/test_ship_parts_refresh.py` (registration); 12
+       mutations, all caught.
+126. **Ships the wiki lists twice now resolve to the plain ship.** The real fix for entry
+     122's known issue, on the owner's request. 12 ships UEX lists (Carrack, Cutlass
+     Black/Blue/Red, Eclipse, F8C Lightning, Hammerhead, Idris-P, Polaris, S-65 Stingray,
+     Valkyrie, Zeus Mk II CL) share their exact name with a second wiki `/vehicles` row, so
+     `/ship-parts-finder` and `/ship-loadout` showed the known-issue warning instead of slots.
+     - `base_vehicle_row` (`bot/wiki_api.py`): of the rows sharing a name, the one whose
+       `class_name` every other row's extends at a word boundary (`DRAK_Cutlass_Black` for
+       `DRAK_Cutlass_Black_BIS2950`). Both `get_vehicle_loadout` (the finder's slots) and
+       `get_vehicle_stock_ports` (the loadout's stock tree) use it. With no single such row
+       (two rows of one class name, or the five "PYAM Exec" pairs, `..._Exec_Stealth` /
+       `..._Exec_Military`, none a ship UEX lists) it still declines: `WikiDuplicateNameError`
+       and the known-issue warning, never a guess.
+     - Checked first, as the ROADMAP item asked, on the wiki list of 2026-10-01: the base
+       row is the standard ship in all 12, and the editions are named variants of it (Best
+       in Show 2950, Plat, Collector, GS, TSG, FW-25). Nine editions have identical slots and
+       stock parts; the Hammerhead GS (radar size), the Idris-P TSG (no PDCs) and FW-25
+       (cooler and turret sizes) and the Zeus Collector (8 stock parts) differ - which is why
+       the base row is picked rather than any row.
+     - Live: all 12 now build full loadouts (the Cutlass Black: 10 lines, its turret guns
+       included, 1,025,248 aUEC in Balanced). The Pi had no saved slots for any of them, so
+       the finder reads them live until the hourly reference check saves them (they were
+       marked checked with 0 slots, so within a day). 6 mutations, all caught.
+127. **`/ship-parts-finder`'s location is optional.** On the owner's request, the same as
+     `/ship-loadout`'s has been since entry 122. Location only ever did one thing in the
+     finder: each part's cheapest shop shows its distance from you, and ties between equally
+     good parts go to the nearer shop (a fix from the finder's pre-merge audit; see the
+     module docstring). Without it no distances show
+     and ties go to the cheaper part - the ranking itself is unchanged.
+     - `PartsBrowserView.origin_terminal` may be None (`origin_id` reads it), and so may
+       `open_loadout`'s, so "Recommend a loadout" opens a loadout without a location.
+     - ↻ Refresh carries no location as an empty terminal in its custom_id
+       (`ship-parts-browse:refresh:100::Radar`; `REFRESH_TEMPLATE`'s terminal is now `\d*`),
+       so it works after a restart too. Buttons already posted, which carry a terminal id,
+       still parse.
+     - Tests in `tests/test_ship_parts_finder.py`, `tests/test_ship_parts_refresh.py` and
+       `tests/test_ship_loadout_command.py`; 6 mutations, all caught.
+128. **An idle loadout with a location greys out.** `LoadoutView` (entry 122) stored the
+     player's location as `self.origin`, a (terminal id, name) tuple - but `origin` is
+     `BotView`'s own attribute, the interaction `grey_out` edits the message through
+     (`_message_editors` in `bot/discord_ui.py`). So `grey_out` called
+     `edit_original_response` on the tuple and raised AttributeError: on the idle timeout, and
+     on Done's failed-delete path. Every loadout made with a location kept its live-looking
+     buttons after they stopped answering. Done itself still worked (entry 125's DynamicItem).
+     - Found while porting the loadout to the AI bot (aiv2, 2026-10-02), where its chat tool
+       passes a location whenever the player names one. Entry 125's idle-timeout test used
+       no location, which is why the suite never saw it.
+     - Fix: the attribute is `origin_terminal`, the name `PartsBrowserView` already uses; the
+       constructor's `origin` argument and every caller are unchanged. aiv2 made the same
+       rename, so the two copies match again.
+     - Test: `test_a_loadout_with_a_location_still_greys_out_when_idle` in
+       `tests/test_ship_loadout_command.py` (fails on the old code with
+       `'tuple' object has no attribute 'edit_original_response'`).
+129. **Loadouts keep every ship's stock missile racks.** The owner's call after entry 126's
+     deploy: "keep the 4x S2 racks on the cutlass", then, offered the choice, for every ship
+     rather than the Cutlass alone. The rack rank (`_rack_rank`: missile size x 100 + count)
+     put the one-missile rack first at every slot size - sold racks surveyed live on
+     2026-10-02: S4 slots MSD-414 (1x S4), MSD-481, MSD-423 (2x S3), MSD-442 (4x S2); S5
+     MSD-515 (1x S5) down to MSD-582 (8x S2); S6 MSD-625 (2x S5) down to MSD-616 - so the
+     Cutlass Black's 4x S2 racks became 1x S4 and most ships' multi-missile racks went the same
+     way. More smaller missiles or fewer bigger ones is the player's call, which no rank makes.
+     - `pick_for_slot` (`bot/uex/ship_loadout.py`): a Missile Racks slot with a stock rack, or
+       one whose stock couldn't be loaded, keeps it in every profile (`STOCK_RACKS`), the same
+       shape as the PDC rule (entry 123). A rack slot that comes empty still gets the best
+       rack. The kept line shows what the rack holds ("4x S2 missiles") whatever the profile
+       ranks by, not Tank's component HP.
+     - Why not "more missiles first": the wiki lists the MSD-481 (an S4 rack, 8x S1 by its
+       name) as 8x S3, its missile ports sized 1-3, so that rank would have swapped the
+       Cutlass's racks for it. The MSD-616 shows as 18x S2. The finder's own rack list still
+       ranks by missile size; only the loadout keeps stock.
+     - Live (read-only build): the Cutlass Black keeps its 2x MSD-442 (4x S2) and 4x MSD-423
+       (2x S3) in all four profiles, Balanced 918,172 aUEC (was 1,025,248); the Avenger Titan
+       keeps its MSD-322s. Tests in `tests/test_ship_loadout.py` and
+       `tests/test_ship_loadout_command.py`; 5 mutations, all caught.
+130. **Listing deletes are sent as production deletes.** Live, 2026-10-02 05:32 EDT: the 48h
+     no-interest relist deleted the owner's two helmet listings (175615, 175616) to repost
+     them lower. UEX answered both DELETEs "ok" (the client raises on anything else, entry 45),
+     and both reposts came back HTTP 409 `listing_already_added`, a status UEX's docs don't
+     list. A fresh read-only GET 35 minutes later still showed both listings live at their old
+     prices, so the DM's "it currently has no active listing" was wrong: the old listings never
+     went away.
+     - Cause, most likely: `delete_marketplace_listing` sent only `id`. UEX's own example URL
+       for this DELETE also carries `is_production` (0, "for testing"), and POST
+       /marketplace_advertise without its `is_production` was already proven to create
+       listings that never went live (`bot/cogs/marketplace.py`) - the same silent
+       non-production default. Not proven directly: that would mean deleting a real listing
+       with the owner's secret key, which isn't this session's to use.
+     - Fix: the DELETE sends `is_production=1` (`bot/uex/client.py`). One call covers all
+       three deletes: the 48h relist, `/inventory-cancel-post` and the marketplace delete
+       button.
+     - Left as found: jobs 5 and 6 are `expired` and 7 and 8 `failed` on the Pi, while the old
+       listings stay live, so a sale of either wouldn't be tracked. The owner removes them on
+       UEX (or with the bot's delete once this is live, which also proves the fix), then
+       `/inventory-post-now`.
+     - Test: `test_delete_is_sent_as_a_production_delete` in
+       `tests/test_client_write_status.py` (fails on the old client).
+131. **Alerts can only ping their owner; the bot never pings @everyone or a role.** The 2026-10-03
+     range audit's REL-2 (`docs/audits/2026-10-03-range-audit-0e8818b.md`, local): a "Post in
+     this channel" marketplace alert (new in entry 105's delivery choice) put the listing title
+     and seller name - text any UEX player writes - into message content, and nothing set
+     `allowed_mentions`, so a title like `Laranite @everyone <@&999>` would have pinged the
+     server, the role and anyone named. Replies that echo what a player typed (an alert's
+     keyword, a ship name) had the same gap.
+     - `bot/delivery.py`: `send_dm` and `send_to_channel_or_dm` (and so `send_alert` and the
+       scanner) default to `owner_only_mentions(user_id)` - only the alert's owner can be
+       pinged. A caller's own `allowed_mentions` is kept.
+     - `bot/main.py`: the bot-wide default is `AllowedMentions(everyone=False, roles=False)`,
+       covering every send and interaction reply that doesn't set its own. No feature pings a
+       role or @everyone on purpose (checked: no role mentions anywhere in `bot/`).
+     - Tests: `tests/test_alert_mentions.py`; three older delivery tests now read the content
+       and ignore the new keyword. 5 mutations, all caught.
+132. **A listing delete reads the listing back before anything treats it as gone.** The 2026-10-03
+     range audit's REL-1 (P1 while entry 130's fix is unproven live) and MSG-1: entry 130 only
+     changed the request (`is_production=1`). If that guess is wrong, the 2026-10-02 incident
+     repeats exactly - the 48h relist expires the job, releases the reservation, posts a copy
+     UEX refuses, stops tracking the still-live listing (a sale never reconciles) and DMs "no
+     active listing". `/inventory-cancel-post` and the marketplace delete button released stock
+     and said "deleted" on the same bare "ok".
+     - `UexClient.delete_marketplace_listing` (`bot/uex/client.py`) now reads the listing back
+       after the DELETE (`use_cache=False`; UEX documents `/marketplace_listings` as uncached
+       and realtime) and once more after `DELETE_RECHECK_SECONDS` (3), returning True once
+       it's gone, False if UEX still lists it. In the client, not the callers, so no caller
+       can skip it - this codebase's recurring sibling-call-site bug shape.
+     - Still listed: the relist keeps the job `listed` (so a sale still reconciles), pauses
+       auto-relist (`disable_auto_relist`, no 5-minute retry loop) and DMs the player that it's
+       still for sale at its price, with how to relist by hand; the cancel and the delete
+       button change nothing and say UEX still shows it. A failed read-back is a UexApiError,
+       which every caller already handles without touching local state.
+     - The relist's "no active listing" DM is now true (the listing was read back gone), and
+       PATCH 2.49's claim that the fix works is softened to what's known.
+     - Tests: a no-op delete through the real relist path (`tests/test_inventory.py`,
+       `_setup_reconcile(delete_noop=True)`), the read-back's retry and freshness
+       (`tests/test_client_write_status.py`), the cancel (`tests/test_personal_inventory.py`)
+       and the delete button (`tests/test_listing_pickers.py`). 7 mutations, all caught.
+133. **Alerts reach players with closed DMs, and a new marketplace alert skips what's already
+     listed.** The 2026-10-03 range audit's UX-1, UX-2, UX-3 and MSG-6.
+     - **UX-1, closed DMs:** entry 105 made DM the default for every alert, and a DM Discord
+       refuses (50007) counted as settled, so the alert never arrived; a one-shot price alert
+       was even deactivated. The owner chose a channel fallback (over a DM check at creation):
+       `send_alert` (`bot/delivery.py`) now posts a refused DM alert in the channel it was set
+       in, pinging only its owner, with a note pointing at `/test-dm`. A temporary DM failure
+       still waits for the next poll instead. `send_to_channel` is split out of
+       `send_to_channel_or_dm` for this. Confirmations say "I'll DM you (or post here if your
+       DMs are closed)".
+     - **UX-2, "new" listings that weren't:** a new marketplace alert had no baseline, so its
+       first polls announced every listing already up, five per poll - now possibly in a
+       public channel (entry 105). `marketplace_alerts.baseline_done` (additive column;
+       existing alerts migrate to 1, since they'd been polling; new ones insert 0) makes the
+       first poll record what's listed, silently, via `mark_marketplace_alert_baseline` - even
+       when nothing matches yet, or the first real listing would be swallowed later.
+     - **UX-3 / MSG-6:** `/test-dm` named a `scope:` option that no longer exists; the
+       marketplace alert description still said "DM me".
+     - Tests: `tests/test_alert_dm_fallback.py` (including the column migration on an old-layout
+       database). 7 mutations, all caught.
+134. **Loadout picks: guns that beat stock head to head, no paid copies of the fitted part, the
+     better grade on a tie, and no "distance unknown" without a location.** The 2026-10-03 range
+     audit's LOGIC-1, LOGIC-3 and MSG-5, plus a side finding of the PvP/PvE research pass.
+     - **LOGIC-1:** a gun slot compared stock only with the top of `_rank_guns`, whose 5% band
+       is anchored on the best *sold* gun. The band isn't transitive, so with the stock gun
+       not sold (e.g. stock 1,050 DPS / 10 alpha; sold 1,000 / 20 and 955 / 100) the slot said
+       "stock is already the best pick" while the 1,000 / 20 gun beats stock by the owner's own
+       rule (3,084 of 200,000 random trials). `pick_for_slot` now ranks only the sold guns that
+       beat stock head to head (`gun_at_least_as_good` both ways), keeping stock when none do.
+     - **LOGIC-3:** Budget had no `same_part` guard, so a shop copy of the fitted part (another
+       uuid, slightly different stats) was a paid "upgrade". Excluded now.
+     - **Grade tie (research):** one line's grades share a key stat on the live wiki (4.10.1):
+       7SA Concord (A), 6SA Arbiter (B), 5SA Rhada (C) all 3,000 shield HP; power plants at 16
+       segments across classes. The shop broke the tie, so Balanced bought the Avenger Titan
+       two C-grade Rhadas. `tiebreak_key` (shield regen, then component HP; the better grade
+       wins both in every line checked) now orders candidates before the shop; it never
+       counts against stock, so a same-stat better grade isn't worth buying over stock. Live:
+       the Titan's Balanced shields are now the 7SA Concord; Budget still takes the Rhada.
+     - **MSG-5:** without a location, every finder part said "distance unknown" (entry 127's
+       slip; PATCH 2.46 promised "just without distances"). `format_part_block` now leaves the
+       distance out when no `_distance_gm` key exists (no location), and keeps "distance
+       unknown" for a location UEX couldn't measure from.
+     - Not changed, by the owner's call: LOGIC-2 (Budget's gun floor is DPS only) waits for
+       research on whether the 5% band is wide enough given real armor thresholds.
+     - Tests in `tests/test_ship_loadout.py` and `tests/test_ship_part_display.py`; 6
+       mutations, all caught.
+135. **A recommended gun must hurt a heavy fighter; Budget's gun must beat stock head to head.**
+     The owner asked for research on what players use for PvP and PvE, and whether the 5% DPS
+     band (entry 123) was wide enough before changing Budget's gun floor (audit LOGIC-2, left
+     open in entry 134).
+     - **Finding:** since 4.7, a projectile below the target armor's deflection threshold does
+       nothing to its armor or hull. The live wiki (4.10.1, `armor.deflection`) puts heavy
+       fighters (Hurricane, F8C, Scorpius, Vanguard Warden) at 54 physical and 29-40 energy
+       per projectile. The S3 Mantis GT-220 (853 DPS, 32 physical a round), the top S3 gun on
+       DPS once scatterguns were out, did nothing to any of them; the S1 YellowJacket (8 a round) bounces off
+       even a Gladius. The band was the right width as a tiebreak, the wrong tool for this.
+     - **The owner's call:** gate at heavy fighters (`ARMOR_REFERENCE = {"physical": 54,
+       "energy": 40}`). `beats_armor` checks each damage type's share of one shot, per pellet
+       (`modes[0].pellets_per_shot`), at or above its threshold; types aren't added up. It
+       returns None when the wiki gives no per-type damage, and such a gun isn't held back.
+       `gun_at_least_as_good` checks the gate after the scattergun rule and before the band;
+       `_rank_guns` ranks every gun that gets through ahead of every one that doesn't, the
+       band applying within each group.
+     - **Budget (the owner's call, "band + no DPS loss"):** a gun upgrade must beat stock head
+       to head (`gun_at_least_as_good` both ways, gate included) and have at least stock's
+       DPS. So Budget keeps the Gladius's stock Mantis (the M5A gets through but has less DPS)
+       and now buys a gun with the same DPS that hits harder: the Avenger Titan's nose gets
+       the AD4B (1,266.0 DPS, 84.4 alpha) over the stock Revenant (1,266.0 DPS, 63.3), which
+       the old strictly-more-DPS floor never offered. A stock scattergun is still replaced by
+       any gun.
+     - **The line says why:** when the gate decided (the pick gets through, stock doesn't), the
+       stat reads "(was 853 DPS / 32 alpha stock, which can't get through heavy-fighter
+       armor)", so a lower-DPS pick doesn't look like a mistake.
+     - **Live (read-only, real UEX + wiki), before and after:** every profile, Budget
+       included, used to swap the Avenger Titan's and the Gladius's S3 wing guns (stock
+       Omnisky IX / CF-337 Panther, both of which get through) for the Mantis, and keep the
+       Gladius's stock nose Mantis. Now the wings get the M5A Cannon (684 DPS, 410 energy a
+       shot) in all four profiles, and the Gladius's nose gets it in Balanced, Stealth and
+       Tank, with the note; Budget keeps the nose Mantis.
+     - Re-check `ARMOR_REFERENCE` with the gun rules after the combat patch (ROADMAP.md).
+     - Tests in `tests/test_ship_loadout.py`; 9 mutations, all caught.
+136. **The item and blueprint lookups answer in Discord's layout components: shared facts
+     said once, crafting behind its button.** The owner's presentation pass (2026-10-03):
+     "make the messages look much easier on the eyes", one section at a time, mockups first.
+     They chose the lookups (`/ingame-item-finder` 23 uses, `/blueprint-search` 14, from
+     `command_usage_by_user` on the Pi). The canvas showed today's real reply against three
+     options each, then the R97 Shotgun's 30 contracts. The owner picked C, the
+     layout-component version, for both.
+     - **Layout components** (discord.py 2.6+'s `LayoutView`): a `Container` with the embeds'
+       blurple accent, holding `TextDisplay`s (full markdown: `##`/`###` headings, `-#` small
+       print, lists), `Separator`s, a `Section` that puts a button beside its text, and
+       `ActionRow`s. The whole message is the view, so no `content` or embed goes with it.
+       Discord's limits are 40 components (discord.py raises `ValueError`) and 4,000 characters of
+       text (`content_length()`). There are no columns, so the mockup's side-by-side nearest and
+       cheapest stack instead.
+     - **`BotLayoutView`** (`bot/discord_ui.py`) shares BotView's behaviour through
+       `_BotViewBehaviour`. `grey_out` now walks nested children (`walk_children`), since a
+       layout's buttons sit inside its container. The every-view tests (`tests/bot_views.py`,
+       `test_failed_interactions.py`) cover layouts too: a `LayoutView` isn't a `View`.
+     - **`/blueprint-search`:** `summarize_contracts` (`bot/uex/blueprints.py`, replacing
+       `group_line`) says once what every contract shares. One lead sentence carries the most
+       common pool and reward chance ("Each always grants one of the 10 blueprints in its pool
+       unless noted; the odds of getting this one aren't published." - still never a
+       per-blueprint figure), plus the star system when every contract agrees. Per giver with two
+       or more contracts, it gives one rank, one system, or all illegal. Each contract keeps a
+       bold title over a small line of what differs: its rank, rep (now with commas), and an
+       odd pool or chance. Dropped: the blueprint id, the build number (now "game 4.10.1") and
+       "x2 variants" (internal variant ids). The R97 Shotgun went from 4,513 to about 2,400
+       characters.
+     - **Crafting details** (the owner's call): out of the reply. A "Crafting" line sits beside
+       the Configure crafting button, which shows the full recipe (materials, quantities scaled
+       to the copies, stat changes); it reads "Crafting N copies" for more than one.
+     - **Fit:** the layout goes only when the whole list fits; otherwise the existing text pages
+       go, in the same new wording, with "Showing X of Y contracts". A refused or oversized
+       layout falls back to the same text. On a copy of the 2026-10-03 snapshot, all 679
+       blueprints fit: the most text was 2,985 characters (Parallax Rifle Battery) and the most
+       components 32 (R97 Shotgun Magazine, 46 contracts from 9 givers).
+     - **`/ingame-item-finder`:** a header with the shop count and origin, then the answer
+       first: "Nearest", and "Cheapest" (the nearest shop at the lowest price, naming its system
+       when it isn't the player's). Then each system's shops. When every shop in a system
+       charges the same, the price (and a shared vendor) goes in the heading once and the shops
+       share a line: Pyro's ten P4-AR shops at 4,138. Prices drop the repeated "aUEC" and
+       distances drop the ".0". `format_item_listing_line` gives way to `item_header`,
+       `highlights_block`, `system_block`, `item_footer` and `distance_text`. Shop lines stay
+       proportional text, never a monospace table (the truncated-place bug, kept as a test).
+     - Not yet seen in Discord: no local bot run (the dev guild is shared with the Pi), so the
+       first real use is the smoke test. Rendered offline from real data (a copy of the Pi's
+       backup, live wiki and UEX reads) before shipping.
+     - Tests in `tests/test_blueprints.py`, `test_blueprints_cog.py`,
+       `test_blueprint_crafting_cog.py`, `test_item_finder.py`, `test_expired_views.py` and
+       `test_failed_interactions.py`. 22 mutations, all caught. One was caught only by
+       accident (one button row for six buttons) and now has its own test.
+137. **`/blueprint-search`: the star system stands out at the top, or sits beside each giver.**
+     The owner's first look at entry 136 live (R97 Shotgun): "some dont say what system they
+     are in". "All in Nyx" was there, but in the small grey print, where they missed it.
+     - **The owner's call:** when every contract is in one system, it stays at the top but on
+       a line of its own at full size, in a grey tag ("Every contract is in `Nyx`.": the inline-
+       code highlight of the item-finder mockup they pointed at). Otherwise each giver whose
+       contracts share one system has it beside the name ("### Bit Zeros · Nyx · 1 contract"),
+       even for a single contract. A giver whose contracts differ keeps the system on each line.
+     - `GiverContracts.system` (`bot/uex/blueprints.py`) carries it; `contracts_header` writes
+       the tagged line ("The contract is in ..." for one contract, "`Nyx` and `Pyro`" for
+       several systems). The giver-level system used to go in the giver's small-print line,
+       only for 2+ contracts.
+     - Mocked up from real output before shipping (R97 Shotgun, Monde Arms Delta Camo,
+       Pembroke Helmet). Seen there, but not changed: some wiki missions carry an unfilled
+       title placeholder, "[Contractor|RecoverItemTitle]" (Bit Zeros, Dead Saints).
+     - Tests in `tests/test_blueprints.py`; 8 mutations, all caught.
+138. **`/multi-stop-route` is laid out with layout components, each leg with its own warnings.**
+     The second section of the message presentation pass (ROADMAP), and the command with the
+     most players. Mocked up from real output first: today's reply, three options, then option
+     B in full against the busiest of 120 real routes (12 ships, no budget and 250K, 5 routes
+     each: 11-17 warning lines, most 17). The owner picked the C2 Hercules board: "warning per
+     leg seems like a way better choice over putting them all at the bottom".
+     - **What a route page says** (`multi_stop_blocks` in `bot/uex/route_presentation.py`): a
+       summary (profit, ROI, investment, revenue, distance, confidence), a section per leg,
+       then the small print. A leg lists its cargo with what limited each load and its market
+       status in small print, the leg's investment, revenue, profit and distance in small
+       print, then its ⚠️ lines at full size: system crossings, cargo risk, price outliers, and
+       each station's limits and stale data.
+     - **Said once, by name:** a station's own facts (container size, no dock, player-owned,
+       stale data, a cargo center) come under the first leg that stops there. The old list said
+       "Leg 2 Destination" and "Leg 3 Origin" for the same station and repeated them.
+     - **The owner's cuts:** refuel and repair aren't listed (a cargo center still is), every
+       leg shows its own profit, and the footer is "Prices can change before you arrive", plus
+       "the cargo split is approximate" only when it is, and the options in force (budget,
+       filters, capital-ship access). Dropped: "Collected UEX data + live UEX distance" and
+       "warnings do not change profit ranking".
+     - **Paging** (`bot/route_pages.py`): `RouteLayoutPagesView` pages the layout the way
+       `RoutePagesView` pages embeds; `RoutePaging` holds what both share (only the player who
+       ran it pages, anyone tracks, a refused page shows as its text, buttons grey out after 15
+       idle minutes). `layout_pages` sends a route over Discord's 4,000 characters as text
+       pages, and if Discord refuses the layout the routes go out as text pages through the
+       classic view. Real routes use about 1,500-1,700 characters and 15 of 40 components.
+     - `cargo_item_notes` and `terminal_limit_notes` split out the pieces of
+       `cargo_item_warnings`/`terminal_practical_notes`, whose lines for every other route
+       command are unchanged; `system_crossing` likewise under `travel_warning`.
+       `LAYOUT_TEXT_LIMIT` moved to `bot/discord_ui.py`, shared with `/blueprint-search`.
+     - Only `/multi-stop-route` changed. `/best-route`, `/top-routes` and `/mixed-routes` still
+       send embeds, with refuel/repair and the old footer.
+     - Tests: `tests/test_multi_stop_layout.py` (new), layout paging in
+       `tests/test_route_pages.py`, and the multi-stop tests in `tests/test_route_send_shape.py`
+       moved from the embed to the layout. 12 mutations, all caught.
+139. **Track this route copies the route into its thread again (`/multi-stop-route`).** The
+     owner, tracking a route right after entry 138 deployed: "it doesnt copy the whole route
+     to the thread anymore". `start_tracking` (`bot/cogs/route_progression.py`) copied the
+     route by re-posting `interaction.message.embeds[0]`, the embed of the message the button
+     was on; the layout message has no embed, so the thread started with only "Tracking ...".
+     - **Missed before deploying:** the pre-deploy check of tracking looked at how the thread
+       is created, not at everything `start_tracking` reads from the clicked message. A
+       message's format is an input to anything that reads the message back.
+     - **Fix:** the button hands over the page showing (`start_tracking(..., page=page)` from
+       `RoutePaging._track`), and `_post_route_copy` posts it as it was shown: a layout page
+       as a layout without the paging buttons (`route_copy_view`, sharing `route_container`
+       with `RouteLayoutPagesView`), an embed page as its embed, a text page as text, and a
+       page Discord refuses as an embed or layout as its text. Without a page it keeps the old
+       embed copy. The other route commands' threads are unchanged, except a page shown as
+       text after Discord refused its embed now gets copied too (it used to get nothing).
+     - Tests in `tests/test_route_progression.py`, one through the real Track this route
+       button on a layout page; 4 mutations, all caught (the original bug among them).
+140. **Configure crafting (`/blueprint-search`) is a layout: a section per material, then "Your
+     craft".** The owner, on the Parallax Energy Assault Rifle: "we need to make this look nicer".
+     Before anything was picked, every stat said "requires known quality / supported curve" and
+     every total "unavailable", under the blueprint's raw id; the menus reset to their placeholder
+     after each pick, so nothing showed what was chosen.
+     - **Mockups first** (real recipes, nothing picked and after picking): today, A (material by
+       material), B (result first), C (a table). A and C tied; the tie-break boards (the R97
+       Shotgun, whose Frame and Stock both move recoil, and phone width) showed C's table wrapping
+       on a phone (Discord wraps code-block lines), and the owner chose A.
+     - **What it says** (`Recipe.layout_blocks` in `bot/uex/blueprint_crafting.py`): a header (no
+       blueprint id; game version in small print), then each material with its amount (1 item, not
+       "1 items"), its quality, and what that does. Unpicked, each stat shows its range across the
+       qualities on offer ("11% worse at 363 → 40% better at 1000"); picked, its effect. Stats
+       sharing one curve are one line ("Recoil (smoothness, handling, kick)"). "Your craft" gives
+       the totals once every quality they depend on is picked, else "Pick every quality to see
+       it" with the best possible; "Best possible" only when every stat improves with quality,
+       otherwise "At top quality". Changes are whole percents, "better"/"worse"
+       (`describe_change`); a stat whose curve the bot doesn't compute (value segments) says its
+       exact effect isn't published, never a made-up number.
+     - **Menus** (`QualitySelect`): each option says what that quality does ("Tungsten 858 —
+       Recoil 29% better", `quality_choice_label`) and the pick stays shown.
+     - **Views** (`bot/cogs/blueprint_planner.py`): `CraftLayoutView` is the reply;
+       `CraftConfigView` sends the same text as a plain message when the layout doesn't fit or
+       Discord refuses it. `_CraftConfig` holds what both share (picks, menus and their pages,
+       the button, now "Add to shopping list"). `Recipe.lines` and `format_modifier` are gone.
+       Real recipes are small (a 20-recipe sample: 2-4 materials, at most 6 stats, no "choose one"
+       groups); the Parallax uses 645 of 4,000 characters and 18 of 40 components.
+     - Tests in `tests/test_blueprint_crafting.py` and `tests/test_blueprint_crafting_cog.py`
+       (the paging tests now run against both views); 9 mutations, all caught.
+141. **`/command-usage` shows other players' usage, most used first, and who ran it.** The
+     owner, on the old report: "this is a bit confusing ... take the mess at the bottom out and
+     just put real usage by users other than me at the focus".
+     - **What was wrong.** A monospace table led with the 15 *least*-used commands (all 0 real
+       uses, each with the owner's own count), then a list of every command never run. It
+       passed 1,900 characters, so the cut fell before "Most used", the one section that
+       answered the question. The owner never saw it.
+     - **What it says now** (`usage_report`, `bot/cogs/diagnostics.py`): a plain message. A
+       heading, then how many players, uses and commands, then each command other players
+       ran, most uses first (a tie goes to the most recent). Each line gives its uses, the
+       last day it was used and who ran it: one name, or up to four with their counts and
+       "+N more". The commands nobody else has run are one count, not a list. A retired
+       command's usage is one small line. No owner counts anywhere.
+     - **Data** (`Database.get_real_command_usage`): every (command, user) row except the
+       owner's, in one query. A row from before usernames were tracked borrows the same
+       player's name from another row: the unnamed `/multi-stop-route` use is الوافل [STD].
+       The `command:` drill-down (links to each player) is unchanged.
+     - Names are the players' own text: mentions and markdown escaped, wrapped in Unicode
+       isolates (U+2068/U+2069) so a right-to-left name doesn't reorder the line, and sent
+       with no mentions allowed. The report stops adding commands before 1,900 characters and
+       says how many it left out.
+     - On the Pi's data (2026-10-06): 5 players, 23 uses, 8 of 66 commands; `/multi-stop-route`
+       leads with 9 uses from 3 players. Usage figures quoted earlier this session counted
+       the owner's testing: `/blueprint-search` and `/ship-parts-finder` have no use by
+       another player.
+     - Tests in `tests/test_command_usage.py`; 10 mutations, all caught.
+142. **`/ship-loadout` is a layout: the total up top, then "Upgrades", then "Keeping stock".**
+     The next section of the message-presentation pass, picked by real usage (entry 141: the
+     most-used command not yet redone; `/ship-parts-finder` has no use by another player).
+     - **Mockups first** (real data, 2026-10-04, the Cutlass Black and the Polaris as the
+       stress case): today, A (by kind, slot by slot), B (a shopping trip, by place), C
+       (compact, before → after, shops in a list at the end). The owner picked C with each
+       part's shop under it rather than in a list, and the Polaris the same way.
+     - **What it says** (`bot/uex/ship_loadout.py`): a header (ship · profile, the profile's
+       blurb, any wiki notes, then "**1,950,910 aUEC** for 12 parts · ⚡ 20 power pips",
+       `summary_line`). "Upgrades" (`upgrade_entry`): the slot → the part · its price, the
+       figure the profile chose it by as `before → after` in grey tags (`stat_change`; a figure
+       that didn't change is said once, "1,266 DPS"), the armor-gate or stock-unknown note, and
+       its shop in small print. "Keeping stock" (`kept_sections`): each reason said once over
+       the slots it covers; slots with the same stock part, figure and reason are one line
+       ("4x S10 Torpedo"). `pick_line`, `total_line`, `paginate_lines`, `stat_vs_stock` and
+       `PowerTotal.line` are gone (`PowerTotal.text` replaces the last).
+     - **Projectile speed** is shown on every gun beside DPS and alpha (`projectile_speed`,
+       "`1,480 → 1,184` m/s"), the owner's ask: "velocity is a pretty important stat for
+       weapons". Shown only, never ranked by - the owner's pick of three (show it; a tie-breaker
+       inside the 5% DPS band; a speed floor) after seeing the M5A replace the Panther with
+       rounds 20% slower. Compared figure by figure, so a stock gun with no speed on the wiki
+       still gets its DPS and alpha compared.
+     - **A wording bug fixed on the way:** the header said "ties go to the cheaper part", but
+       `rank_candidates` breaks ties on a shield's regen, then the tougher component, and only
+       then the shop - the Balanced Cutlass got the 172,800 Snowpack over the 44,000 IceDive,
+       both 46 cooling segments. It now says "ties go to the tougher part, then the cheaper one"
+       (or "then the shop nearest X").
+     - **Views** (`bot/cogs/ship_parts_finder.py`): `_Loadout` holds what both share (picks,
+       paging, profile switch, Add all, idle). `LoadoutLayoutView` is what's posted: the blocks
+       in a green container, the idle note under it when idle, the profile buttons, then Add
+       all, Done and the page buttons. `LoadoutView` is the same loadout as plain text, sent
+       when Discord refuses the layout (`as_text`, same profile). Pages are built by
+       `paginate_loadout` to each view's budget (3,800 characters laid out, 2,000 as text);
+       the Polaris used to take 2 pages and now takes one (1,154 characters, 14 components).
+     - Tests in `tests/test_ship_loadout.py` and `tests/test_ship_loadout_command.py`; 14
+       mutations, all caught. Rendered offline from live wiki/UEX data for the Cutlass Black
+       (Balanced, Budget), the Polaris and the Gladius (Stealth): matches the approved board.
+
+143. **`/blueprint-search material:` lists what an ore or mineral crafts.** The owner's ask
+     (2026-10-07): "ask what a certain ore/mineral is used to craft and then it lists the
+     blueprints". Settled with the owner before building, from real-data mockups of Aslarite
+     (266 blueprints, all armor), Hadanite, Quantainium and Tungsten:
+     - **An option, not a command:** `material:` on `/blueprint-search`, beside `blueprint:`
+       (now optional); exactly one of the two, or an ephemeral note saying so. Autocomplete
+       lists the materials most-used first ("Tungsten · 113 blueprints").
+     - **Only blueprints a player can get:** one a stored contract awards (`blueprint_pool_
+       entries`) or one unlocked by default (8 on 4.10.1: the S-38, the P4-AR, their
+       magazines and the Field Recon Suit). The wiki lists 1,606 blueprints; 917 have neither
+       and are left out. Why they exist is an open question the owner wants answered later.
+     - **The reply** (`bot/material_pages.py`, `MaterialUsesView`): a header with the count per
+       category, a button per category (Armor, Guns, Ship parts, then Other) so any category
+       is one click away, then that category 20 to a page with a menu to pick from. Armor is
+       folded into sets by name (the piece words stripped: "ADP-mk4 Helmet Woodland" is set
+       "ADP-mk4 Woodland"), each colour its own set even though that's crowded, as long as it
+       pages; picking a set shows its pieces as buttons (the owner found two menus felt "locked
+       into it"). A ship part says what it is ("Agni · quantum drive"). No amounts or stats:
+       "keep it simple just what that material is used for".
+     - **Picking a blueprint** answers the click by redrawing (the menu resets, so it can be
+       picked again), then sends that blueprint's usual `/blueprint-search` reply as a new
+       message, found by uuid (`Blueprints.open_blueprint`), so it continues into Configure
+       crafting and Mine. A default blueprint has no contract: its reply says it's unlocked by
+       default and still offers Configure crafting. Only whoever ran it can click; idle 15
+       minutes, it greys out with a note. If Discord refuses the layout, every category goes
+       as text pages (`text_listing`).
+     - **Data:** the wiki's `/blueprints` listing (`WikiApiClient.get_blueprints`, 9 requests at
+       200 a page; the mission crawl became the shared `_crawl`). It's its own snapshot -
+       `blueprint_recipe_state`, `blueprint_outputs`, `blueprint_materials`, replaced whole by
+       `replace_blueprint_recipes` - synced by `sync_recipes` in the same 12h loop as the
+       contracts but in its own try/except, with the same checks (game version unchanged and
+       under a week old skips it; rows of another version or a count under the plausible share
+       of the last one are refused). Whether a blueprint can be got is decided when it's read
+       (`get_material_uses`), against the contracts stored then. First use syncs whatever is
+       missing. Sorting and wording are pure, in `bot/uex/blueprint_materials.py`.
+     - **Real data:** every page of all 37 materials, every category, with a set picked, fits
+       Discord's layout limits (the largest is about 1,000 characters and 15 components;
+       limits 4,000 and 40). The largest set has 5 pieces (Testudo), one button row.
+     - **A pre-commit audit** (an Opus subagent, read-only) found nothing serious; fixed from it:
+       the whole list is checked against the layout limits before it's sent (`fits`: every
+       category's every page, with its biggest set picked), so a click can never reach a page
+       Discord refuses - a list that wouldn't fit goes as text from the start; a failed
+       on-demand recipe sync isn't retried by every query for 10 minutes (each try is ~9
+       requests; the loop retries anyway); blueprint ids are lowercased like the contracts';
+       a material spelt two ways is one autocomplete entry; "Did you mean" names are
+       markdown-safe; and a contract blueprint opened while the contract data is unavailable
+       says so instead of "no contract awards it". Kept as is: a material that's one choice
+       among alternatives in a recipe counts as "used in".
+     - Tests in `tests/test_blueprint_materials.py` (25); 16 mutations before the audit, 15
+       caught - the other only moved the recipe sync inside the contracts' try on the success
+       path, which changes a log line and nothing else.
+
+144. **Configure crafting reads ship parts' stat curves, given in straight-line parts.** The
+     owner, on the FR-86 shield (2026-10-07): "your craft doesnt seem to work on this one" -
+     every material said "the exact effect isn't published", and "Your craft" said "Pick every
+     quality to see it. At top quality:" with nothing after, though every quality was picked.
+     - **Why:** the wiki gives most ship parts' curves in parts (`value_segments`): Integrity
+       x0.8 at 0 to x1.0 at 500, then x1.0 at 501 to x1.2 at 1000, and `quality_range`/
+       `modifier_range` describe only the first part. `modifier_at` refused anything with
+       parts ("never invent a linear curve"), right not to read the first part as the whole
+       curve but wrong to give up: each part is itself a straight line. On a 55-blueprint
+       sample across every type, 41 of 70 ship-part stats came in parts (35 as 0-500/501-1000);
+       no gun or armor stat did.
+     - **Now** (`bot/uex/blueprint_crafting.py`, `_segments`): a curve in parts is read part
+       by part - exact, not a guess. A part that overlaps another or lacks a figure leaves the
+       stat unpublished, as before; so does any other curve kind, e.g. power plants' Power Pips
+       (`linear_integer_additive`, every part x1 → x1: the wiki doesn't say how many pips a
+       quality adds). Ranges are shown across the whole curve (`_quality_span`). The FR-86 at
+       947/1000/1000: Integrity 18% better, Max. Shield Strength 21% better (x1.1 x x1.1).
+     - **"Your craft"** only asks to pick every quality while one isn't picked; once all are,
+       a stat with no published effect says so ("Power Pips: the exact effect isn't
+       published"). A "Best possible"/"At top quality" line is never left empty. A material
+       offered at one quality says its effect once ("10% better at 1000"), not "10% better at
+       1000 → 10% better at 1000".
+     - Tests in `tests/test_blueprint_crafting.py` on the real FR-86 and DuraJet responses
+       (`tests/fixtures/blueprint_crafting_shield.json`, `..._power_plant.json`); 4 mutations,
+       all caught.
+
+145. **Server anniversaries: a DM and a post on the day, and at the time, a member joined.**
+     The owner's idea (2026-10-14), to bring people back to the server - "getting people to stop
+     by in general not just use the bot". Star Tech Dynamics has 355 members (365 with bots); 148
+     were past their first year and most joined in 2025-2026, so it grows fast.
+     - **The owner's decisions:** a DM *and* a post in `#stdynamics-bot` that @mentions the member
+       (a DM alone reaches one person; the post invites others to say hello); formal, with no push
+       to use the bot; "Star Tech Dynamics" in full, never "STDynamics" (the bot's own name); sent
+       at the member's own join time of day, since members are all over the world. The join date
+       is a Discord timestamp, so each reader sees it in their own time zone.
+     - **How** (`bot/cogs/anniversaries.py`, pure timing/wording in `bot/uex/anniversaries.py`): a
+       check every 5 minutes over the channel's guild's members; one is due from its moment
+       (same month, day and time; 29 February on 28 February in other years) for 24 hours, so a
+       bot that was down still sends it the same day. Each anniversary is claimed in
+       `member_anniversaries` before anything is sent, and its DM and post are tracked apart
+       through bot/delivery.py's outcomes: a temporary failure is tried again on the next check, a
+       refusal (DMs closed) isn't, and one part failing never holds up the other. Bots, members
+       under a year, and members who opted out (`anniversary_opt_outs`) get nothing. The post
+       pings only that member. "Stop anniversary messages" under the DM (and "Turn them back on"
+       in its reply) are DynamicItems, so they work after a restart.
+     - **Needs the Server Members intent** - the bot's first privileged intent (audit MSG-14 had
+       turned them all off). Switched on in the Developer Portal by the owner on 2026-10-14
+       before this deployed; without it Discord refuses the connection at startup. README step 3
+       says so; `tests/test_honest_labels.py` now checks it's the only one.
+     - **`/anniversary-preview`** (owner-only, hidden from `/intro`): DMs the owner their own
+       anniversary message and shows the channel post privately, with the next three
+       anniversaries.
+     - Tests in `tests/test_anniversaries.py`; 11 mutations, all caught. Real join dates read
+       once over the API to check the timing: anniversaries fall on 86 days a year, at most 6 in
+       a day (22 June), at all hours.
+
+146. **A welcome DM for new members.**
+     The owner's idea (2026-10-14), the second step after anniversaries (entry 145): "nothing
+     welcomes and no onboarding at the moment". Each member who joins Star Tech Dynamics gets one
+     short DM: a welcome, six commands with a line each, and the bot's channel.
+     - **The owner's decisions:** a DM only (no channel post); no pointer to `/intro` - "just let
+       them get started and something useful and don't overload them"; `/where-to-mine` and
+       `/ship-parts-finder` ("in case people want to compare parts") among the six. The others
+       are the commands other players use most (`/multi-stop-route`, `/ingame-item-finder`,
+       `/ship-loadout`; `/command-usage` with the owner left out) plus `/blueprint-search`. "Star Tech Dynamics" in full, as everywhere.
+     - **How** (`bot/cogs/welcome.py`, wording in `bot/uex/welcome.py`): sent from
+       `on_member_join`, for the server `#stdynamics-bot` is in only, never to bots. If the
+       server ever turns on membership screening, a member still accepting the rules
+       (`member.pending`) is welcomed from `on_member_update` once they accept, so the channel
+       it names is one they can open. Each welcome is claimed in `member_welcomes` (one row per
+       member, ever) before it's sent, so a rejoin, a restart or a second event never sends it
+       twice. bot/delivery.py's outcomes decide the rest: a temporary failure stays 'pending'
+       and a 10-minute loop tries again for a day; a refusal (DMs closed) is 'skipped' and never
+       retried. Members already in the server don't get it - only joins from the deploy on.
+     - **`/welcome-preview`** (owner-only, hidden from `/intro`): DMs the owner the welcome.
+     - Tests in `tests/test_welcome.py`. 7 mutations: 6 caught; the seventh was a guard in the
+       retry loop for members still pending, which can't happen (a row exists only once they've
+       accepted, and Discord never sets `pending` back), so the guard was removed.
+     - **The server's places first** (2026-10-30, PR #143): once the owner added #👋welcome,
+       #📅events, #📜rules, the role panels and Onboarding, the DM opens with four bullets - say
+       hi in #👋welcome, ops in #📅events, roles in Channels & Roles or #🙋‍♂️pick-your-roles🙋‍♂️,
+       the rules - then the same six commands. The owner picked this from three layouts (the
+       others cut the command descriptions). It arrives after the rules are accepted, so #📜rules
+       is for looking back. ~700 characters. The four channel ids live in `bot/uex/welcome.py`;
+       the role picker imports `WELCOME_CHANNEL_ID` from there.
+
+147. **`/ship-loadout` shows a gun's fire rate.**
+     The owner's ask (2026-10-14): "add the fire rate to all the weapon stats". `/ship-parts-finder`
+     already listed rpm (`ship_part_display._weapon_stats`); `/ship-loadout`'s gun lines didn't.
+     `shown_stat` (`bot/uex/ship_loadout.py`) now adds it between alpha and projectile speed
+     ('1,266 DPS / 84.4 alpha / 900 rpm / 1,332 m/s', the parts finder's order) through a new
+     `fire_rate` (`vehicle_weapon.rpm`), so an upgrade line compares it with the stock gun's
+     (`` `60 → 750` rpm``), says it once when unchanged, and shows it alone when the stock gun
+     has none. Shown, never ranked by.
+     - **Crowding, checked on real data at the owner's request:** the 8 longest gun names on the
+       wiki, rendered as upgrade lines. The name sits on its own line, so it's unaffected; the
+       stats line grows about 18 characters (around 56 to around 74): one line on desktop, two
+       on a phone as before. The longest, with the heavy-fighter armor note, goes from 99 to 116.
+       The Polaris stays one page (about 1,150 characters of about 3,800).
+
+148. **A sell count UEX leaves out is unknown, not zero (sellability ratings).**
+     Found from the owner's question (2026-10-17): why Ouratite "all of a sudden dropped to 0" in
+     the digest's Biggest Rating Shifts, alongside V801-12, Aslarite and Gold.
+     - **Cause:** `/marketplace_trends` sends null, never 0, for an empty count (425 of 500 items
+       had a null buy count, every one with no buy postings). From 2026-10-16 12:00 UTC it also
+       sent a null sell count for 18 items that were plainly still being sold: Ouratite had 27
+       unexpired, not-sold-out sell listings from about 30 sellers on `/marketplace_listings`,
+       one added that day; Lindinium 43 sell rows, Gold 25. `extract_item_activity` turned null
+       into 0 sellers, and `compute_liquidity_score` scores no sellers 0 - a guard on the
+       division, never a judgement that the item won't sell. Deal counts didn't move.
+     - **Not new:** the Pi already had false zeros from 2026-10-03 (2,004 hourly snapshots over
+       25 items by 2026-10-17; 30 items rated 0).
+     - **Fix (the owner's pick of two):** a null sell count is unknown (`sell_count_unknown`,
+       `bot/uex/marketplace.py`): `update_liquidity_scores` doesn't rescore the item, so it keeps
+       its last real score and isn't reported as a mover, and logs which items. The other option,
+       counting `/marketplace_listings` ourselves, was declined: ~14 more calls an hour, and its
+       count doesn't match trends' (47 rows against trends' 20-21 for Ouratite), so the items
+       would jump instead. Older rows built without the key keep their total-listings fallback.
+     - **Repair** (`Database._repair_unknown_sell_count_scores`, every startup, a no-op once
+       clean): a stored row with no sell listings and a 0 score can only have come from a null,
+       so each such current rating goes back to its last real snapshot (with that snapshot's
+       hour as last_updated), one with none left in the 7 days kept is removed as unrated, and
+       the false snapshots are deleted. Dry run on a copy of the Pi's database (SQLite 3.40.1):
+       15 restored (Ouratite 67.41, V801-12 68.14, Aslarite 64.58, Gold 56.63), 15 removed, 2,004
+       snapshots deleted.
+     - Such an item's rating stays frozen until UEX sends the count again; its "last updated"
+       says how old it is.
+     - Tests in `tests/test_liquidity.py`; 9 mutations, all caught.
+
+149. **Voice-activity ranks, replacing Arcane's levels.**
+     The owner's ask (2026-10-26): ranks from time in voice, with SC-themed names, rank-up
+     announcements, `/rank` and weekly/seasonal leaderboards, 2x in the Ops channels, a daily cap,
+     tracking that survives a restart - and only minutes in voice, never audio.
+     - **The owner's decisions:** the ladder Cadet 1h, Crewman 5h, Specialist 15h, Petty Officer
+       35h, Officer 75h, Lieutenant 150h, Commander 300h, Captain 500h, Admiral 1,000h of ordinary
+       voice (1 XP a minute); Arcane's Level 1-5 roles aren't carried over (everyone starts at 0);
+       rank-ups post in `#stdynamics-bot`; and a second ladder for ops attended (Operator 5,
+       Veteran Operator 15, Op Specialist 40, Wing Commander 100), picked over plain 2x XP and over
+       a ladder of minutes in Ops: an op is an event, and idling alone in an Ops channel doesn't
+       make one.
+     - **How** (`bot/cogs/voice_ranks.py`, pure rules in `bot/uex/voice_ranks.py`): once a minute
+       the cog reads every voice channel's members from discord.py's cache, which voice state
+       events keep current (the Guild Voice States intent is in `Intents.default()`, so nothing
+       to switch on). A minute counts with 2+ members who aren't bots or deafened (muted counts:
+       people listen in on ops), never in the AFK channel, 2 XP in the Ops category
+       (`OPS_CATEGORY_ID`, so a new Ops channel counts without a code change), up to 5 hours a UTC
+       day (`voice_daily`). Reading state each minute rather than timing sessions from events
+       makes a restart nothing to catch up on: the next minute sees whoever is in voice. TempVoice's
+       channels count like any other.
+     - **Ops:** 3+ counted people across the Ops channels together (one op even when squads split
+       across channels) for 30+ minutes; it ends after 5 minutes in a row below 3, so a dropped
+       connection doesn't split it; you attended if you were there for half its minutes. The op
+       in progress is saved every minute (`voice_op_session`, timed by the cog's own clock); after
+       a restart it carries on, or, if the bot was down past the 5-minute grace, it's counted as
+       ended when last seen. Every op and its attendees are kept (`voice_ops`,
+       `voice_op_attendance`).
+     - **Roles and announcements:** the 13 roles are created by name when first needed - the bot
+       needs Manage Roles, with its own role above them (the owner adds this; README step 4 says
+       so). Each person holds one rank and one op rank. A rank-up is claimed in `voice_members`
+       (`claim_voice_rank`) before it's announced, so it's announced once; without Manage Roles
+       it's still announced. Roles are put right every 30 minutes, quietly.
+     - **Commands:** `/rank [member]` (rank, progress, voice time, this week, ops attended, and a
+       line saying audio is never read) and `/rank-leaderboard` (this week from Monday, this
+       season - calendar quarters - all time, or ops attended); top 10 still in the server, plus
+       your own place.
+     - Not done: the fleet bot tie-in (top ship on the leaderboard) waits on where that bot's
+       data lives.
+     - Tests in `tests/test_voice_ranks.py`; 12 mutations, all caught (one only after a test that
+       an op rank isn't announced again at every later op).
+
+150. **Veteran roles, the next event in the anniversary DM, and welcome backs.**
+     The owner's asks (2026-10-29): a veteran role when the anniversary message goes out, named
+     in it "if it's not too tacky"; a line pointing the member to the next event ("Come fly with
+     us Saturday at 8 CT", not that exactly); and a welcome back for anyone who speaks or joins
+     voice after 30+ days away. At the time 152 of 387 members were past a first anniversary;
+     only the 8 whose anniversary fell after the feature went live (2026-10-14) had had a message
+     - all 8 sent, DM and post.
+     - **Veteran roles** (`bot/cogs/anniversaries.py`): one per year, "1-Year Veteran", "2-Year
+       Veteran"..., each replacing the last (the owner's pick over a single "Veteran"), created by
+       name when first needed (Manage Roles, on since voice ranks). Given as the anniversary is
+       sent; the DM says "🎖️ You've earned the **N-Year Veteran** role." and the post "...and is
+       now a **N-Year Veteran**". `sync_veteran_roles` (every 6 hours and at startup) gives everyone
+       theirs quietly - so the 152 got theirs when this shipped, the owner's pick over waiting for
+       each one's next anniversary - and repairs a failed change. A role failure never stops the
+       message. Members who pressed "Stop anniversary messages" still get the role.
+     - **The next event:** the server runs recurring Discord scheduled events (Mining Mondays,
+       Contested Tuesdays), so the DM's last line is read from them (`next_event_line`, pure in
+       `bot/uex/anniversaries.py: event_line`): the event on now, else the soonest to come, linked,
+       with a Discord timestamp so each reader sees their own time - not a fixed "8 CT". No line
+       when nothing is scheduled. DM only; the channel post stays a celebration.
+     - **Welcome back** (`bot/cogs/welcome_back.py`): a DM (the owner's pick over a public reply)
+       when a member posts or joins a voice channel (not AFK) after 30+ days away: "👋 **Welcome
+       back, Nova!** It's good to see you around **Star Tech Dynamics** again." plus the event
+       line. Only times are kept (`member_activity`), from message and voice state events the bot
+       already gets - Message Content isn't needed or asked for. Written at most hourly per member.
+       The new time is recorded before the DM, so one return gets one DM.
+     - **Starting from day one** (the owner's pick over starting fresh): the first start reads who
+       posted in each readable channel over the last 30 days (authors and times only) plus voice
+       ranks' voice days, then marks it done (`activity_seed_state`). Before that, a member with
+       no record isn't known to be away; after, no record means unseen for 30 days, and only a
+       member who joined over 30 days ago is welcomed back. A channel the bot can't read isn't
+       counted, so someone active only there could get one welcome back they don't need.
+     - `/welcome-preview message:` previews the welcome-back DM too.
+     - Tests in `tests/test_veteran_and_welcome_back.py` (11) and the updated
+       `tests/test_anniversaries.py`; 16 mutations, all caught (two only after a test for the
+       hourly write limit and for the read never rewinding a newer time).
+
+151. **The role picker: self-serve role panels.**
+     The owner's spec (2026-10-30): buttons and dropdowns, not emoji reactions, for four groups -
+     Activities (Mining, Salvage, Cargo/Trade, Combat/Bounty, FPS, Exploration, Medical, Racing),
+     Timezone (Eastern, Central, Mountain, Pacific, Outside US), Experience (New Pilot, Getting
+     There, Veteran) and Pings (Org Events, Patch & Server Status, Free Fly & Events, Joint Ops).
+     Discord Onboarding was in the spec as optional; the owner is setting it up by hand, using
+     these same roles.
+     - **`/rolesetup`** (admins; `bot/cogs/role_picker.py`): every role, plus Mentor, is kept by
+       its saved id (`role_picker_roles`), so a rename is fine; else an existing role with the same
+       name (any case) is used; else it's created with no permissions, no color, not mentionable.
+       Never a duplicate - a second run creates nothing. It warns about a matched role with
+       permissions of its own, a role above the bot's (can't be given), and a Mentor it can't ping.
+       At the time none of the 21 existed; "miner" and "Combat medic" did and are left alone, and
+       "Veteran" is not the "N-Year Veteran" roles (entry 150).
+     - **`/rolepanel post channel:`** (admins; a command group, so it reads `/rolepanel post`): four
+       messages. Activities is a dropdown where each pick toggles that role - the dropdown can't
+       show what each member already has, so "pick exactly these" would silently drop the ones
+       they didn't re-pick. Timezone and Experience are buttons, one role at a time (picking
+       another swaps it, picking yours removes it). Pings are toggle buttons. Pure rules in
+       `bot/uex/role_picker.py`.
+     - **Through restarts:** each button's custom id carries its role's id
+       (`rolepick:btn:<group>:<role id>`), the dropdown's options carry theirs; both are
+       DynamicItems registered in `cog_load`. A pick is acted on only if the id is still one of
+       the group's saved roles, so an old or forged panel can't hand out anything else ("This
+       panel is out of date").
+     - **Each pick:** a private "Added **X**. Removed **Y**." reply, and a line in #staff that
+       doesn't ping the member. Picking New Pilot also pings Mentor there - the role is
+       non-mentionable like the rest, so the bot needs "Mention @everyone, @here and All Roles"
+       (the owner granted it) and `/rolesetup` warns without it.
+     - Tests in `tests/test_role_picker.py` (17); 17 mutations, all caught. The test caught a
+       one-role group removing a member's role on a pick from outside the group.
+     - **Everything on Pings** (the owner's ask the same day, PR #141): a fifth button
+       (`rolepick:all:pings`, `EverythingButton`) giving all four ping roles, or taking them all off
+       once the member has all four - a button, not a fifth role, so announcements still ping just
+       the four. `RoleGroup.everything` turns it on per group; only Pings has it. Panels posted
+       before it need posting again to show it. 7 more tests, 6 more mutations, all caught.
+     - **Streams & Videos** (PR #142): a fifth ping role, for a member of the server going live or
+       posting a video. The bot doesn't announce streams itself - whatever posts them pings the
+       role. Everything covers it; the Pings panel wraps to two rows (Discord's 5 per row).
+       `/rolesetup` creates it (22 roles); the Pings panel needs posting again to show it.
+     - **Onboarding** (same PR, the owner's ask once Discord Onboarding was live with these same
+       role ids): roles picked there never pass through the panels, so `on_member_update` (and
+       `on_member_join`, in case they're already on) catches picker roles a member gained. A role
+       a panel gave in the last `PANEL_GRACE` (15s, an in-memory note per member and role) is
+       skipped; the rest wait `BATCH_SECONDS` (5s) so one onboarding is one #staff line, "@member
+       picked **Mining**, **Eastern**, **New Pilot** via Onboarding", leaving out any taken off
+       again meanwhile. New Pilot also pings Mentor in #👋welcome: "New pilot joined: @member
+       (Eastern). Say hi and invite them to the next op." Only the saved picker roles count, Mentor
+       excepted - voice ranks, the ops ladder and veteran roles are never picker roles. Staff
+       giving a picker role by hand also reads "via Onboarding"; telling them apart would need
+       the audit log.
+     - **#👋welcome intros:** a member's first post there gets a reply from the bot pinging Mentor
+       ("first hello from @member! Give them a reply."), so every intro gets an answer. `welcome_intros` keeps who has posted; the first start reads
+       the channel's whole history once (`welcome_intro_seed`), and until then nothing counts as a
+       first. Staff (Manage Messages, or Mentor) and Discord's join notices don't count.
+       Message Content isn't needed - only the author.
+     - **Mentor pings in #👋welcome** (the owner's change before merging): both New Pilot pings -
+       the panels' and Onboarding's - and the first-hello reply go to #👋welcome, where the new
+       member is; the role log lines stay in #staff. Nobody but Mentor is pinged.
+     - **#role-log** (PR #143): the owner keeps #staff for moderation, so every role log line -
+       panel picks and Onboarding - goes to a new #role-log (`ROLE_LOG_CHANNEL_ID`) instead.
+     - 7 more tests (24 in all), 14 mutations, all caught.
+     - **Colors** (PR #146, the owner's ask): a fifth panel, "🎨 Colors - What color do you want
+       your name to have in text channels?", ten one-at-a-time buttons, each with an emoji
+       (`COLOR_ROLES`: name, color, emoji - Orange, Gold, Green, Teal, Ice, Blue, Purple, Pink,
+       Silver, Bronze; no red, the owner's call, since the Star Tech Dynamics role is red).
+       Created with their color and no permissions; one renamed or recolored in
+       Discord is kept by id, as every picker role is. A name shows the color of the highest
+       colored role a member has, so `/rolesetup` moves them right under the lowest voice rank
+       role (Operator; none of the 13 rank roles has a color) in one `edit_role_positions` call:
+       `color_positions` moves only roles under that one, keeping their order (at a shared
+       position the newer role is lower, as Discord shows it), and nothing once they're in place.
+       On the live server (read 2026-10-30) a picked color beats Star Citizen (the color of 251 of
+       389 names), Path of Exile and every other colored role under the ranks, but not Mod,
+       Server Booster or the red Star Tech Dynamics role above them (27 members) - unless the
+       owner takes that role's color off. 32 roles. 4 more tests (28 in all), 12 mutations, all
+       caught.
+
+152. **Event cards: sign-ups for Discord's scheduled events in #📅events.**
+     The owner's ask (2026-10-30): members on phones couldn't find Discord's Events list. Designed
+     on a mockup first (the "Event Card Mockup" artifact, real Mining Mondays and Contested Tuesdays
+     data), the look the owner liked from another bot, our own version. `bot/cogs/event_cards.py`,
+     rules and wording in `bot/uex/events.py`.
+     - **A card per occurrence**, from Discord's scheduled events (made in Discord as before; the
+       bot follows `on_scheduled_event_create/update/delete` and re-reads every event each 10
+       minutes, so nothing is missed while it was down). Posted in #📅events pinging Org Events
+       (the role picker's saved role) and nobody else. A message of layout components
+       (`discord.ui.LayoutView`, no embed): title linked to the event, its cover picture,
+       organizer, description, start in each reader's own time with a countdown, Ready by (15
+       minutes before), the voice channel, and "Every week" for a repeating event - never a
+       weekday, which Discord keeps in UTC (Mining Mondays at 7:30 PM Eastern is a UTC Tuesday).
+       A repeating event keeps its event id; each week is a new card (`event_cards`), never
+       posted twice (`event_card_exists`, any state).
+     - **Roles** (`/event-roles event: roles:"Miner 6, Hauler 2, Escort 2"`, the owner's pick of
+       three ways): stored per event id, so they carry over every week; "none" goes back to one
+       Going list with a Join button. A role that's taken away moves its people to "Going - no
+       role yet" (nobody dropped); more spots move the wait list up.
+     - **Joining**: the role menu (or Join), Maybe (its own button, the owner's change: no spot
+       taken, its own list), Leave, Voice (the owner's ask: a big target on a phone) and
+       Interested on Discord. A full role puts you on its wait list (`queued` orders it, reset on a
+       new role or status); a freed spot moves the first one up with a DM. One lock per card, so
+       two clicks can't both take the last spot.
+     - **After joining** (private): what you're bringing - your default ship (trading
+       preferences), then ships you've brought before (`event_ship_history`), Not sure yet, or
+       Another ship... (typed, matched against UEX's ship list; several matches ask which, with a
+       button each) - and "Sign me up every time" on a repeating event (`event_regulars`: put on
+       each new card in their role and ship; Leave skips one week).
+     - **Organizers**: the event's creator, the Event Manager role (1565664577088131234, made by
+       the owner), admins or anyone with Manage Events. Start pings the roster with a Join button
+       for the voice channel and starts the Discord event (the bot has Manage Events since
+       2026-10-30); End closes the card and ends it - for a repeating event Discord then moves to
+       the next one, which gets its own card. Started from Discord itself counts the same, and
+       only one of the two ever pings (`set_event_card_state`'s guarded update).
+     - **Changes**: an hour before, the roster (going and maybe) is reminded once
+       (`claim_event_reminder`). A new time pings everyone on the card once; an occurrence whose
+       time has passed (or that started) closes quietly when Discord moves on; a cancelled or
+       deleted event says so; a card nobody ended closes 12 hours after its start.
+     - The owner chose a 30-minute rule for counting who showed up; attendance (who on the roster
+       was in the voice channel between Start and End) is the next PR, not this one.
+     - On the first start after deploy, every scheduled event already in Discord gets its card
+       (Mining Mondays and Contested Tuesdays), each pinging Org Events once.
+     - Every view and the ship modal use the bot's own bases (`BotLayoutView`, `BotView`,
+       `BotModal`), so a failure still answers the player (`test_failed_interactions`). The
+       biggest possible card (10 long roles, 300 people, a 5,000-character description) stays
+       under Discord's 4,000 characters and 40 components: the roster gets 2,400, the
+       description 800.
+     - Tests in `tests/test_event_cards.py` (20); 23 mutations, all caught after two gaps were
+       closed (a whole ship name inside a longer one, a reminder claimed twice).
+     - **Typed ships, fixed the same day** (the owner: "doesn't seem to put in a ship when i type
+       certain ones"; nothing in the log - the bot was answering "I don't know a ship called..."):
+       the first version looked for the whole typed text inside UEX's short name, and UEX's names
+       aren't how people type them - "Aurora MR" is "Aurora Mk I MR", so "aurora mr" found
+       nothing, and neither did "hercules c2", "drake cutlass" or "misc prospector". Now every
+       typed word has to be somewhere in the name or the full name with its maker, in any order,
+       with "Mk II" also read as "mk 2"/"mk2"; an exact name or full name still wins alone.
+       Matches list shortest name first in a menu of up to 25 (was buttons, and anything over 5
+       asked for more of the name - "aurora" has 7, "hornet" 12). Checked against UEX's real list
+       of 283 ships. Discord has no autofill in a pop-up box; a `/event-ship` command with
+       autofill was offered and the owner passed ("that's fine").
+
 ## Where to look for what
 
-Six docs, deliberately scoped so they don't duplicate each other:
+Seven docs, deliberately scoped so they don't duplicate each other:
 
 | Doc | Answers |
 |---|---|
@@ -4057,6 +5338,7 @@ Six docs, deliberately scoped so they don't duplicate each other:
 | `PROJECT_CONTEXT.md` (this doc) | *What happened and why* - history, hard-won API knowledge, current state |
 | `ROADMAP.md` | *What's next* - completed features and the backlog of ideas |
 | `AI_BOT_HANDOFF.md` | *What still needs porting* to the separate AI-bot project - a live checklist, not history |
+| `docs/AUDIT_LOG.md` | *Which commits have been audited* - `main` is only synced up to an audited commit |
 
 Standalone troubleshooting write-ups have been folded into `CONTRIBUTING.md` rather than kept
 as separate files - point-in-time incident logs drift out of date and end up contradicting the
@@ -4314,7 +5596,9 @@ guessed at.
   volatility, and recent gameplay bugs. `is_illegal` is worded as restricted in some
   jurisdictions, matching UEX's definition rather than overstating it as universal contraband.
   If the commodity reference row or any risk flag is missing, route views explicitly warn that
-  risk metadata is unavailable rather than silently presenting the cargo as safe.
+  risk metadata is unavailable rather than silently presenting the cargo as safe. The labels
+  only inform: no setting leaves flagged cargo out of routes (the saved risk tolerance that
+  did was removed, entry 114).
 - **Mixed Routes** intentionally rank by estimated profit *after* ship, stock, demand, and
   optional budget limits. They do not include travel time/distance in the score, so the output
   retains cross-system and missing-distance warnings. A qualifying result must allocate at

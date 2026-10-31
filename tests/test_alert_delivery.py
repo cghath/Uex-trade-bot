@@ -76,7 +76,8 @@ def test_channel_then_dm_outcomes():
 
     assert asyncio.run(run(None, None))[0] is Delivery.DELIVERED
     outcome, dms = asyncio.run(run(_http_error(403), None))
-    assert outcome is Delivery.DELIVERED and dms == [("hi", {})], "a refused channel post falls back to a DM"
+    assert outcome is Delivery.DELIVERED and [content for content, _ in dms] == ["hi"], \
+        "a refused channel post falls back to a DM"
     assert asyncio.run(run(_http_error(403), _http_error(503)))[0] is Delivery.RETRY
     assert asyncio.run(run(_http_error(503), _http_error(403)))[0] is Delivery.RETRY
     assert asyncio.run(run(_http_error(403), _http_error(403)))[0] is Delivery.UNDELIVERABLE

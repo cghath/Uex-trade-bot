@@ -395,8 +395,10 @@ def run_backup_search(market_rows: list[dict[str, Any]], context: BackupContext)
 def _load_lines(load: BackupLoad, anchor_commodity_id: int) -> list[str]:
     lines = []
     for item in load.cargo:
-        line = cargo_item_line(item)
-        lines.append(line + " (yours)" if item.id_commodity == anchor_commodity_id else line)
+        if item.id_commodity == anchor_commodity_id:
+            lines.append(cargo_item_line(item) + " (yours)")
+        else:  # cargo the player hasn't picked yet: its risk label, as on a hedge
+            lines.append(cargo_item_line(item, risk=True))
     lines.append(f"Total: **{load.profit:,.0f} profit** on {load.investment:,.0f} aUEC · {load.cargo_scu:,.0f} SCU")
     if note := approximation_note(load.is_exact):
         lines.append("⚠️ " + note[0].upper() + note[1:])

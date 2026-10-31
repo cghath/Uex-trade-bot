@@ -22,7 +22,9 @@ from bot.cogs import prices as prices_module
 from bot.cogs.prices import Prices
 from bot.cogs.route_progression import RouteProgression
 from bot.db.database import Database
-from bot.route_pages import RoutePagesView
+from bot import route_pages as route_pages_module
+from bot.discord_ui import LAYOUT_TEXT_LIMIT
+from bot.route_pages import RouteLayoutPagesView, RoutePagesView
 from bot.uex.client import UexClient
 from bot.uex.mixed_routes import MixedCargoItem, MixedRoute
 from bot.uex.multi_stop_routes import MultiStopLeg, MultiStopRoute
@@ -119,13 +121,12 @@ def test_multi_stop_route_sends_one_message_per_route_not_batched(tmp_path):
             tmp_path, "multi_stop.sqlite3", _MULTI_STOP_ROWS,
             lambda cog, interaction: cog.multi_stop_route.callback(cog, interaction, ship="TestShip"),
         )
-        assert interaction.followup.sent, "expected at least one followup"
-        for args, kwargs in interaction.followup.sent:
-            assert "embeds" not in kwargs, (
-                "must send one embed per route via 'embed=', not a batched 'embeds=' list - "
-                "that batched shape is what caused the original stuck-thinking bug"
-            )
-            assert kwargs.get("embed") is not None or "content" in kwargs
+        (_args, kwargs), = interaction.followup.sent
+        assert "embeds" not in kwargs and "embed" not in kwargs, (
+            "one message, one route per page - never a batched 'embeds=' list, the shape "
+            "behind the original stuck-thinking bug"
+        )
+        assert isinstance(kwargs["view"], RouteLayoutPagesView)
 
     asyncio.run(run())
 
@@ -202,13 +203,11 @@ def test_route_from_multi_only_returns_chains_starting_at_the_resolved_location(
             terminal_reference_rows=_MULTI_STOP_TERMINAL_REFERENCE,
         )
         assert interaction.followup.sent, "expected at least one followup"
-        embeds = [kwargs["embed"] for _, kwargs in interaction.followup.sent if kwargs.get("embed")]
-        assert embeds, interaction.followup.sent
-        titles = [embed.title or "" for embed in embeds]
+        titles = route_results(interaction.followup.sent).titles
         # Exact-match, not substring: "AltOrigin"/"AltFinal" contain "Origin"/"Final" as
         # suffixes, so a naive substring check on either name is ambiguous between the
         # two fixture chains.
-        assert titles == ["#1 AltOrigin → AltMid → AltFinal"], titles
+        assert titles == ["#1 · AltOrigin → AltMid → AltFinal"], titles
 
     asyncio.run(run())
 
@@ -253,7 +252,7 @@ def test_route_from_multi_attaches_a_tracking_view(monkeypatch, tmp_path):
         assert captured_kwargs.get("start_terminal_id") == 1, captured_kwargs
         views = [kwargs["view"] for _, kwargs in interaction.followup.sent if kwargs.get("view")]
         assert views, "expected a tracking view on the real command output"
-        assert isinstance(views[0], RoutePagesView)
+        assert isinstance(views[0], RouteLayoutPagesView)
 
     asyncio.run(run())
 
@@ -277,6 +276,16 @@ def test_diminishing_returns_sends_a_chart_embed_with_a_plateau_note(tmp_path):
     asyncio.run(run())
 
 
+class _LayoutRefusedFollowup(_FakeFollowup):
+    """Simulates Discord refusing a layout message, so /multi-stop-route's text fallback runs."""
+
+    async def send(self, *args, **kwargs):
+        if isinstance(kwargs.get("view"), discord.ui.LayoutView):
+            response = type("R", (), {"status": 400, "reason": "Bad Request", "headers": {}})()
+            raise discord.HTTPException(response, {"message": "Invalid Form Body"})
+        await super().send(*args, **kwargs)
+
+
 class _EmbedTooLargeFollowup(_FakeFollowup):
     """Simulates Discord rejecting the embed (too large) so the plain-text fallback path
     in multi_stop_route actually runs, the same way a real oversized route would."""
@@ -289,8 +298,8 @@ class _EmbedTooLargeFollowup(_FakeFollowup):
 
 
 def test_multi_stop_route_fallback_preserves_warnings(tmp_path):
-    """Regression: the fallback text (sent when the real embed is rejected as too large)
-    only carried summary_lines (investment/revenue/profit/ROI/distance/confidence) -
+    """Regression: the fallback text (sent when Discord refuses the route as laid out)
+    once only carried the summary (investment/revenue/profit/ROI/distance/confidence) -
     warnings (risk flags, stock/demand limits, practical notes) were silently dropped.
     A stock-limited leg (5 SCU available vs a 10-SCU ship) must produce a real warning
     that survives into the fallback content, not just the profit figures."""
@@ -320,16 +329,16 @@ def test_multi_stop_route_fallback_preserves_warnings(tmp_path):
         cog = Prices.__new__(Prices)
         cog.bot = bot
         interaction = _FakeInteraction(111)
-        interaction.followup = _EmbedTooLargeFollowup()
+        interaction.followup = _LayoutRefusedFollowup()
 
         try:
             await cog.multi_stop_route.callback(cog, interaction, ship="TestShip")
 
             assert interaction.followup.sent, "expected at least one followup"
             for args, kwargs in interaction.followup.sent:
-                assert "embed" not in kwargs, "the embed send should have been rejected, not succeeded"
+                assert not isinstance(kwargs.get("view"), discord.ui.LayoutView), "the layout should have been refused"
             fallback_text = "\n".join(kwargs["content"] for _, kwargs in interaction.followup.sent)
-            assert "Stileron: limited by stock" in fallback_text, (
+            assert "**Stileron** · 5 SCU" in fallback_text and "Limited by stock" in fallback_text, (
                 f"expected the stock-limit explanation to survive into the fallback, got: {fallback_text!r}"
             )
         finally:
@@ -443,8 +452,8 @@ def test_multi_stop_route_offloads_cargo_allocation_to_a_worker_thread(tmp_path,
 
 def test_multi_stop_route_fallback_preserves_approximation_disclosure(tmp_path):
     """Regression: the "cargo allocation is approximate" disclosure lived only in the
-    embed footer - a route whose allocation is approximate but whose embed is rejected as
-    too large silently lost that disclosure in the plain-text fallback."""
+    embed footer - a route whose allocation is approximate but whose embed was rejected
+    silently lost that disclosure in the plain-text fallback. The same for a refused layout."""
     async def run():
         db = Database(tmp_path / "multi_stop_fallback_disclosure.sqlite3", Fernet(Fernet.generate_key()))
         await db.init()
@@ -471,7 +480,7 @@ def test_multi_stop_route_fallback_preserves_approximation_disclosure(tmp_path):
         cog = Prices.__new__(Prices)
         cog.bot = bot
         interaction = _FakeInteraction(111)
-        interaction.followup = _EmbedTooLargeFollowup()
+        interaction.followup = _LayoutRefusedFollowup()
 
         try:
             await cog.multi_stop_route.callback(cog, interaction, ship="BigShip")
@@ -486,21 +495,13 @@ def test_multi_stop_route_fallback_preserves_approximation_disclosure(tmp_path):
     asyncio.run(run())
 
 
-def test_multi_stop_route_falls_back_to_plain_text_when_only_the_warnings_section_overflows(monkeypatch):
-    """Follow-up review finding: _add_chunked_fields' A08 fix (see test_prices_chunked_
-    fields.py) made adding a logical field all-or-nothing, which is exactly right for a
-    per-leg field - but /multi-stop-route also uses it for one call covering the ENTIRE
-    accumulated warnings section, and ignored its return value. If the leg fields + route
-    summary already consume most of the budget, the warnings section can fail to fit
-    entirely - the function then adds NOTHING, the route embed (legs + summary, no
-    warnings) is still small enough to send successfully, and every cargo-risk/cross-
-    system warning silently vanishes with no exception ever raised to trigger the existing
-    too-large fallback. Fixed by checking the warnings call's own return value and
-    manually entering the same plain-text fallback (which independently rebuilds the full
-    warning list) when it comes back False, exactly as if the whole embed had been
-    rejected. Reproduced here with a controlled 3-leg, 3-commodity-per-leg route - not
-    real UEX data - built to force this specific budget interaction, per the review's own
-    approach."""
+def test_a_warning_heavy_multi_stop_route_keeps_every_warning_under_its_leg(monkeypatch):
+    """Follow-up review finding (A08): the embed this command used to send could silently
+    lose its whole warnings section once the leg fields filled Discord's 6,000-character
+    embed budget. The layout that replaced it puts each leg's warnings in that leg's own
+    section, and a route too long for one layout goes out as text pages - either way none
+    is dropped. A controlled 3-leg, 3-commodity-per-leg route with every kind of warning
+    this command shows, not real UEX data."""
     async def run():
         legs = []
         for leg in range(3):
@@ -550,12 +551,19 @@ def test_multi_stop_route_falls_back_to_plain_text_when_only_the_warnings_sectio
 
         await cog.multi_stop_route.callback(cog, interaction)
 
-        assert interaction.followup.sent, "expected at least one followup"
-        for _, kwargs in interaction.followup.sent:
-            assert "embed" not in kwargs, "an embed missing its warnings must not be sent as if complete"
-        fallback_text = "\n".join(kwargs.get("content", "") for _, kwargs in interaction.followup.sent)
-        assert "Cargo risk:" in fallback_text, fallback_text
-        assert "crosses systems" in fallback_text, fallback_text
+        results = route_results(interaction.followup.sent)
+        assert results and not results.embeds
+        text = results.all_text()
+        for leg in (1, 2, 3):
+            assert f"### Leg {leg} · Station {leg} → Station {leg + 1}" in text, text
+        assert text.count("Cargo risk:") == 9, "every commodity on every leg"
+        assert text.count("⚠️ Crosses systems") == 3, text
+        for station in (1, 2, 3, 4):  # each station's own facts, said once
+            assert text.count(f"⚠️ Station {station}: maximum container size 8 SCU") == 1, text
+            assert text.count(f"⚠️ Station {station}: stale terminal data") == 1, text
+            assert text.count(f"⚠️ Station {station}: player-owned location") == 1, text
+            assert text.count(f"-# Station {station} has a cargo center") == 1, text
+        assert "refuel" not in text and "repair" not in text, "the owner asked those out"
 
     asyncio.run(run())
 
@@ -598,8 +606,9 @@ def test_multi_stop_route_attaches_a_track_button_with_flattened_legs(monkeypatc
         assert interaction.followup.sent, "expected at least one followup"
         _, kwargs = interaction.followup.sent[0]
         view = kwargs.get("view")
-        assert isinstance(view, RoutePagesView)
-        assert len(view.children) == 1, "one route -> one tracking button"
+        assert isinstance(view, RouteLayoutPagesView)
+        buttons = [item.label for item in view.walk_children() if isinstance(item, discord.ui.Button)]
+        assert buttons == ["Track this route"], "one route -> one tracking button"
 
         legs = view.pages[0].route.legs
         assert [progression_leg.display_label for progression_leg in legs] == [
@@ -1730,39 +1739,27 @@ def test_best_route_fallback_branch_discloses_when_routes_are_truncated_for_size
     asyncio.run(run())
 
 
-def test_multi_stop_route_falls_back_to_plain_text_when_a_leg_field_does_not_fit(tmp_path, monkeypatch):
-    """Second follow-up review finding: /multi-stop-route's per-leg loop called the
-    atomic _add_chunked_fields for each leg's own field but never checked its return
-    value - unlike the warnings-section call right after the loop, which the previous
-    review round already fixed to check it. If a middle leg's field silently failed to
-    fit (while an earlier and/or later leg's smaller field still fit into the same
-    remaining budget), the route embed's title and "Route summary" field would both still
-    unconditionally describe ALL legs (built from route.legs and route.investment/
-    revenue/profit, not from which leg fields actually got added) while the embed itself
-    visibly showed fewer legs than it claimed - a self-contradictory result that also
-    never triggered the existing too-large fallback, since a route missing one leg's
-    field is smaller, not bigger, and sends "successfully." Forces the SECOND leg's field
-    to fail deterministically rather than depending on exact byte counts."""
+def test_a_multi_stop_route_too_long_for_one_layout_goes_out_whole_as_text(tmp_path, monkeypatch):
+    """Second follow-up review finding: the embed this command used to send could show a
+    route missing one of its legs while its title and summary still counted it. A route
+    too long for one layout (Discord's 4,000 characters, shrunk here so the small fixture
+    crosses it) goes out as text, every leg, the summary and the small print included."""
+    monkeypatch.setattr(route_pages_module, "LAYOUT_TEXT_LIMIT", 700)
+
     async def run():
-        real_add_chunked_fields = prices_module._add_chunked_fields
-
-        def flaky_add_chunked_fields(embed, *, name, lines):
-            if name.startswith("Leg 2"):
-                return False
-            return real_add_chunked_fields(embed, name=name, lines=lines)
-
-        monkeypatch.setattr(prices_module, "_add_chunked_fields", flaky_add_chunked_fields)
-
-        interaction = await _run_command(
-            tmp_path, "multi_stop_leg_drop.sqlite3", _MULTI_STOP_ROWS,
+        return await _run_command(
+            tmp_path, "multi_stop_too_long.sqlite3", _MULTI_STOP_ROWS,
             lambda cog, interaction: cog.multi_stop_route.callback(cog, interaction, ship="TestShip"),
         )
 
-        assert interaction.followup.sent, "expected at least one followup"
-        for args, kwargs in interaction.followup.sent:
-            assert "embed" not in kwargs, "a route embed missing one of its legs must not be sent as if complete"
-
-    asyncio.run(run())
+    interaction = asyncio.run(run())
+    # One untrackable route on one text page: a plain message, nothing to click.
+    (_args, kwargs), = interaction.followup.sent
+    assert "view" not in kwargs and "embed" not in kwargs
+    text = kwargs["content"]
+    for part in ("## #1 · Origin → Midpoint → Final", "Profit **", "### Leg 1 · Origin → Midpoint",
+                 "### Leg 2 · Midpoint → Final", "-# Prices can change before you arrive"):
+        assert part in text, (part, text)
 
 
 def test_mixed_routes_sends_one_message_per_route(tmp_path):
@@ -2190,13 +2187,16 @@ def test_multi_stop_route_shows_a_four_leg_chain_only_when_asked_and_stays_withi
             lambda cog, interaction: cog.multi_stop_route.callback(cog, interaction, ship="TestShip", max_legs=four),
         )
 
-        def descriptions(interaction):
-            return [kw["embed"].description or "" for _, kw in interaction.followup.sent if kw.get("embed") is not None]
+        def text(interaction):
+            return route_results(interaction.followup.sent).all_text()
 
-        assert not any("4-leg chain" in text for text in descriptions(default)), "the default must stay at 3 legs"
-        assert any("4-leg chain" in text for text in descriptions(deeper)), descriptions(deeper)
-        for _, kwargs in deeper.followup.sent:
-            if kwargs.get("embed") is not None:
-                assert len(kwargs["embed"]) <= 6000, len(kwargs["embed"])
+        assert "4-leg chain" not in text(default), "the default must stay at 3 legs"
+        assert "4-leg chain" in text(deeper), text(deeper)
+        view = route_results(deeper.followup.sent).view
+        assert isinstance(view, RouteLayoutPagesView)
+        for index in range(len(view.pages)):
+            view.index = index
+            view.render()
+            assert view.content_length() <= LAYOUT_TEXT_LIMIT, view.content_length()
 
     asyncio.run(run())

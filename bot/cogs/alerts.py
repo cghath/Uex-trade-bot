@@ -24,7 +24,7 @@ from bot.delivery import (
 from bot.discord_ui import send_alert_remove_picker
 from bot.uex.exceptions import UexApiError, describe_uex_api_error
 from bot.uex.marketplace import format_quality_range
-from bot.uex.trading import resolve_tradeable_commodity, unknown_commodity_message
+from bot.uex.trading import resolve_tradeable_commodity, rows_for_commodity, unknown_commodity_message
 
 logger = logging.getLogger("uexbot.alerts")
 
@@ -243,6 +243,15 @@ class Alerts(commands.Cog):
                 continue
 
             try:
+                # UEX matches commodity_name as a SUBSTRING - a Gold alert fired on Golden
+                # Medmon's 71,000.
+                rows, others = rows_for_commodity(rows, commodity_name)
+                if others:
+                    logger.warning(
+                        "Skipping price alerts for '%s': it matches several commodities (%s), none exactly",
+                        commodity_name, ", ".join(others),
+                    )
+                    continue
                 best_sell = max((r.get("price_sell") or 0 for r in rows), default=0)
                 best_buy_candidates = [r.get("price_buy") or 0 for r in rows if (r.get("price_buy") or 0) > 0]
                 best_buy = min(best_buy_candidates) if best_buy_candidates else None

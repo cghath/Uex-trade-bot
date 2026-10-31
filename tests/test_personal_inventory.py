@@ -88,6 +88,38 @@ def test_rejected_delete_must_not_release_inventory(tmp_path):
     asyncio.run(run())
 
 
+def test_cancel_keeps_the_reservation_when_uex_still_shows_the_listing(tmp_path, monkeypatch):
+    """A delete answered "ok" while the listing stays live (2026-10-02, audit REL-1) must not
+    cancel the job or release stock: it's still for sale."""
+    monkeypatch.setattr("bot.uex.client.DELETE_RECHECK_SECONDS", 0)
+
+    async def run():
+        db, inv, job_id = await _fixture(tmp_path, "still_live_delete.sqlite3")
+        await db.claim_inventory_post_job(job_id)
+        await db.mark_inventory_post_listed(
+            job_id, listing_id=999, listing_url=None, posted_price=200, date_expiration=None
+        )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "DELETE":
+                return httpx.Response(200, json={"status": "ok", "data": None})
+            return httpx.Response(200, json={"status": "ok", "data": [{"id": 999, "in_stock": 5, "is_sold_out": 0}]})
+
+        uex = UexClient("fake", base_url="https://audit.invalid")
+        await uex._client.aclose()
+        uex._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        try:
+            job = await db.get_inventory_post_job(1, job_id)
+            ok, message = await _cog(db, uex)._cancel_listed_job(job, secret_key="fake")
+            return ok, message, await db.get_inventory_item(1, inv), await db.get_inventory_post_job(1, job_id)
+        finally:
+            await uex.aclose()
+
+    ok, message, entry, job = asyncio.run(run())
+    assert not ok and "still shows listing #999" in message
+    assert entry["reserved_quantity"] == 5 and job["status"] == "listed"
+
+
 def test_definite_post_rejection_is_not_treated_as_ambiguous(tmp_path):
     """Follow-up review finding: client.py's A01 fix started raising UexRejectedError (a
     real, definite rejection) for a non-"ok" POST status like

@@ -1276,11 +1276,16 @@ class PersonalInventory(commands.Cog):
             sold_out = _flag(listing_rows[0].get("is_sold_out"))
             # Delete on UEX before touching any local state: if this raises, nothing below
             # has run yet, so there's nothing to leave inconsistent or roll back.
-            await self.bot.uex.delete_marketplace_listing(
+            gone = await self.bot.uex.delete_marketplace_listing(
                 listing_id=int(job["listing_id"]), secret_key=secret_key
             )
         except UexApiError as exc:
             return False, f"UEX could not confirm deletion of listing #{job['listing_id']}: {exc}"
+        if not gone:
+            return False, (
+                f"UEX accepted the delete but still shows listing #{job['listing_id']}, so job #{job_id} "
+                "was not cancelled and nothing was released. Check the listing on UEX, then try again."
+            )
 
         outcome = await self.bot.db.record_inventory_listing_stock(job_id, in_stock=current_stock, sold_out=sold_out)
         released = await self.bot.db.cancel_tracked_inventory_listing(int(job["user_id"]), int(job["listing_id"]))
@@ -1701,12 +1706,28 @@ class PersonalInventory(commands.Cog):
                     # genuinely live on UEX - it must be explicitly deleted, not just replaced
                     # locally, or the item ends up double-listed at two different prices.
                     try:
-                        await self.bot.uex.delete_marketplace_listing(
+                        gone = await self.bot.uex.delete_marketplace_listing(
                             listing_id=listing_id, secret_key=secret_key
                         )
                     except UexApiError as exc:
                         logger.warning(
                             "Could not delete listing %s for the 48h no-interest relist: %s", listing_id, exc
+                        )
+                        continue
+                    if not gone:
+                        # UEX said ok but still lists it (2026-10-02, audit REL-1): it's still for
+                        # sale, so keep tracking it and stop retrying; the player decides.
+                        logger.warning("Listing %s is still live after the 48h relist's delete; relist paused",
+                                       listing_id)
+                        await self.bot.db.disable_auto_relist(job_id)
+                        await self._notify_user(
+                            int(job["user_id"]),
+                            f"No interest yet on **{marketplace_item_link(job['item_name'], job.get('id_item'))}** "
+                            f"after {RELIST_DISCOUNT_INTERVAL_HOURS}h, so the bot tried to relist it lower - but UEX "
+                            f"still shows listing #{listing_id} after deleting it. It's still for sale at "
+                            f"**{current_price:,}** UEC/unit and still tracked; automatic relisting is paused for it. "
+                            "To relist lower, remove it on UEX (or with `/marketplace-delete-listing`), then use "
+                            "`/inventory-post-now`.",
                         )
                         continue
                     next_price = max(round(current_price * RELIST_DISCOUNT_RATE), minimum_price)
@@ -1727,8 +1748,8 @@ class PersonalInventory(commands.Cog):
                                 f"relisted as job #{new_id} at **{next_price:,}** UEC/unit (was {current_price:,}).",
                             )
                         else:
-                            # The old listing is already gone (deleted above) - this item
-                            # currently has NO active UEX listing, whatever went wrong. Never
+                            # The old listing is gone (deleted and read back above) - this
+                            # item currently has NO active UEX listing, whatever went wrong. Never
                             # claim a successful relist here; _post_one_job already recorded
                             # the real failure reason on the job itself (notify=False only
                             # suppressed its own DM, not the DB write).

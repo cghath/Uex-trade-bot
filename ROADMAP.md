@@ -22,6 +22,14 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
   Sellability Ratings, direct UEX links, balanced price recommendations, hard manual floors,
   automatic no-interest relisting (5% lower every 48h, pausing on open negotiations) down to
   the floor, and explicit handling for ambiguous sale quantities.
+- [x] **Ship Parts and Loadouts**: `/ship-parts-finder` browses a ship's component and weapon
+  slots, lists only parts that really fit and are sold, ranked by each slot's key stat with
+  the nearest shop, and keeps a private shopping list. `/ship-loadout` (and the finder's
+  "Recommend a loadout" button) picks a part for every slot for a Balanced, Stealth, Tank or
+  Budget build, keeps stock where nothing beats it, never recommends scatterguns, ranks guns
+  within 5% DPS by alpha, keeps stock PDCs, reaches the guns inside locked and manned
+  turrets, shows the total cost and power pips, and saves every purchase to the list in one
+  click (PROJECT_CONTEXT.md entries 122-125).
 
 ## Backlog & Ideas
 
@@ -196,11 +204,74 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
 
 ### Personalization & Workflow
 
+- [ ] **Message presentation pass** *(complexity: Medium, ongoing)*: the owner's goal
+  (2026-10-03), "make the messages look much easier on the eyes", one section at a time with
+  mockups first; phone layout matters less, as long as it isn't a disaster. Done: the item
+  and blueprint lookups (layout components, shared facts said once; PROJECT_CONTEXT.md entry
+  136), then `/multi-stop-route` (each leg with its own warnings; entry 138) and Configure
+  crafting (a section per material, then the totals; entry 140) and `/ship-loadout` (the total,
+  then upgrades with their shops, then what keeps stock; entry 142). Next: `/ship-parts-finder`'s
+  list (one line per part, its DPS in a grey tag, 10 a page - the owner's pick, option B), then
+  the other route commands (`/best-route`, `/top-routes`, `/mixed-routes`), and alerts and DMs.
+  Pick by real usage (`/command-usage`, entry 141).
+
+- [x] **Server anniversaries**: Shipped 2026-10-14 (PR #132, PROJECT_CONTEXT.md entry 145): a
+  DM and a post in `#stdynamics-bot` on the day and at the time a member joined, to bring
+  people back to the server. Other ideas for that, from the same talk: a weekly hosted event,
+  Discord Onboarding with a personal welcome, a daily low-effort prompt (poll, screenshot of the
+  day), patch-day threads, fewer and busier channels.
+
+- [x] **Event cards**: Shipped 2026-10-30 (PR #144, PROJECT_CONTEXT.md entry 152): a sign-up card in
+  #events for each Discord event - roles and spots (`/event-roles`), wait list, Maybe, ships,
+  every-week regulars, reminder, Start/End. Next: attendance (who was in voice 30+ minutes).
+
+- [x] **Role picker**: Shipped 2026-10-30 (PR #140, PROJECT_CONTEXT.md entry 151): `/rolesetup`
+  and `/rolepanel post` - self-serve Activities, Timezone, Experience, Pings and name Colors
+  roles from buttons and a dropdown, logged in #role-log, Mentor pinged for New Pilots.
+
+- [x] **Veteran roles and welcome backs**: Shipped 2026-10-29 (PR #138, PROJECT_CONTEXT.md entry
+  150): a role per year at each anniversary (given quietly to everyone already past one), the
+  next Discord event in the anniversary DM, and a welcome-back DM after 30+ days away.
+
+- [x] **Voice ranks**: Shipped 2026-10-26 (PR #137, PROJECT_CONTEXT.md entry 149): ranks from time
+  in voice with others (Cadet to Admiral), a second ladder for ops attended, `/rank` and
+  `/rank-leaderboard`, replacing Arcane. Open: show each person's top ship from the fleet bot on
+  the leaderboard, once it's known where that bot keeps its data.
+
+- [x] **A welcome DM for new members**: Shipped 2026-10-14 (PR #134, PROJECT_CONTEXT.md entry
+  146): a short DM when someone joins, with six commands and the bot's channel, nothing more.
+
+- [x] **What an ore crafts**: Shipped 2026-10-07 as `/blueprint-search material:` (PR #130,
+  PROJECT_CONTEXT.md entry 143): the blueprints a player can get that use an ore or mineral,
+  by category, armor as sets, each opening its usual reply. Open question from the owner: why
+  917 of the wiki's 1,606 blueprints have no contract and aren't unlocked by default.
+
+- [ ] **Free guns from salvage wrecks** *(declined as a bot feature 2026-10-10; made a spreadsheet instead)*:
+  the idea was to catalog the stock guns on salvage-contract wrecks, by size, as free
+  upgrades. Researched on the live wiki (4.10.1) first: only 32 of 132 salvage contracts name
+  their wrecks (`combat.spawns`, group `SalvageableShip`), about 20 of them sharing one pool of
+  17 ships; the common Stanton "Claim #...: [Ship] Salvage Rights" and "Risky [Ship] Salvage
+  Job" contracts name none. Those 17 wrecks carry 9 different guns, mostly mid-pack stock
+  repeaters; only three stood out - the S3 M5A Cannon (A1/C1 Spirit, 4 each, sold for 75k),
+  the S5 CF-557 Galdereen (M80, not sold) and the S5 Vanduul 'WRATH' Cannon (Stinger, not
+  sold). A cloud research session then found the community wiki's (starcitizen.tools,
+  hand-maintained, unverified) ship list for the Claim contracts, by Adagio rank: its top tier
+  (Hercules A2/C2/M2, 890 Jump) carries S5 M7As, Omnisky XVs and S4 M6As - about 2.85M aUEC of
+  guns at shop prices on an A2 wreck. Community sources agree guns up to S5 come off with a
+  tractor beam (unlock from the wreck's pilot seat, strip before scraping); that wrecks spawn
+  with their stock guns is implied by guides, not documented. The owner chose a spreadsheet over
+  a bot feature: `docs/salvage_guns_4.10.2.xlsx` (private, excluded in `.git/info/exclude`) -
+  guns by size, wrecks by gun value, with columns to mark what's confirmed in-game. If it's ever
+  revisited: the wiki also lists a second "CF-557 Galdereen Repeater" at 9,375 DPS (a
+  non-player variant to filter out), and the lighter option was a "or free: salvage an A1/C1
+  Spirit" note on `/ship-loadout`/`/ship-parts-finder` picks.
+
 - [x] **Saved Trading Preferences**: Shipped 2026-09-06. `/set-trading-preferences`,
   `/clear-trading-preferences`, `/my-trading-preferences` store per-user defaults for
   space-only terminals, capital-ship access, auto-loading, preferred system, and risk
   tolerance (risk tolerance was stored/shown only at first, a deliberate scoping choice;
-  enforced since 2026-09-30, PROJECT_CONTEXT.md entry 104). Applied automatically by `/best-route`, `/top-routes`, `/mixed-routes`, and
+  enforced since 2026-09-30, PROJECT_CONTEXT.md entry 104, then removed the same day,
+  entry 114 - routes keep their ⚠️ cargo-risk labels instead). Applied automatically by `/best-route`, `/top-routes`, `/mixed-routes`, and
   `/multi-stop-route` whenever their matching option is left unset; space-only/
   capital-ship-access only affect the latter two today. Default ship (`/set-default-ship`)
   was folded into the same `user_trading_preferences` row rather than kept in its own
@@ -924,6 +995,32 @@ A comprehensive tool for navigating the UEX economy, providing actionable insigh
 
 ### Platform & Reliability
 
+- [ ] **Re-check loadout gun rules after the next patch** *(complexity: Low)*: the owner says
+  weapon damage changes are coming in the next game patch after 4.10.1. Once the wiki shows
+  it, re-run the live gun list (every sold gun's type, DPS and alpha per size) and check that
+  `/ship-loadout`'s rules still hold: no scatterguns, the 5% DPS band (`DPS_BAND`), alpha
+  as the decider inside it (PROJECT_CONTEXT.md entries 123 and 124), and the heavy-fighter
+  armor gate (`ARMOR_REFERENCE`, re-read from the wiki's `armor.deflection` on the
+  Hurricane, F8C, Scorpius and Vanguard Warden; entry 135).
+- [ ] **How often alpha decides a gun pick** *(complexity: Low, next session)*: the owner
+  asked for an analysis across every weapon of how often the 5% DPS band actually changes a
+  pick, per size and per profile, against the live gun list, before tuning it further.
+- [ ] **Guns inside locked or manned turrets in `/ship-parts-finder`** *(complexity:
+  Medium)*: `/ship-loadout` reads them from the wiki's single-vehicle tree
+  (`locked_turret_gun_ports`, entry 124), but the finder's browser still skips manned
+  turrets (`TurretBase`) and the guns inside locked gimbals, so the Idris-M's turret guns
+  can't be browsed there.
+- [x] **Ships the wiki lists twice**: Shipped 2026-10-02 (`base_vehicle_row`,
+  PROJECT_CONTEXT.md entry 126): the base row was the standard ship in all 12. The original
+  note, kept for history: 12 ships UEX lists (Carrack,
+  Cutlass Black/Blue/Red, Eclipse, F8C Lightning, Hammerhead, Idris-P, Polaris, S-65 Stingray,
+  Valkyrie, Zeus Mk II CL) share their exact name with a second wiki /vehicles row (a BIS2950,
+  Collector or other edition), so `/ship-parts-finder` and `/ship-loadout` can't read their
+  slots and say so as a known issue (`WikiDuplicateNameError`, PROJECT_CONTEXT.md entry 122).
+  Likely fix: in all 12, one row's `class_name` is the base every other row's extends
+  (`DRAK_Cutlass_Black` vs `DRAK_Cutlass_Black_BIS2950`), so pick that row, and still decline
+  when no single base exists. Check first that the editions' slots really match the base
+  row's, or say which edition the slots are for.
 - [ ] **State-Table Cleanup Sweep** *(complexity: Low-Medium)*: Audit DB tables that
   accumulate rows with no built-in pressure-release mechanism, and add bounded, time-based
   cleanup wherever one's missing - the same problem `scripts/sync_pi_backups.sh` already

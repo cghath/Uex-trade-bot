@@ -30,6 +30,8 @@ Current features:
   with aUEC prices cheapest first and rentals grouped by star system (1-day rate).
   `/ship-parts-finder` (ready for testing) browses a ship's component slots, lists only parts that
   fit and are sold, ranked by each slot's key stat, and keeps a private shopping list of locked-in parts.
+  `/ship-loadout` recommends one part per slot (Balanced, Stealth, Tank or Budget), says where the
+  stock part is already the best pick, and adds every purchase to that list in one click.
 
 Run `/intro` in Discord for the complete categorized command guide.
 
@@ -108,14 +110,22 @@ background posting/sale updates are delivered only by private DM.
 
 1. Go to the [Discord Developer Portal](https://discord.com/developers/applications) → New Application.
 2. Bot tab → Reset Token → copy it. This is `DISCORD_BOT_TOKEN`.
-3. Under **Bot**, leave all three privileged intents (Presence, Server Members, Message Content)
-   off. The bot only uses slash commands, buttons and forms, so it never needs to read messages.
+3. Under **Bot** → Privileged Gateway Intents, switch on **Server Members** and leave Presence and
+   Message Content off. Server Members lets the bot see who's a member and when they joined, for
+   server anniversaries, veteran roles and the welcome DMs; without it Discord refuses the bot's connection at startup. The bot only
+   uses slash commands, buttons and forms, so it never needs to read messages.
 4. Under **OAuth2 → URL Generator**, check the `bot` and `applications.commands` scopes, then these
    permissions:
    - `View Channels`, `Send Messages`, `Embed Links`, `Read Message History`;
    - `Attach Files`, for charts and long lists;
    - `Create Private Threads`, `Send Messages in Threads` and `Manage Threads`, for the private
      threads that route tracking, the ship-parts list and the blueprint list use.
+   - `Manage Roles`, for voice ranks, veteran roles and the role picker: the bot creates those
+     roles and gives them out (and moves the color roles right under the rank roles), so its own
+     role must sit above them in Server Settings → Roles.
+   - `Mention @everyone, @here and All Roles`, so the role picker can ping Mentor in #👋welcome when
+     someone picks New Pilot (or make Mentor mentionable instead).
+   - `Manage Events`, so an event card's Start and End also start and end the Discord event.
 
    Use the generated URL to invite the bot to your server.
 5. (Optional, recommended while developing) Enable Developer Mode in Discord, right-click your
@@ -227,8 +237,8 @@ bot/
     route_confidence.py, route_presentation.py, supply_demand.py, commodity_risk.py,
     data_health.py, practical_routes.py, trading_preferences.py,
     marketplace.py, scanner.py, inventory.py, charts.py, ships.py, ship_shops.py,
-    ship_parts.py, ship_part_display.py, item_finder.py, refinery.py, mining_locations.py,
-    stock_alerts.py, leaderboard.py, status.py, exceptions.py, ...
+    ship_parts.py, ship_part_display.py, ship_loadout.py, item_finder.py, refinery.py,
+    mining_locations.py, stock_alerts.py, leaderboard.py, status.py, exceptions.py, ...
   db/
     database.py      SQLite schema + queries (aiosqlite)
     crypto.py        Fernet key management for encrypting per-user secret keys
@@ -262,8 +272,14 @@ bot/
     blueprints.py         /blueprint-search, /blueprint-list + loop (blueprint_planner.py: its shopping list)
     item_finder.py        /ingame-item-finder
     ship_shops.py         /where-to-buy-ship
-    ship_parts_finder.py  /ship-parts-finder + loop
+    ship_parts_finder.py  /ship-parts-finder, /ship-loadout + loop
     diagnostics.py        /test-dm, /command-usage
+    anniversaries.py      server-anniversary DMs and posts + loop, /anniversary-preview
+    welcome.py            the welcome DM new members get + retry loop, /welcome-preview
+    voice_ranks.py        voice-activity ranks + 1-minute loop, /rank, /rank-leaderboard
+    welcome_back.py       a DM to members back after 30+ days away (activity times only)
+    role_picker.py        self-serve role panels (buttons + a dropdown), /rolesetup, /rolepanel post
+    event_cards.py        sign-up cards in #events for Discord's scheduled events, /event-roles
     help.py               /intro (the categorized command guide)
 scripts/
   deploy_and_backup.sh, revert_last_deploy.sh   Pi deploys and rollback (see above)
