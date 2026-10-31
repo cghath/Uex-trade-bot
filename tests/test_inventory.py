@@ -650,9 +650,10 @@ class _FakeResponse:
         self.edits = []
         self.messages = []
         self.sent_modal = None
+        self.deferred = []
 
     async def defer(self, **kwargs):
-        pass
+        self.deferred.append(kwargs)
 
     async def edit_message(self, **kwargs):
         self.edits.append(kwargs)
@@ -677,6 +678,10 @@ class _FakeInteraction:
         self.user = type("U", (), {"id": user_id})()
         self.response = _FakeResponse()
         self.followup = _FakeFollowup()
+        self.original_edits = []
+
+    async def edit_original_response(self, **kwargs):
+        self.original_edits.append(kwargs)
 
 
 def _post_now_client(tmp_path, *, advertise_response):
@@ -956,9 +961,27 @@ def test_post_one_job_uses_the_custom_price_directly_not_the_algorithm(tmp_path)
     asyncio.run(run())
 
 
+class _MinimumDb:
+    """get_inventory_item for the custom-price forms, which re-read each stack's minimum
+    (audit UX-5): `minimums` maps inventory id to its minimum now."""
+
+    def __init__(self, minimums):
+        self.minimums = minimums
+
+    async def get_inventory_item(self, user_id, inventory_id):
+        minimum = self.minimums.get(inventory_id)
+        return None if minimum is None else {"id": inventory_id, "minimum_price": minimum}
+
+
+def _minimum_cog(minimums):
+    cog = PersonalInventory.__new__(PersonalInventory)
+    cog.bot = type("FakeBot", (), {"db": _MinimumDb(minimums)})()
+    return cog
+
+
 def test_custom_price_modal_rejects_below_minimum_and_accepts_a_valid_price():
     async def run():
-        cog = PersonalInventory.__new__(PersonalInventory)
+        cog = _minimum_cog({1: 1000})
         entry = {"id": 1, "minimum_price": 1000}
         view = PostNowView(cog, 42, entry, 5)
         modal = CustomPriceModal(view, minimum_price=entry["minimum_price"])
@@ -980,11 +1003,34 @@ def test_custom_price_modal_rejects_below_minimum_and_accepts_a_valid_price():
         assert view.choose_pricing_strategy.options[-1].default is True
 
 
+def test_custom_price_modal_checks_the_minimum_as_it_is_now():
+    """UX-5: a minimum lowered with /inventory-set-minimum after /inventory-post-now opened
+    counts, as the refusal's own advice says; a raised one does too."""
+    async def run():
+        entry = {"id": 1, "minimum_price": 1000}
+        lowered = PostNowView(_minimum_cog({1: 400}), 42, entry, 5)
+        modal = CustomPriceModal(lowered, minimum_price=1000)
+        modal.price_input._value = "500"
+        await modal.on_submit(_FakeInteraction(42))
+        assert lowered.custom_price == 500 and entry["minimum_price"] == 400
+
+        raised = PostNowView(_minimum_cog({1: 2000}), 42, {"id": 1, "minimum_price": 1000}, 5)
+        modal = CustomPriceModal(raised, minimum_price=1000)
+        modal.price_input._value = "1500"
+        refused = _FakeInteraction(42)
+        await modal.on_submit(refused)
+        assert raised.custom_price is None
+        (message,), _ = refused.response.messages[0]
+        assert "below your minimum of **2,000**" in message
+
+    asyncio.run(run())
+
+
 def test_a_one_stack_batch_takes_its_custom_price_from_the_per_stack_form():
     """AuthorizeScheduleView prices every batch size with StackPricesModal, one input per
     stack (audit UX-20); a one-stack batch is just a one-input form."""
     async def run():
-        cog = PersonalInventory.__new__(PersonalInventory)
+        cog = _minimum_cog({1: 1000})
         specs = [{"inventory_id": 1, "quantity": 5, "scheduled_for": datetime.now(timezone.utc),
                    "auto_relist": True, "minimum_price": 1000, "item_name": "Laranite"}]
         view = AuthorizeScheduleView(cog, 42, specs)
@@ -1109,7 +1155,8 @@ def test_setting_the_only_missing_minimum_continues_straight_into_the_authorize_
         entry = await db.get_inventory_item(user_id, ids_by_name["Laranite"])
         assert entry["minimum_price"] == 500_000
 
-        (edit,) = modal_interaction.response.edits
+        assert modal_interaction.response.deferred == [{}] and not modal_interaction.response.edits
+        (edit,) = modal_interaction.original_edits
         assert isinstance(edit.get("view"), AuthorizeScheduleView)
         assert edit.get("embed") is not None
 
@@ -1135,7 +1182,8 @@ def test_setting_one_of_two_missing_minimums_leaves_the_other_button_showing(tmp
         await modal.on_submit(modal_interaction)
 
         # Still one floor missing - must show the remaining button, not jump to authorize.
-        (edit,) = modal_interaction.response.edits
+        assert modal_interaction.response.deferred == [{}] and not modal_interaction.response.edits
+        (edit,) = modal_interaction.original_edits
         assert isinstance(edit.get("view"), SetMinimumPricesView)
         remaining_labels = [c.label for c in edit["view"].children]
         assert any("Gold" in label for label in remaining_labels)
@@ -1502,7 +1550,8 @@ def test_lower_floor_modal_rejects_invalid_input_and_resumes_on_success(tmp_path
             modal2.price_input._value = "700,000"
             interaction2 = _FakeInteraction(user_id)
             await modal2.on_submit(interaction2)
-            assert interaction2.response.edits, "should edit the original DM message, not send a new one"
+            assert interaction2.response.deferred == [{}]
+            assert interaction2.original_edits, "should edit the original DM message, not send a new one"
 
             updated = await db.get_inventory_post_job(user_id, job_id)
             assert updated["minimum_price"] == 700_000
@@ -1552,3 +1601,38 @@ def test_resolve_floor_command_rejects_a_job_that_is_not_paused(tmp_path):
     asyncio.run(run())
 
     asyncio.run(run())
+
+
+def test_a_relist_delete_whose_check_failed_relists_next_cycle_instead_of_asking_what_sold(tmp_path):
+    """Audit TRD-2: UEX took the 48h relist's DELETE but the read-back failed, so the job stayed
+    "listed"; next cycle the listing was gone, and the player was told it "disappeared" without proof
+    of what sold and that relisting had stopped - though the bot had deleted it itself."""
+    from bot.uex.exceptions import UexApiError
+
+    async def run():
+        db, client, cog, user_id, job_id, dmed = await _setup_reconcile(
+            tmp_path, hours_old=49, minimum_price=850_000, posted_price=1_000_000,
+        )
+        real_get, reads = client.get_marketplace_listings, []
+
+        async def read_back_fails_once(**kwargs):
+            reads.append(kwargs)
+            if len(reads) == 2:  # cycle 1: the reconcile's own read, then the delete's read-back
+                raise UexApiError("HTTP 503")
+            return await real_get(**kwargs)
+
+        client.get_marketplace_listings = read_back_fails_once
+        try:
+            await cog._reconcile_listed_jobs()
+            after_first = (await db.get_inventory_post_job(user_id, job_id))["status"], list(dmed)
+            await cog._reconcile_listed_jobs()
+            return after_first, await db.get_inventory_post_job(user_id, job_id), dmed
+        finally:
+            await client.aclose()
+
+    (status, first_dms), job, dmed = asyncio.run(run())
+    assert status == "listed" and first_dms == [], "nothing decided on an unconfirmed delete"
+    assert job["status"] != "needs_confirmation"
+    (_, message), = dmed
+    assert "relisted as job" in message and "(was 1,000,000)" in message, message
+    assert "did not prove" not in message

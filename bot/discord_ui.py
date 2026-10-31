@@ -5,7 +5,8 @@
   "thinking..." or a click that seems to do nothing, and a view greys out its controls when
   it times out. BotLayoutView is BotView for a reply built from Discord's layout components
   (a container of text, dividers and sections; discord.py's LayoutView). `on_app_command_error` does the same for
-  slash commands; bot/main.py registers it on the command tree.
+  slash commands; bot/main.py registers it on the command tree. BotDynamicItem does it for a
+  DynamicItem, which discord.py runs outside any view.
 - AlertRemovePickerView: a paginated dropdown for removing an alert by picking it from a
   menu instead of having to already know (and type) its numeric id. Used by every alert
   family in this bot (bot/cogs/alerts.py, bot/cogs/marketplace_alerts.py,
@@ -14,6 +15,7 @@
 """
 from __future__ import annotations
 
+import functools
 import logging
 import math
 from typing import Any, Awaitable, Callable
@@ -173,6 +175,34 @@ class BotModal(discord.ui.Modal):
     async def on_error(self, interaction: discord.Interaction, error: Exception, /) -> None:
         logger.error("Unhandled error in %s", type(self).__name__, exc_info=error)
         await tell_player_it_failed(interaction)
+
+
+class BotDynamicItem:
+    """Put first in the bases of every DynamicItem in this bot (a button or menu that works
+    through restarts): `class X(BotDynamicItem, discord.ui.DynamicItem[discord.ui.Button],
+    template=...)`.
+
+    discord.py runs a DynamicItem's callback on a throwaway view built from the message, never
+    a BotView, and only logs what it raises - so a failure after "thinking..." stayed there
+    forever (audit UI-1). The class's own callback is wrapped to log it and tell the player,
+    as BotView.on_error does."""
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        callback = cls.__dict__.get("callback")
+        if callback is not None:
+            cls.callback = _answers_when_it_fails(callback)  # type: ignore[method-assign]
+
+
+def _answers_when_it_fails(callback: Callable[..., Awaitable[None]]) -> Callable[..., Awaitable[None]]:
+    @functools.wraps(callback)
+    async def wrapped(self: Any, interaction: discord.Interaction) -> None:
+        try:
+            await callback(self, interaction)
+        except Exception:
+            logger.exception("Unhandled error in %s", type(self).__name__)
+            await tell_player_it_failed(interaction)
+    return wrapped
 
 
 class AlertRemovePickerView(BotView):

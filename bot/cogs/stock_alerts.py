@@ -27,7 +27,7 @@ from bot.delivery import DELIVERY_CHOICES, DELIVERY_DESCRIPTION, Delivery, deliv
 from bot.uex.exceptions import UexApiError, describe_uex_api_error
 from bot.uex.ships import resolve_ship
 from bot.uex.stock_alerts import compute_terminal_availability, detect_restocks, format_restock_message
-from bot.uex.trading import resolve_tradeable_commodity, rows_for_commodity, unknown_commodity_message
+from bot.uex.trading import resolve_tradeable_commodity, rows_for_known_commodity, unknown_commodity_message
 
 logger = logging.getLogger("uexbot.stock_alerts")
 
@@ -88,7 +88,15 @@ class StockAlerts(commands.Cog):
             ship_query=ship,
             scope=scope_value,
         )
-        ship_note = f" (cargo fit checked against **{ship}**)" if ship else " (set a ship with /set-trading-preferences for a cargo-fit estimate)"
+        # A saved default ship is used when no ship is given: say so, rather than telling a
+        # player who has one to set one (audit UX-11/MSG-4).
+        default_ship = None if ship else await self.bot.db.get_default_ship(interaction.user.id)
+        if ship:
+            ship_note = f" (cargo fit checked against **{ship}**)"
+        elif default_ship:
+            ship_note = f" (cargo fit checked against your default ship, **{default_ship}**)"
+        else:
+            ship_note = " (set a ship with /set-trading-preferences for a cargo-fit estimate)"
         await interaction.followup.send(
             f"Stock alert #{alert_id} set: {delivery_note(scope_value)} when **{commodity}** has real stock "
             f"at any terminal{ship_note} (checked every {POLL_INTERVAL_MINUTES} min). This keeps "
@@ -130,14 +138,19 @@ class StockAlerts(commands.Cog):
 
             try:
                 # UEX matches commodity_name as a SUBSTRING - a Gold watch reported Golden
-                # Medmon's restocks (a terminal stocking both could even show twice).
-                rows, others = rows_for_commodity(rows, commodity_name)
-                if others:
+                # Medmon's restocks (a terminal stocking both could even show twice). The name
+                # was resolved against UEX's own list when the alert was set, so only that
+                # exact commodity counts (audit LOGIC-4). No exact row this poll is skipped,
+                # not read as "out of stock everywhere": that would save an empty state and
+                # report every terminal as a restock on the next poll.
+                matched = rows_for_known_commodity(rows, commodity_name)
+                if not matched:
                     logger.warning(
-                        "Skipping stock alerts for '%s': it matches several commodities (%s), none exactly",
-                        commodity_name, ", ".join(others),
+                        "Skipping stock alerts for '%s': no price row names it exactly (got %s)",
+                        commodity_name, ", ".join(sorted({str(r.get("commodity_name")) for r in rows})),
                     )
                     continue
+                rows = matched
                 current = compute_terminal_availability(rows)
             except (AttributeError, KeyError, TypeError, ValueError) as exc:
                 logger.warning("Skipping stock alerts for %s: unexpected price rows (%s)", commodity_name, exc)
@@ -156,18 +169,25 @@ class StockAlerts(commands.Cog):
                     if to_notify:
                         ship_query = alert.get("ship_query") or await self.bot.db.get_default_ship(alert["user_id"])
                         ship_cargo_scu = None
+                        lookup_failed = False
                         if ship_query:
                             try:
                                 if vehicles_cache is None:
                                     vehicles_cache = await self.bot.uex.get_vehicles()
                                 vehicle = resolve_ship(vehicles_cache, ship_query)
-                                ship_cargo_scu = vehicle.get("scu") if vehicle else None
+                                # 0 for a matched ship with no hold, None for no match: the
+                                # message says which (audit MSG-4).
+                                ship_cargo_scu = (vehicle.get("scu") or 0) if vehicle else None
                             except UexApiError as exc:
+                                lookup_failed = True
                                 logger.info("Vehicle lookup failed for stock alert #%s: %s", alert["id"], exc)
 
                         # One message for every terminal this check found (audit UX-1). If it
                         # isn't settled, none of them are recorded, so all are retried.
-                        outcome = await self._notify_stock_alert(alert, commodity_name, to_notify, ship_cargo_scu)
+                        outcome = await self._notify_stock_alert(
+                            alert, commodity_name, to_notify, ship_cargo_scu,
+                            ship_query=ship_query, lookup_failed=lookup_failed,
+                        )
                         if not outcome.settled:
                             unsent.update(terminal["id_terminal"] for terminal in to_notify)
 
@@ -181,9 +201,11 @@ class StockAlerts(commands.Cog):
                     logger.exception("Stock alert #%s failed this cycle", alert["id"])
 
     async def _notify_stock_alert(
-        self, alert: dict, commodity_name: str, terminals: list[dict], ship_cargo_scu: float | None
+        self, alert: dict, commodity_name: str, terminals: list[dict], ship_cargo_scu: float | None,
+        *, ship_query: str | None = None, lookup_failed: bool = False,
     ) -> Delivery:
-        body = format_restock_message(alert["id"], commodity_name, terminals, ship_cargo_scu)
+        body = format_restock_message(alert["id"], commodity_name, terminals, ship_cargo_scu,
+                                      ship_query=ship_query, lookup_failed=lookup_failed)
         return await send_alert(self.bot, alert, body, label=f"stock alert #{alert['id']}")
 
     @poll_stock_alerts.before_loop

@@ -1135,6 +1135,8 @@ class Prices(commands.Cog):
         if auto_load_only is None:
             auto_load_only = prefs["auto_load_only"]
         system_value = system.value if system else prefs["preferred_system"]
+        # A saved budget is named by an empty result too, not just "within that budget" (UX-4).
+        saved_budget = prefs["budget"] if budget is None else None
         if budget is None:
             budget = prefs["budget"]
 
@@ -1202,12 +1204,13 @@ class Prices(commands.Cog):
             destination_terminal_id=destination_id,
         )
         if not routes:
-            budget_note = " within that budget" if budget is not None else ""
+            budget_note = (" within your saved budget" if saved_budget
+                           else " within that budget" if budget is not None else "")
             safety_note = " using confirmed space stations only" if space_only else ""
             access_note = " with confirmed capital-ship cargo access" if capital_access_only else ""
             auto_load_note = " with auto-load at both ends" if auto_load_only else ""
             system_note = f" entirely within {system_value}" if system_value else ""
-            saved_hint = saved_filters_hint(saved_filter_labels(**saved_filters, capital_ship_access=(
+            saved_hint = saved_filters_hint(saved_filter_labels(**saved_filters, budget=saved_budget, capital_ship_access=(
                 bool(prefs["capital_ship_access"]) and not requires_capital_cargo_access(ship_vehicle))))
             if origin_name and destination_name:
                 pin_note = f" from **{origin_name}** to **{destination_name}**"
@@ -1415,6 +1418,8 @@ class Prices(commands.Cog):
         if auto_load_only is None:
             auto_load_only = prefs["auto_load_only"]
         system_value = system.value if system else prefs["preferred_system"]
+        # A saved budget is named by an empty result too, not just "within that budget" (UX-4).
+        saved_budget = prefs["budget"] if budget is None else None
         if budget is None:
             budget = prefs["budget"]
 
@@ -1481,12 +1486,13 @@ class Prices(commands.Cog):
             max_legs=max_legs.value if max_legs else MAX_LEGS,
         )
         if not routes:
-            budget_note = " within that budget" if budget is not None else ""
+            budget_note = (" within your saved budget" if saved_budget
+                           else " within that budget" if budget is not None else "")
             safety_note = " using confirmed space stations only" if space_only else ""
             access_note = " with confirmed capital-ship cargo access" if capital_access_only else ""
             auto_load_note = " with auto-load at every stop" if auto_load_only else ""
             system_note = f" entirely within {system_value}" if system_value else ""
-            saved_hint = saved_filters_hint(saved_filter_labels(**saved_filters, capital_ship_access=(
+            saved_hint = saved_filters_hint(saved_filter_labels(**saved_filters, budget=saved_budget, capital_ship_access=(
                 bool(prefs["capital_ship_access"]) and not requires_capital_cargo_access(ship_vehicle))))
             await interaction.followup.send(
                 f"No multi-stop chains{f' from **{origin_name}**' if origin_name else ''} "

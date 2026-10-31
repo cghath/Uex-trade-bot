@@ -267,3 +267,20 @@ def test_routes_embed_discloses_when_cargo_allocation_is_approximate(tmp_path):
         )
 
     asyncio.run(run())
+
+
+def test_a_uex_failure_is_described_not_shown_as_a_raw_exception():
+    """2026-10-03 audit MSG-4: "Route intelligence unavailable: <raw exception>"."""
+    from types import SimpleNamespace as NS
+    from unittest.mock import AsyncMock
+
+    from bot.uex.exceptions import UexApiError
+
+    async def run():
+        cog = IntelligenceBrief.__new__(IntelligenceBrief)
+        cog.bot = NS(uex=NS(get_vehicles=AsyncMock(side_effect=UexApiError("ReadTimeout: pool timeout"))))
+        return await cog._routes_embed("Ship", _NO_PREFS, budget=None, space_only=None)
+
+    description = asyncio.run(run()).description
+    assert description.startswith("Route intelligence unavailable: UEX didn't return a valid response just now")
+    assert "try again in a moment" in description

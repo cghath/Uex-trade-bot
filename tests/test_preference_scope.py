@@ -171,7 +171,8 @@ def test_intelligence_brief_applies_saved_preferences(monkeypatch):
         embed = await cog._routes_embed("Ship", prefs, budget=None, space_only=None)
         assert seen["budget"] == 5000.0 and seen["space_only"] is True
         assert seen["auto_load_only"] is True and seen["system"] == "Stanton"
-        assert "Your saved space-only, auto-load-only and system Stanton settings are on" in embed.description
+        assert ("Your saved budget of 5,000 aUEC, space-only, auto-load-only and system Stanton settings are on"
+                in embed.description), "the saved budget is named too (UX-4)"
         assert "set those options on this command" not in embed.description, "the brief has no such options"
 
         await cog._routes_embed("Ship", prefs, budget=100.0, space_only=False)

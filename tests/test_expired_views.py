@@ -242,7 +242,7 @@ def test_the_minimum_price_menu_stops_once_its_message_becomes_the_authorize_scr
         cog = NS(_build_authorize_screen=AsyncMock(return_value=(discord.Embed(title="Authorize"), authorize)))
         row = {"id": 1, "item_name": "Gold", "quantity": 5, "minimum_price": None}
         view = SetMinimumPricesView(cog, 7, [row], [row])
-        interaction = NS(response=NS(edit_message=AsyncMock()))
+        interaction = NS(edit_original_response=AsyncMock())
         await view.resolve_minimum_set(interaction, 1, 100)
         return view, authorize, interaction
 

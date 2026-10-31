@@ -568,6 +568,14 @@ def test_budget_still_replaces_a_stock_scattergun_with_any_gun():
     assert pick.part["name"] == "Mantis GT-220 Gatling"
 
 
+@pytest.mark.parametrize("stock", [None, _typed_gun("Dominance-3 Scattergun", 930, energy=1116, pellets=8)])
+def test_budget_with_no_stock_gun_to_beat_still_puts_guns_that_get_through_first(stock):
+    """Audit TRD-3: for an empty slot or a stock scattergun, Budget went by DPS per aUEC alone and
+    bought the cheap gun whose rounds bounce off even a Gladius, where the other profiles don't."""
+    pick = pick_for_slot(_group("Guns", stock), [_sold(MANTIS_4101, 10_000), _sold(M5A_4101, 90_000)], BUDGET)
+    assert pick.part["name"] == "M5A Cannon"
+
+
 # -- Point defense: a PDC slot keeps its stock turret -------------------------------------------
 
 # Live wiki 4.10.1: every stock PDC is the M2C "Swarm"; the Pepperbox is a PDCTurret too, but its

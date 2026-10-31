@@ -121,28 +121,56 @@ def format_trading_preferences(prefs: dict[str, object], *, ship_detail: str | N
     ])
 
 
+# Saved filters no route command has its own option for, so the hint never says "set that
+# option on this command" about them (audit UX-4): capital-ship access is worked out from the
+# saved setting and the ship.
+_NO_OPTION_LABELS = frozenset({"capital-ship access"})
+
+
+def _join_labels(labels: list[str]) -> str:
+    return labels[0] if len(labels) == 1 else ", ".join(labels[:-1]) + " and " + labels[-1]
+
+
+def _option_name(label: str) -> str:
+    """The command option a label is for: "system Pyro" is the system option."""
+    return label.split()[0] if label.startswith(("budget ", "system ")) else label
+
+
 def saved_filters_hint(labels: list[str], *, can_override: bool = True) -> str:
     """Appended to a "nothing found" message when filters the player didn't pass on this
     command - their saved /set-trading-preferences defaults - are active (audit UX-2).
     Without it a saved auto-load-only or system filter that rules out everything reads as
     "nothing exists right now", with no hint the player's own setting is the cause.
     `labels` are the saved filters actually active, e.g. ["auto-load-only", "system Pyro"];
-    empty means no hint. `can_override=False` is for a command without options for them."""
+    empty means no hint. `can_override=False` is for a command without options for them.
+    Capital-ship access never has an option, so it's never offered as one (audit UX-4)."""
     if not labels:
         return ""
-    if len(labels) == 1:
-        override = "set that option on this command to override it, or " if can_override else ""
+    overridable = [label for label in labels if label not in _NO_OPTION_LABELS] if can_override else []
+    several = len(labels) > 1
+    if not overridable:
+        override = ""
+    elif len(overridable) == len(labels):
+        override = ("set those options on this command to override them, or " if several
+                    else "set that option on this command to override it, or ")
+    else:
+        names = [_option_name(label) for label in overridable]
+        override = (f"set the {_join_labels(names)} option{'s' if len(names) > 1 else ''} "
+                    "on this command to override, or ")
+    if not several:
         return f" Your saved {labels[0]} setting is on - {override}change it with /set-trading-preferences."
-    joined = ", ".join(labels[:-1]) + " and " + labels[-1]
-    override = "set those options on this command to override them, or " if can_override else ""
-    return f" Your saved {joined} settings are on - {override}change them with /set-trading-preferences."
+    return (f" Your saved {_join_labels(labels)} settings are on - {override}change them with "
+            "/set-trading-preferences.")
 
 
 def saved_filter_labels(*, space_only: bool = False, capital_ship_access: bool = False,
-                        auto_load_only: bool = False, system: str | None = None) -> list[str]:
+                        auto_load_only: bool = False, system: str | None = None,
+                        budget: float | None = None) -> list[str]:
     """Labels for saved_filters_hint. Pass only filters that came from saved preferences,
-    not ones the player set on this command."""
+    not ones the player set on this command - a budget only when the saved one was used."""
     labels = []
+    if budget:
+        labels.append(f"budget of {budget:,.0f} aUEC")
     if space_only:
         labels.append("space-only")
     if capital_ship_access:

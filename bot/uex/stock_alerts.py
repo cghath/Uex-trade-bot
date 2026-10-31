@@ -71,14 +71,23 @@ def detect_restocks(
     return to_notify, new_state
 
 
-def format_cargo_fit_note(scu_available: float, ship_cargo_scu: float | None) -> str:
+def format_cargo_fit_note(scu_available: float, ship_cargo_scu: float | None, *, ship_query: str | None = None,
+                          lookup_failed: bool = False) -> str:
     """Describe how much of a restock a given ship's hold could actually take, for the
-    notification message. With no known ship, points the user at how to set one instead of
-    just omitting the detail silently.
+    notification message. With no known ship, says why instead of just omitting the detail
+    silently - and only tells a player to set a ship when they have none (audit MSG-4):
+    `ship_query` is the ship the alert checked against (its own, or the saved default), and
+    `lookup_failed` means UEX's ship list didn't load.
     """
     if ship_cargo_scu is None or ship_cargo_scu <= 0:
-        return ("set a ship with /set-trading-preferences (or pass one to /stock-alert-add) to see how much "
-                "of this would fill your hold")
+        if not ship_query:
+            return ("set a ship with /set-trading-preferences (or pass one to /stock-alert-add) to see how much "
+                    "of this would fill your hold")
+        if lookup_failed:
+            return "UEX's ship list didn't load, so no cargo-fit estimate this time"
+        if ship_cargo_scu is not None:
+            return f"'{ship_query}' has no cargo hold to fill"
+        return f"'{ship_query}' didn't match a single ship, so no cargo-fit estimate"
     if scu_available >= ship_cargo_scu:
         return f"fills your full {ship_cargo_scu:,.0f} SCU hold"
     return f"fills {scu_available:,.0f} of your {ship_cargo_scu:,.0f} SCU hold"
@@ -90,28 +99,32 @@ RESTOCK_MESSAGE_MAX_TERMINALS = 10
 
 def format_restock_message(
     alert_id: int, commodity_name: str, terminals: list[dict[str, Any]], ship_cargo_scu: float | None,
+    *, ship_query: str | None = None, lookup_failed: bool = False,
 ) -> str:
     """One notification for every terminal an alert's check found newly in stock. It used
     to be one ping per terminal, and on an alert's first check that's every terminal that
     already has stock - a flood for a common commodity (audit UX-1). Cheapest first, since
-    a restock alert is about where to buy."""
+    a restock alert is about where to buy. `ship_query`/`lookup_failed` are format_cargo_fit_note's."""
+    def fit_note(scu_available: float) -> str:
+        return format_cargo_fit_note(scu_available, ship_cargo_scu, ship_query=ship_query, lookup_failed=lookup_failed)
+
     if len(terminals) == 1:
         terminal = terminals[0]
         return (
             f"stock alert #{alert_id}: **{commodity_name}** is back in stock at "
             f"**{terminal['terminal_name']}** — {terminal['price_buy']:.2f} aUEC/unit, "
-            f"{terminal['scu_buy']:,.0f} SCU available ({format_cargo_fit_note(terminal['scu_buy'], ship_cargo_scu)})"
+            f"{terminal['scu_buy']:,.0f} SCU available ({fit_note(terminal['scu_buy'])})"
         )
     ordered = sorted(terminals, key=lambda t: (t["price_buy"], -t["scu_buy"]))
     shown = ordered[:RESTOCK_MESSAGE_MAX_TERMINALS]
     known_ship = ship_cargo_scu is not None and ship_cargo_scu > 0
     lines = [f"stock alert #{alert_id}: **{commodity_name}** is in stock at {len(terminals)} terminals:"]
     for terminal in shown:
-        fit = f" ({format_cargo_fit_note(terminal['scu_buy'], ship_cargo_scu)})" if known_ship else ""
+        fit = f" ({fit_note(terminal['scu_buy'])})" if known_ship else ""
         lines.append(f"• **{terminal['terminal_name']}** — {terminal['price_buy']:.2f} aUEC/unit, "
                      f"{terminal['scu_buy']:,.0f} SCU{fit}")
     if len(ordered) > len(shown):
         lines.append(f"…and {len(ordered) - len(shown)} more.")
     if not known_ship:
-        lines.append(f"({format_cargo_fit_note(0, None)})")
+        lines.append(f"({fit_note(0)})")
     return "\n".join(lines)

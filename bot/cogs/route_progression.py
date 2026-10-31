@@ -52,6 +52,10 @@ ABANDONMENT_HOURS = 48
 # distance lookup (one call each), which caps the lookups for a widely traded commodity.
 MAX_REROUTE_DISTANCE_GM = 25
 MAX_REROUTE_DISTANCE_LOOKUPS = 24
+# How long the reroute waits on those lookups. It runs before the next leg's prompt is
+# posted, and a hanging UEX (24 lookups, 3 batches, each with UEX's timeout and retries)
+# held that prompt back for minutes (audit REL-9).
+REROUTE_DISTANCE_BUDGET_SECONDS = 10
 
 # A leg-outcome button/modal's real commit point (claim() + the Discord acknowledgement)
 # happens BEFORE handle_leg_outcome/abandon_thread ever runs - by the time either of those
@@ -567,13 +571,17 @@ class HedgeReportModal(BotModal):
                 )
                 return
 
+        # Acknowledged before the report's DB write, which can wait on a lock past Discord's
+        # 3-second window: the report would save while the player saw "did not respond",
+        # and a retry would only say "already reported" (audit REL-6).
+        await interaction.response.defer(ephemeral=True, thinking=True)
         recorded = await self.cog._record_hedge_report(
             hedge_id=self.hedge_id, side=self.side, actual_price=actual_price, actual_scu=actual_scu,
         )
         if not recorded:
-            await interaction.response.send_message("This was already reported.", ephemeral=True)
+            await interaction.followup.send("This was already reported.", ephemeral=True)
             return
-        await interaction.response.send_message("Got it, thanks for reporting.", ephemeral=True)
+        await interaction.followup.send("Got it, thanks for reporting.", ephemeral=True)
         await self.parent_view.disable_in_background()
 
 
@@ -816,7 +824,8 @@ class RouteProgression(commands.Cog):
                 return
             except discord.HTTPException as exc:
                 logger.warning("Discord refused the route copy for thread %s (%s); posting its text", thread.id, exc)
-        for part in text_pages(page.text):
+        # Every part of a route split over several text pages, not only the part showing (audit TRD-8).
+        for part in text_pages(page.full_text or page.text):
             await thread.send(part.text, allowed_mentions=NO_MENTIONS)
 
     async def _post_leg_prompt(
@@ -1097,16 +1106,30 @@ class RouteProgression(commands.Cog):
                 market_rows, terminal_id=leg.id_terminal, anchor_commodity_id=leg.id_commodity,
                 anchor_buy_price=float(buy_price), **route_filters,
             )
-            nothing_nearby = (
-                f"That left ~{shortfall_scu:,.0f} SCU of **{leg.commodity_name}** unsold - no other buyer "
-                f"within {MAX_REROUTE_DISTANCE_GM} Gm of **{leg.terminal_name}** was found right now."
-            )
+            unsold = f"That left ~{shortfall_scu:,.0f} SCU of **{leg.commodity_name}** unsold - "
+            if len(buyer_ids) > MAX_REROUTE_DISTANCE_LOOKUPS:
+                # Only the best-paying buyers get a distance lookup, so a near one further
+                # down the list was never checked - don't claim there is none (audit LOGIC-5).
+                nothing_nearby = (
+                    f"{unsold}none of the {MAX_REROUTE_DISTANCE_LOOKUPS} best-paying buyers in this system "
+                    f"is within {MAX_REROUTE_DISTANCE_GM} Gm of **{leg.terminal_name}** right now."
+                )
+            else:
+                nothing_nearby = (
+                    f"{unsold}no other buyer within {MAX_REROUTE_DISTANCE_GM} Gm of **{leg.terminal_name}** "
+                    "was found right now."
+                )
             if not buyer_ids:
                 await channel.send(nothing_nearby)
                 return
-            distances = await fetch_terminal_distances(
-                self.bot.uex, leg.id_terminal, buyer_ids[:MAX_REROUTE_DISTANCE_LOOKUPS],
-            )
+            try:
+                distances = await asyncio.wait_for(
+                    fetch_terminal_distances(self.bot.uex, leg.id_terminal, buyer_ids[:MAX_REROUTE_DISTANCE_LOOKUPS]),
+                    timeout=REROUTE_DISTANCE_BUDGET_SECONDS,
+                )
+            except TimeoutError:
+                await channel.send(f"{unsold}UEX didn't give distances in time, so no nearby buyer could be checked.")
+                return
             nearby = {tid: gm for tid, gm in distances.items() if gm is not None and gm <= MAX_REROUTE_DISTANCE_GM}
             if not nearby:
                 await channel.send(nothing_nearby)
@@ -1134,7 +1157,8 @@ class RouteProgression(commands.Cog):
                 f"still won't sell there)" if load.anchor_unsold_scu > 0 else ""
             )
             distance = nearby.get(load.destination_id)
-            distance_note = f" ({distance:,.0f} Gm away)" if distance is not None else ""
+            # One decimal, as distances are shown elsewhere: a nearby terminal read "0 Gm away" (audit MSG-9).
+            distance_note = f" ({distance:,.1f} Gm away)" if distance is not None else ""
             await channel.send(
                 f"That left ~{shortfall_scu:,.0f} SCU of **{leg.commodity_name}** unsold - "
                 f"**{load.destination_name}**{distance_note} buys it{unsold_note}:\n{cargo_item_line(item)}"

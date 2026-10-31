@@ -461,6 +461,28 @@ def test_a_wiki_that_never_answers_raises_the_unavailable_subclass():
     assert len(h.requests) == MAX_ATTEMPTS
 
 
+@pytest.mark.parametrize("response", [
+    httpx.Response(401), httpx.Response(403), httpx.Response(407), httpx.Response(451),
+    httpx.Response(200, content=b"<html>Down for maintenance</html>"), httpx.Response(200, json=None),
+    httpx.Response(200, json=[1, 2]),
+])
+def test_a_refusal_or_a_page_that_is_not_json_is_an_outage_not_a_definite_miss(response):
+    """Audit REL-3: a 403 or a 200 HTML maintenance page was a definite WikiApiError, so the
+    ship parts finder cached "no detail" for 24h and showed wrong sizes and no stats all day."""
+    h = _Harness(lambda req, n: response)
+    with pytest.raises(WikiUnavailableError):
+        h.run(lambda c: c.get_item_detail(UUID))
+    assert len(h.requests) == 1, "not retried"
+
+
+@pytest.mark.parametrize("status", [400, 404, 410, 422])
+def test_other_client_errors_stay_definite(status):
+    h = _Harness(lambda req, n: httpx.Response(status))
+    with pytest.raises(WikiApiError) as info:
+        h.run(lambda c: c.get_item_detail(UUID))
+    assert not isinstance(info.value, WikiUnavailableError)
+
+
 def test_a_definite_404_is_a_plain_wiki_error_not_an_outage():
     h = _Harness(lambda req, n: httpx.Response(404))
     with pytest.raises(WikiApiError) as info:

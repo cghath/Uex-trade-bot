@@ -215,6 +215,19 @@ def test_a_long_route_is_split_over_text_pages_without_losing_a_line():
     asyncio.run(run())
 
 
+def test_an_expired_text_page_keeps_every_line():
+    """Audit TRD-9: text pages were sized without room for EXPIRED_NOTE, so when the buttons closed a
+    full page's last lines (a disclosure, the footer, its part line) became "...and N more"."""
+    lines = [f"Leg {i:03}: buy Agricium at a terminal with a long name, sell it somewhere else" for i in range(90)]
+    pages = text_pages("\n".join(lines), route=NS(title="long"), header=HEADER)
+    view = RoutePagesView(pages, owner_id=OWNER, tracking_cog=_tracker(), header=HEADER)
+    for index in range(len(pages)):
+        view.index = index
+        content = view.render(note=EXPIRED_NOTE)["content"]
+        assert len(content) <= MAX_MESSAGE_CHARS and "…and" not in content and "(part " in content, index
+    view.stop()
+
+
 def test_expired_buttons_grey_out_and_say_so():
     async def run():
         pages = _pages(3)

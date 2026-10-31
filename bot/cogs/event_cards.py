@@ -5,7 +5,7 @@ list. Rules and wording live in bot/uex/events.py.
 - **A card per occurrence**, posted when the event is made (or found on start-up), pinging Org
   Events: title, picture, organizer, description, start in each reader's own time, Ready by,
   the voice channel, and a roster. A repeating event gets a fresh card each time; its regulars
-  are put on it by themselves.
+  are put on it by themselves (one who has left the server is dropped).
 - **Joining**: the role menu (or Join, for an event without roles), Maybe, Leave, Voice and
   Interested on Discord. A full role puts you on its wait list; the first one waiting moves up,
   with a DM, when a spot opens. The private reply after joining asks which ship you're bringing
@@ -13,9 +13,9 @@ list. Rules and wording live in bot/uex/events.py.
 - **The organizer and Event Managers** get Start (pings the roster with the voice channel and
   marks the Discord event live) and End, and set roles with /event-roles. The event's creator,
   the Event Manager role, admins and anyone who can manage events count.
-- **Changes**: an hour before, the roster is reminded. A new time in Discord updates the card and
-  pings the roster once; a cancelled event says so. A card nobody ended closes 12 hours after its
-  start.
+- **Changes**: an hour before, the roster is reminded (again each minute while Discord refuses the
+  post). A new time in Discord updates the card and pings the roster once; a cancelled event says
+  so. A card nobody ended closes 12 hours after its start.
 
 Buttons and menus are DynamicItems carrying the card's id, so they work after a restart.
 """
@@ -31,8 +31,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
-from bot.delivery import send_dm
-from bot.discord_ui import BotLayoutView, BotModal, BotView
+from bot.delivery import home_channel, send_dm
+from bot.discord_ui import BotDynamicItem, BotLayoutView, BotModal, BotView
 from bot.uex.events import (
     CANCELLED, ENDED, GOING, MAYBE, OPEN, REMIND_BEFORE, STARTED, WAITING, EventRole, Signup, announce_text,
     cancelled_text, details_text, ended_text, joined_text, next_in_line, parse_roles, ping_messages, placed_status,
@@ -102,6 +102,12 @@ def _card_ids(components) -> set[int]:
     return found
 
 
+def _left(guild, user_id: int) -> bool:
+    """Whether a member has left the server. Only said once discord.py holds the whole member list
+    (`chunked`), so a member it hasn't loaded yet is never taken for gone."""
+    return guild is not None and getattr(guild, "chunked", False) and guild.get_member(user_id) is None
+
+
 def _snapshot(event: discord.ScheduledEvent) -> dict:
     return {"name": event.name, "description": event.description,
             "cover_url": event.cover_image.url if event.cover_image else None,
@@ -159,7 +165,7 @@ _BUTTONS = {
 }
 
 
-class CardButton(discord.ui.DynamicItem[discord.ui.Button], template=BUTTON_TEMPLATE):
+class CardButton(BotDynamicItem, discord.ui.DynamicItem[discord.ui.Button], template=BUTTON_TEMPLATE):
     """Every button on a card and its private replies; the custom id carries the card's id."""
 
     def __init__(self, card_id: int, action: str) -> None:
@@ -176,7 +182,7 @@ class CardButton(discord.ui.DynamicItem[discord.ui.Button], template=BUTTON_TEMP
         await getattr(cog, f"on_{self.action}")(interaction, self.card_id)
 
 
-class RoleMenu(discord.ui.DynamicItem[discord.ui.Select], template=MENU_TEMPLATE):
+class RoleMenu(BotDynamicItem, discord.ui.DynamicItem[discord.ui.Select], template=MENU_TEMPLATE):
     """The card's role menu (kind "role") and the private ship menu (kind "ship")."""
 
     def __init__(self, card_id: int, roles: list[EventRole] | None = None, signups: list[Signup] | None = None,
@@ -247,7 +253,7 @@ class EventCards(commands.Cog):
     # -- helpers ----------------------------------------------------------------
 
     def _channel(self):
-        return self.bot.get_channel(EVENTS_CHANNEL_ID)
+        return home_channel(self.bot, EVENTS_CHANNEL_ID, feature="event cards")
 
     async def _org_mention(self, guild_id: int) -> tuple[str | None, discord.Object | None]:
         role_id = (await self.bot.db.get_role_picker_roles(guild_id)).get(ORG_EVENTS_ROLE)
@@ -273,15 +279,17 @@ class EventCards(commands.Cog):
             logger.warning("Couldn't redraw event card %s: %s", card_id, exc)
 
     async def ping_roster(self, card: dict, text: str, *, waiting_too: bool = False,
-                          view: discord.ui.View | None = None) -> None:
-        """A reply to the card pinging everyone on it (the wait list only when `waiting_too`)."""
+                          view: discord.ui.View | None = None) -> bool:
+        """A reply to the card pinging everyone on it (the wait list only when `waiting_too`).
+        False when nothing was posted, so a claimed reminder can be tried again."""
         statuses = (GOING, MAYBE, WAITING) if waiting_too else (GOING, MAYBE)
         ids = [s.user_id for s in _signups(await self.bot.db.get_event_signups(card["card_id"])) if s.status in statuses]
         channel = self.bot.get_channel(card["channel_id"])
         if channel is None:
-            return
+            return False
         reference = discord.MessageReference(message_id=card["message_id"], channel_id=card["channel_id"],
                                              fail_if_not_exists=False) if card["message_id"] else None
+        posted = False
         # Past 100 people one message can't ping everyone (Discord's limits): the rest follow
         for index, (content, batch) in enumerate(ping_messages(text, ids)):
             kwargs = {"reference": reference} if reference else {}
@@ -290,8 +298,10 @@ class EventCards(commands.Cog):
             try:
                 await channel.send(content, allowed_mentions=discord.AllowedMentions(
                     everyone=False, roles=False, users=[discord.Object(i) for i in batch]), **kwargs)
+                posted = True
             except discord.HTTPException as exc:
                 logger.warning("Couldn't post to event card %s's roster: %s", card["card_id"], exc)
+        return posted
 
     def _can_manage(self, member, card: dict) -> bool:
         if member.id == card["creator_id"]:
@@ -330,6 +340,9 @@ class EventCards(commands.Cog):
         if default:
             ships.append(default)
         ships += [s for s in await self.bot.db.event_ship_history(user_id) if s not in ships]
+        # A ship typed as "~other" (kept as typed while UEX was down) would repeat a menu value below,
+        # and Discord refuses a menu with two the same
+        ships = [s for s in ships if not s.startswith("~")]
         options = [discord.SelectOption(label=s[:100], value=s[:100],
                                         description="Your default ship" if s == default else "You've brought it before")
                    for s in ships[:SHIP_MENU]]
@@ -545,7 +558,9 @@ class EventCards(commands.Cog):
         if _voice_url(card):
             channel = self.bot.get_channel(card["voice_channel_id"])
             view = BotView(timeout=None)
-            view.add_item(discord.ui.Button(label=f"Join {channel.name}" if channel else "Join voice", url=_voice_url(card)))
+            # a channel name runs to 100 characters, a button label to 80
+            view.add_item(discord.ui.Button(label=f"Join {channel.name}"[:80] if channel else "Join voice",
+                                            url=_voice_url(card)))
         await self.ping_roster(card, start_text(card["name"], card["voice_channel_id"]), view=view)
         return True
 
@@ -608,7 +623,7 @@ class EventCards(commands.Cog):
         if parsed:
             listed = "\n".join(f"{r.name} - {r.capacity} spot" + ("" if r.capacity == 1 else "s") for r in parsed)
             text = (f"Roles set for **{scheduled.name}**:\n{listed}\nUsed every time until you change them."
-                    f" The card in <#{EVENTS_CHANNEL_ID}> is updated.")
+                    + (f" The card in <#{EVENTS_CHANNEL_ID}> is updated." if card is not None else ""))
         else:
             text = f"**{scheduled.name}** has no roles now - people just press Join."
         await interaction.followup.send(text, ephemeral=True)
@@ -680,11 +695,13 @@ class EventCards(commands.Cog):
                 card = None
             else:
                 await self.bot.db.move_event_card(card["card_id"], starts_at)
-                if starts_at - now <= REMIND_BEFORE:  # the time-change ping is its reminder: not a second ping
-                    await self.bot.db.claim_event_reminder(card["card_id"])
+                # the time-change ping is its reminder: not a second ping
+                claimed = starts_at - now <= REMIND_BEFORE and await self.bot.db.claim_event_reminder(card["card_id"])
                 await self.bot.db.update_event_card(card["card_id"], **_snapshot(event))
                 await self.refresh(card["card_id"])
-                await self.ping_roster(card, time_change_text(event.name, starts_at, card["starts_at"]), waiting_too=True)
+                if not await self.ping_roster(card, time_change_text(event.name, starts_at, card["starts_at"]),
+                                              waiting_too=True) and claimed:
+                    await self.bot.db.release_event_reminder(card["card_id"], starts_at)  # not posted: the reminder goes instead
                 return
         if card is None:
             if event.status != discord.EventStatus.scheduled or await self.bot.db.event_card_exists(event.id, starts_at):
@@ -722,7 +739,11 @@ class EventCards(commands.Cog):
         card_id = await self.bot.db.create_event_card(guild_id=event.guild_id, event_id=event.id, starts_at=starts_at,
                                                       channel_id=channel.id, repeats=repeats_text(rule), **_snapshot(event))
         roles = _roles(await self.bot.db.get_event_roles(event.id))
+        guild = self.bot.get_guild(event.guild_id)
         for regular in await self.bot.db.get_event_regulars(event.id):  # regulars are on it from the start
+            if _left(guild, regular["user_id"]):  # gone from the server: off every card from now on
+                await self.bot.db.delete_event_regular(event.id, regular["user_id"])
+                continue
             role = regular["role"] if regular["role"] in {r.name for r in roles} else None
             signups = _signups(await self.bot.db.get_event_signups(card_id))
             await self.bot.db.save_event_signup(card_id, regular["user_id"], status=placed_status(roles, signups,
@@ -799,8 +820,9 @@ class EventCards(commands.Cog):
                     await self.sync(event)
                 await self.close_missing(channel.guild)
             for card in await self.bot.db.event_cards_due_reminder(now, REMIND_BEFORE):
-                if await self.bot.db.claim_event_reminder(card["card_id"]):
-                    await self.ping_roster(card, reminder_text(card["name"], card["starts_at"], card["voice_channel_id"]))
+                if await self.bot.db.claim_event_reminder(card["card_id"]) and not await self.ping_roster(
+                        card, reminder_text(card["name"], card["starts_at"], card["voice_channel_id"])):
+                    await self.bot.db.release_event_reminder(card["card_id"], card["starts_at"])  # not posted: tried next minute
             for card in await self.bot.db.stale_event_cards(now - CLOSE_AFTER):
                 await self.close(card, ENDED, announce=False)
         except Exception:

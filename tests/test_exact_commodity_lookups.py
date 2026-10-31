@@ -180,6 +180,24 @@ def test_a_price_alert_on_a_name_matching_several_commodities_is_skipped_not_gue
     asyncio.run(run())
 
 
+def test_a_gold_price_alert_ignores_golden_medmon_when_no_gold_row_comes_back():
+    """Audit LOGIC-4: with no Gold row in a poll, the lenient filter took Golden Medmon's lone
+    rows as partial typing, so a Gold alert fired on its 71,000 and was used up."""
+    async def run():
+        alert = {"id": 1, "user_id": 10, "channel_id": 5, "commodity_name": "Gold",
+                 "direction": "sell_at_least", "target_price": 50000}
+        medmon_only = AsyncMock(return_value=[r for r in _matching("Gold") if r["commodity_name"] != "Gold"])
+        cog = Alerts.__new__(Alerts)
+        cog.bot = NS(db=NS(list_active_alerts=AsyncMock(return_value=[alert])), uex=NS(get_commodities_prices=medmon_only))
+        cog._fire_alert = AsyncMock()
+
+        await cog._poll_alerts_once()
+
+        cog._fire_alert.assert_not_awaited()
+
+    asyncio.run(run())
+
+
 # -- stock alerts ---------------------------------------------------------------------------------------------------
 
 def test_a_gold_stock_alert_ignores_golden_medmon_restocks():
@@ -199,6 +217,30 @@ def test_a_gold_stock_alert_ignores_golden_medmon_restocks():
 
         cog._notify_stock_alert.assert_not_awaited()
         assert [call.args[1] for call in db.upsert_stock_alert_terminal_state.await_args_list] == [5]
+
+    asyncio.run(run())
+
+
+def test_a_gold_stock_alert_ignores_golden_medmon_when_no_gold_row_comes_back():
+    """Audit LOGIC-4, stock side: Golden Medmon's restock was reported as Gold's, and its
+    state saved as Gold's."""
+    async def run():
+        alert = {"id": 7, "user_id": 10, "channel_id": 5, "commodity_name": "Gold", "scope": "personal",
+                 "ship_query": None}
+        db = NS(list_active_stock_alerts=AsyncMock(return_value=[alert]),
+                get_stock_alert_terminal_state=AsyncMock(return_value={}),
+                upsert_stock_alert_terminal_state=AsyncMock(),
+                get_default_ship=AsyncMock(return_value=None))
+        medmon_only = AsyncMock(return_value=[r for r in _matching("Gold") if r["commodity_name"] != "Gold"])
+        cog = StockAlerts.__new__(StockAlerts)
+        cog.bot = NS(db=db, uex=NS(get_commodities_prices=medmon_only))
+        cog._notify_stock_alert = AsyncMock()
+
+        await cog._poll_stock_alerts_once()
+
+        cog._notify_stock_alert.assert_not_awaited()
+        db.get_stock_alert_terminal_state.assert_not_awaited()
+        db.upsert_stock_alert_terminal_state.assert_not_awaited()
 
     asyncio.run(run())
 

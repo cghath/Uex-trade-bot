@@ -107,7 +107,7 @@ def test_a_reroute_only_suggests_a_buyer_within_reach(tmp_path):
     async def run():
         # 30 pays most but is across the system; 32's distance is unknown; 33 is a jump away.
         message, looked_up = await _reroute(tmp_path, {30: 40.0, 31: 10.0, 32: None})
-        assert "Buyer 31" in message and "(10 Gm away)" in message, message
+        assert "Buyer 31" in message and "(10.0 Gm away)" in message, message
         assert looked_up == {30, 31, 32}, "a buyer in another star system is never even looked up"
 
     asyncio.run(run())

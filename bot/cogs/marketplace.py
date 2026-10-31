@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import discord
@@ -22,7 +23,7 @@ from bot.autocomplete import fetch_within, gather_within
 from bot.delivery import fit_lines
 from bot.discord_ui import BotModal, BotView
 from bot.uex.charts import render_price_history_chart
-from bot.uex.exceptions import UexApiError, describe_uex_api_error
+from bot.uex.exceptions import UexApiError, UexDeleteUnconfirmedError, describe_uex_api_error
 from bot.uex.inventory import extract_listing_id
 from bot.uex.marketplace import (
     QUALITY_MAX,
@@ -35,15 +36,18 @@ from bot.uex.marketplace import (
     filter_listings_by_keyword,
     filter_listings_by_quality,
     find_item_id_by_name,
+    group_marketplace_history_by_currency_unit,
     listing_choices_from_rows,
     marketplace_item_link,
     marketplace_item_url,
+    marketplace_price_label,
     match_listing_choices,
     match_traded_items,
     merge_listing_choices,
     parse_listing_quality,
     parse_marketplace_average_rows,
     parse_uex_number,
+    quality_range_error,
     rank_traded_items,
     reshape_marketplace_history_rows,
 )
@@ -147,6 +151,11 @@ async def category_autocomplete(interaction: discord.Interaction, current: str) 
 # never caches favorites or deals. Keyed (user id, includes favorites/deals).
 LISTING_PICKS_TTL_SECONDS = 60
 _listing_picks_cache: dict[tuple[int, bool], tuple[float, list[ListingChoice]]] = {}
+# Each source's fetch, by (user id, source), with when it started: a keystroke while UEX is
+# slow joins the fetch already running instead of starting another, and a fetch that
+# finished after its keystroke's deadline still answers the next one (audit REL-8: 8
+# keystrokes during a slow UEX made 16 calls).
+_listing_pick_fetches: dict[tuple[int, str], tuple[float, asyncio.Future]] = {}
 # The "Show details for..." menu stays usable this long. Under Discord's 15-minute limit on
 # editing an ephemeral message, so it can still grey itself out (BotView).
 LISTING_DETAILS_TIMEOUT_SECONDS = 600
@@ -156,6 +165,24 @@ def forget_listing_picks(user_id: int) -> None:
     """Drop a player's cached pick lists, e.g. after they delete a listing."""
     for key in [key for key in _listing_picks_cache if key[0] == user_id]:
         _listing_picks_cache.pop(key, None)
+    for fetch_key in [fetch_key for fetch_key in _listing_pick_fetches if fetch_key[0] == user_id]:
+        _listing_pick_fetches.pop(fetch_key, None)
+
+
+def _shared_pick_fetch(user_id: int, source: str, start: Callable[[], Awaitable[list[ListingChoice]]]) -> asyncio.Future:
+    """The running (or recently finished, successful) fetch of one pick-list source, or a
+    new one. A failed fetch, or one older than LISTING_PICKS_TTL_SECONDS, starts again."""
+    key = (user_id, source)
+    entry = _listing_pick_fetches.get(key)
+    if entry is not None:
+        started, fetch = entry
+        if time.monotonic() - started < LISTING_PICKS_TTL_SECONDS and (
+            not fetch.done() or (not fetch.cancelled() and fetch.exception() is None)
+        ):
+            return fetch
+    fetch = asyncio.ensure_future(start())
+    _listing_pick_fetches[key] = (time.monotonic(), fetch)
+    return fetch
 
 
 async def _listing_picks(bot: Any, user_id: int, *, include_others: bool) -> list[ListingChoice]:
@@ -186,7 +213,8 @@ async def _listing_picks(bot: Any, user_id: int, *, include_others: bool) -> lis
         open_deals = [row for row in rows if not row.get("date_closed")]
         return listing_choices_from_rows(open_deals, "deal", id_key="id_listing")
 
-    outcomes = await gather_within(own(), *((favorites(), deals()) if include_others else ()))
+    sources = [("own", own), *((("favorites", favorites), ("deals", deals)) if include_others else ())]
+    outcomes = await gather_within(*(_shared_pick_fetch(user_id, name, start) for name, start in sources))
     groups = [outcome for outcome in outcomes if isinstance(outcome, list)]
     for outcome in outcomes:
         if not isinstance(outcome, list):
@@ -404,6 +432,31 @@ class ConfirmDeleteListingView(BotView):
         # run yet, so there's nothing to leave inconsistent or roll back.
         try:
             gone = await self.bot.uex.delete_marketplace_listing(listing_id=listing_id, secret_key=self.secret_key)
+        except UexDeleteUnconfirmedError as exc:
+            if tracked_job:
+                # Same hold as /inventory-cancel-post: /inventory-confirm-sale can take the job at once,
+                # and confirming 0 sold never relists what the player deleted.
+                job_id = int(tracked_job["id"])
+                outcome = await self.bot.db.record_inventory_listing_stock(
+                    job_id, in_stock=int(current_stock), sold_out=sold_out
+                )
+                if not (outcome and outcome["status"] == "sold"):
+                    await self.bot.db.disable_auto_relist(job_id)
+                    await self.bot.db.mark_inventory_post_needs_confirmation(
+                        job_id, "Deletion accepted by UEX, but its read-back failed"
+                    )
+                    await interaction.followup.send(
+                        f"UEX accepted the delete of listing #{listing_id}, but checking that it's gone failed "
+                        f"({exc}). Job #{job_id} is on hold and won't be relisted: once UEX no longer shows the "
+                        f"listing, use `/inventory-confirm-sale job_id:{job_id}` with how many sold (0 if none) "
+                        "to release the rest.", ephemeral=True,
+                    )
+                    return
+            await interaction.followup.send(
+                f"UEX accepted the delete of listing #{listing_id}, but checking that it's gone failed ({exc}). "
+                "Nothing was changed here; check it on UEX before deleting it again.", ephemeral=True,
+            )
+            return
         except UexApiError as exc:
             await interaction.followup.send(f"Couldn't delete listing #{listing_id}: {exc}", ephemeral=True)
             return
@@ -510,10 +563,15 @@ class Marketplace(commands.Cog):
         bot/db/database.py."""
         try:
             rows = await self.bot.uex.get_marketplace_trends()
+            activity = extract_item_activity(rows)
         except UexApiError as exc:
             logger.warning("Failed to snapshot marketplace item activity: %s", exc)
             return
-        activity = extract_item_activity(rows)
+        except Exception:
+            # Anything else escaping here would stop this hourly loop until a restart, and
+            # liquidity with it (audit REL-5).
+            logger.exception("Failed to snapshot marketplace item activity")
+            return
         if not activity:
             return
         try:
@@ -616,6 +674,9 @@ class Marketplace(commands.Cog):
         min_quality: app_commands.Range[float, 0, QUALITY_MAX] | None = None,
         max_quality: app_commands.Range[float, 0, QUALITY_MAX] | None = None,
     ) -> None:
+        if (quality_error := quality_range_error(min_quality, max_quality)) is not None:
+            await interaction.response.send_message(quality_error, ephemeral=True)
+            return
         await interaction.response.defer()
 
         try:
@@ -885,21 +946,32 @@ class Marketplace(commands.Cog):
             await interaction.followup.send(f"No Marketplace price history found for '{item}'{tier_note}.")
             return
 
-        history_rows = reshape_marketplace_history_rows(rows)
+        # One currency and unit per chart, the most-listed one, labelled from the data: UEC,
+        # WIF and per-box prices drawn as one "aUEC / unit" line made no sense (audit MSG-3).
+        groups = group_marketplace_history_by_currency_unit(rows)
+        (currency, unit), chosen = groups[0]
+        left_out = sum(len(group) for _, group in groups[1:])
+        price_label = marketplace_price_label(currency, unit)
+        history_rows = reshape_marketplace_history_rows(chosen)
         tier_label = quality_tier.name if quality_tier else "all qualities"
         # Off the event loop: drawing a chart is CPU-bound (audit REL-14).
         chart = await asyncio.to_thread(
             render_price_history_chart,
-            commodity_name=item, terminal_name=f"UEX Marketplace ({tier_label})", history_rows=history_rows
+            commodity_name=item, terminal_name=f"UEX Marketplace ({tier_label})", history_rows=history_rows,
+            y_label=price_label,
         )
         if chart is None:
             await interaction.followup.send(f"No plottable Marketplace price history found for '{item}'.")
             return
 
         file = discord.File(chart, filename="marketplace_history.png")
-        footer = "UEX Marketplace price history · one point per listed price change, not a fixed interval"
+        footer = (f"UEX Marketplace price history in {price_label} · one point per listed price change, "
+                  "not a fixed interval")
         if quality_tier:
             footer += f" · quality tier: {quality_tier.name}"
+        if left_out:
+            footer += (f" · {left_out:,} price change{'s' if left_out != 1 else ''} in other currencies or "
+                       "units not drawn")
         embed = discord.Embed(title=f"{item} — Marketplace Price History", color=discord.Color.teal())
         embed.set_footer(text=footer)
         embed.set_image(url="attachment://marketplace_history.png")

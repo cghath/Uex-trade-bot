@@ -9,11 +9,13 @@ Revenant Gatling, two S3 wing gimbals holding Omnisky IX cannons, a power plant,
 shield and a missile rack. Stock details come from tests/test_ship_loadout.py; the parts for
 sale are made up in the same shape."""
 import asyncio
+import dataclasses
 import sys
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock
 
 import discord
+import pytest
 from cryptography.fernet import Fernet
 from discord import app_commands
 
@@ -26,8 +28,8 @@ from bot.cogs.ship_parts_finder import (
 )
 from bot.db.database import Database
 from bot.uex.ship_loadout import (
-    NO_STATS, NOTHING_BEATS_STOCK, PROFILES, STOCK_UNKNOWN, LoadoutSlot, group_slots,
-    purchases,
+    NO_STATS, NOTHING_BEATS_STOCK, PROFILES, STOCK_IS_BEST, STOCK_UNKNOWN, LoadoutSlot, group_slots,
+    purchases, stock_slots,
 )
 from bot.uex.ship_parts import ShipPort
 from bot.wiki_api import WikiDuplicateNameError, WikiUnavailableError
@@ -874,6 +876,26 @@ def test_a_big_ship_pages_inside_a_layouts_limits_and_redraws_never_pile_up():
     assert all(text.startswith("## Avenger Titan · Balanced") for text in texts), "the header on every page"
 
 
+@pytest.mark.parametrize("form, limit", [(LoadoutLayoutView, 4000), (LoadoutView, MESSAGE_LIMIT)])
+def test_a_keeping_stock_section_too_long_for_one_page_is_split_between_its_lines(form, limit):
+    """Audit TRD-4: one reason's kept slots were one block never cut, so ~45+ distinct kept slots built a
+    page over the layout's 4,000 characters (and the text form's 2,000): Discord refused both."""
+    async def run():
+        view = form(NS(), VEHICLE, None, _many_groups(80), {}, owner_id=1)
+        texts = []
+        for page in range(len(view.pages)):
+            texts.append(view.text())
+            if page < len(view.pages) - 1:
+                await next(c for c in _items(view) if isinstance(c, _LoadoutPageButton) and c.delta > 0).callback(
+                    _interaction(None))
+        return view, texts
+
+    view, texts = asyncio.run(run())
+    assert len(view.pages) > 1 and all(len(text) <= limit for text in texts), [len(text) for text in texts]
+    shown = [line for text in texts for line in text.splitlines() if "Shield Generator Number" in line]
+    assert len(shown) == 80, "every kept slot on some page, none cut"
+
+
 def test_discord_refusing_the_layout_posts_the_same_loadout_as_text(tmp_path, monkeypatch):
     async def run():
         cog, thread = await _cog(tmp_path, monkeypatch)
@@ -1161,7 +1183,7 @@ def test_a_double_click_on_add_all_saves_once(tmp_path, monkeypatch):
         await _run_command(cog, thread)
         _, view = _posted(thread)
 
-        async def slow(*_args):
+        async def slow(*_args, **_kwargs):
             await asyncio.sleep(0.05)
             return 6
 
@@ -1279,7 +1301,7 @@ def test_lock_in_many_outside_a_server_without_a_thread_or_when_the_redraw_fails
     (in_dm, dm), (redrawn, redraw), (threadless, no_thread) = asyncio.run(run())
     assert in_dm == 0 and dm.followup.send.await_args.args[0] == "Ship parts lists are available in a server."
     assert redrawn == 1 and redraw.followup.send.await_args.args[0].startswith("Saved 1 part, but I couldn't refresh")
-    assert threadless == 0 and "couldn't create your private ship parts thread" in no_thread.followup.send.await_args.args[0]
+    assert threadless == 0 and "couldn't open your private ship parts thread" in no_thread.followup.send.await_args.args[0]
 
 
 def test_a_thread_that_cant_be_opened_or_posted_in_is_said_and_the_view_stopped(tmp_path, monkeypatch):
@@ -1416,3 +1438,68 @@ def test_each_stock_part_is_looked_up_once_however_many_slots_hold_it(tmp_path, 
 
     calls = [c.args[0] for c in asyncio.run(run()).get_item_detail.await_args_list]
     assert calls.count(BRACER["uuid"]) == 1 and calls.count(VARIPUCK_S3["uuid"]) == 1
+
+
+# -- UX-7: "Add all" makes the list match the loadout -----------------------------------------
+
+def test_add_all_takes_an_earlier_profiles_part_off_a_slot_this_profile_keeps_stock(tmp_path, monkeypatch):
+    """Add all on one profile, switch to one that keeps stock in a slot the first bought for,
+    Add all again: that slot's earlier part comes off, and the reply says so (audit UX-7)."""
+    async def run():
+        cog, thread = await _cog(tmp_path, monkeypatch)
+        await _run_command(cog, thread)
+        _, view = _posted(thread)
+        first = {(slot.category, slot.entry_port_name) for slot, _ in purchases(view.picks)}
+        await view.add_all(_interaction(thread))
+        for profile in PROFILES:
+            await _switch(view, profile)
+            kept = {(slot.category, slot.entry_port_name) for slot in stock_slots(view.picks)} & first
+            if kept and purchases(view.picks):
+                break
+        else:
+            raise AssertionError("no profile keeps stock where the first one bought")
+        click = _interaction(thread)
+        await view.add_all(click)
+        entries = await cog.bot.db.get_ship_parts_entries(1, 10)
+        return kept, {(e["category"], e["port_name"]) for e in entries}, click
+
+    kept, listed, click = asyncio.run(run())
+    assert not kept & listed, "the slots this profile keeps stock in are off the list"
+    reply = click.followup.send.await_args.args[0]
+    assert f"Took off {len(kept)} earlier part" in reply and "keeps stock" in reply
+
+
+def test_add_all_on_a_fresh_list_takes_nothing_off(tmp_path, monkeypatch):
+    async def run():
+        cog, thread = await _cog(tmp_path, monkeypatch)
+        await _run_command(cog, thread)
+        _, view = _posted(thread)
+        click = _interaction(thread)
+        await view.add_all(click)
+        return click
+
+    assert "Took off" not in asyncio.run(run()).followup.send.await_args.args[0]
+
+
+def test_add_all_with_nothing_to_buy_still_takes_an_earlier_profiles_parts_off(tmp_path, monkeypatch):
+    """A profile that keeps stock in every slot leaves Add all on, and pressing it takes an
+    earlier profile's parts off those slots, so the list matches the loadout (audit UX-7)."""
+    async def run():
+        cog, thread = await _cog(tmp_path, monkeypatch)
+        await _run_command(cog, thread)
+        _, view = _posted(thread)
+        await view.add_all(_interaction(thread))
+        before = len(await cog.bot.db.get_ship_parts_entries(1, 10))
+        # Every slot keeps stock because stock is best: nothing to buy.
+        view.picks = [dataclasses.replace(pick, part=None, reason=STOCK_IS_BEST) for pick in view.picks]
+        view._show_buttons()
+        disabled = view.add_all_button.disabled
+        click = _interaction(thread)
+        await view.add_all(click)
+        return before, disabled, await cog.bot.db.get_ship_parts_entries(1, 10), click
+
+    before, disabled, after, click = asyncio.run(run())
+    assert before and not disabled
+    assert after == [], "every earlier part sat in a slot this loadout keeps stock"
+    reply = click.followup.send.await_args.args[0]
+    assert reply.startswith(f"Nothing to buy: took off {before} earlier part") and "keeps stock" in reply

@@ -181,7 +181,7 @@ class Diagnostics(commands.Cog):
     )
     @app_commands.describe(command="Optional: see WHICH real users ran this specific command, for feedback outreach.")
     @app_commands.autocomplete(command=tracked_command_autocomplete)
-    @app_commands.default_permissions(manage_guild=True)  # hidden from members (audit UX-17)
+    @app_commands.default_permissions(administrator=True)  # hidden from members (audits UX-17, COMM-6)
     async def command_usage(self, interaction: discord.Interaction, command: str | None = None) -> None:
         if not await self.bot.is_owner(interaction.user):
             await interaction.response.send_message("Owner-only command.", ephemeral=True)
@@ -238,7 +238,9 @@ class Diagnostics(commands.Cog):
         rows = await self.bot.db.get_real_command_usage(owner_ids)
         # walk_commands() is the live command surface right now: a command no longer in it
         # (e.g. /my-ship, retired 2026-09) still has rows, reported apart as retired.
-        all_names = {cmd.qualified_name for cmd in self.bot.tree.walk_commands()}
+        # A group (/rolepanel) isn't a command anyone runs - its subcommands are (audit DOC-2).
+        all_names = {cmd.qualified_name for cmd in self.bot.tree.walk_commands()
+                     if not isinstance(cmd, app_commands.Group)}
         # Names are the players' own text (escaped in usage_report); nothing here may ping.
         await interaction.followup.send(usage_report(rows, all_names), ephemeral=True,
                                         allowed_mentions=discord.AllowedMentions.none())

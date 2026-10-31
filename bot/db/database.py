@@ -991,6 +991,24 @@ CREATE TABLE IF NOT EXISTS anniversary_opt_outs (
     PRIMARY KEY (guild_id, user_id)
 );
 
+-- Members who pressed "Stop welcome-back messages" under that DM (bot/cogs/welcome_back.py).
+CREATE TABLE IF NOT EXISTS welcome_back_opt_outs (
+    guild_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    opted_out_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (guild_id, user_id)
+);
+
+-- Roles the bot creates and hands out by itself - voice ranks and veteran roles
+-- (bot/managed_roles.py) - by id once found or created, so a renamed role still works and a
+-- look-alike made later is never handed out. `name` is the bot's own name for the role.
+CREATE TABLE IF NOT EXISTS managed_roles (
+    guild_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    role_id INTEGER NOT NULL,
+    PRIMARY KEY (guild_id, name)
+);
+
 -- One row per (command, user), aggregated rather than one row per invocation - matches this
 -- project's standing preference for keeping the Pi's own storage footprint lean (see
 -- CLAUDE.local.md) over a raw per-event log nobody needs the individual rows of; still
@@ -4955,6 +4973,15 @@ class Database:
             await db.commit()
         return claimed
 
+    async def release_event_reminder(self, card_id: int, starts_at: int) -> None:
+        """A claimed reminder that didn't go out: the next check sends it. Only the claim made for
+        `starts_at`: a time change since then made (and maybe already sent) its own."""
+        async with self.connect() as db:
+            await db.execute(
+                "UPDATE event_cards SET reminded = 0 WHERE card_id = ? AND starts_at = ? AND reminded = 1",
+                (card_id, starts_at))
+            await db.commit()
+
     async def event_cards_due_reminder(self, now: int, before: int) -> list[dict[str, Any]]:
         """Open cards starting within `before` seconds that haven't been reminded."""
         async with self.connect() as db:
@@ -5186,6 +5213,45 @@ class Database:
             rows = await (await db.execute(
                 "SELECT user_id FROM anniversary_opt_outs WHERE guild_id = ?", (guild_id,))).fetchall()
         return {row["user_id"] for row in rows}
+
+    async def set_welcome_back_opt_out(self, guild_id: int, user_id: int, opted_out: bool) -> None:
+        async with self.connect() as db:
+            if opted_out:
+                await db.execute("INSERT OR IGNORE INTO welcome_back_opt_outs (guild_id, user_id) VALUES (?, ?)",
+                                 (guild_id, user_id))
+            else:
+                await db.execute("DELETE FROM welcome_back_opt_outs WHERE guild_id = ? AND user_id = ?",
+                                 (guild_id, user_id))
+            await db.commit()
+
+    async def welcome_back_opted_out(self, guild_id: int, user_id: int) -> bool:
+        async with self.connect() as db:
+            row = await (await db.execute(
+                "SELECT 1 FROM welcome_back_opt_outs WHERE guild_id = ? AND user_id = ?",
+                (guild_id, user_id))).fetchone()
+        return row is not None
+
+    async def voice_history_start(self, guild_id: int) -> str | None:
+        """The first day voice ranks recorded anyone's voice time ('YYYY-MM-DD'), None before any."""
+        async with self.connect() as db:
+            row = await (await db.execute(
+                "SELECT MIN(day) AS day FROM voice_daily WHERE guild_id = ?", (guild_id,))).fetchone()
+        return row["day"] if row else None
+
+    async def get_managed_roles(self, guild_id: int) -> dict[str, int]:
+        """The role ids the bot remembers for its own roles, by its name for each."""
+        async with self.connect() as db:
+            rows = await (await db.execute(
+                "SELECT name, role_id FROM managed_roles WHERE guild_id = ?", (guild_id,))).fetchall()
+        return {row["name"]: row["role_id"] for row in rows}
+
+    async def save_managed_role(self, guild_id: int, name: str, role_id: int) -> None:
+        async with self.connect() as db:
+            await db.execute(
+                """INSERT INTO managed_roles (guild_id, name, role_id) VALUES (?, ?, ?)
+                   ON CONFLICT(guild_id, name) DO UPDATE SET role_id = excluded.role_id""",
+                (guild_id, name, role_id))
+            await db.commit()
 
     async def get_blueprint_refs(self) -> list[BlueprintRef]:
         """Every distinct blueprint any stored mission can award - the autocomplete/matching universe."""

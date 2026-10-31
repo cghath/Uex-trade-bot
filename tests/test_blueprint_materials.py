@@ -552,3 +552,108 @@ def test_a_contract_blueprint_opened_while_the_contract_data_is_gone_says_so(tmp
 
     (reply,) = asyncio.run(run())
     assert "isn't available right now" in reply["content"]
+
+
+# -- the 2026-10-30 audit's recipe-sync findings (BP-1..BP-5) ------------------------------------------
+
+
+def test_a_default_blueprint_keeps_configure_crafting_while_the_recipes_lag_a_patch(tmp_path):
+    """Audit BP-1: the detail was checked against the RECIPES' version, so while they lagged the contracts
+    by a patch every default blueprint opened from a material list said crafting was unavailable."""
+    from tests.test_blueprint_crafting_cog import _detail
+    from tests.test_blueprints_cog import VERSION
+
+    async def run():
+        cog, db = await _make(tmp_path, RecipeWiki(), seed=True)  # contracts on VERSION
+        await db.replace_blueprint_recipes(parse_blueprint_rows(LISTING), game_version="4.9.0-LIVE.1")
+        cog._client.get_blueprint_detail = AsyncMock(return_value=dict(_detail(), uuid=P4AR[0], game_version=VERSION))
+        return await cog.default_blueprint(MaterialUse(*P4AR, True))
+
+    result = asyncio.run(run())
+    assert result.recipe is not None and "Configure crafting" in "\n".join(result.pages)
+
+
+def test_a_shrink_the_crawl_confirms_twice_running_is_accepted(tmp_path):
+    """Audit BP-2: a refused sync never moves the count it's compared with, so a patch that really
+    removed over half the blueprints was refused on every cycle for good."""
+    async def run():
+        wiki = RecipeWiki()
+        cog, db = await _make(tmp_path, wiki, seed=True)
+        await cog.sync_recipes()
+        wiki.version, wiki.listing = "4.11.0-LIVE.1", wiki.listing[:2]
+        outcomes = [await _outcome(cog.sync_recipes())]
+        wiki.listing = wiki.listing[:1]  # a different count isn't a confirmation
+        outcomes.append(await _outcome(cog.sync_recipes()))
+        outcomes.append(await _outcome(cog.sync_recipes()))
+        return outcomes, await db.get_blueprint_recipe_state()
+
+    outcomes, state = asyncio.run(run())
+    assert outcomes == ["SnapshotRejected", "SnapshotRejected", "synced"]
+    assert state[0] == "4.11.0-LIVE.1" and state[2] == 1
+
+
+def test_players_waiting_behind_a_failed_recipe_sync_never_crawl_again(tmp_path):
+    """Audit BP-3: the retry window was checked before the lock, so each player queued behind a failing
+    crawl ran a full crawl of their own."""
+    async def run():
+        wiki = RecipeWiki()
+        cog, _db = await _make(tmp_path, wiki, seed=True)
+        await cog.get_index(sync_if_missing=False)
+        wiki.listing_status = 503
+        await cog._recipe_lock.acquire()  # a crawl is under way: all four players queue behind it
+        players = [asyncio.create_task(cog.material_uses("Tungsten")) for _ in range(4)]
+        while len(cog._recipe_lock._waiters or ()) < 4:
+            await asyncio.sleep(0.01)
+        cog._recipe_lock.release()
+        replies = await asyncio.gather(*players)
+        crawls = wiki.count("listing")
+
+        alone = RecipeWiki()
+        solo, _ = await _make(tmp_path / "solo", alone, seed=True)
+        alone.listing_status = 503
+        await solo.material_uses("Tungsten")
+        return replies, crawls, alone.count("listing")
+
+    (tmp_path / "solo").mkdir()
+    replies, crawls, one_crawl = asyncio.run(run())
+    assert all("recipes aren't available" in reply for reply in replies)
+    assert crawls == one_crawl, "four players, one crawl"
+
+
+def test_an_index_read_that_began_before_a_sync_is_never_kept_after_it(tmp_path):
+    """Audit BP-4: get_index stored the refs it read before sync_snapshot cleared the index, leaving the
+    old index (missing the new patch's blueprints) until the next real sync."""
+    async def run():
+        wiki = RecipeWiki()
+        cog, db = await _make(tmp_path, wiki, seed=True)
+        real_refs, gate, reading = db.get_blueprint_refs, asyncio.Event(), asyncio.Event()
+
+        async def slow_refs():
+            refs = await real_refs()
+            reading.set()
+            await gate.wait()
+            return refs
+
+        db.get_blueprint_refs = slow_refs
+        lookup = asyncio.create_task(cog.get_index(sync_if_missing=False))
+        await reading.wait()
+        db.get_blueprint_refs = real_refs
+        wiki.version = "4.11.0-LIVE.1"
+        assert await cog.sync_snapshot() == "synced"
+        gate.set()
+        await lookup
+        return cog._index
+
+    assert asyncio.run(run()) is None, "the next lookup reads the synced refs"
+
+
+def test_a_padded_version_on_the_contract_rows_still_syncs(tmp_path):
+    """Audit BP-5: the contracts compared the raw row version with the probe's stripped one, so a padded
+    version was refused on every cycle while the recipes (which strip both) kept syncing."""
+    async def run():
+        wiki = RecipeWiki()
+        wiki.row_stamp = lambda _index: f"{wiki.version} "
+        cog, _db = await _make(tmp_path, wiki)
+        return await cog.sync_snapshot()
+
+    assert asyncio.run(run()) == "synced"

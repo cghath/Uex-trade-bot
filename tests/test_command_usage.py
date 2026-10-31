@@ -8,6 +8,7 @@ from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock
 
 from cryptography.fernet import Fernet
+from discord import app_commands
 
 from bot.cogs.diagnostics import REPORT_LIMIT, Diagnostics, tracked_command_autocomplete, usage_report
 from bot.db.database import Database
@@ -604,3 +605,21 @@ def test_command_usage_with_a_command_no_real_usage_says_so():
         assert "blueprint-search" in body
 
     asyncio.run(run())
+
+
+def test_command_usage_does_not_count_a_command_group_as_a_command():  # DOC-2
+    """walk_commands() yields the /rolepanel group as well as /rolepanel post; only the
+    subcommand can be run (and recorded), so the group would read as one more unused command."""
+    group = app_commands.Group(name="rolepanel", description="Role panels")
+
+    async def run():
+        cog = _cog(is_owner=True, real_rows=[_real_row("best-route", 1, "PlayerOne", use_count=2)],
+                   live_command_names=["best-route", "rolepanel post"])
+        names = cog.bot.tree.walk_commands
+        cog.bot.tree.walk_commands = lambda: [*names(), group]
+        interaction = _FakeInteraction()
+        await cog.command_usage.callback(cog, interaction, None)
+        return interaction.followup.send.call_args.args[0]
+
+    body = asyncio.run(run())
+    assert "1 of 2 commands" in body and "1 command no other player has run yet" in body, body

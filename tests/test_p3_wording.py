@@ -69,6 +69,7 @@ def test_a_ship_slot_lookup_failure_never_shows_raw_error_text():  # MSG-20
 
 
 def test_server_settings_are_hidden_from_members_who_cant_use_them():  # UX-17
-    for command in (Digest.set_digest_channel, Digest.digest_disable, Diagnostics.command_usage):
+    for command in (Digest.set_digest_channel, Digest.digest_disable):
         assert command.default_permissions is not None and command.default_permissions.manage_guild, command.name
+    assert Diagnostics.command_usage.default_permissions.administrator, "owner tools: admins only (COMM-6)"
     assert Digest.digest_now.default_permissions is None, "posting the digest stays open to everyone"

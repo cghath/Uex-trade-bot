@@ -82,6 +82,8 @@ def test_each_job_list_offers_only_the_jobs_its_command_can_act_on():
         {"id": 3, "inventory_id": 11, "quantity": 2, "status": "listed", "auto_relist": 0},
         {"id": 4, "inventory_id": 11, "quantity": 2, "status": "needs_confirmation", "auto_relist": 1},
         {"id": 5, "inventory_id": 11, "quantity": 2, "status": "posting", "auto_relist": 1},
+        {"id": 6, "inventory_id": 11, "quantity": 2, "status": "needs_confirmation", "auto_relist": 1,
+         "listing_id": 900},
     ]
     db = NS(list_active_inventory_jobs=AsyncMock(return_value=jobs),
             list_inventory=AsyncMock(return_value=[{"id": 10, "item_name": "Gold"}, {"id": 11, "item_name": "Laranite"}]))
@@ -89,8 +91,10 @@ def test_each_job_list_offers_only_the_jobs_its_command_can_act_on():
     def offered(autocomplete, typed=""):
         return [(c.value, c.name) for c in asyncio.run(autocomplete(_typing(7, db), typed))]
 
-    assert offered(confirm_sale_job_autocomplete) == [(4, "#4 Laranite ×2 · needs confirming")]
-    assert [value for value, _ in offered(cancel_post_job_autocomplete)] == [1, 2, 3, 4]
+    assert [value for value, _ in offered(confirm_sale_job_autocomplete)] == [4, 6]
+    assert offered(confirm_sale_job_autocomplete)[0] == (4, "#4 Laranite ×2 · needs confirming")
+    # UX-8: #4's post was never confirmed, so it has no listing to cancel - only #6 does.
+    assert [value for value, _ in offered(cancel_post_job_autocomplete)] == [1, 2, 3, 6]
     assert offered(floor_job_autocomplete) == [(3, "#3 Laranite ×2 · listed")], "paused at its floor"
     assert [value for value, _ in offered(cancel_post_job_autocomplete, "gold")] == [1, 2]
 
@@ -170,3 +174,40 @@ def test_the_profile_lookup_sends_the_players_key_to_uex_user(payload, expected)
     else:
         assert asyncio.run(run()) == expected
     assert seen == [("/user", "sk_player")]
+
+
+# ---- 2026-10-03 audit UX-8 and MSG-7 --------------------------------------------------------
+
+def _cancel(job):
+    async def run():
+        cog = PersonalInventory.__new__(PersonalInventory)
+        cog.bot = NS(db=NS(get_inventory_post_job=AsyncMock(return_value=job)))
+        interaction = NS(user=NS(id=7), response=NS(send_message=AsyncMock(), defer=AsyncMock()),
+                         followup=NS(send=AsyncMock()))
+        await PersonalInventory.inventory_cancel_post.callback(cog, interaction, job["id"])
+        return interaction.followup.send.await_args  # answered after the deferral (audit REL-6)
+
+    return asyncio.run(run())
+
+
+def test_cancelling_a_post_uex_never_confirmed_points_at_confirm_sale():
+    """UX-8: it used to say "Job #4 is **needs_confirmation** and has no cancellable public or
+    pending post" - the raw status, and nothing on what to do."""
+    reply = _cancel({"id": 4, "inventory_id": 11, "status": "needs_confirmation", "listing_id": None})
+    assert "/inventory-confirm-sale" in reply.args[0] and "needs_confirmation" not in reply.args[0]
+    assert reply.kwargs["ephemeral"] is True
+
+
+def test_cancelling_a_job_in_another_state_names_it_in_words():
+    reply = _cancel({"id": 5, "inventory_id": 11, "status": "posting", "listing_id": None})
+    assert reply.args[0] == "Job #5 is **posting** and has no cancellable public or pending post."
+
+
+def test_the_link_confirmation_doesnt_say_the_key_is_only_used_for_your_own_requests():
+    """MSG-7: /leaderboard reads it whenever anyone runs it, and the alerts and automatic
+    posts a player turns on use it in the background."""
+    _, _, reply = _link(profile={"username": "pilot"})
+    text = reply.args[0]
+    assert "only used for your own requests" not in text
+    assert "/leaderboard" in text.split("\n")[0], "said in the sentence about how the key is used"
+    assert "negotiation alerts and automatic inventory posts you turn on" in text

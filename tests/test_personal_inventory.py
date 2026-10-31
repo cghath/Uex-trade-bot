@@ -120,6 +120,41 @@ def test_cancel_keeps_the_reservation_when_uex_still_shows_the_listing(tmp_path,
     assert entry["reserved_quantity"] == 5 and job["status"] == "listed"
 
 
+def test_a_cancel_whose_delete_check_failed_can_be_confirmed_at_once_and_never_relists(tmp_path):
+    """Audit TRD-2 follow-up: UEX accepted /inventory-cancel-post's delete but the read-back
+    failed. The reply sends the player to /inventory-confirm-sale, which used to refuse the
+    still-'listed' job; and once it did take it, confirming 0 sold relisted the stock they had
+    just cancelled (auto_relist was still on)."""
+    from bot.uex.exceptions import UexDeleteUnconfirmedError
+
+    async def run():
+        db, inv, job_id = await _fixture(tmp_path, "unconfirmed_cancel.sqlite3")
+        await db.claim_inventory_post_job(job_id)
+        await db.mark_inventory_post_listed(
+            job_id, listing_id=999, listing_url=None, posted_price=200, date_expiration=None
+        )
+        uex = NS(
+            get_marketplace_listings=AsyncMock(return_value=[{"id": 999, "in_stock": 3, "is_sold_out": 0}]),
+            delete_marketplace_listing=AsyncMock(side_effect=UexDeleteUnconfirmedError("HTTP 503")),
+        )
+        cog = _cog(db, uex)
+        job = await db.get_inventory_post_job(1, job_id)
+        ok, message = await cog._cancel_listed_job(job, secret_key="fake")
+        inter = _interaction()
+        await cog.inventory_confirm_sale.callback(cog, inter, job_id=job_id, quantity_sold=0)
+        return (ok, message, inter.followup.send.await_args.args[0], await db.list_due_inventory_post_jobs(),
+                await db.get_inventory_item(1, inv), await db.get_inventory_post_job(1, job_id))
+
+    ok, message, confirm_reply, due, entry, job = asyncio.run(run())
+    assert not ok and "accepted the delete" in message and f"/inventory-confirm-sale job_id:{job['id']}" in message
+    assert "not one of your listings" not in confirm_reply, confirm_reply
+    assert "Recorded **0** sold" in confirm_reply
+    assert not due, "confirming 0 sold relisted stock the player had cancelled"
+    # The 2 UEX reported sold before the delete are recorded; the 3 left are released.
+    assert entry["quantity"] == 3 and entry["reserved_quantity"] == 0
+    assert job["status"] == "expired"
+
+
 def test_definite_post_rejection_is_not_treated_as_ambiguous(tmp_path):
     """Follow-up review finding: client.py's A01 fix started raising UexRejectedError (a
     real, definite rejection) for a non-"ok" POST status like

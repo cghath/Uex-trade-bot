@@ -2648,7 +2648,7 @@ def test_handle_leg_outcome_no_hedge_available_says_so_and_sends_the_next_leg_pr
     asyncio.run(run())
 
 
-def test_handle_leg_outcome_a_sell_side_shortfall_suggests_a_different_destination(tmp_path):
+def _shortfall_reroute_message(tmp_path, distance: float = 10) -> str:
     """The tracking-thread counterpart to find_backup_routes' own other_destination case:
     a 'missing' report on a sell leg means the player is left holding unsold cargo, so
     this should suggest a different terminal that still buys it. Uses a 3-leg thread so
@@ -2677,18 +2677,28 @@ def test_handle_leg_outcome_a_sell_side_shortfall_suggests_a_different_destinati
         )
         await _create_thread_for_legs(db, 1, [leg0, leg1, leg2])
         cog = RouteProgression.__new__(RouteProgression)
-        cog.bot = _reroute_bot(db)
+        cog.bot = _reroute_bot(db, distance)
         cog._active_legs = {1: [leg0, leg1, leg2]}
         channel = _fake_thread_channel()
 
         await cog.handle_leg_outcome(channel, 1, 1, leg1, outcome="missing")
 
         assert channel.send.await_count == 2, "expected the reroute suggestion plus leg 3's prompt"
-        reroute_message = channel.send.call_args_list[0].args[0]
-        assert "Port Olisar" in reroute_message, reroute_message
-        assert "(10 Gm away)" in reroute_message, reroute_message
+        return channel.send.call_args_list[0].args[0]
 
-    asyncio.run(run())
+    return asyncio.run(run())
+
+
+def test_handle_leg_outcome_a_sell_side_shortfall_suggests_a_different_destination(tmp_path):
+    reroute_message = _shortfall_reroute_message(tmp_path)
+    assert "Port Olisar" in reroute_message, reroute_message
+    assert "(10.0 Gm away)" in reroute_message, reroute_message
+
+
+def test_a_nearby_reroute_buyer_isnt_said_to_be_0_gm_away(tmp_path):
+    """MSG-9: the distance was rounded to a whole Gm, so a buyer 0.4 Gm off read "0 Gm away"."""
+    reroute_message = _shortfall_reroute_message(tmp_path, distance=0.4)
+    assert "(0.4 Gm away)" in reroute_message, reroute_message
 
 
 def test_handle_leg_outcome_a_sell_side_shortfall_with_no_other_buyer_says_so(tmp_path):
@@ -2719,6 +2729,81 @@ def test_handle_leg_outcome_a_sell_side_shortfall_with_no_other_buyer_says_so(tm
         assert "no other buyer within 25 Gm of **Elsewhere**" in no_reroute_message, no_reroute_message
 
     asyncio.run(run())
+
+
+async def _sell_shortfall_setup(db: Database, buyers: list[tuple[int, str, float]]):
+    """A 3-leg thread whose middle (sell) leg at Elsewhere (20) comes up short, with
+    `buyers` (id, name, sell price) buying Gold in the same system."""
+    await _seed_market_row(db)
+    await db.record_terminal_market_snapshot([
+        {"id_commodity": 1, "id_terminal": 20, "commodity_name": "Gold", "terminal_name": "Elsewhere",
+         "price_buy": 0, "price_sell": 0, "scu_buy": 0, "scu_sell": 0, "status_buy": None, "status_sell": 7},
+        *({"id_commodity": 1, "id_terminal": tid, "commodity_name": "Gold", "terminal_name": name,
+           "price_buy": 0, "price_sell": price, "scu_buy": 0, "scu_sell": 60, "status_buy": None, "status_sell": 1}
+          for tid, name, price in buyers),
+    ])
+    await _seed_systems(db, (20, "Elsewhere"), *((tid, name) for tid, name, _ in buyers))
+    leg0 = _leg_input(id_terminal=10, id_commodity=1, quoted_price=100.0, quoted_scu=50.0, quoted_status=3)
+    leg1 = _leg_input(
+        side="sell", id_terminal=20, id_commodity=1, terminal_name="Elsewhere",
+        display_label="Sell Gold at Elsewhere", quoted_price=90.0, quoted_scu=40.0, quoted_status=2,
+    )
+    leg2 = _leg_input(
+        side="buy", id_terminal=99, id_commodity=3, terminal_name="Third Stop",
+        commodity_name="Iron", display_label="Buy Iron at Third Stop",
+        quoted_price=10.0, quoted_scu=20.0, quoted_status=3,
+    )
+    await _create_thread_for_legs(db, 1, [leg0, leg1, leg2])
+    return leg0, leg1, leg2
+
+
+def test_a_hanging_distance_lookup_cannot_hold_back_the_next_leg_prompt(tmp_path, monkeypatch):
+    """Audit REL-9: the reroute's distance lookups ran before the next leg's prompt was
+    posted, so a hanging UEX held that prompt back for minutes."""
+    monkeypatch.setattr(route_progression_module, "REROUTE_DISTANCE_BUDGET_SECONDS", 0.05)
+
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        legs = await _sell_shortfall_setup(db, [(30, "Port Olisar", 150)])
+
+        async def hang(*args):
+            await asyncio.sleep(30)
+
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = type("FakeBot", (), {"db": db, "uex": NS(get_terminal_distance=hang)})()
+        cog._active_legs = {1: list(legs)}
+        channel = _fake_thread_channel()
+
+        await asyncio.wait_for(cog.handle_leg_outcome(channel, 1, 1, legs[1], outcome="missing"), timeout=5)
+        return channel
+
+    channel = asyncio.run(run())
+    assert channel.send.await_count == 2, "the reroute note, then leg 3's prompt"
+    assert "didn't give distances in time" in channel.send.call_args_list[0].args[0]
+
+
+def test_a_reroute_that_checked_only_the_best_paying_buyers_does_not_claim_there_is_none(tmp_path):
+    """Audit LOGIC-5: only the 24 best-paying buyers get a distance lookup; with 30, the
+    reroute still said "no other buyer within 25 Gm" though 6 were never checked."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        buyers = [(100 + i, f"Station {i}", 200 - i) for i in range(30)]
+        legs = await _sell_shortfall_setup(db, buyers)
+        cog = RouteProgression.__new__(RouteProgression)
+        cog.bot = _reroute_bot(db, distance=40)
+        cog._active_legs = {1: list(legs)}
+        channel = _fake_thread_channel()
+
+        await cog.handle_leg_outcome(channel, 1, 1, legs[1], outcome="missing")
+        return cog, channel
+
+    cog, channel = asyncio.run(run())
+    assert cog.bot.uex.get_terminal_distance.await_count == 24
+    message = channel.send.call_args_list[0].args[0]
+    assert "none of the 24 best-paying buyers in this system is within 25 Gm" in message, message
+    assert "no other buyer" not in message
 
 
 def test_handle_leg_outcome_sell_side_reroute_offloads_the_search_to_a_worker_thread(tmp_path, monkeypatch):
@@ -3295,7 +3380,7 @@ def _hedge_modal(cog, hedge_id, *, scu, price=""):
     modal = HedgeReportModal(cog=cog, hedge_id=hedge_id, side="buy", view=view)
     modal.scu_input._value = scu
     modal.price_input._value = price
-    interaction = NS(response=NS(send_message=AsyncMock()))
+    interaction = NS(response=NS(send_message=AsyncMock(), defer=AsyncMock()), followup=NS(send=AsyncMock()))
     return modal, interaction
 
 
@@ -3330,15 +3415,28 @@ def test_hedge_report_modal_records_a_valid_report_and_confirms_it(tmp_path):
         cog.bot = type("FakeBot", (), {"db": db})()
 
         modal, interaction = _hedge_modal(cog, hedge_id, scu="50", price="22")
-        await modal.on_submit(interaction)
+        deferred_at_write = []
+        record = cog._record_hedge_report
 
-        assert "thanks" in interaction.response.send_message.call_args.args[0].lower()
+        async def recording(**kwargs):
+            # Audit REL-6: acknowledged before the write, which can wait on a lock past 3s.
+            deferred_at_write.append(interaction.response.defer.await_count)
+            return await record(**kwargs)
+
+        cog._record_hedge_report = recording
+        await modal.on_submit(interaction)
+        del cog._record_hedge_report
+
+        assert deferred_at_write == [1]
+        interaction.response.send_message.assert_not_awaited()
+        assert "thanks" in interaction.followup.send.call_args.args[0].lower()
+        assert interaction.followup.send.call_args.kwargs == {"ephemeral": True}
         hedge = await db.get_route_progression_hedge(hedge_id)
         assert hedge["buy_outcome"] == "less" and hedge["buy_actual_scu"] == 50.0
 
         again, interaction2 = _hedge_modal(cog, hedge_id, scu="70")
         await again.on_submit(interaction2)
-        assert "already reported" in interaction2.response.send_message.call_args.args[0]
+        assert "already reported" in interaction2.followup.send.call_args.args[0]
 
     asyncio.run(run())
 
@@ -4521,6 +4619,21 @@ def test_a_route_copy_discord_refuses_is_posted_as_its_text(tmp_path):
     assert isinstance(sends[0].kwargs["view"], discord.ui.LayoutView), "the layout was tried first"
     assert sends[1].args[0] == _layout_page().text
     assert sends[2].args[0].startswith("Tracking **Test Route**"), "tracking still starts"
+
+
+def test_tracking_one_part_of_a_split_text_route_copies_every_part(tmp_path):
+    """Audit TRD-8: Track this route on part 2 of a route split over text pages copied only part 2,
+    leaving the thread without the route's header and totals."""
+    from bot.route_pages import text_pages
+
+    lines = ["**Test Route** · profit 1,234,567 aUEC",
+             *(f"Leg {i:03}: buy Agricium at a terminal with a long name, sell it somewhere else" for i in range(60))]
+    parts = text_pages("\n".join(lines), route=_trackable_route())
+    assert len(parts) > 1
+    sends = _thread_sends(tmp_path, page=parts[1])
+    copied = [call.args[0] for call in sends if call.args and not call.args[0].startswith("Tracking **")]
+    shown = [line for text in copied for line in text.splitlines()]
+    assert shown[0] == lines[0] and [line for line in shown if line.startswith("Leg ")] == lines[1:]
 
 
 def test_without_a_page_the_clicked_messages_embed_is_copied(tmp_path):

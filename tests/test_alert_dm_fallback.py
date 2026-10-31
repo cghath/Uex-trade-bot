@@ -130,6 +130,17 @@ def test_a_new_marketplace_alert_skips_what_is_already_listed(tmp_path):
     assert alert["baseline_done"] == 1
 
 
+def test_a_listing_posted_between_setting_the_alert_and_its_first_poll_is_announced(tmp_path):
+    """Audit TRD-1: the first poll (up to 15 minutes after the alert was set) took everything it saw as
+    already up, so a listing posted in between was never announced."""
+    import time
+
+    before = dict(_listing(401), date_added=int(time.time()) - 3600)
+    after = dict(_listing(402), date_added=str(int(time.time()) + 60))  # Marketplace numbers can be strings
+    sent_after, _ = _poll(tmp_path, [[before, after], [before, after]])
+    assert sent_after == [1, 1], "the new listing at once, once; the one already up never"
+
+
 def test_a_new_alert_with_nothing_listed_yet_still_announces_the_first_listing(tmp_path):
     sent_after, _ = _poll(tmp_path, [[], [_listing(300)]])
     assert sent_after == [0, 1]

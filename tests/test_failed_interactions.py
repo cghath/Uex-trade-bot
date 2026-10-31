@@ -35,6 +35,7 @@ from bot.config import Config
 from bot.db.database import Database
 from bot.discord_ui import (
     UNEXPECTED_ERROR_MESSAGE,
+    BotDynamicItem,
     BotLayoutView,
     BotModal,
     BotView,
@@ -130,6 +131,34 @@ def test_every_view_and_modal_in_the_bot_answers_when_it_fails():
     layouts = [c for c in _all_subclasses(discord.ui.LayoutView) if c.__module__.startswith("bot.")]
     assert layouts and [c.__name__ for c in layouts if not issubclass(c, BotLayoutView)] == []
     assert [c.__name__ for c in modals if not issubclass(c, BotModal)] == []
+
+
+def test_every_dynamic_item_in_the_bot_answers_when_it_fails():
+    """Audit UI-1: discord.py runs a DynamicItem's callback outside any BotView and only logs
+    what it raises, so each one needs BotDynamicItem's own safety net."""
+    _bot_modules()
+    items = [c for c in _all_subclasses(discord.ui.DynamicItem) if c.__module__.startswith("bot.")]
+    assert len(items) >= 9
+    assert [c.__name__ for c in items if not issubclass(c, BotDynamicItem)] == []
+
+
+def test_a_failing_dynamic_item_tells_the_player():
+    class Boom(BotDynamicItem, discord.ui.DynamicItem[discord.ui.Button], template=r"test:boom"):
+        def __init__(self):
+            super().__init__(discord.ui.Button(custom_id="test:boom"))
+
+        async def callback(self, interaction):
+            raise RuntimeError("boom")
+
+    async def run():
+        deferred, unanswered = _interaction(done=True), _interaction(done=False)
+        await Boom().callback(deferred)
+        await Boom().callback(unanswered)
+        return deferred, unanswered
+
+    deferred, unanswered = asyncio.run(run())
+    deferred.followup.send.assert_awaited_once_with(UNEXPECTED_ERROR_MESSAGE, ephemeral=True)
+    unanswered.response.send_message.assert_awaited_once_with(UNEXPECTED_ERROR_MESSAGE, ephemeral=True)
 
 
 def test_a_failing_button_or_form_tells_the_player():

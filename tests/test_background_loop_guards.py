@@ -16,10 +16,12 @@ import pytest
 from bot.cogs.alerts import Alerts
 from bot.cogs.digest import Digest
 from bot.cogs.intelligence import Intelligence
+from bot.cogs.marketplace import Marketplace
 from bot.cogs.marketplace_alerts import MarketplaceAlerts
 from bot.cogs.negotiation_alerts import NegotiationAlerts
 from bot.cogs.route_progression import RouteProgression
 from bot.cogs.scanner import Scanner
+from bot.cogs.ship_parts_finder import ShipPartsFinder
 from bot.cogs.stock_alerts import StockAlerts
 from bot.cogs.trends import Trends
 
@@ -61,6 +63,15 @@ def _trends_setup():
     return _cog(Trends, db=SimpleNamespace(), uex=uex), "refresh_trending", uex
 
 
+def _uex_first(cls, loop_name):
+    """The loop's first step is a UEX fetch that fails with something other than UexApiError
+    (audit REL-5: AttributeError from a non-object JSON body)."""
+    def setup():
+        uex = _Raising(AttributeError("'list' object has no attribute 'get'"))
+        return _cog(cls, db=SimpleNamespace(), uex=uex), loop_name, uex
+    return setup
+
+
 def _db_first(cls, loop_name):
     def setup():
         db = _locked_db()
@@ -78,6 +89,8 @@ LOOP_SETUPS = {
     "abandoned threads": _db_first(RouteProgression, "poll_abandoned_threads"),
     "fuel collector": _fuel_setup,
     "trending refresh": _trends_setup,
+    "marketplace snapshot": _uex_first(Marketplace, "snapshot_item_activity"),
+    "ship parts reference refresh": _uex_first(ShipPartsFinder, "refresh_reference"),
 }
 
 
@@ -97,6 +110,42 @@ def test_loop_survives_a_failure_in_its_first_step(name):
             assert not loop.failed(), f"{loop_name} stopped for good after one error"
         finally:
             loop.cancel()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("vehicles", [
+    {"id": 1, "name": "Cutlass Black"},  # {"status": "ok", "data": {...}}: one object, not a list
+    "Cutlass Black",
+    ["Cutlass Black", None, 7],
+])
+def test_ship_parts_refresh_survives_a_vehicle_list_that_is_not_a_list_of_objects(vehicles):
+    """Audit REL-5: the client returns whatever a well-formed envelope's data holds, so the
+    loop must not iterate it blindly (dict keys or a string's characters have no .get)."""
+    async def run():
+        uex = SimpleNamespace(get_vehicles=AsyncMock(return_value=vehicles))
+        db = SimpleNamespace(get_fresh_ship_parts_vehicles=AsyncMock(return_value=set()))
+        cog = _cog(ShipPartsFinder, db=db, uex=uex)
+        cog._refresh_vehicle_reference = AsyncMock()
+
+        await cog.refresh_reference.coro(cog)
+
+        cog._refresh_vehicle_reference.assert_not_awaited()
+
+    asyncio.run(run())
+
+
+def test_ship_parts_refresh_still_refreshes_the_real_ships_beside_odd_entries():
+    async def run():
+        ship = {"id": 3, "name": "Cutlass Black"}
+        uex = SimpleNamespace(get_vehicles=AsyncMock(return_value=["junk", ship, None]))
+        db = SimpleNamespace(get_fresh_ship_parts_vehicles=AsyncMock(return_value=set()))
+        cog = _cog(ShipPartsFinder, db=db, uex=uex)
+        cog._refresh_vehicle_reference = AsyncMock()
+
+        await cog.refresh_reference.coro(cog)
+
+        cog._refresh_vehicle_reference.assert_awaited_once_with(ship)
 
     asyncio.run(run())
 

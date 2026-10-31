@@ -61,13 +61,16 @@ class UexBot(commands.Bot):
     def __init__(self, config: Config) -> None:
         # One privileged intent, Server Members: server anniversaries (bot/cogs/anniversaries.py)
         # need the member list and join dates. It must also be switched on in the Developer
-        # Portal or Discord refuses the connection at startup - README says so. Nothing reads
-        # other people's messages, so Message Content and Presence stay off (audit MSG-14).
+        # Portal or Discord refuses the connection at startup - README says so. Nothing reads what
+        # other people write, so Message Content and Presence stay off (audit MSG-14); welcome_back
+        # and role_picker only note who posted where and when (audit DOC-1).
         intents = discord.Intents.default()
         intents.members = True
-        # Never @everyone, @here or a role, whatever ends up in a message: replies echo what
-        # players type, and alerts carry text other players wrote (audit REL-2). A send that
-        # should ping only its owner narrows this further (bot/delivery.py).
+        # Never @everyone, @here or a role by default, whatever ends up in a message: replies echo
+        # what players type, and alerts carry text other players wrote (audit REL-2). A send that
+        # should ping only its owner narrows this further (bot/delivery.py). The only role pings are
+        # the two sends that name their one role themselves: role_picker's Mentor ping and an event
+        # card's Org Events mention (audit DOC-1).
         super().__init__(command_prefix="!uex-unused-", intents=intents,
                          allowed_mentions=discord.AllowedMentions(everyone=False, roles=False))
         self.config = config

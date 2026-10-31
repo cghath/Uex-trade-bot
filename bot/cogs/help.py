@@ -77,7 +77,10 @@ class Help(commands.Cog):
         # Acknowledge before assembling the guide so a busy background refresh can never
         # let Discord's short interaction-response window expire.
         await interaction.response.defer()
-        commands_by_name = {c.name: c for c in self.bot.tree.get_commands()}
+        # Only what every member can run: an admin command (/set-digest-channel) is hidden from
+        # members' command lists by its default permissions, so /intro hides it too - whoever
+        # runs it, since the guide is a public post the whole channel reads (audit UX-10).
+        commands_by_name = {c.name: c for c in self.bot.tree.get_commands() if _for_everyone(c)}
         categorized_names: set[str] = set()
 
         embed = discord.Embed(
@@ -113,6 +116,12 @@ class Help(commands.Cog):
 
         embed.set_footer(text="Tip: commands with a text option usually support autocomplete — start typing and pick from the dropdown.")
         await interaction.followup.send(embed=embed)
+
+
+def _for_everyone(command: app_commands.Command | app_commands.Group) -> bool:
+    """Whether every member gets `command` in their command list: Discord hides a command with
+    default permissions from anyone without them."""
+    return getattr(command, "default_permissions", None) is None
 
 
 def _format_command_list(commands: list[app_commands.Command]) -> str:

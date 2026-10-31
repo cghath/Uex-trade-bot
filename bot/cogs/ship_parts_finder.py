@@ -52,7 +52,7 @@ from discord.ext import commands, tasks
 from bot.autocomplete import gather_within
 from bot.cogs.prices import terminal_name_autocomplete
 from bot.cogs.ships import ship_name_autocomplete
-from bot.discord_ui import LAYOUT_TEXT_LIMIT, BotLayoutView, BotView
+from bot.discord_ui import LAYOUT_TEXT_LIMIT, BotDynamicItem, BotLayoutView, BotView
 from bot.uex.client import cache_interval_text
 from bot.uex.exceptions import UexApiError, describe_uex_api_error
 from bot.uex.ship_part_display import (
@@ -84,6 +84,7 @@ from bot.uex.ship_loadout import (
     pick_for_slot,
     purchases,
     slot_category,
+    stock_slots,
     stock_uuids_by_port,
     summary_line,
     upgrade_entry,
@@ -182,6 +183,16 @@ class PartCandidates(list):
 # One wiki call per candidate item - batched so a slot with many real candidates doesn't
 # serialize dozens of live lookups, same pattern as /ingame-item-finder's _fetch_distances.
 DETAIL_BATCH_SIZE = 8
+
+
+# When the private thread can't be had: run somewhere that isn't a text channel or a thread in
+# one (a forum, voice chat, a DM), or the bot can't make private threads there (audit UX-9).
+THREAD_UNAVAILABLE = ("I couldn't open your private ship parts thread. Run this in a server text channel "
+                      "where I can create private threads, or ask an admin to let me.")
+# The ship parts list past its first message: the rest in embeds, within Discord's 10 embeds
+# and 6,000 characters of embed text a message (audit UX-6).
+LIST_MAX_EMBEDS = 10
+LIST_EMBED_TOTAL = 5800
 
 
 def _pages(lines: list[str], limit: int = 1900) -> list[str]:
@@ -303,11 +314,16 @@ class ShipPartsShoppingService:
                 except (discord.Forbidden, discord.HTTPException):
                     logger.warning("Could not reuse ship parts thread %s", thread.id)
 
-        if not isinstance(interaction.channel, discord.TextChannel):
+        channel = interaction.channel
+        # Run inside a thread (a route thread, this list's own), the private thread goes in
+        # that thread's channel, since a thread can't hold one (audit UX-9).
+        if isinstance(channel, discord.Thread):
+            channel = channel.parent
+        if not isinstance(channel, discord.TextChannel):
             return None
         thread = None
         try:
-            thread = await interaction.channel.create_thread(
+            thread = await channel.create_thread(
                 name=f"Ship parts - {interaction.user.display_name}"[:100],
                 type=discord.ChannelType.private_thread, invitable=False, auto_archive_duration=1440,
             )
@@ -382,9 +398,14 @@ class ShipPartsShoppingService:
         pages = await self.render(user_id, guild_id)
         content = pages[0]
         attachment = None
-        if len(pages) > 1:
+        # A list past one message goes on in embeds under it (within Discord's 6,000 characters
+        # of embeds, about 50 more parts), not straight into a .txt attachment at ~18 parts
+        # (audit UX-6). Only a list longer than that is attached.
+        embeds = [discord.Embed(description=page, color=discord.Color.dark_grey()) for page in pages[1:]]
+        if len(embeds) > LIST_MAX_EMBEDS or sum(len(page) for page in pages[1:]) > LIST_EMBED_TOTAL:
             content = "**Ship parts list**\nThe full list is attached because it exceeds Discord's message limit."
             attachment = discord.File(io.BytesIO("\n".join(pages).encode("utf-8")), filename="ship-parts-list.txt")
+            embeds = []
         saved = await self.bot.db.get_ship_parts_thread(user_id, guild_id)
         message = None
         if saved and saved.get("message_id"):
@@ -394,10 +415,11 @@ class ShipPartsShoppingService:
                 pass
         if message is None:
             kwargs = {"file": attachment} if attachment else {}
-            message = await thread.send(content, view=ShipPartsShoppingView(self), allowed_mentions=NO_MENTIONS, **kwargs)
+            message = await thread.send(content, embeds=embeds, view=ShipPartsShoppingView(self),
+                                        allowed_mentions=NO_MENTIONS, **kwargs)
             await self.bot.db.set_ship_parts_thread(user_id, guild_id, thread.id, message.id)
         else:
-            await message.edit(content=content, attachments=[attachment] if attachment else [],
+            await message.edit(content=content, embeds=embeds, attachments=[attachment] if attachment else [],
                                view=ShipPartsShoppingView(self), allowed_mentions=NO_MENTIONS)
 
     async def lock_in(
@@ -410,8 +432,7 @@ class ShipPartsShoppingService:
             return False
         thread = await self._thread(interaction)
         if thread is None:
-            await interaction.followup.send("I couldn't create your private ship parts thread. Check thread permissions.",
-                                            ephemeral=True)
+            await interaction.followup.send(THREAD_UNAVAILABLE, ephemeral=True)
             return False
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         try:
@@ -436,20 +457,22 @@ class ShipPartsShoppingService:
 
     async def lock_in_many(
         self, interaction: discord.Interaction, id_vehicle: int, vehicle_name: str, entries: list[dict],
+        *, clear: list[tuple[str, str]] = (),
     ) -> int:
         """lock_in for several parts at once - /ship-loadout's "Add all to shopping list". One
         thread lookup, one list refresh and one reply, where calling lock_in per part would
         post a reply and redraw the list once per part. Each entry has the keys lock_in takes
         (category, port_name, id_item, item_name, id_terminal, terminal_name, price_buy); one
         in a slot that already has a part replaces it, as a lock-in does. Returns how many
-        were saved."""
+        were saved. `clear` is (category, port_name) of slots the loadout keeps stock in: a
+        part locked in there earlier, say by another profile, comes off once these are saved,
+        so the list matches the loadout (audit UX-7)."""
         if interaction.guild_id is None:
             await interaction.followup.send("Ship parts lists are available in a server.", ephemeral=True)
             return 0
         thread = await self._thread(interaction)
         if thread is None:
-            await interaction.followup.send("I couldn't create your private ship parts thread. Check thread permissions.",
-                                            ephemeral=True)
+            await interaction.followup.send(THREAD_UNAVAILABLE, ephemeral=True)
             return 0
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         saved = 0
@@ -471,6 +494,10 @@ class ShipPartsShoppingService:
         failed = len(entries) - saved
         added = f"{saved} part{'s' if saved != 1 else ''}"
         not_saved = f" {failed} couldn't be saved - press it again to retry." if failed else ""
+        removed = await self._clear_slots(interaction.user.id, interaction.guild_id, id_vehicle, clear)
+        if removed:
+            not_saved = (f" Took off {removed} earlier part{'s' if removed != 1 else ''} in slots this loadout "
+                         f"keeps stock.{not_saved}")
         try:
             await self.refresh(thread, interaction.user.id, interaction.guild_id)
         except Exception:
@@ -483,6 +510,54 @@ class ShipPartsShoppingService:
             f"Added {added} for **{vehicle_name}** to {thread.mention}, replacing anything already "
             f"locked in for those slots.{not_saved}", ephemeral=True)
         return saved
+
+    async def clear_kept_stock(
+        self, interaction: discord.Interaction, id_vehicle: int, vehicle_name: str, slots: list[tuple[str, str]],
+    ) -> int:
+        """For "Add all to shopping list" on a loadout with nothing to buy: take this ship's earlier
+        parts off `slots`, the ones it keeps stock in, and redraw the list (audit UX-7). Returns
+        how many came off."""
+        removed = 0
+        if interaction.guild_id is not None:
+            removed = await self._clear_slots(interaction.user.id, interaction.guild_id, id_vehicle, slots)
+        if not removed:
+            await interaction.followup.send("Nothing to add: every slot keeps what it has.", ephemeral=True)
+            return 0
+        parts = f"{removed} earlier part{'s' if removed != 1 else ''}"
+        thread = await self._thread(interaction)
+        try:
+            if thread is not None:
+                await self.refresh(thread, interaction.user.id, interaction.guild_id)
+        except Exception:
+            logger.exception("Kept-stock slots cleared but the Discord refresh failed")
+            thread = None
+        if thread is None:
+            await interaction.followup.send(
+                f"Nothing to buy: took off {parts} for **{vehicle_name}** in slots this loadout keeps stock, "
+                "but I couldn't redraw your list. Use Refresh list there.", ephemeral=True)
+            return removed
+        await interaction.followup.send(
+            f"Nothing to buy: took off {parts} for **{vehicle_name}** from {thread.mention} in slots this "
+            "loadout keeps stock.", ephemeral=True)
+        return removed
+
+    async def _clear_slots(self, user_id: int, guild_id: int, id_vehicle: int, slots: list[tuple[str, str]]) -> int:
+        """Take this ship's locked-in parts off `slots`, (category, port_name) each; how many
+        came off. A failure leaves the rest as they are."""
+        if not slots:
+            return 0
+        removed = 0
+        try:
+            held = {(entry["category"], entry["port_name"])
+                    for entry in await self.bot.db.get_ship_parts_entries(user_id, guild_id)
+                    if entry.get("id_vehicle") == id_vehicle}
+            for category, port_name in dict.fromkeys(slots):
+                if (category, port_name) in held:
+                    await self.bot.db.remove_ship_parts_entry(user_id, guild_id, id_vehicle, category, port_name)
+                    removed += 1
+        except Exception:
+            logger.exception("Could not take kept-stock slots off the ship parts list")
+        return removed
 
 
 class _RemoveEntrySelect(discord.ui.Select):
@@ -855,17 +930,19 @@ class PartsBrowserView(BotView):
                 # to keep the old parts on screen while this view had already dropped them.
                 if not isinstance(exc, (UexApiError, WikiApiError)):
                     logger.exception("Ship parts options failed to load for %s", self.category)
-                if load != self._load_seq:
+                if load != self._load_seq or self.is_finished():
                     return
                 self.notice = (f"⚠️ Couldn't load {category_label(self.category)} options right now. "
                                "Pick it again to retry.")
                 await interaction.edit_original_response(content=self.text(), view=self)
                 return
-        if load != self._load_seq:
+        if load != self._load_seq or self.is_finished():
             # The player picked another category or slot while this one loaded (a cold
             # category's first browse is the slow one). Applying these parts now would list
             # them under the newer pick and let one be locked in there (audit REL-2); that
-            # newer pick updates the message itself.
+            # newer pick updates the message itself. Likewise once this view is finished:
+            # ↻ Refresh replaced it (or it timed out) meanwhile, and drawing its menus back
+            # over the new browser would leave controls nothing answers (audit REL-4).
             return
         self.parts_unanswered = getattr(candidates, "wiki_unavailable", 0)
         self._set_candidates(candidates)
@@ -1100,7 +1177,9 @@ class _Loadout:
         raise NotImplementedError
 
     def _show_buttons(self) -> None:
-        self.add_all_button.disabled = not purchases(self.picks)
+        # On while there is a part to buy, or a slot this profile keeps stock in, where an
+        # earlier profile's part may still be on the list to take off (audit UX-7).
+        self.add_all_button.disabled = not (purchases(self.picks) or stock_slots(self.picks))
 
     async def switch_profile(self, interaction: discord.Interaction, profile: str) -> None:
         self.profile = profile
@@ -1132,11 +1211,15 @@ class _Loadout:
                 "item_name": part.get("name") or "unknown", "id_terminal": part.get("_id_terminal"),
                 "terminal_name": part.get("_terminal_name"), "price_buy": part.get("_price_buy"),
             } for slot, part in purchases(self.picks)]
+            clear = [(slot.category, slot.entry_port_name) for slot in stock_slots(self.picks)]
             if not entries:
-                await interaction.followup.send("Nothing to add: every slot keeps what it has.", ephemeral=True)
+                # Nothing to buy, but an earlier profile's part in a slot this one keeps stock
+                # in still comes off, so the list matches the loadout (audit UX-7).
+                await self.cog.shopping.clear_kept_stock(
+                    interaction, _vehicle_id(self.vehicle), self.vehicle.get("name") or "", clear)
                 return
             await self.cog.shopping.lock_in_many(
-                interaction, _vehicle_id(self.vehicle), self.vehicle.get("name") or "", entries)
+                interaction, _vehicle_id(self.vehicle), self.vehicle.get("name") or "", entries, clear=clear)
         finally:
             self._adding = False
 
@@ -1237,7 +1320,7 @@ class _LoadoutDoneStub(discord.ui.Button):
         return False
 
 
-class LoadoutDoneButton(discord.ui.DynamicItem[discord.ui.Button], template=LOADOUT_DONE_TEMPLATE):
+class LoadoutDoneButton(BotDynamicItem, discord.ui.DynamicItem[discord.ui.Button], template=LOADOUT_DONE_TEMPLATE):
     """Done on any loadout message (the owner's call): removes it once the player has what they
     need. Parts already added stay on the shopping list, a message of its own. Who may press it
     rides in the button's own custom_id, so it works with or without a live view."""
@@ -1326,7 +1409,7 @@ class _RefreshStub(discord.ui.Button):
         return False
 
 
-class RefreshBrowserButton(discord.ui.DynamicItem[discord.ui.Button], template=REFRESH_TEMPLATE):
+class RefreshBrowserButton(BotDynamicItem, discord.ui.DynamicItem[discord.ui.Button], template=REFRESH_TEMPLATE):
     """Handles ↻ Refresh on any browsing message, even one whose view timed out or was lost
     in a restart: the ship, location (if any) and category ride in the button's own custom_id."""
     def __init__(self, id_vehicle: int, id_terminal: int | None, category: str | None) -> None:
@@ -1395,12 +1478,23 @@ class ShipPartsFinder(commands.Cog):
         except UexApiError as exc:
             logger.warning("Ship parts reference refresh could not load the vehicle list: %s", exc)
             return
+        except Exception:
+            # Anything else escaping here would stop this loop until a restart (audit REL-5).
+            logger.exception("Ship parts reference refresh could not load the vehicle list")
+            return
         try:
             fresh = await self.bot.db.get_fresh_ship_parts_vehicles(REFERENCE_REFRESH_HOURS)
         except Exception:
             logger.exception("Ship parts reference refresh could not read when ships were last refreshed")
             return
-        due = [v for v in vehicles if v.get("name") and _vehicle_id(v) is not None and _vehicle_id(v) not in fresh]
+        if not isinstance(vehicles, list):
+            # A well-formed answer whose data isn't a list would otherwise raise below,
+            # outside every guard, and stop this loop (audit REL-5).
+            logger.warning("Ship parts reference refresh got a vehicle list that isn't a list (%s); "
+                           "skipping this check", type(vehicles).__name__)
+            return
+        due = [v for v in vehicles
+               if isinstance(v, dict) and v.get("name") and _vehicle_id(v) is not None and _vehicle_id(v) not in fresh]
         outages = 0
         for index, vehicle in enumerate(due):
             if index:
@@ -1782,7 +1876,7 @@ class ShipPartsFinder(commands.Cog):
         thread = await self.shopping._thread(interaction)
         if thread is None:
             await interaction.followup.send(
-                "I couldn't open your private ship parts thread. Check thread permissions.", ephemeral=True,
+                THREAD_UNAVAILABLE, ephemeral=True,
             )
             return
         try:
@@ -1964,7 +2058,7 @@ class ShipPartsFinder(commands.Cog):
         if thread is None:
             view.stop()
             await interaction.followup.send(
-                "I couldn't open your private ship parts thread. Check thread permissions.", ephemeral=True,
+                THREAD_UNAVAILABLE, ephemeral=True,
             )
             return
         try:
@@ -1975,7 +2069,7 @@ class ShipPartsFinder(commands.Cog):
             view.stop()
             view = view.as_text()
             try:
-                view.message = await thread.send(content=view.text(), view=view, allowed_mentions=NO_MENTIONS)
+                view.message = await thread.send(**view._message(), allowed_mentions=NO_MENTIONS)  # cut to 2,000
             except discord.HTTPException:
                 logger.exception("Could not post a ship loadout in thread %s", thread.id)
                 view.stop()

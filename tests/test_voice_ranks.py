@@ -12,6 +12,7 @@ import asyncio
 import sqlite3
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace as NS
+from unittest.mock import AsyncMock
 
 import discord
 from cryptography.fernet import Fernet
@@ -104,21 +105,32 @@ class FakeMember:
         self.roles = [r for r in self.roles if r not in roles]
 
 
+def _role(role_id, name, permissions=0, members=()):
+    return NS(id=role_id, name=name, permissions=NS(value=permissions), managed=False, members=list(members))
+
+
 class FakeGuild:
     def __init__(self, *, can_manage_roles=True):
         self.id = GUILD_ID
         self.afk_channel = NS(id=AFK_ID)
-        self.voice_channels, self.stage_channels, self.roles, self.members = [], [], [], {}
+        self.voice_channels, self.stage_channels, self.roles, self.created, self.members = [], [], [], [], {}
         self.can_manage_roles = can_manage_roles
+        self.create_delay = 0.0   # seconds create_role takes; long enough for another caller to run
 
     def get_member(self, user_id):
         return self.members.get(user_id)
 
+    def get_role(self, role_id):
+        return next((r for r in self.roles if r.id == role_id), None)
+
     async def create_role(self, name, reason=None):
+        """Like the real one: an HTTP round trip (other tasks run meanwhile), and the new role isn't
+        in `roles` (the cache) until the gateway says so."""
+        await asyncio.sleep(self.create_delay)
         if not self.can_manage_roles:
             raise discord.Forbidden(NS(status=403, reason="Forbidden"), "Missing Permissions")
-        role = NS(id=9000 + len(self.roles), name=name)
-        self.roles.append(role)
+        role = _role(9000 + len(self.created), name)
+        self.created.append(role)
         return role
 
     def put(self, channel_id, members, category_id=None):
@@ -192,11 +204,11 @@ def test_a_rank_up_is_announced_once_and_swaps_the_role(tmp_path):
         cadet_roles = [r.name for r in a.roles]
         _sql(tmp_path, "UPDATE voice_members SET xp = 299 WHERE user_id = 1")
         await cog.count_minute(T0 + timedelta(minutes=3))   # Crewman
-        return posts, cadet_roles, [r.name for r in a.roles], [r.name for r in guild.roles]
+        return posts, cadet_roles, [r.name for r in a.roles], [r.name for r in guild.created]
 
     posts, cadet_roles, roles, created = asyncio.run(run())
-    assert [p[0] for p in posts] == ["🎖️ <@1> has been promoted to **Cadet**! (1h 0m of voice time)",
-                                     "🎖️ <@1> has been promoted to **Crewman**! (5h 0m of voice time)"]
+    assert [p[0] for p in posts] == ["🎖️ <@1> has been promoted to **Cadet**! (60 XP)",
+                                     "🎖️ <@1> has been promoted to **Crewman**! (300 XP)"]
     assert posts[0][1].users[0].id == 1 and not posts[0][1].everyone
     assert cadet_roles == ["Cadet"] and roles == ["Crewman"], "only the highest rank is held"
     assert len(created) == 13 and "Wing Commander" in created
@@ -341,3 +353,81 @@ def test_a_rank_already_announced_is_never_announced_again(tmp_path):
     op_posts, claims = asyncio.run(run())
     assert op_posts == ["🎯 <@1> has earned **Operator**: 5 ops attended."]
     assert claims == [False, False, True, False], "person 2 already announced Cadet (index 0)"
+
+
+def test_rank_roles_are_remembered_by_id_so_renames_and_look_alikes_change_nothing(tmp_path):  # COMM-8
+    async def run():
+        guild = FakeGuild()
+        cadet_role = _role(400, "Cadet")                          # already on the server: adopted
+        staff_officer = _role(401, "Officer", permissions=8)      # a staff role with permissions
+        guild.roles = [staff_officer, cadet_role]
+        a = FakeMember(1)
+        guild.members[1] = a
+        cog, db, _posts = await _make(tmp_path, guild)
+        # Two callers at once (the minute's rank-up and the role check), the cache not caught up,
+        # each creation taking a real round trip.
+        guild.create_delay = 0.05
+        first, second = await asyncio.gather(cog._rank_roles(guild), cog._rank_roles(guild))
+        made = len(guild.created)
+        guild.roles += guild.created                               # the gateway catches up
+        cadet_role.name = "Cadet ⭐"                                # staff rename it
+        guild.roles.append(_role(402, "Crewman"))                  # and a look-alike appears
+        restarted, _, _ = await _make(tmp_path, guild, db)         # memory gone, database kept
+        again = await restarted._rank_roles(guild)
+        _sql(tmp_path, "INSERT INTO voice_members (guild_id, user_id, xp, minutes) VALUES (?, 1, 400, 400)",
+             (GUILD_ID,))
+        await VoiceRanks.reconcile.coro(restarted)
+        return first, second, made, again, a.roles
+
+    first, second, made, again, roles = asyncio.run(run())
+    assert made == 12, "13 roles, Cadet adopted: none made twice by two callers at once"
+    assert first["Cadet"].id == 400 and first["Officer"].id != 401, "a role with permissions is never adopted"
+    assert {n: r.id for n, r in first.items()} == {n: r.id for n, r in second.items()} == \
+        {n: r.id for n, r in again.items()}
+    assert again["Crewman"].id != 402 and [r.id for r in roles] == [first["Crewman"].id]
+
+
+def test_a_rank_role_staff_delete_is_made_again_and_the_one_members_hold_is_adopted(tmp_path):  # COMM-8
+    async def run():
+        guild = FakeGuild()
+        a = FakeMember(1)
+        lookalike, held = _role(410, "Crewman"), _role(411, "Crewman", members=[a])
+        guild.roles = [lookalike, held]                             # the look-alike sits lower
+        cog, _db, _posts = await _make(tmp_path, guild)
+        first = await cog._rank_roles(guild)
+        guild.roles += guild.created                               # the gateway catches up
+        await cog._rank_roles(guild)
+        deleted = first["Cadet"]
+        guild.roles.remove(deleted)                                # staff delete it
+        again = await cog._rank_roles(guild)
+        return first, deleted, again, len(guild.created)
+
+    first, deleted, again, made = asyncio.run(run())
+    assert first["Crewman"].id == 411, "of two harmless roles by the name, the one members hold"
+    assert again["Cadet"] is not deleted and again["Cadet"].id != deleted.id and made == 13
+
+
+def test_a_busy_database_never_stops_a_claimed_rank_up_being_announced(tmp_path):
+    async def run():
+        guild = FakeGuild()
+        a, b = FakeMember(1), FakeMember(2)
+        guild.put(10, [a, b])
+        cog, db, posts = await _make(tmp_path, guild)
+        await cog.count_minute(T0)
+        _sql(tmp_path, "UPDATE voice_members SET xp = 59 WHERE user_id = 1")
+        db.get_managed_roles = AsyncMock(side_effect=sqlite3.OperationalError("database is locked"))
+        await cog.count_minute(T0 + timedelta(minutes=1))           # 59 -> 60: Cadet, claimed
+        locked_posts = list(posts)
+        del db.get_managed_roles                                    # reads work again, saves don't
+        db.save_managed_role = AsyncMock(side_effect=sqlite3.OperationalError("database is locked"))
+        await cog.reconcile.coro(cog)
+        return locked_posts, a.roles
+
+    posts, roles = asyncio.run(run())
+    assert len(posts) == 1 and "Cadet" in posts[0][0], "announced even though the roles couldn't be read"
+    assert [r.name for r in roles] == ["Cadet"], "a role whose id couldn't be saved is still given"
+
+
+def test_the_leaderboard_says_it_ranks_xp_not_time():  # COMM-9
+    description = VoiceRanks.rank_leaderboard.description
+    assert "XP" in description and "double in Ops" in description and len(description) <= 100

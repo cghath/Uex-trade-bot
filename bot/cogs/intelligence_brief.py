@@ -10,7 +10,7 @@ from discord.ext import commands
 from bot.cogs.digest import _format_data_freshness, _format_rating_movers
 from bot.cogs.ships import ship_name_autocomplete
 from bot.uex.data_health import classify_terminal_health
-from bot.uex.exceptions import UexApiError
+from bot.uex.exceptions import UexApiError, describe_uex_api_error
 from bot.uex.marketplace import marketplace_item_link
 from bot.uex.mixed_routes import build_mixed_routes, requires_capital_cargo_access
 from bot.uex.route_presentation import (
@@ -118,6 +118,7 @@ class IntelligenceBrief(commands.Cog):
         embed = discord.Embed(title="Personalized Mixed Routes", color=discord.Color.green())
         # Saved /set-trading-preferences defaults apply here as on every other route command
         # (audit MSG-6). Only budget and space-only have options on this command.
+        saved_budget = prefs["budget"] if budget is None else None
         if budget is None:
             budget = prefs["budget"]
         space_only_saved = space_only is None and bool(prefs["space_only"])
@@ -154,13 +155,17 @@ class IntelligenceBrief(commands.Cog):
                 limit=3, max_commodities=3, space_only=space_only,
                 capital_access_only=capital_gate, auto_load_only=auto_load_only, system=system,
             )
-        except (UexApiError, ValueError) as exc:
+        except UexApiError as exc:
+            # Not the raw exception (audit MSG-4): say whether it's worth retrying.
+            embed.description = f"Route intelligence unavailable: {describe_uex_api_error(exc)}"
+            return embed
+        except ValueError as exc:
             embed.description = f"Route intelligence unavailable: {exc}"
             return embed
 
         if not routes:
             saved_hint = saved_filters_hint(saved_filter_labels(
-                space_only=space_only_saved,
+                budget=saved_budget, space_only=space_only_saved,
                 capital_ship_access=bool(prefs["capital_ship_access"]) and not requires_capital_cargo_access(vehicle),
                 auto_load_only=auto_load_only, system=system,
             ), can_override=False)
