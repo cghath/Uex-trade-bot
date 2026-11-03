@@ -57,6 +57,12 @@ def test_roles_read_from_one_line_and_bad_input_says_why():
         [EventRole("Miner", 6), EventRole("Hauler", 2), EventRole("Escort", 2)], None)
     assert parse_roles("Cargo Iron Clad 2\nSalvager 15")[0] == [EventRole("Cargo Iron Clad", 2), EventRole("Salvager", 15)]
     assert parse_roles("") == ([], None) and parse_roles(" None ") == ([], None)
+    # however a role is written, and a list bullet, it reads the same
+    for written in ("Miner: 6", "Miner - 6", "Miner x6", "Miner x 6", "Miner (6)", "Miner 6 spots", "6x Miner",
+                    "- Miner 6", "\u2022 Miner 6"):
+        assert parse_roles(written) == ([EventRole("Miner", 6)], None), written
+    assert parse_roles("6 Miners\n\nHauler: 2\n")[0] == [EventRole("Miners", 6), EventRole("Hauler", 2)]
+    assert parse_roles("Box 3, T-800 2")[0] == [EventRole("Box", 3), EventRole("T-800", 2)]
     for bad, says in (("Miner", "`Miner`"), ("Miner 0", "1 to 99"), ("Miner 100", "1 to 99"),
                       ("Miner 2, miner 3", "listed twice"), (", ".join(f"R{i} 1" for i in range(11)), "Up to 10"),
                       ("X" * 41 + " 2", "40 characters")):
@@ -164,7 +170,7 @@ def test_the_card_has_the_right_controls():
         view = build_card(_card(), [EventRole("Miner", 6)], [], set(), "<@&77>")
         items = _items(view)
         ids = [getattr(i, "custom_id", None) for i in items if getattr(i, "custom_id", None)]
-        assert ids == ["ev:role:5", "ev:maybe:5", "ev:leave:5", "ev:start:5", "ev:end:5"]
+        assert ids == ["ev:role:5", "ev:maybe:5", "ev:leave:5", "ev:start:5", "ev:roles:5", "ev:end:5"]
         links = {i.label: i.url for i in items if isinstance(i, discord.ui.Button) and i.url}
         assert links == {"Voice": f"https://discord.com/channels/{GUILD_ID}/55",
                          "Interested on Discord": f"https://discord.com/events/{GUILD_ID}/42"}
@@ -268,7 +274,8 @@ class World:
 
     def interaction(self, user_id, **kw):
         return NS(user=self.user(user_id, **kw), guild=self.guild, client=self.bot,
-                  response=NS(defer=AsyncMock(), send_modal=AsyncMock()), followup=NS(send=AsyncMock()))
+                  response=NS(defer=AsyncMock(), send_modal=AsyncMock(), send_message=AsyncMock()),
+                  followup=NS(send=AsyncMock()))
 
 
 def _run(tmp_path, body):
@@ -815,6 +822,55 @@ def test_a_failed_reminder_never_undoes_a_time_change_ping_sent_meanwhile(tmp_pa
         assert len(texts) == 1 and texts[0].startswith("**Time changed:**")   # one ping, not a second reminder
         assert (await db.get_event_card(card["card_id"]))["reminded"] == 1
     _run(tmp_path, body)
+
+def test_event_roles_without_roles_opens_a_form_filled_in_with_the_current_ones(tmp_path):
+    async def body(db):
+        await db.set_event_roles(42, [("Miner", 6), ("Hauler", 2)])
+        world = World(db, [_event()])
+        cid = (await _posted(world))["card_id"]
+        await world.cog.on_join(world.interaction(1), cid, role="Hauler")
+        organizer = world.interaction(9)                               # the event's creator
+        await EventCards.event_roles.callback(world.cog, organizer, "42")
+        form = organizer.response.send_modal.await_args.args[0]
+        organizer.response.defer.assert_not_awaited()                  # the form is the answer, nothing first
+        assert form.title == "Roles for Mining Mondays" and form.roles.default == "Miner 6\nHauler 2"
+        assert form.roles.style == discord.TextStyle.paragraph and form.roles.required is False
+        # edit a line, add one, drop one - written loosely
+        form.roles._value = "Miner: 4\n- Escort x2"
+        submit = world.interaction(9)
+        await form.on_submit(submit)
+        assert await db.get_event_roles(42) == [("Miner", 4), ("Escort", 2)]
+        assert _reply(submit).startswith("Roles set for **Mining Mondays**:\nMiner - 4 spots\nEscort - 2 spots\n")
+        rows = {s["user_id"]: (s["status"], s["role"]) for s in await db.get_event_signups(cid)}
+        assert rows == {1: (GOING, None)}                              # Hauler's gone: still going, no role
+        # emptied: no roles, everyone just joins
+        form.roles._value = "   "
+        await form.on_submit(world.interaction(9))
+        assert await db.get_event_roles(42) == []
+    _run(tmp_path, body)
+
+
+def test_the_edit_roles_button_is_for_organizers(tmp_path):
+    async def body(db):
+        await db.set_event_roles(42, [("Escort", 1)])
+        world = World(db, [_event()])
+        card = await _posted(world)
+        stranger = world.interaction(5)
+        await world.cog.on_roles(stranger, card["card_id"])
+        assert stranger.response.send_message.await_args.args[0] == NOT_MANAGER
+        stranger.response.send_modal.assert_not_awaited()
+        manager = world.interaction(6, roles=[EVENT_MANAGER_ROLE_ID])
+        await world.cog.on_roles(manager, card["card_id"])
+        assert manager.response.send_modal.await_args.args[0].roles.default == "Escort 1"
+        await world.cog.close(card, ENDED, announce=False)
+        late = world.interaction(9)
+        await world.cog.on_roles(late, card["card_id"])
+        assert "closed" in late.response.send_message.await_args.args[0]
+        nobody = world.interaction(9)
+        await EventCards.event_roles.callback(world.cog, nobody, "999")
+        assert nobody.response.send_message.await_args.args[0] == "Pick the event from the list."
+    _run(tmp_path, body)
+
 
 
 def test_event_roles_only_says_the_card_was_updated_when_there_is_one(tmp_path):
