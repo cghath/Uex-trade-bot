@@ -24,7 +24,7 @@ from bot.cogs.route_progression import RouteProgression
 from bot.cogs.ship_parts_finder import PartsBrowserView
 from bot.db.database import Database
 from bot.discord_ui import AlertRemovePickerView, BotView, send_alert_remove_picker
-from bot.route_pages import RoutePagesView
+from bot.route_pages import RoutePaging
 from bot.uex.blueprint_crafting import Recipe
 from bot.uex.client import UexClient
 from tests.bot_views import all_bot_views
@@ -216,22 +216,24 @@ def test_every_route_tracking_view_knows_its_message(tmp_path):
     sent = [kwargs for _, kwargs in asyncio.run(run()).followup.sent if kwargs.get("view")]
     assert sent
     for kwargs in sent:
-        assert isinstance(kwargs["view"], RoutePagesView)
+        assert isinstance(kwargs["view"], RoutePaging)
         assert kwargs["view"].message.sent_with is kwargs
 
 
 def test_the_blueprint_craft_buttons_know_their_message():
     raw = json.loads((Path(__file__).parent / "fixtures" / "blueprint_crafting_rifle.json").read_text(encoding="utf-8-sig"))
-    result = SearchResult("found", ("page",), "Rifle", discord.Embed(title="Rifle"), recipe=Recipe.parse(raw),
-                          craft_quantity=1)
+    recipe = Recipe.parse(raw)
+    layout = SearchResult("found", ("page",), "Rifle", ("## Rifle",), "**Crafting**", recipe=recipe, craft_quantity=1)
+    text = SearchResult("found", ("page",), "Rifle", recipe=recipe, craft_quantity=1)
 
-    async def run():
+    async def run(result):
         followup = _Followup()
         await Blueprints.deliver(Blueprints.__new__(Blueprints), lambda **kw: followup.send(wait=True, **kw), result)
         return followup
 
-    (_, kwargs), = asyncio.run(run()).sent
-    assert kwargs["view"].message.sent_with is kwargs
+    for result in (layout, text):
+        (_, kwargs), = asyncio.run(run(result)).sent
+        assert kwargs["view"].message.sent_with is kwargs
 
 
 def test_the_minimum_price_menu_stops_once_its_message_becomes_the_authorize_screen():

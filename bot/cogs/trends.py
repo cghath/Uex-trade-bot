@@ -28,6 +28,7 @@ from discord.ext import commands, tasks
 from bot.cogs.prices import (
     SYSTEM_CHOICES,
     _add_chunked_fields,
+    ambiguous_commodity_text,
     commodity_name_autocomplete,
     terminal_name_autocomplete,
 )
@@ -35,7 +36,7 @@ from bot.cogs.route_progression import RouteLegInput, TrackableRoute
 from bot.cogs.ships import ship_name_autocomplete
 from bot.route_pages import RoutePage, send_route_pages
 from bot.uex.charts import render_price_history_chart
-from bot.uex.commodity_risk import format_commodity_risk, outside_risk_tolerance, within_risk_tolerance
+from bot.uex.commodity_risk import format_commodity_risk
 from bot.uex.data_health import classify_terminal_health, format_health_note
 from bot.uex.exceptions import UexApiError, describe_uex_api_error
 from bot.uex.mixed_routes import find_hedge_cargo
@@ -64,9 +65,9 @@ from bot.uex.supply_demand import (
     classify_supply_evidence,
     has_sell_side_demand,
 )
+from bot.uex.trading import rows_for_commodity, rows_for_known_commodity
 from bot.uex.trading_preferences import (
     describe_active_preferences,
-    risk_tolerance_hint,
     saved_filter_labels,
     saved_filters_hint,
 )
@@ -155,7 +156,7 @@ def _build_route_field(
         if headroom_note := stock_headroom_warning(cargo.limited_by):
             value_lines.append(f"⚠️ {headroom_note}")
             for hedge_item in hedge_items or ():
-                value_lines.append(f"Hedge: {cargo_item_line(hedge_item)}")
+                value_lines.append(f"Hedge: {cargo_item_line(hedge_item, risk=True)}")
     elif not ship_vehicle:
         value_lines.append(missing_ship_line or "Cargo: unknown (set a ship with /set-trading-preferences to see haulable SCU)")
 
@@ -323,6 +324,13 @@ class Trends(commands.Cog):
 
             # Per commodity, so one commodity's odd rows can't sink the whole refresh.
             try:
+                # UEX matches commodity_name as a SUBSTRING: 'Gold' also returned Golden
+                # Medmon (its 71,000 became Gold's trending best sell), and 'Tin' listed
+                # Astatine first, so rows[0]'s id gathered Astatine's routes a second time
+                # under Tin's name. Only this catalog commodity's own rows, by its id.
+                rows = rows_for_known_commodity(rows, name, commodity.get("id"))
+                if not rows:
+                    continue
                 total_trips, avg_volatility = aggregate_commodity_trips(rows)
                 if total_trips > 0:
                     best_sell = max((r.get("price_sell") or 0 for r in rows), default=0)
@@ -438,7 +446,6 @@ class Trends(commands.Cog):
         display_limit: int,
         auto_load_only: bool = False,
         system: str | None = None,
-        risk_tolerance: str | None = None,
         budget: float | None = None,
         already_deferred: bool = False,
         auto_load_saved: bool = False,
@@ -526,17 +533,6 @@ class Trends(commands.Cog):
                     f"No routes confirmed entirely within {system} found right now."
                     + saved_filters_hint(saved_filter_labels(system=system if system_saved else None))
                     + partial_refresh_hint(gap)
-                )
-                return
-        # The saved risk tolerance has no per-command option, so it always applies here.
-        if risk_tolerance:
-            flags = await self.bot.db.get_commodity_references(list({route.id_commodity for route in entries}))
-            entries = [route for route in entries
-                       if not outside_risk_tolerance(flags.get(route.id_commodity), risk_tolerance)]
-            if not entries:
-                await interaction.followup.send(
-                    "No routes within your risk tolerance found right now."
-                    + risk_tolerance_hint(risk_tolerance) + partial_refresh_hint(gap)
                 )
                 return
         # Re-rank by what THIS player can actually haul/afford before dedup/truncation,
@@ -647,7 +643,7 @@ class Trends(commands.Cog):
         if budget is not None:
             footer += f" · budget {budget:,.0f} aUEC"
         preferences_note = describe_active_preferences(
-            auto_load_only=auto_load_only, system=system, risk_tolerance=risk_tolerance,
+            auto_load_only=auto_load_only, system=system,
             saved={name for name, on in (("auto_load_only", auto_load_saved), ("system", system_saved)) if on},
         )
         if preferences_note:
@@ -692,8 +688,7 @@ class Trends(commands.Cog):
                 if room is None:
                     continue
                 if market_rows is None:
-                    market_rows = within_risk_tolerance(
-                        await self.bot.db.get_mixed_route_market_rows(), risk_tolerance)
+                    market_rows = await self.bot.db.get_mixed_route_market_rows()
                 hedge_items_by_route[i] = find_hedge_cargo(
                     market_rows, origin_terminal_id=r.origin_terminal_id,
                     destination_terminal_id=r.destination_terminal_id, exclude_commodity_id=r.id_commodity,
@@ -930,7 +925,6 @@ class Trends(commands.Cog):
             display_limit=TOP_IN_STOCK_ROUTES_KEEP if strict else TOP_SCORED_ROUTES_KEEP,
             auto_load_only=auto_load_only,
             system=system_value,
-            risk_tolerance=prefs["risk_tolerance"],
             auto_load_saved=auto_load_saved,
             system_saved=system_saved,
             budget=float(budget) if budget is not None else None,
@@ -994,6 +988,14 @@ class Trends(commands.Cog):
 
         if not price_rows:
             await interaction.followup.send(f"No data found for '{commodity}'. Check the spelling.")
+            return
+
+        # UEX matches commodity_name as a SUBSTRING - 'Gold' also returned Golden Medmon,
+        # whose terminals could win the "most traded" default below and chart the wrong
+        # market. Only the commodity asked for.
+        price_rows, others = rows_for_commodity(price_rows, commodity)
+        if others:
+            await interaction.followup.send(ambiguous_commodity_text(commodity, others))
             return
 
         id_commodity = price_rows[0].get("id_commodity")

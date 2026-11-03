@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock
 
 from cryptography.fernet import Fernet
 
-from bot.cogs.prices import Prices
+from bot.cogs.prices import Prices, ambiguous_commodity_text, no_terminal_trades_text
 from bot.db.database import Database
 from bot.uex.data_health import FRESHNESS_LEGEND
 from bot.uex.supply_demand import SELL_SIDE_STATUS_CLARIFIER
@@ -405,5 +405,108 @@ def test_price_guards_against_oversized_fields_instead_of_crashing(tmp_path):
         fields = {f.name: f.value for f in embed.fields}
         assert "Best places to SELL" not in fields, "an oversized section must be omitted, not raise"
         assert "SELL" in embed.footer.text and "omitted" in embed.footer.text
+
+    asyncio.run(run())
+
+
+# -- only the commodity asked for --------------------------------------------------------
+# Ported from aiv2 commit c4f1aa6: UEX's commodity_name filter matches substrings.
+
+def _gold_and_medmon_rows() -> list[dict]:
+    """Shaped like UEX's live answer to commodity_name='Gold' - a SUBSTRING match that also
+    returns Golden Medmon, which pays far more (71,000 against real Gold's ~31,000) and so
+    used to top /price's Gold list."""
+    return [
+        {"id_terminal": 1, "terminal_name": "Ashland Medmon Buyer", "id_commodity": 50,
+         "commodity_name": "Golden Medmon", "price_sell": 71000.0, "scu_sell": 10, "status_sell": 3},
+        {"id_terminal": 2, "terminal_name": "CBD Lorville", "id_commodity": 33,
+         "commodity_name": "Gold", "price_sell": 31000.0, "scu_sell": 500, "status_sell": 3},
+        {"id_terminal": 3, "terminal_name": "Levski Medmon Seller", "id_commodity": 50,
+         "commodity_name": "Golden Medmon", "price_buy": 50000.0, "scu_buy": 20},
+        {"id_terminal": 4, "terminal_name": "ARC-L1", "id_commodity": 33,
+         "commodity_name": "Gold", "price_buy": 24000.0, "scu_buy": 300},
+    ]
+
+
+def _only_text_sent(interaction) -> str:
+    interaction.followup.send.assert_awaited_once()
+    assert "embed" not in interaction.followup.send.call_args.kwargs
+    return interaction.followup.send.call_args.args[0]
+
+
+def test_price_ignores_other_commodities_whose_name_contains_the_query(tmp_path):
+    """Live bug: /price Gold listed Golden Medmon's terminals (71,000). Only Gold's own rows
+    may appear."""
+    async def run():
+        db = Database(tmp_path / "price_exact.sqlite3", Fernet(Fernet.generate_key()))
+        await db.init()
+        cog = _cog(db, price_rows=_gold_and_medmon_rows())
+        interaction = _FakeInteraction()
+
+        await cog.price.callback(cog, interaction, commodity="Gold")
+
+        embed = interaction.followup.send.call_args.kwargs["embed"]
+        assert embed.title == "Gold — Prices"
+        fields = {f.name: f.value for f in embed.fields}
+        assert "CBD Lorville" in fields["Best places to SELL"] and "31000.00" in fields["Best places to SELL"]
+        assert "ARC-L1" in fields["Best places to BUY"]
+        shown = "\n".join(fields.values())
+        assert "Medmon" not in shown and "71000" not in shown and "50000" not in shown
+
+    asyncio.run(run())
+
+
+def test_price_keeps_partial_typing_when_one_commodity_matches(tmp_path):
+    async def run():
+        db = Database(tmp_path / "price_partial.sqlite3", Fernet(Fernet.generate_key()))
+        await db.init()
+        rows = [{"id_terminal": 1, "terminal_name": "Terminal A", "commodity_name": "Laranite",
+                 "price_sell": 9100.0, "scu_sell": 50, "status_sell": 3}]
+        cog = _cog(db, price_rows=rows)
+        interaction = _FakeInteraction()
+
+        await cog.price.callback(cog, interaction, commodity="Laranit")
+
+        assert interaction.followup.send.call_args.kwargs["embed"].title == "Laranite — Prices"
+
+    asyncio.run(run())
+
+
+def test_price_asks_which_one_when_several_commodities_match():
+    async def run():
+        cog = _cog(None, price_rows=_gold_and_medmon_rows())
+        interaction = _FakeInteraction()
+
+        await cog.price.callback(cog, interaction, commodity="Gol")
+
+        text = _only_text_sent(interaction)
+        assert text == ambiguous_commodity_text("Gol", ["Gold", "Golden Medmon"])
+        assert "Gold, Golden Medmon" in text and "Which one" in text
+
+    asyncio.run(run())
+
+
+def test_ambiguous_commodity_text_lists_at_most_five_names():
+    names = [f"Name {i}" for i in range(7)]
+    assert ambiguous_commodity_text("Na", names) == (
+        "'Na' matches more than one commodity: Name 0, Name 1, Name 2, Name 3, Name 4 and 2 more. "
+        "Which one do you mean?"
+    )
+
+
+def test_price_says_so_when_no_terminal_buys_or_sells_it():
+    """It used to post an embed with no fields at all."""
+    async def run():
+        rows = [
+            {"id_terminal": 1, "terminal_name": "A", "commodity_name": "Gold", "price_sell": 0, "price_buy": 0},
+            # A stale sell price at a terminal UEX confirms has no demand (code 7) is not a place to sell either.
+            {"id_terminal": 2, "terminal_name": "B", "commodity_name": "Gold", "price_sell": 90.0, "status_sell": 7},
+        ]
+        cog = _cog(None, price_rows=rows)
+        interaction = _FakeInteraction()
+
+        await cog.price.callback(cog, interaction, commodity="Gold")
+
+        assert _only_text_sent(interaction) == no_terminal_trades_text("Gold")
 
     asyncio.run(run())

@@ -64,7 +64,7 @@ date - no open item, nothing to record here.
       deliberately does NOT fall back to the full catalog the way Marketplace's
       `traded_item_autocomplete` does, since an item missing here means it's genuinely not
       sold anywhere, not just a gap in the bot's own tracking
-- [ ] PR #58 - Add
+- [x] PR #58 - Add
       `/where-to-buy-ship`: every in-game terminal that sells or rents one ship, aUEC prices
       cheapest first, rentals grouped per star system and labelled as the 1-day rate. No
       location option or distance sort, deliberately (only 7 terminals sell ships). A buy or
@@ -76,15 +76,19 @@ date - no open item, nothing to record here.
       `get_vehicle_rental_prices_all`, each with a 12h `_ENDPOINT_CACHE_TTL` entry
       (`bot/uex/client.py`, new `bot/uex/ship_shops.py`, new `bot/cogs/ship_shops.py`,
       `bot/main.py`'s `INITIAL_COGS`, `bot/cogs/help.py`'s `CATEGORIES`, new
-      `tests/test_ship_shops.py`)
-- [ ] PR #59 - Time-limit `/ingame-item-finder`'s (and `/where-to-buy-ship`'s) autocomplete
+      `tests/test_ship_shops.py`) (ported: aiv2 34b7003, as `/ai-where-to-buy-ship` with #92's
+      shop names, plus a chat tool built on the same reply)
+- [x] PR #59 - Time-limit `/ingame-item-finder`'s (and `/where-to-buy-ship`'s) autocomplete
       so a slow or cold UEX response returns no suggestions within Discord's ~3s deadline,
       instead of silently timing out: new `bot/autocomplete.py` `gather_within()` (stops
       waiting at 2.5s without cancelling, so the fetch still fills the cache), plus a
       `cog_load` cache pre-load in both cogs. Port the item-finder half if aiv2 has
       `/ingame-item-finder`. The same PR's `ship_parts_shopping_entries` migration only
       matters if aiv2 ever ported `/ship-parts-finder`. See PROJECT_CONTEXT.md entry 82.
-- [ ] PR #60 - `/ship-parts-finder`'s
+      (ported: the `/where-to-buy-ship` half, `bot/autocomplete.py` and its `cog_load`
+      pre-load, in aiv2 34b7003. aiv2 has no `/ingame-item-finder` or `/ship-parts-finder`
+      yet; porting those from current production brings the rest of this PR with them)
+- [x] PR #60 - `/ship-parts-finder`'s
       comparison text is rebuilt (new `bot/uex/ship_part_display.py`), with a Weapons
       category. Fit is now decided by the wiki's size and tags instead of UEX's catalog size
       (wrong for 18/19 missile racks, 7/86 guns, 6/41 shields). Relevant to aiv2 only if it
@@ -92,19 +96,23 @@ date - no open item, nothing to record here.
       `get_vehicle_loadout`/`find_item_detail_by_name`/`find_item_variants_by_name`
       (`bot/wiki_api.py`) and two new `ship_parts_reference` columns (`bot/db/database.py`).
       See PROJECT_CONTEXT.md entry 83
-- [ ] PR #61 - `/ship-parts-finder` per-category extra stats (weapon per shot/rpm/
+      (ported to aiv2 in commit `211cd54`)
+- [x] PR #61 - `/ship-parts-finder` per-category extra stats (weapon per shot/rpm/
       projectile speed; signature and component HP for radar, power plants, coolers,
       shields and quantum drives), all in `bot/uex/ship_part_display.py`. Only relevant
       if aiv2 ever ports `/ship-parts-finder`. See PROJECT_CONTEXT.md entry 84
-- [ ] PR #62 - `/ship-parts-finder` pages its list (Previous/Next, dropdown per page,
+      (ported to aiv2 in commit `211cd54`)
+- [x] PR #62 - `/ship-parts-finder` pages its list (Previous/Next, dropdown per page,
       15-part cap removed) and ranks each category by its key stat, highest first
       (`bot/uex/ship_part_display.py`, `bot/cogs/ship_parts_finder.py`). Only relevant if
       aiv2 ever ports `/ship-parts-finder`. See PROJECT_CONTEXT.md entry 85
-- [ ] PR #63 - `/ship-parts-finder` shops the guns inside turrets (`child_gun_ports`),
+      (ported to aiv2 in commit `211cd54`)
+- [x] PR #63 - `/ship-parts-finder` shops the guns inside turrets (`child_gun_ports`),
       skips weapon ports the game locks, and checks a port's own required_tags against the
       part's tags (`bot/uex/ship_parts.py`, `bot/cogs/ship_parts_finder.py`, three new
       `ship_parts_reference` columns). Only relevant if aiv2 ever ports `/ship-parts-finder`.
       See PROJECT_CONTEXT.md entry 86
+      (ported to aiv2 in commit `211cd54`)
 - [x] Background loops guarded against any single failure: an outer try/except per loop
       body plus a per-item guard, in `alerts.py`, `stock_alerts.py`, `digest.py`,
       `intelligence.py` (`snapshot_fuel_prices`), `marketplace_alerts.py`,
@@ -114,12 +122,13 @@ date - no open item, nothing to record here.
       too, including any AI-only ones. Test: `tests/test_background_loop_guards.py`.
       See PROJECT_CONTEXT.md entry 87
       (ported to aiv2 in commit `dacd22b`; aiv2's other loops, including `blueprints.py`, were already guarded)
-- [ ] `/ship-parts-finder` reliability: a wiki outage is no longer cached as "no detail"
+- [x] `/ship-parts-finder` reliability: a wiki outage is no longer cached as "no detail"
       for 24h, and a slow category load can't overwrite a newer pick or lock a part under
       the wrong slot (`bot/cogs/ship_parts_finder.py`). Also a new `WikiUnavailableError`
       subclass in `bot/wiki_api.py`, raised only when retries run out. It's a subclass, so
       every existing `except WikiApiError` still catches it. Only the finder part matters,
       and only if aiv2 ever ports `/ship-parts-finder`. See PROJECT_CONTEXT.md entry 88
+      (ported to aiv2 in commit `211cd54`)
 - [x] Notifications marked done only once settled: new `bot/delivery.py` (DELIVERED /
       RETRY / UNDELIVERABLE, `send_dm`, `send_to_channel_or_dm`, `fit_message`), used by
       `alerts.py`, `stock_alerts.py`, `marketplace_alerts.py`, `scanner.py` (which also
@@ -155,24 +164,27 @@ date - no open item, nothing to record here.
       `bot/autocomplete.py: fetch_within`. aiv2's AI tools that draw charts, or any aiv2
       autocomplete still doing `try: await uex... except UexApiError`, need the same.
       Test: `tests/test_responsiveness.py`. See PROJECT_CONTEXT.md entry 93
-- [ ] `/ship-parts-finder`'s restart-proof ↻ Refresh button (`RefreshBrowserButton`,
+- [x] `/ship-parts-finder`'s restart-proof ↻ Refresh button (`RefreshBrowserButton`,
       `_RefreshStub`, `refresh_browser`, `PartsBrowserView.on_timeout`) - only matters if
       aiv2 ever ports `/ship-parts-finder`. The general lesson applies to any aiv2 view:
       never put a `DynamicItem` inside a view that can time out, since closing it
       unregisters the pattern bot-wide. Test: `tests/test_ship_parts_refresh.py`.
       See PROJECT_CONTEXT.md entry 94
-- [ ] Ship-slot reference refresh asks the wiki only about ships not refreshed in 24h
+      (ported to aiv2 in commit `211cd54`)
+- [x] Ship-slot reference refresh asks the wiki only about ships not refreshed in 24h
       (new `ship_parts_reference_status` table, hourly check, 1s between ships, stops
       after 5 wiki outages in a row), and keeps saved slots when the wiki answers empty.
       Only matters if aiv2 ever ports `/ship-parts-finder`. The general lesson for any
       aiv2 `tasks.loop`: a long interval still runs on every start, so a heavy crawl
       needs its own last-run record. Test: `tests/test_ship_parts_reference_refresh.py`.
       See PROJECT_CONTEXT.md entry 95
-- [ ] Ship Parts Finder's fitting-variant lookups batched by `DETAIL_BATCH_SIZE`, once per
+      (ported to aiv2 in commit `211cd54`)
+- [x] Ship Parts Finder's fitting-variant lookups batched by `DETAIL_BATCH_SIZE`, once per
       name, and `_variants_cached` treating a wiki outage as an outage (flagged in the
       note, skipped for 5 minutes) instead of "no variants". Only matters if aiv2 ever
       ports `/ship-parts-finder`. Test: `tests/test_ship_parts_variant_lookups.py`.
       See PROJECT_CONTEXT.md entry 96
+      (ported to aiv2 in commit `211cd54`)
 - [ ] Trending/top-routes refresh keeps the previous snapshot when too much of a refresh
       failed (`RefreshGap`, `should_replace_snapshot`, `partial_refresh_note`/`_hint` in
       `bot/uex/trends.py`; `REFRESH_MAX_FAILED_SHARE`, `REFRESH_KEEP_PREVIOUS_MAX_AGE` in
@@ -180,12 +192,13 @@ date - no open item, nothing to record here.
       aiv2's `/ai-*` route tools read the same caches, so their answers should mention a
       partial snapshot too. Test: `tests/test_partial_refresh.py`. See PROJECT_CONTEXT.md
       entry 97
-- [ ] `/ship-parts-finder` loads capped at `LOAD_TIME_BUDGET_SECONDS` (45) via
+- [x] `/ship-parts-finder` loads capped at `LOAD_TIME_BUDGET_SECONDS` (45) via
       `_gather_until` + `gather_within`, so a hanging wiki can't outlast the 15-minute
       interaction window; cut-off lookups finish in the background. Only matters if aiv2
       ever ports `/ship-parts-finder`, but any aiv2 AI tool that waits on the wiki has the
       same ~96s-per-request worst case. Test: `tests/test_ship_parts_load_deadline.py`.
       See PROJECT_CONTEXT.md entry 98
+      (ported to aiv2 in commit `211cd54`)
 - [ ] Price/stock alert commodity names resolved against UEX before saving
       (`resolve_tradeable_commodity`, `suggest_commodity_names`, `unknown_commodity_message`
       in `bot/uex/trading.py`), both add commands deferring first, and one combined restock
@@ -217,12 +230,14 @@ date - no open item, nothing to record here.
       message on, and the Configure crafting menu's 10-minute timeout. aiv2's own views
       need the same wiring. Tests: `tests/test_expired_views.py`, `tests/bot_views.py`.
       See PROJECT_CONTEXT.md entry 103
-- [ ] The saved risk tolerance filters routes: `bot/uex/commodity_risk.py`'s
+- [x] The saved risk tolerance filters routes: `bot/uex/commodity_risk.py`'s
       `outside_risk_tolerance`/`within_risk_tolerance`, applied in `_send_ranked_routes`, the
       four mixed-cargo commands' market pools, every hedge suggestion (including the
       tracking thread's), and a `/best-route` note; `risk_tolerance_hint` for empty results.
       If aiv2's AI tools suggest routes, they should honour it too.
-      Tests: `tests/test_risk_tolerance.py`. See PROJECT_CONTEXT.md entry 104
+      Tests: `tests/test_risk_tolerance.py`. See PROJECT_CONTEXT.md entry 104 (skipped:
+      superseded by PR #96, which removed the saved risk tolerance from production
+      altogether - see its entry below, and PROJECT_CONTEXT.md entry 114)
 - [ ] One `delivery` option on all three alert commands (`bot/delivery.py`:
       `DELIVERY_CHOICES`, `delivery_scope`, `send_alert`), DM by default; `scope` columns on
       `price_alerts`/`marketplace_alerts` with migrations that keep old alerts' delivery;
@@ -234,12 +249,14 @@ date - no open item, nothing to record here.
       leaderboard disclosure (`LEADERBOARD_NOTE`). If aiv2 links keys any other way, check
       them the same way.
       Tests: `tests/test_inventory_pickers_and_key_check.py`. See PROJECT_CONTEXT.md entry 106
-- [ ] Route results as one paged message: `bot/route_pages.py` (`send_route_pages`,
+- [x] Route results as one paged message: `bot/route_pages.py` (`send_route_pages`,
       `RoutePagesView`, `text_pages`), used by `_send_ranked_routes`, `/best-route`,
       `/mixed-routes` and `_send_multi_stop_routes`; `RouteTrackingView` removed;
       `BotView.grey_out(**edit_kwargs)`. If aiv2's AI chat posts route results, it can send
       them the same way. Tests: `tests/test_route_pages.py`, `tests/route_results.py`.
       See PROJECT_CONTEXT.md entry 107
+      (ported to aiv2 in commit `55b2ab7`, the AI chat's route tools included; aiv2's copy
+      fixes two bugs this one still has, see `55b2ab7` under aiv2 -> production below)
 - [ ] Saved preferences named and disclosed: `PREFERENCE_READERS`/`preference_scope` and
       `describe_active_preferences(..., saved=)` ("Filters: ... (saved)") in
       `bot/uex/trading_preferences.py`; `_filters_note` in the mixed-cargo commands;
@@ -275,10 +292,225 @@ date - no open item, nothing to record here.
       custom prices on `/inventory-sell` batches (`StackPricesModal`,
       `AuthorizeScheduleView.custom_prices`, `item_name` in the authorize specs). See
       PROJECT_CONTEXT.md entry 113
+- [ ] PR #96 - The saved risk tolerance is removed; routes keep their "⚠️ Cargo risk: ..."
+      labels. `/set-trading-preferences` loses its `risk-tolerance` option (and
+      `RISK_TOLERANCE_CHOICES`); `format_trading_preferences` and the "Filters: ..." footer
+      (`describe_active_preferences`, which no longer takes it) stop showing it;
+      `Database.set_trading_preferences` no longer takes it and `get_trading_preferences`
+      no longer returns it (the `risk_tolerance` column stays, unread, per the additive-only
+      schema); the entry-104 filtering helpers are deleted. aiv2 never got that filtering
+      (skipped above), so what's left there is the option itself: `/ai-set-trading-preferences`
+      still has it and should lose it, along with anywhere it's shown. aiv2's chat
+      `trading_preferences` tool already leaves risk tolerance out. Tests:
+      `tests/test_risk_tolerance.py` (rewritten), `tests/test_trading_preferences.py`,
+      `tests/test_preference_scope.py`. See PROJECT_CONTEXT.md entry 114
+- [ ] PR #97 - Hedge lines and the other cargo in a backup load show their "⚠️ Cargo risk: ..."
+      label: `cargo_item_line(item, risk=True)` (`bot/uex/route_presentation.py`) at
+      `/best-route`'s two "Hedge:" lines, `/top-routes`' ranked list, a tracking thread's
+      shortfall hedge, and `_load_lines` in `bot/uex/backup_routes.py` for cargo that isn't
+      the player's own. aiv2 shows the same lines unlabelled. Tests:
+      `tests/test_risk_tolerance.py`, `tests/test_backup_routes.py`. See PROJECT_CONTEXT.md
+      entry 115
+- [ ] PR #99 - `UexClient.get_marketplace_listings` wraps UEX's bare-object answer to an
+      `id=` lookup in a list (`bot/uex/client.py`). UEX never sends a one-row list there, so every
+      `rows[0]` caller raised `KeyError: 0` once a tracked listing was live, which stalled
+      inventory reconciliation. aiv2 has the same client code. Tests:
+      `tests/test_listing_by_id.py`, and the reconcile harness in `tests/test_inventory.py`
+      now mocks the real shape. See PROJECT_CONTEXT.md entry 116
+- [ ] PR #102 - `ambiguous_commodity_text` (`bot/cogs/prices.py`) ends a list of more than five
+      names with "and N more". aiv2's version (from its own `c4f1aa6`) appends " ..." and then
+      the sentence's period, so the question reads "Name 4 .... Which one do you mean?". Test:
+      `test_ambiguous_commodity_text_lists_at_most_five_names` in `tests/test_price_command.py`.
+      See PROJECT_CONTEXT.md entry 118
+- [ ] PR #103 - Marketplace listings picked by name, not typed by id. `/marketplace-listing`
+      and `/marketplace-delete-listing` take a `listing` autocomplete (your own listings via
+      the linked key's UEX username, plus favorites and open deals for the first), and
+      `/marketplace-search`, `/my-favorites` and `/my-negotiations` get a "Show details for..."
+      menu (`bot/cogs/marketplace.py`, `bot/uex/marketplace.py`'s listing-choice helpers,
+      `UexClient.get_user_username`). Tests: `tests/test_listing_pickers.py`. See
+      PROJECT_CONTEXT.md entry 119
+- [x] PR #106 - `/ship-loadout`, and a "Recommend a loadout" button in `/ship-parts-finder`'s
+      browser: one recommended part per slot for a Balanced/Stealth/Tank/Budget profile, with
+      keep-stock lines, total cost, the total power pips and "Add all to shopping list".
+      Pure logic in the new `bot/uex/ship_loadout.py`; `LoadoutView`, `_loadout_slots` and
+      `ShipPartsShoppingService.lock_in_many` in `bot/cogs/ship_parts_finder.py`; the new
+      `WikiApiClient.get_vehicle_stock_ports` (`bot/wiki_api.py`) for the stock gun inside a
+      gimbal, and `WikiDuplicateNameError` for a ship name the wiki uses twice (the Cutlass
+      Black), said as a known issue in both commands instead of "no slots"; "ship-loadout" in
+      `bot/cogs/help.py`'s Ships category. aiv2 needs the finder's
+      earlier entries above first (PRs #60-#63 and the reliability items). Tests:
+      `tests/test_ship_loadout.py`, `tests/test_ship_loadout_command.py`,
+      `tests/test_wiki_api.py`, `tests/test_ship_parts_finder.py`. See PROJECT_CONTEXT.md
+      entry 122
+      (ported to aiv2 in commit `211cd54`)
+- [x] PR #107 - `/ship-loadout` guns: never a scattergun (`is_scattergun`, and a stock one is
+      always replaced), alpha damage breaking DPS ties (widened to a 5% DPS band by PR #108
+      below), gun lines showing "DPS / alpha", and
+      PDC slots always keeping their stock turret (`is_point_defense`, `bot/uex/ship_loadout.py`);
+      "PDC" in port labels (`format_port_label`, `bot/uex/ship_part_display.py`). Needs PR #106
+      above first. Tests: `tests/test_ship_loadout.py`, `tests/test_ship_loadout_command.py`,
+      `tests/test_ship_part_display.py`. See PROJECT_CONTEXT.md entry 123
+      (ported to aiv2 in commit `211cd54`)
+- [x] PR #108 - `/ship-loadout` turret guns and the alpha band: guns inside locked and
+      manned turrets from the single-vehicle tree (`locked_turret_gun_ports`, the cog's
+      `_vehicle_stock_tree`), guns within 5% DPS ranked by alpha (`DPS_BAND`,
+      `gun_at_least_as_good`, `_rank_guns`), and label fixes in `format_port_label` and
+      `SlotGroup.label`. Needs PRs #106 and #107 above first. See PROJECT_CONTEXT.md entry 124
+      (ported to aiv2 in commit `211cd54`)
+- [x] PR #109 - `/ship-loadout` Done button (`LoadoutDoneButton`, a DynamicItem registered at
+      `cog_load`, with a `_LoadoutDoneStub` in `LoadoutView`, `bot/cogs/ship_parts_finder.py`;
+      `BotView.grey_out(keep=)` in `bot/discord_ui.py`): removes the loadout message, and keeps
+      working after the view goes idle or the bot restarts. Needs the loadout PRs above first.
+      See PROJECT_CONTEXT.md entry 125
+      (ported to aiv2 in commit `211cd54`)
+- [x] PR #111 - Ships the wiki lists twice resolve to the plain ship (`base_vehicle_row` in
+      `bot/wiki_api.py`, used by `get_vehicle_loadout` and `get_vehicle_stock_ports`): the
+      Cutlass Black, Carrack, Polaris and nine more get their slots. Tests:
+      `tests/test_wiki_api.py`. See PROJECT_CONTEXT.md entry 126
+      (ported to aiv2 in commit `211cd54`)
+- [x] PR #112 - `/ship-parts-finder`'s `location` is optional (`bot/cogs/ship_parts_finder.py`:
+      `PartsBrowserView.origin_terminal`/`origin_id` may be None, and ↻ Refresh's custom_id
+      carries an empty terminal). Without it no distances show. See PROJECT_CONTEXT.md entry 127
+      (ported to aiv2 in commit `211cd54`)
+- [x] PR #114 - `/ship-loadout` keeps every ship's stock missile racks (`STOCK_RACKS` in
+      `pick_for_slot`, `bot/uex/ship_loadout.py`; the kept line shows what the rack holds in
+      every profile). An empty rack slot still gets a pick. See PROJECT_CONTEXT.md entry 129
+      (ported to aiv2 in commit `36705a6`)
+- [ ] PR #115 - `delete_marketplace_listing` sends `is_production=1` (`bot/uex/client.py`):
+      without it UEX answered deletes "ok" and the listings stayed live. Check aiv2's copy of
+      the client. See PROJECT_CONTEXT.md entry 130
+- [x] PR #117 - Alerts only ping their owner (`owner_only_mentions` in `bot/delivery.py`'s
+      `send_dm`/`send_to_channel_or_dm`) and the bot never pings @everyone or roles
+      (`allowed_mentions` default in `bot/main.py`). Check aiv2's AI replies too: they echo
+      player text. See PROJECT_CONTEXT.md entry 131
+      (ported to aiv2 in commit `02f3635`; its AI replies already went out with no mentions)
+- [ ] PR #118 - `delete_marketplace_listing` reads the listing back and returns whether it's gone
+      (`bot/uex/client.py`); the 48h relist, `/inventory-cancel-post` and the marketplace delete
+      button act only on a confirmed delete (`bot/cogs/personal_inventory.py`,
+      `bot/cogs/marketplace.py`). Needs PR #115 first. See PROJECT_CONTEXT.md entry 132
+- [ ] PR #119 - A refused DM alert posts in its channel instead (`send_alert`/`send_to_channel`
+      in `bot/delivery.py`); a new marketplace alert's first poll records what's listed without
+      announcing it (`marketplace_alerts.baseline_done`, `mark_marketplace_alert_baseline`).
+      See PROJECT_CONTEXT.md entry 133
+- [x] PR #120 - `/ship-loadout` picks (`bot/uex/ship_loadout.py`): guns that beat stock head to
+      head in `pick_for_slot`, Budget's `same_part` guard, `tiebreak_key` (shield regen, then
+      component HP) before the shop; `format_part_block` leaves out the distance with no
+      location (`bot/uex/ship_part_display.py`). See PROJECT_CONTEXT.md entry 134
+      (ported to aiv2 in commit `02f3635`)
+- [x] PR #121 - `/ship-loadout` heavy-fighter armor gate (`bot/uex/ship_loadout.py`):
+      `ARMOR_REFERENCE`, `beats_armor` (per type, per pellet), the gate in
+      `gun_at_least_as_good` and `_rank_guns`, Budget's gun floor (beats stock head to head,
+      no DPS loss), and the "can't get through heavy-fighter armor" note in `stat_vs_stock`.
+      See PROJECT_CONTEXT.md entry 135
+      (ported to aiv2 in commit `02f3635`)
+- [ ] PR #123 - `/blueprint-search` and `/ingame-item-finder` as layout-component replies:
+      `BotLayoutView`/`_BotViewBehaviour` (`bot/discord_ui.py`; `grey_out` walks nested
+      children), `summarize_contracts`/`contracts_header`/`giver_block`/`first_contracts`
+      (`bot/uex/blueprints.py`, replacing `group_line`), `BlueprintResultView`
+      (`bot/cogs/blueprint_planner.py`), and `item_header`/`highlights_block`/`system_block`/
+      `item_footer`/`distance_text` (`bot/uex/item_finder.py`, replacing
+      `format_item_listing_line`). `SearchResult.embed` became `blocks`/`crafting`: check
+      anything in aiv2 that reads it, such as a chat tool. See PROJECT_CONTEXT.md entry 136
+- [ ] PR #124 - `/blueprint-search`'s star system: a full-size grey-tag line at the top when every
+      contract shares one, else beside each giver whose contracts share one
+      (`GiverContracts.system`, `contracts_header`, `giver_block` in `bot/uex/blueprints.py`).
+      See PROJECT_CONTEXT.md entry 137
+- [ ] PR #125 - `/multi-stop-route` as layout components: a section per leg with its own warnings,
+      station facts said once by name, no refuel/repair, leg profit on every leg, short footer
+      (`multi_stop_blocks`, `multi_stop_footer`, `cargo_item_notes`, `terminal_limit_notes` in
+      `bot/uex/route_presentation.py`/`practical_routes.py`; `RouteLayoutPagesView`,
+      `RoutePaging`, `layout_pages` in `bot/route_pages.py`). A multi-stop route page has no
+      embed now: check anything in aiv2 that reads one. See PROJECT_CONTEXT.md entry 138
+- [ ] PR #126 - Track this route copies the page showing into its thread: `start_tracking(...,
+      page=)`, `_post_route_copy` (`bot/cogs/route_progression.py`), `route_copy_view`/
+      `route_container` (`bot/route_pages.py`). Needs PR #125 first. See PROJECT_CONTEXT.md
+      entry 139
+- [ ] PR #127 - Configure crafting as a layout: `Recipe.layout_blocks`, `describe_change`,
+      `stat_groups`, `quality_choice_label` (`bot/uex/blueprint_crafting.py`) replace
+      `Recipe.lines`/`format_modifier`; `CraftLayoutView`/`_CraftConfig` (`bot/cogs/
+      blueprint_planner.py`), `CraftConfigView` kept as the text fallback. See PROJECT_CONTEXT.md
+      entry 140
+- [ ] PR #128 - `/command-usage` shows only other players' usage: `usage_report` (`bot/cogs/
+      diagnostics.py`) and `Database.get_real_command_usage` replace the least/most-used
+      table. See PROJECT_CONTEXT.md entry 141
+- [ ] PR #129 - `/ship-loadout` as a layout: `upgrade_entry`, `stat_change`, `kept_sections`,
+      `summary_line`, `paginate_loadout`, `PowerTotal.text` (`bot/uex/ship_loadout.py`) replace
+      `pick_line`/`total_line`/`paginate_lines`/`stat_vs_stock`/`PowerTotal.line`;
+      `_Loadout`/`LoadoutLayoutView` (`bot/cogs/ship_parts_finder.py`), `LoadoutView` kept as
+      the text fallback. Also the tie-break wording fix. See PROJECT_CONTEXT.md entry 142
+- [ ] PR #130 - `/blueprint-search material:` (what an ore crafts): `bot/uex/blueprint_materials.py`,
+      `bot/material_pages.py` (`MaterialUsesView`), `Blueprints.sync_recipes`/`material_uses`/
+      `open_blueprint`, `WikiApiClient.get_blueprints` (and the shared `_crawl`), tables
+      `blueprint_recipe_state`/`blueprint_outputs`/`blueprint_materials`. See PROJECT_CONTEXT.md
+      entry 143
+- [ ] PR #131 - Configure crafting reads stat curves given in parts (most ship parts):
+      `_segments` and `modifier_at`/`_quality_span`/`Recipe._result_block` in
+      `bot/uex/blueprint_crafting.py`. See PROJECT_CONTEXT.md entry 144
+- [ ] PR #132 - Server anniversaries: `bot/cogs/anniversaries.py`, `bot/uex/anniversaries.py`,
+      tables `member_anniversaries`/`anniversary_opt_outs`, the Server Members intent. Only if
+      aiv2 runs in a server of its own; it needs that intent switched on there too. See
+      PROJECT_CONTEXT.md entry 145
+- [ ] PR #134 - The welcome DM for new members: `bot/cogs/welcome.py`, `bot/uex/welcome.py`,
+      table `member_welcomes`. Same condition as PR #132 (a server of its own, the Server
+      Members intent). See PROJECT_CONTEXT.md entry 146
+- [ ] PR #135 - `/ship-loadout` shows a gun's fire rate: `fire_rate` and `shown_stat` in
+      `bot/uex/ship_loadout.py`. See PROJECT_CONTEXT.md entry 147
+- [ ] PR #136 - A sell count UEX leaves out is unknown, not zero: `sell_count_unknown` and
+      `extract_item_activity` in `bot/uex/marketplace.py`, `update_liquidity_scores` and
+      `_repair_unknown_sell_count_scores` in `bot/db/database.py`. See PROJECT_CONTEXT.md entry 148
+- [ ] PR #137 - Voice-activity ranks: `bot/cogs/voice_ranks.py`, `bot/uex/voice_ranks.py`, tables
+      `voice_members`/`voice_daily`/`voice_op_session`/`voice_ops`/`voice_op_attendance`. Only if
+      aiv2 runs in a server of its own, with Manage Roles. See PROJECT_CONTEXT.md entry 149
+- [ ] PR #138 - Veteran roles, the next event in the anniversary DM, and welcome backs:
+      `set_veteran_role`/`sync_veteran_roles`/`next_event_line` in `bot/cogs/anniversaries.py`,
+      `event_line`/`years_completed`/`welcome_back_text` in `bot/uex/anniversaries.py`,
+      `bot/cogs/welcome_back.py`, tables `member_activity`/`activity_seed_state`. Same condition
+      as PR #132. See PROJECT_CONTEXT.md entry 150
+- [ ] PR #140 - The role picker: `bot/cogs/role_picker.py` (`/rolesetup`, `/rolepanel post`,
+      DynamicItem buttons/dropdown), `bot/uex/role_picker.py`, table `role_picker_roles`. Only if
+      aiv2 runs in a server that wants self-serve roles; its #staff channel id is production's.
+      See PROJECT_CONTEXT.md entry 151
+- [ ] PR #141 - Pings' Everything button (`EverythingButton`, `everything_changes`,
+      `RoleGroup.everything`); goes with PR #140. See PROJECT_CONTEXT.md entry 151
+- [ ] PR #142 - Streams & Videos ping role; the Onboarding listener (`on_member_update`/
+      `on_member_join` in `bot/cogs/role_picker.py`) and #welcome first-post Mentor pings (tables
+      `welcome_intros`, `welcome_intro_seed`); production's #staff and #welcome ids. Goes with
+      PR #140. See PROJECT_CONTEXT.md entry 151
+- [ ] PR #143 - Welcome DM opens with the server's places (#welcome, #events, the role panels,
+      #rules); production's channel ids in `bot/uex/welcome.py`. Only if aiv2 sends the welcome
+      DM. See PROJECT_CONTEXT.md entry 146. Also the role picker's log lines move from #staff to
+      #role-log (`ROLE_LOG_CHANNEL_ID`, entry 151)
+- [ ] PR #144 - Event cards: `bot/cogs/event_cards.py`, `bot/uex/events.py`, `/event-roles`, tables
+      `event_cards`, `event_roles`, `event_signups`, `event_regulars`, `event_ship_history`;
+      production's #events and Event Manager ids. Only if aiv2's server runs Discord events.
+      See PROJECT_CONTEXT.md entry 152
+- [ ] PR #146 - The role picker's Colors panel (`COLOR_ROLES`, `color_positions` in
+      `bot/uex/role_picker.py`, `place_colors` in the cog); goes with PR #140. See
+      PROJECT_CONTEXT.md entry 151
 
 ## To port: aiv2 -> production
 
-- [ ] aiv2 commit `a6bd024` - Cross-terminal price-outlier warnings: a commodity's buy/sell
+- [ ] aiv2 commit `55b2ab7` (the `bot/route_pages.py` part only) - two fixes to PR #88's route
+      pages, found by a review while porting them. A page whose embed Discord refuses shows its
+      fallback text cut down to one message (`render`'s `fit_lines`), so lines are lost; aiv2's
+      `RoutePagesView.show_as_text` splits that page into text pages in place (`text_pages`),
+      the first page included, and adds ◀/▶ back when one page becomes several. And
+      `text_pages` leaves no room for `EXPIRED_NOTE`, so `on_timeout` cuts the end off a long
+      text page; aiv2 takes the note's length off the room too. Skip the rest: aiv2's
+      `send_route_pages` taking a send callable (`followup_sender`) is for the chat's channel
+      posts, and the commit's chat tool and evals are AI-only. Tests: the three aiv2 added to
+      `tests/test_route_pages.py`.
+- [x] aiv2's ship-loadout port (uncommitted there on 2026-10-02) - `LoadoutView` keeps the
+      location as `origin_terminal`, not `origin`, which is `BotView`'s interaction: a loadout
+      with a location never greyed out when idle (`bot/cogs/ship_parts_finder.py`).
+      (ported to production in PR #113, PROJECT_CONTEXT.md entry 128)
+- [x] aiv2 commit `c3c14ec` (fix #1 only) - typo-tolerant ore names in `/where-to-mine` and
+      `/refinery-advisor` (`resolve_raw_material_name` in `bot/uex/trading.py`). Not logged
+      here when aiv2 made it; found in a 2026-10-01 review of aiv2's log. Its other fixes are
+      AI-chat or eval work, and fix #2 (city TDD terminals) needs a free-text terminal resolver
+      production doesn't have.
+      (ported to production in PR #104, PROJECT_CONTEXT.md entry 120)
+- [x] aiv2 commit `a6bd024` - Cross-terminal price-outlier warnings: a commodity's buy/sell
       price checked against every other terminal trading it in the same snapshot, flagged
       when 4x-or-more off the median (`bot/uex/price_outliers.py`,
       `bot/uex/route_presentation.py`, `bot/cogs/prices.py`, `bot/cogs/intelligence_brief.py`,
@@ -289,7 +521,9 @@ date - no open item, nothing to record here.
       the unmerged `feature/price-outlier-detection` branch - porting this entry likely
       means merging that branch rather than re-implementing from scratch, but check it's
       still current (and still unmerged) before assuming a fresh port is needed.
-- [ ] aiv2 commit `f2785ae` - Refinery Advisor finds sell prices for ores UEX
+      (ported to production in PR #105, PROJECT_CONTEXT.md entry 121: rebuilt on today's
+      code from aiv2's version, since that branch was 79 commits behind)
+- [x] aiv2 commit `f2785ae` - Refinery Advisor finds sell prices for ores UEX
       links only from the refined side, and signs negative yield bonuses ("-3%", not "+-3%"):
       new `refined_form`/`format_yield_bonus` (`bot/uex/refinery.py`), used in
       `bot/cogs/refinery.py`; 5 new tests in `tests/test_refinery.py`. Checked live: 5 of 32
@@ -298,7 +532,8 @@ date - no open item, nothing to record here.
       shows no sell price for them today. Found through aiv2 chat testing. Production's
       `bot/uex/refinery.py` and `tests/test_refinery.py` matched aiv2's before this change, so
       it ports cleanly.
-- [ ] aiv2 commit `c4f1aa6` - Price only the commodity asked for. UEX's
+      (ported to production in PR #101, PROJECT_CONTEXT.md entry 117)
+- [x] aiv2 commit `c4f1aa6` - Price only the commodity asked for. UEX's
       `/commodities_prices?commodity_name=` matches by SUBSTRING, and every lookup by name used
       the mixed rows as-is. Checked live 2026-09-29: "Gold" returns Gold + Golden Medmon, so
       `/price Gold` shows Golden Medmon's 71,000 (real Gold sells for about 31,000) and
@@ -315,3 +550,4 @@ date - no open item, nothing to record here.
       one), `test_trading.py`, `test_price_command.py`, `test_refinery.py`. Skip aiv2's chat
       price tool, its `price_summary.py` facts and the evals - production has no AI. Port the
       refinery entry above (`f2785ae`) first: both touch the refinery sell-price lookup.
+      (ported to production in PR #102, PROJECT_CONTEXT.md entry 118)

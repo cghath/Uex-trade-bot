@@ -11,7 +11,7 @@ from bot.db.database import Database
 from bot.cogs.liquidity import _format_rating_change
 from bot.cogs.help import _add_command_fields
 from bot.cogs.digest import _format_data_freshness, _format_sellability_digest_fields
-from bot.uex.marketplace import compute_liquidity_score
+from bot.uex.marketplace import compute_liquidity_score, extract_item_activity, sell_count_unknown
 
 
 def _make_db(tmp_path) -> Database:
@@ -260,3 +260,79 @@ def test_existing_liquidity_table_is_migrated_before_new_snapshots_are_written(t
         assert rows[0]["id_item"] == 1
 
     asyncio.run(run())
+
+
+def test_a_sell_count_uex_left_out_is_unknown_not_zero():
+    """UEX sends null, never 0, and from 2026-10-16 sent null for items still being sold."""
+    (row,) = extract_item_activity([{"id_item": 5943, "item_name": "Ouratite", "negotiations_success": "74",
+                                     "negotiations_open": "115", "listings_count_sell": None,
+                                     "listings_count_buy": 5, "total_listings_count": 5}])
+    assert row["listings_count_sell"] is None and sell_count_unknown(row)
+    assert not sell_count_unknown({**row, "listings_count_sell": 21})
+    assert not sell_count_unknown({"negotiations_success": 1, "listings_count": 5}), "older rows keep their fallback"
+
+
+def test_an_item_with_no_sell_count_keeps_its_last_real_score(tmp_path):
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        ouratite = {"id_item": 5943, "item_name": "Ouratite", "negotiations_success": 76, "negotiations_open": 131,
+                    "listings_count_sell": 20, "listings_count_buy": 5, "listings_count": 25}
+        gold = {"id_item": 5907, "item_name": "Gold", "negotiations_success": 25, "negotiations_open": 43,
+                "listings_count_sell": 9, "listings_count_buy": 2, "listings_count": 11}
+        assert await db.update_liquidity_scores([ouratite, gold]) == 2
+        before = {r["item_name"]: r["score"] for r in await db.get_top_liquidity_items()}
+        # The next snapshot: Ouratite's sell count missing, Gold's still there and changed.
+        count = await db.update_liquidity_scores([{**ouratite, "listings_count_sell": None, "listings_count": 5},
+                                                  {**gold, "listings_count_sell": 10}])
+        after = {r["item_name"]: r for r in await db.get_top_liquidity_items()}
+        history = await db.get_liquidity_history("Ouratite")
+        return before, count, after, history
+
+    before, count, after, history = asyncio.run(run())
+    assert count == 1
+    assert before["Ouratite"] == 67.41 and after["Ouratite"]["score"] == 67.41
+    assert after["Ouratite"]["listings_count_sell"] == 20
+    assert [h["score"] for h in history] == [67.41], "no 0 recorded for the hour"
+    assert after["Gold"]["score"] != before["Gold"], "the rest of the snapshot is still scored"
+
+
+def test_startup_repairs_the_false_zeros_a_missing_sell_count_left(tmp_path):
+    """The Pi on 2026-10-17: Ouratite rated 0 since 16 Oct over a sell count UEX left out."""
+    async def run():
+        db = _make_db(tmp_path)
+        await db.init()
+        conn = sqlite3.connect(tmp_path / "test.sqlite3")
+        snap = """INSERT INTO liquidity_score_snapshots (id_item, item_name, score, negotiations_success,
+                  negotiations_open, listings_count, listings_count_sell, listings_count_buy, recorded_hour)
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+        conn.executemany(snap, [
+            (5943, "Ouratite", 66.63, 74, 137, 26, 21, 5, "2026-10-13 16:00:00"),
+            (5943, "Ouratite", 67.41, 76, 131, 25, 20, 5, "2026-10-16 11:00:00"),
+            (5943, "Ouratite", 0.0, 76, 131, 5, 0, 5, "2026-10-16 12:00:00"),   # false zeros
+            (5943, "Ouratite", 0.0, 75, 115, 5, 0, 5, "2026-10-17 14:00:00"),
+            (5910, "Hephaestanite", 0.0, 3, 4, 2, 0, 2, "2026-10-17 14:00:00"),  # no real score left
+            (5907, "Gold", 56.63, 25, 43, 11, 9, 2, "2026-10-17 14:00:00"),     # untouched
+        ])
+        scores = """INSERT INTO liquidity_scores (item_name, id_item, score, negotiations_success, negotiations_open,
+                    listings_count, listings_count_sell, listings_count_buy, last_updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+        conn.executemany(scores, [
+            ("Ouratite", 5943, 0.0, 75, 115, 5, 0, 5, "2026-10-17 14:00:00"),
+            ("Hephaestanite", 5910, 0.0, 3, 4, 2, 0, 2, "2026-10-17 14:00:00"),
+            ("Gold", 5907, 56.63, 25, 43, 11, 9, 2, "2026-10-17 14:00:00"),
+        ])
+        conn.commit()
+        conn.close()
+        await db.init()
+        await db.init()  # idempotent
+        conn = sqlite3.connect(tmp_path / "test.sqlite3")
+        current = conn.execute("""SELECT item_name, score, negotiations_open, listings_count_sell, last_updated
+                                  FROM liquidity_scores ORDER BY item_name""").fetchall()
+        history = conn.execute("SELECT item_name, score FROM liquidity_score_snapshots ORDER BY item_name, recorded_hour").fetchall()
+        conn.close()
+        return current, history
+
+    current, history = asyncio.run(run())
+    assert current == [("Gold", 56.63, 43, 9, "2026-10-17 14:00:00"),
+                       ("Ouratite", 67.41, 131, 20, "2026-10-16 11:00:00")]
+    assert history == [("Gold", 56.63), ("Ouratite", 66.63), ("Ouratite", 67.41)]

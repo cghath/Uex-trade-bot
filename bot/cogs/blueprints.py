@@ -7,11 +7,14 @@ old (bot/uex/blueprints.py snapshot_is_current). The snapshot lives in SQLite so
 re-download it and so a failed sync can never lose good data (Database.replace_blueprint_snapshot is
 all-or-nothing, and sync_result_is_plausible refuses a truncated response before it gets that far).
 
-`search` is the one entry point the slash command calls.
+`search` is the one entry point the slash command calls for a blueprint. For a material (what an
+ore or mineral crafts), the command lists the blueprints that use it (bot/material_pages.py) from a
+second snapshot, every blueprint's recipe (sync_recipes), checked and stored the same way.
 """
 from __future__ import annotations
 
 import asyncio
+import difflib
 import functools
 import logging
 import re
@@ -27,28 +30,33 @@ from discord.ext import commands, tasks
 from bot.uex.blueprints import (
     BlueprintIndex,
     BlueprintMission,
+    contracts_header,
     describe_chance,
-    group_line,
+    first_contracts,
+    giver_block,
     group_missions,
     parse_chances,
     parse_missions,
     snapshot_is_current,
+    summarize_contracts,
     sync_result_is_plausible,
 )
-from bot.uex.route_presentation import add_chunked_fields, chunk_lines
+from bot.uex.route_presentation import chunk_lines
 from bot.wiki_api import WikiApiClient, WikiApiError
 from bot.uex.blueprint_crafting import Recipe, UNAVAILABLE, craft_count, obtainable_qualities
-from bot.cogs.blueprint_planner import CraftLaunchView, ShoppingView, ShoppingService
+from bot.uex.blueprint_materials import MaterialUse, parse_blueprint_rows
+from bot.material_pages import MaterialUsesView, text_listing
+from bot.cogs.blueprint_planner import BlueprintResultView, CraftLaunchView, ShoppingView, ShoppingService
+from bot.discord_ui import LAYOUT_TEXT_LIMIT  # a result over it goes as text pages
 
 logger = logging.getLogger("uexbot.blueprints")
 
 REFRESH_HOURS = 12  # the API itself caches responses for 12h, so checking more often gains nothing
 DETAIL_CACHE_SECONDS = 6 * 3600
+RECIPE_RETRY_SECONDS = 10 * 60  # after a failed on-demand recipe sync, material: says so until then
 DETAIL_CACHE_MAX = 300
-MAX_EMBED_FIELDS = 25
 TEXT_PAGE_LIMIT = 1900  # under Discord's 2000-char message cap
 MAX_TEXT_PAGES = 5
-POOL_DISCLOSURE = "A contract rewards a blueprint from its pool; the odds of each item in the pool aren't published."
 # The longest real blueprint name is well under this; anything longer is not a name, and a player's raw query
 # is echoed back in "no match"/"which one?" replies, so it is bounded and made mention-safe first.
 MAX_QUERY_CHARS = 100
@@ -74,12 +82,14 @@ class SnapshotRejected(Exception):
 @dataclass(frozen=True)
 class SearchResult:
     """`pages` is ALWAYS the complete plain-text rendering (each page fits one Discord message), so
-    it doubles as the fallback when the embed is too large or its send fails. `embed` exists only
-    for a `found` result that fit Discord's limits."""
+    it doubles as the fallback when the layout is too large or its send fails. `blocks` (the
+    layout's header, then one per giver) and `crafting` exist only for a `found` result whose
+    whole list fits one layout."""
     status: Literal["found", "ambiguous", "none", "unavailable"]
     pages: tuple[str, ...]
     name: str | None = None
-    embed: discord.Embed | None = None
+    blocks: tuple[str, ...] = ()
+    crafting: str = ""
     # Structured extras so callers never have to parse `pages` back apart: for
     # "ambiguous" the ranked candidate names and how many more matched; for "none" the near-miss
     # suggestions (possibly empty).
@@ -103,11 +113,24 @@ async def blueprint_autocomplete(interaction: discord.Interaction, current: str)
     return [app_commands.Choice(name=name[:100], value=name[:100]) for name in index.autocomplete(current)]
 
 
+async def material_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
+    """Materials used in a blueprint a player can get, most-used first, narrowed by what's typed.
+    Reads the database only - never triggers a sync."""
+    names = await interaction.client.db.get_material_names()
+    typed = " ".join(current.split()).lower()
+    starts = [n for n in names if n[0].lower().startswith(typed)]
+    inside = [n for n in names if typed in n[0].lower() and n not in starts]
+    return [app_commands.Choice(name=f"{name} · {uses} blueprint{'s' if uses != 1 else ''}"[:100], value=name[:100])
+            for name, uses in [*starts, *inside][:25]]
+
+
 class Blueprints(commands.Cog):
     def __init__(self, bot: commands.Bot, *, client: WikiApiClient | None = None, start_refresh: bool = True) -> None:
         self.bot = bot
         self._client = client or WikiApiClient()
         self._sync_lock = asyncio.Lock()
+        self._recipe_lock = asyncio.Lock()
+        self._recipe_retry_after = 0.0
         self._index: BlueprintIndex | None = None
         self._detail_cache: dict[tuple[str, str], tuple[float, dict]] = {}
         self._quality_cache: dict[str, tuple[float, tuple[int, ...]]] = {}
@@ -133,6 +156,14 @@ class Blueprints(commands.Cog):
             logger.warning("Blueprint snapshot refresh failed (keeping the previous snapshot): %s", exc)
         except Exception:
             logger.exception("Blueprint snapshot refresh failed unexpectedly")
+        # Apart from the contracts: a failure in either leaves the other's sync alone.
+        try:
+            outcome = await self.sync_recipes()
+            logger.info("Blueprint recipe check: %s", outcome)
+        except (WikiApiError, SnapshotRejected) as exc:
+            logger.warning("Blueprint recipe refresh failed (keeping the previous recipes): %s", exc)
+        except Exception:
+            logger.exception("Blueprint recipe refresh failed unexpectedly")
 
     @refresh_snapshot.before_loop
     async def before_refresh_snapshot(self) -> None:
@@ -170,6 +201,36 @@ class Blueprints(commands.Cog):
             counts = await self.bot.db.replace_blueprint_snapshot(missions, game_version=remote_version, synced_at=now)
             self._index = None
             logger.info("Blueprint snapshot synced: %d missions, %d blueprints (game %s)", *counts, remote_version)
+            return "synced"
+
+    async def sync_recipes(self, *, force: bool = False) -> Literal["synced", "current"]:
+        """Bring the stored recipes (what each blueprint takes, for material:) up to date, as
+        sync_snapshot does the contracts: only when the game version changed or they're a week old,
+        never with rows of another version, never with a count far below the last one. Raises
+        WikiApiError or SnapshotRejected, leaving the previous recipes untouched."""
+        async with self._recipe_lock:
+            state = await self.bot.db.get_blueprint_recipe_state()
+            remote_version = await self._client.get_game_version()
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
+            if not force and snapshot_is_current(
+                state[0] if state else None, state[1] if state else None, remote_version, now,
+            ):
+                return "current"
+            rows = await self._client.get_blueprints()
+            row_versions = {str(row.get("game_version") or "").strip() for row in rows if isinstance(row, dict)}
+            if row_versions != {remote_version}:
+                raise SnapshotRejected(
+                    f"recipe rows report game version(s) {sorted(str(v) for v in row_versions)} but the API "
+                    f"served {remote_version!r} a moment earlier - keeping the previous recipes, will retry"
+                )
+            recipes = parse_blueprint_rows(rows)
+            if not sync_result_is_plausible(len(recipes), state[2] if state else None):
+                raise SnapshotRejected(
+                    f"{len(recipes)} usable blueprints from {len(rows)} rows "
+                    f"(previous recipes: {state[2] if state else 'none'})"
+                )
+            count = await self.bot.db.replace_blueprint_recipes(recipes, game_version=remote_version, synced_at=now)
+            logger.info("Blueprint recipes synced: %d blueprints (game %s)", count, remote_version)
             return "synced"
 
     async def get_index(self, *, sync_if_missing: bool) -> BlueprintIndex | None:
@@ -287,51 +348,36 @@ class Blueprints(commands.Cog):
         chances: dict[str, float], state, recipe: Recipe | None = None, craft_quantity: int = 1,
     ) -> SearchResult:
         groups = group_missions(missions)
-        entries: list[tuple[str, str]] = []  # (giver, line), in display order
-        for group in groups:
-            chance_text = describe_chance([chances.get(uuid) for uuid in group.mission_uuids])
-            entries.append((group.giver, group_line(group, chance_text)))
-        by_giver: dict[str, list[str]] = {}
-        for giver, line in entries:
-            by_giver.setdefault(giver, []).append(line)
-
-        contracts = len(missions)
-        summary = (
-            f"**{name}** can be awarded by {contracts} contract{'s' if contracts != 1 else ''} "
-            f"({len(groups)} distinct) from {len(by_giver)} giver{'s' if len(by_giver) != 1 else ''}."
-        )
-        if corrected_from:
-            summary = f"Showing results for **{name}** (you typed “{corrected_from}”).\n" + summary
-        footer = POOL_DISCLOSURE
-        if state is not None:
-            footer += f"\nStar Citizen Wiki API · game {state.game_version} · synced {state.synced_at:%Y-%m-%d}"
-
-        crafting = "\n".join(recipe.lines(craft_quantity)) if recipe is not None else UNAVAILABLE
-        crafting = discord.utils.escape_mentions(crafting)
-        if len(crafting) > 2400:
-            crafting = crafting[:2300] + "\nFull crafting details are available in Configure crafting."
+        summary = summarize_contracts(
+            groups, [describe_chance([chances.get(uuid) for uuid in group.mission_uuids]) for group in groups])
+        header = discord.utils.escape_mentions(
+            contracts_header(name, summary, state.game_version if state is not None else None, corrected_from))
+        # The crafting details live behind Configure crafting (the owner's call, 2026-10-03): the
+        # reply only says where to find them, and how many copies when it's more than one.
+        if recipe is None:
+            crafting = layout_crafting = f"-# {UNAVAILABLE}"
+        else:
+            title = "**Crafting**" if craft_quantity == 1 else f"**Crafting {craft_quantity:,} copies**"
+            layout_crafting = f"{title}\nSee the materials and how their quality changes the stats."
+            crafting = (f"{title}\nTo see the materials and how their quality changes the stats, "
+                        "use **Configure crafting** below.")
 
         def assemble(shown: int) -> list[str]:
-            lines = [summary, "", crafting]
-            omitted = len(entries) - shown
+            lines = header.split("\n")
+            omitted = summary.count - shown
             if omitted:
                 lines.append(
-                    f"Showing {shown} of {len(entries)} contract groups - {omitted} more didn't fit in Discord. "
+                    f"Showing {shown} of {summary.count} contracts - {omitted} more didn't fit in Discord. "
                     "Search a more specific name to narrow it down."
                 )
-            lines.append("")
-            current_giver = None
-            for giver, line in entries[:shown]:
-                if giver != current_giver:
-                    lines.append(f"**{giver}**")
-                    current_giver = giver
-                lines.append(line)
-            lines.extend(["", footer])
+            for section in first_contracts(summary.givers, shown):
+                lines.extend(["", *discord.utils.escape_mentions(giver_block(section)).split("\n")])
+            lines.extend(["", *crafting.split("\n")])
             return chunk_lines(lines, TEXT_PAGE_LIMIT)
 
         # Everything if it fits; otherwise the LARGEST prefix of the list that fits, with an explicit "showing X
         # of Y". Never silently drop the middle: the summary claims what was shown.
-        shown = len(entries)
+        shown = summary.count
         pages = assemble(shown)
         if len(pages) > MAX_TEXT_PAGES:
             low, high = 0, shown - 1
@@ -343,55 +389,163 @@ class Blueprints(commands.Cog):
                     high = mid - 1
             shown = low
             pages = assemble(shown)
-        omitted = len(entries) - shown
+        omitted = summary.count - shown
 
-        embed = discord.Embed(title=f"Blueprint: {name}"[:256], description=(summary + "\n\n" + crafting)[:4096], color=discord.Color.blurple())
-        embed.set_footer(text=footer[:2048])
-        fits = True
-        for giver, lines in by_giver.items():
-            if len(embed.fields) + len(chunk_lines(lines)) > MAX_EMBED_FIELDS or not add_chunked_fields(embed, name=giver, lines=lines):
-                fits = False
-                break
-        # An embed only ever shows the full list; if any group was cut from the text pages the embed can't
-        # have fit either (it is far tighter), so a truncated result is always delivered as text with its notice.
-        use_embed = fits and len(embed) <= 6000 and omitted == 0
-        return SearchResult("found", tuple(pages), name, embed if use_embed else None, omitted=omitted, recipe=recipe, craft_quantity=craft_quantity)
+        blocks = (header, *(discord.utils.escape_mentions(giver_block(section)) for section in summary.givers))
+        # The layout only ever shows the whole list; a result cut short as text goes as text, with its notice.
+        fits = omitted == 0 and sum(map(len, blocks)) + len(layout_crafting) <= LAYOUT_TEXT_LIMIT
+        return SearchResult("found", tuple(pages), name, blocks if fits else (), layout_crafting if fits else "",
+                            omitted=omitted, recipe=recipe, craft_quantity=craft_quantity)
 
     async def deliver(self, send: Callable[..., Awaitable], result: SearchResult) -> None:
         """Send a result via `send` (a followup.send with wait=True, or a channel.send - either
         returns the message, which the craft buttons need to grey out when they expire).
-        Prefers the embed; if none fits, or Discord rejects it, sends the complete text pages
-        instead - same facts, same disclosures."""
+        Prefers the layout; if it doesn't fit (Discord's 40 components or 4,000 characters), or
+        Discord rejects it, sends the complete text pages instead - same facts, same disclosures."""
+        if result.blocks:
+            try:
+                layout = BlueprintResultView(self, result.blocks, result.crafting, result.recipe, result.craft_quantity)
+                if layout.content_length() > LAYOUT_TEXT_LIMIT:
+                    raise ValueError(f"{layout.content_length()} characters")
+            except ValueError as exc:
+                logger.warning("Blueprint layout doesn't fit (%s); sending text", exc)
+            else:
+                try:
+                    layout.message = await send(view=layout, allowed_mentions=_NO_MENTIONS)
+                    return
+                except discord.HTTPException as exc:
+                    layout.stop()
+                    logger.warning("Blueprint layout send failed (%s); falling back to text", exc)
         view = CraftLaunchView(self, result.recipe, result.craft_quantity) if result.recipe else None
         extras = {"view": view} if view else {}
-        if result.embed is not None:
-            try:
-                sent = await send(embed=result.embed, allowed_mentions=_NO_MENTIONS, **extras)
-                if view is not None:
-                    view.message = sent
-                return
-            except discord.HTTPException as exc:
-                logger.warning("Blueprint embed send failed (%s); falling back to text", exc)
         for index, page in enumerate(result.pages):
             last = index == len(result.pages) - 1
             sent = await send(content=page, allowed_mentions=_NO_MENTIONS, **(extras if last else {}))
             if last and view is not None:
                 view.message = sent
 
+    # -- material: what an ore or mineral crafts ---------------------------------------------------
+
+    async def material_uses(self, query: str) -> tuple[str, list[MaterialUse]] | str:
+        """(the material's own name, the blueprints a player can get that use it), or the reply
+        saying why there are none. Syncs whatever is missing first: the contracts decide which
+        blueprints a player can get, the recipes what each takes."""
+        query = " ".join(str(query).split())[:MAX_QUERY_CHARS]
+        if await self.get_index(sync_if_missing=True) is None:
+            return "Blueprint data isn't available right now - the Star Citizen Wiki API couldn't be reached. Try again in a bit."
+        if await self.bot.db.get_blueprint_recipe_state() is None:
+            unavailable = "Blueprint recipes aren't available right now - the Star Citizen Wiki API couldn't be reached. Try again in a bit."
+            # A failed first sync isn't retried by every query (each is ~9 requests): the loop retries anyway.
+            if time.monotonic() < self._recipe_retry_after:
+                return unavailable
+            try:
+                await self.sync_recipes()
+            except (WikiApiError, SnapshotRejected) as exc:
+                logger.warning("On-demand blueprint recipe sync failed: %s", exc)
+                self._recipe_retry_after = time.monotonic() + RECIPE_RETRY_SECONDS
+                return unavailable
+        names = [name for name, _uses in await self.bot.db.get_material_names()]
+        name = next((n for n in names if n.lower() == query.lower()), None)
+        if name is None:
+            close = difflib.get_close_matches(query.lower(), [n.lower() for n in names], n=3, cutoff=0.6)
+            hint = ("\nDid you mean: " + ", ".join(_echo(n) for n in names if n.lower() in close) + "?") if close else ""
+            return (f"No blueprint you can get uses “{_echo(query)}”.{hint}\n"
+                    "Pick a material from the autocomplete list.")
+        return name, await self.bot.db.get_material_uses(name)
+
+    async def open_blueprint(self, send: Callable[..., Awaitable], use: MaterialUse, craft_quantity: int = 1) -> None:
+        """A blueprint picked from a material's list: its usual reply, found by uuid so a shared
+        name can't pick the wrong one. One unlocked by default has no contract, so its reply says
+        that and still offers Configure crafting."""
+        index = await self.get_index(sync_if_missing=False)
+        if index is not None and index.match(use.uuid).status == "resolved":
+            await self.deliver(send, await self.search(use.uuid, craft_quantity=craft_quantity))
+            return
+        if index is None and not use.is_default:
+            await send(content="Blueprint data isn't available right now - the Star Citizen Wiki API couldn't be "
+                       "reached. Try again in a bit.", allowed_mentions=_NO_MENTIONS)
+            return
+        await self.deliver(send, await self.default_blueprint(use, craft_quantity))
+
+    async def default_blueprint(self, use: MaterialUse, craft_quantity: int = 1) -> SearchResult:
+        state = await self.bot.db.get_blueprint_recipe_state()
+        detail = await self._detail_for(use.uuid, state[0]) if state is not None else None
+        recipe = None
+        if detail is not None:
+            try:
+                recipe = Recipe.parse(detail)
+            except ValueError:
+                logger.warning("Unsupported crafting recipe for %s", use.uuid)
+        if use.is_default:
+            where = "Unlocked by default: every player can craft it, no contract needed."
+        else:
+            where = "No contract in the current data awards it."
+        if recipe is None:
+            crafting = f"-# {UNAVAILABLE}"
+        else:
+            title = "**Crafting**" if craft_quantity == 1 else f"**Crafting {craft_quantity:,} copies**"
+            crafting = (f"{title}\nTo see the materials and how their quality changes the stats, "
+                        "use **Configure crafting** below.")
+        text = discord.utils.escape_mentions(f"## {use.name}\n{where}\n\n{crafting}")
+        return SearchResult("found", _text_pages(text), use.name, recipe=recipe, craft_quantity=craft_quantity)
+
+    async def send_material(self, interaction: discord.Interaction, material: str, craft_quantity: int) -> None:
+        """The material's blueprints as a layout (MaterialUsesView), or as text pages if Discord
+        refuses it. Picking one sends its reply as a new message, the list staying to pick another."""
+        found = await self.material_uses(material)
+        if isinstance(found, str):
+            for page in _text_pages(found):
+                await interaction.followup.send(content=page, allowed_mentions=_NO_MENTIONS)
+            return
+        name, uses = found
+        if not uses:  # the material's name came from the same query, so this only races a sync
+            await interaction.followup.send(content=f"No blueprint you can get uses {_echo(name)} right now.",
+                                            allowed_mentions=_NO_MENTIONS)
+            return
+
+        async def opener(click: discord.Interaction, use: MaterialUse) -> None:
+            await self.open_blueprint(functools.partial(click.followup.send, wait=True), use, craft_quantity)
+
+        view = MaterialUsesView(name, uses, owner_id=interaction.user.id, opener=opener)
+        if not view.fits():
+            view.stop()
+            logger.warning("Material layout for %s doesn't fit Discord's limits; sending text", name)
+        else:
+            try:
+                view.message = await interaction.followup.send(view=view, allowed_mentions=_NO_MENTIONS, wait=True)
+                return
+            except discord.HTTPException as exc:
+                view.stop()
+                logger.warning("Material layout send failed (%s); falling back to text", exc)
+        for page in _text_pages(text_listing(name, uses)):
+            await interaction.followup.send(content=page, allowed_mentions=_NO_MENTIONS)
+
     # -- command --------------------------------------------------------------------------------
 
-    @app_commands.command(name="blueprint-search", description="Find which contracts award a crafting blueprint.")
+    @app_commands.command(name="blueprint-search",
+                          description="Find which contracts award a blueprint, or what an ore or mineral crafts.")
     @app_commands.describe(
         blueprint="Blueprint name - partial names and small typos are fine, e.g. 'killshot rifle'",
+        material="An ore or mineral, e.g. 'tungsten': lists the blueprints it's used in",
         craft_quantity="How many copies to craft; material quantities scale to this number.",
     )
-    @app_commands.autocomplete(blueprint=blueprint_autocomplete)
+    @app_commands.autocomplete(blueprint=blueprint_autocomplete, material=material_autocomplete)
     async def blueprint_search(
-        self, interaction: discord.Interaction, blueprint: app_commands.Range[str, 1, MAX_QUERY_CHARS],
+        self, interaction: discord.Interaction,
+        blueprint: app_commands.Range[str, 1, MAX_QUERY_CHARS] | None = None,
+        material: app_commands.Range[str, 1, MAX_QUERY_CHARS] | None = None,
         craft_quantity: app_commands.Range[int, 1, 10000] = 1,
     ) -> None:
+        if (blueprint is None) == (material is None):
+            await interaction.response.send_message(
+                "Fill in one of the two: `blueprint:` to find where to get a blueprint, or `material:` to see "
+                "what an ore or mineral crafts.", ephemeral=True)
+            return
         # The very first search can trigger a full sync (~9 requests) - acknowledge before any of it.
         await interaction.response.defer()
+        if material is not None:
+            await self.send_material(interaction, material, craft_quantity)
+            return
         result = await self.search(blueprint, craft_quantity=craft_quantity)
         await self.deliver(functools.partial(interaction.followup.send, wait=True), result)
 

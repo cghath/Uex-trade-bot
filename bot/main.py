@@ -48,16 +48,28 @@ INITIAL_COGS = (
     "bot.cogs.item_finder",
     "bot.cogs.ship_parts_finder",
     "bot.cogs.ship_shops",
+    "bot.cogs.anniversaries",
+    "bot.cogs.welcome",
+    "bot.cogs.voice_ranks",
+    "bot.cogs.welcome_back",
+    "bot.cogs.role_picker",
+    "bot.cogs.event_cards",
 )
 
 
 class UexBot(commands.Bot):
     def __init__(self, config: Config) -> None:
-        # No privileged intents (audit MSG-14): nothing reads other people's messages, and a
-        # bot always sees its own. Asking for Message Content made startup fail on any bot
-        # that didn't also switch it on in the Developer Portal, which README says it needn't.
+        # One privileged intent, Server Members: server anniversaries (bot/cogs/anniversaries.py)
+        # need the member list and join dates. It must also be switched on in the Developer
+        # Portal or Discord refuses the connection at startup - README says so. Nothing reads
+        # other people's messages, so Message Content and Presence stay off (audit MSG-14).
         intents = discord.Intents.default()
-        super().__init__(command_prefix="!uex-unused-", intents=intents)
+        intents.members = True
+        # Never @everyone, @here or a role, whatever ends up in a message: replies echo what
+        # players type, and alerts carry text other players wrote (audit REL-2). A send that
+        # should ping only its owner narrows this further (bot/delivery.py).
+        super().__init__(command_prefix="!uex-unused-", intents=intents,
+                         allowed_mentions=discord.AllowedMentions(everyone=False, roles=False))
         self.config = config
         # Every slash command answers when it fails, instead of leaving "thinking..." up.
         self.tree.error(on_app_command_error)

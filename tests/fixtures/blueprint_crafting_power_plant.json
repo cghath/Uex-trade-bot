@@ -1,0 +1,710 @@
+{
+ "uuid": "7a18b345-06c7-40be-b0ac-b7177307ab21",
+ "key": "BP_CRAFT_POWR_LPLT_S00_DuraJet_SCItem",
+ "category_uuid": "df6376b6-eeb0-4e27-a709-98e2ffebe099",
+ "output_item_uuid": "63a0ae66-9852-456e-90a0-1c83e3653efd",
+ "output_name": "DuraJet",
+ "output_class": "powr_lplt_s00_durajet_scitem",
+ "craft_time_seconds": 420,
+ "craft_time_label": "7 minutes",
+ "is_available_by_default": false,
+ "game_version": "4.10.1-LIVE.12660092",
+ "ingredient_count": 3,
+ "unlocking_missions_count": 7,
+ "ingredients": [
+  {
+   "name": "Tin",
+   "kind": "resource",
+   "resource_type_uuid": "1b4c4042-5fdc-4b52-bec4-07085cb3520a",
+   "item_uuid": null,
+   "quantity_scu": 0.1,
+   "quantity": null,
+   "link": "https://api.star-citizen.wiki/api/commodities/551cf88d-c09f-46e3-99b3-66c60bb65af1",
+   "web_url": "https://api.star-citizen.wiki/commodities/551cf88d-c09f-46e3-99b3-66c60bb65af1"
+  },
+  {
+   "name": "Silicon",
+   "kind": "resource",
+   "resource_type_uuid": "7bbd3197-a6e1-49b3-a495-0b7ef4f8ce40",
+   "item_uuid": null,
+   "quantity_scu": 0.11000000000000001,
+   "quantity": null,
+   "link": "https://api.star-citizen.wiki/api/commodities/d137b905-b3bc-4721-a790-830499263c0c",
+   "web_url": "https://api.star-citizen.wiki/commodities/d137b905-b3bc-4721-a790-830499263c0c"
+  }
+ ],
+ "dismantle_returns": [
+  {
+   "name": "Silicon",
+   "resource_type_uuid": "7bbd3197-a6e1-49b3-a495-0b7ef4f8ce40",
+   "quantity_scu": 0.035,
+   "link": "https://api.star-citizen.wiki/api/commodities/7bbd3197-a6e1-49b3-a495-0b7ef4f8ce40",
+   "web_url": "https://api.star-citizen.wiki/commodities/7bbd3197-a6e1-49b3-a495-0b7ef4f8ce40"
+  },
+  {
+   "name": "Tin",
+   "resource_type_uuid": "1b4c4042-5fdc-4b52-bec4-07085cb3520a",
+   "quantity_scu": 0.05,
+   "link": "https://api.star-citizen.wiki/api/commodities/1b4c4042-5fdc-4b52-bec4-07085cb3520a",
+   "web_url": "https://api.star-citizen.wiki/commodities/1b4c4042-5fdc-4b52-bec4-07085cb3520a"
+  }
+ ],
+ "output": {
+  "uuid": "63a0ae66-9852-456e-90a0-1c83e3653efd",
+  "name": "DuraJet",
+  "class": "powr_lplt_s00_durajet_scitem",
+  "type": "PowerPlant",
+  "type_label": "Power Plant",
+  "sub_type": "Power",
+  "subtype": "Power",
+  "grade": "4",
+  "item_web_url": "https://api.star-citizen.wiki/items/63a0ae66-9852-456e-90a0-1c83e3653efd"
+ },
+ "web_url": "https://api.star-citizen.wiki/blueprints/durajet",
+ "output_item_web_url": "https://api.star-citizen.wiki/items/63a0ae66-9852-456e-90a0-1c83e3653efd",
+ "dismantle": {
+  "time_seconds": 15,
+  "time_label": "15 seconds",
+  "efficiency": 0.5
+ },
+ "requirement_groups": [
+  {
+   "key": "SHELL",
+   "name": "Shell",
+   "kind": "group",
+   "required_count": 1,
+   "modifiers": [
+    {
+     "property_key": "health_maxhealth",
+     "property_uuid": null,
+     "label": "Integrity",
+     "better_when": "higher",
+     "quality_range": {
+      "min": 0,
+      "max": 500
+     },
+     "modifier_range": {
+      "at_min_quality": 0.8,
+      "at_max_quality": 1
+     },
+     "value_range_type": "linear",
+     "value_segments": [
+      {
+       "quality_min": 0,
+       "quality_max": 500,
+       "modifier_at_start": 0.8,
+       "modifier_at_end": 1
+      },
+      {
+       "quality_min": 501,
+       "quality_max": 1000,
+       "modifier_at_start": 1,
+       "modifier_at_end": 1.2
+      }
+     ]
+    }
+   ],
+   "children": [
+    {
+     "key": null,
+     "kind": "resource",
+     "uuid": "1b4c4042-5fdc-4b52-bec4-07085cb3520a",
+     "name": "Tin",
+     "required_count": null,
+     "quantity": null,
+     "quantity_scu": 0.1,
+     "min_quality": 1,
+     "modifiers": [],
+     "ore_uuid": "551cf88d-c09f-46e3-99b3-66c60bb65af1"
+    }
+   ]
+  },
+  {
+   "key": "VOLTAGE REGULATOR",
+   "name": "Voltage Regulator",
+   "kind": "group",
+   "required_count": 1,
+   "modifiers": [
+    {
+     "property_key": "itemresource_powergeneration",
+     "property_uuid": null,
+     "label": "Power Pips",
+     "better_when": "neutral",
+     "quality_range": {
+      "min": 0,
+      "max": 399
+     },
+     "modifier_range": {
+      "at_min_quality": null,
+      "at_max_quality": null
+     },
+     "value_range_type": "linear_integer_additive",
+     "value_segments": [
+      {
+       "quality_min": 0,
+       "quality_max": 399,
+       "modifier_at_start": 1,
+       "modifier_at_end": 1
+      },
+      {
+       "quality_min": 400,
+       "quality_max": 899,
+       "modifier_at_start": 1,
+       "modifier_at_end": 1
+      },
+      {
+       "quality_min": 900,
+       "quality_max": 1000,
+       "modifier_at_start": 1,
+       "modifier_at_end": 1
+      }
+     ]
+    }
+   ],
+   "children": [
+    {
+     "key": null,
+     "kind": "resource",
+     "uuid": "7bbd3197-a6e1-49b3-a495-0b7ef4f8ce40",
+     "name": "Silicon",
+     "required_count": null,
+     "quantity": null,
+     "quantity_scu": 0.04,
+     "min_quality": 1,
+     "modifiers": [],
+     "ore_uuid": "d137b905-b3bc-4721-a790-830499263c0c"
+    }
+   ]
+  },
+  {
+   "key": "STATOR CORES",
+   "name": "Stator Cores",
+   "kind": "group",
+   "required_count": 1,
+   "modifiers": [
+    {
+     "property_key": "itemresource_powergeneration",
+     "property_uuid": null,
+     "label": "Power Pips",
+     "better_when": "neutral",
+     "quality_range": {
+      "min": 0,
+      "max": 399
+     },
+     "modifier_range": {
+      "at_min_quality": null,
+      "at_max_quality": null
+     },
+     "value_range_type": "linear_integer_additive",
+     "value_segments": [
+      {
+       "quality_min": 0,
+       "quality_max": 399,
+       "modifier_at_start": 1,
+       "modifier_at_end": 1
+      },
+      {
+       "quality_min": 400,
+       "quality_max": 899,
+       "modifier_at_start": 1,
+       "modifier_at_end": 1
+      },
+      {
+       "quality_min": 900,
+       "quality_max": 1000,
+       "modifier_at_start": 1,
+       "modifier_at_end": 1
+      }
+     ]
+    }
+   ],
+   "children": [
+    {
+     "key": null,
+     "kind": "resource",
+     "uuid": "7bbd3197-a6e1-49b3-a495-0b7ef4f8ce40",
+     "name": "Silicon",
+     "required_count": null,
+     "quantity": null,
+     "quantity_scu": 0.07,
+     "min_quality": 1,
+     "modifiers": [],
+     "ore_uuid": "d137b905-b3bc-4721-a790-830499263c0c"
+    }
+   ]
+  }
+ ],
+ "summary_properties": [
+  {
+   "property_key": "health_maxhealth",
+   "property_uuid": null,
+   "label": "Integrity",
+   "better_when": "higher"
+  },
+  {
+   "property_key": "itemresource_powergeneration",
+   "property_uuid": null,
+   "label": "Power Pips",
+   "better_when": "neutral"
+  }
+ ],
+ "unlocking_missions": [
+  {
+   "title": "Defend [Location] From Mercs",
+   "debug_name": "HeadHunters_DefendEntitiesAndEscort_Pyro_VeryHard",
+   "reward_scope": "Assassination",
+   "chance": 1,
+   "web_url": "https://api.star-citizen.wiki/missions/3c228b26-8aaa-4d87-8ec7-b355bf594af5"
+  },
+  {
+   "title": "Guard [Location] From Rivals",
+   "debug_name": "HeadHunters_DefendEntitiesAndEscort_Pyro_Super",
+   "reward_scope": "Assassination",
+   "chance": 1,
+   "web_url": "https://api.star-citizen.wiki/missions/ccf425e8-af52-451b-bb46-d4d72b4d9dfa"
+  },
+  {
+   "title": "Keep [Location] Safe",
+   "debug_name": "HeadHunters_DefendEntitiesAndEscort_Pyro_VeryEasy_From",
+   "reward_scope": "Assassination",
+   "chance": 1,
+   "web_url": "https://api.star-citizen.wiki/missions/27ac3a6b-922d-445c-903b-5f71480f4c36"
+  },
+  {
+   "title": "Keep [Location] Safe",
+   "debug_name": "HeadHunters_DefendEntitiesAndEscort_Pyro_VeryEasy_To",
+   "reward_scope": "Assassination",
+   "chance": 1,
+   "web_url": "https://api.star-citizen.wiki/missions/ae173ae3-0e72-4884-9b81-584b19be0d7c"
+  },
+  {
+   "title": "Provide Protection at [Location]",
+   "debug_name": "HeadHunters_DefendEntitiesAndEscort_Pyro_Easy",
+   "reward_scope": "Assassination",
+   "chance": 1,
+   "web_url": "https://api.star-citizen.wiki/missions/504f6d01-22e9-4bd0-8cec-bed0ff09937a"
+  },
+  {
+   "title": "Secure [Location] from Upstarts",
+   "debug_name": "HeadHunters_DefendEntitiesAndEscort_Pyro_Medium",
+   "reward_scope": "Assassination",
+   "chance": 1,
+   "web_url": "https://api.star-citizen.wiki/missions/7d4e6d75-d694-4b55-8728-1a2ee752cae2"
+  },
+  {
+   "title": "Stop Rival Attack at [Location]",
+   "debug_name": "HeadHunters_DefendEntitiesAndEscort_Pyro_Hard",
+   "reward_scope": "Assassination",
+   "chance": 1,
+   "web_url": "https://api.star-citizen.wiki/missions/f109c240-7bd7-47c4-9765-1fd87862ab95"
+  }
+ ],
+ "unlocking_missions_grouped": [
+  {
+   "label": "Guaranteed",
+   "chance": 1,
+   "missions": [
+    {
+     "title": "Defend [Location] From Mercs",
+     "reward_scope": "Assassination",
+     "count": 1,
+     "web_url": "https://api.star-citizen.wiki/missions/3c228b26-8aaa-4d87-8ec7-b355bf594af5"
+    },
+    {
+     "title": "Guard [Location] From Rivals",
+     "reward_scope": "Assassination",
+     "count": 1,
+     "web_url": "https://api.star-citizen.wiki/missions/ccf425e8-af52-451b-bb46-d4d72b4d9dfa"
+    },
+    {
+     "title": "Keep [Location] Safe",
+     "reward_scope": "Assassination",
+     "count": 2,
+     "web_url": "https://api.star-citizen.wiki/missions/27ac3a6b-922d-445c-903b-5f71480f4c36"
+    },
+    {
+     "title": "Provide Protection at [Location]",
+     "reward_scope": "Assassination",
+     "count": 1,
+     "web_url": "https://api.star-citizen.wiki/missions/504f6d01-22e9-4bd0-8cec-bed0ff09937a"
+    },
+    {
+     "title": "Secure [Location] from Upstarts",
+     "reward_scope": "Assassination",
+     "count": 1,
+     "web_url": "https://api.star-citizen.wiki/missions/7d4e6d75-d694-4b55-8728-1a2ee752cae2"
+    },
+    {
+     "title": "Stop Rival Attack at [Location]",
+     "reward_scope": "Assassination",
+     "count": 1,
+     "web_url": "https://api.star-citizen.wiki/missions/f109c240-7bd7-47c4-9765-1fd87862ab95"
+    }
+   ]
+  }
+ ],
+ "aspects": {
+  "aspects": [
+   {
+    "key": "SHELL",
+    "name": "Shell",
+    "required_count": 1,
+    "selection_group": null,
+    "input": {
+     "kind": "resource",
+     "uuid": "1b4c4042-5fdc-4b52-bec4-07085cb3520a",
+     "name": "Tin",
+     "quantity": null,
+     "quantity_scu": 0.1,
+     "min_quality": 1,
+     "web_url": "https://api.star-citizen.wiki/commodities/551cf88d-c09f-46e3-99b3-66c60bb65af1"
+    },
+    "modifiers": [
+     {
+      "property_key": "health_maxhealth",
+      "property_uuid": null,
+      "label": "Integrity",
+      "better_when": "higher",
+      "quality_range": {
+       "min": 0,
+       "max": 500
+      },
+      "modifier_range": {
+       "at_min_quality": 0.8,
+       "at_max_quality": 1
+      },
+      "value_range_type": "linear",
+      "value_segments": [
+       {
+        "quality_min": 0,
+        "quality_max": 500,
+        "modifier_at_start": 0.8,
+        "modifier_at_end": 1
+       },
+       {
+        "quality_min": 501,
+        "quality_max": 1000,
+        "modifier_at_start": 1,
+        "modifier_at_end": 1.2
+       }
+      ]
+     }
+    ],
+    "initial_quality": 500,
+    "slider_min": 1,
+    "slider_max": 1000,
+    "has_modifiers": true,
+    "has_dynamic_modifiers": true,
+    "is_selected": true
+   },
+   {
+    "key": "VOLTAGE REGULATOR",
+    "name": "Voltage Regulator",
+    "required_count": 1,
+    "selection_group": null,
+    "input": {
+     "kind": "resource",
+     "uuid": "7bbd3197-a6e1-49b3-a495-0b7ef4f8ce40",
+     "name": "Silicon",
+     "quantity": null,
+     "quantity_scu": 0.04,
+     "min_quality": 1,
+     "web_url": "https://api.star-citizen.wiki/commodities/d137b905-b3bc-4721-a790-830499263c0c"
+    },
+    "modifiers": [
+     {
+      "property_key": "itemresource_powergeneration",
+      "property_uuid": null,
+      "label": "Power Pips",
+      "better_when": "neutral",
+      "quality_range": {
+       "min": 0,
+       "max": 399
+      },
+      "modifier_range": {
+       "at_min_quality": null,
+       "at_max_quality": null
+      },
+      "value_range_type": "linear_integer_additive",
+      "value_segments": [
+       {
+        "quality_min": 0,
+        "quality_max": 399,
+        "modifier_at_start": 1,
+        "modifier_at_end": 1
+       },
+       {
+        "quality_min": 400,
+        "quality_max": 899,
+        "modifier_at_start": 1,
+        "modifier_at_end": 1
+       },
+       {
+        "quality_min": 900,
+        "quality_max": 1000,
+        "modifier_at_start": 1,
+        "modifier_at_end": 1
+       }
+      ]
+     }
+    ],
+    "initial_quality": 500,
+    "slider_min": 1,
+    "slider_max": 1000,
+    "has_modifiers": true,
+    "has_dynamic_modifiers": false,
+    "is_selected": true
+   },
+   {
+    "key": "STATOR CORES",
+    "name": "Stator Cores",
+    "required_count": 1,
+    "selection_group": null,
+    "input": {
+     "kind": "resource",
+     "uuid": "7bbd3197-a6e1-49b3-a495-0b7ef4f8ce40",
+     "name": "Silicon",
+     "quantity": null,
+     "quantity_scu": 0.07,
+     "min_quality": 1,
+     "web_url": "https://api.star-citizen.wiki/commodities/d137b905-b3bc-4721-a790-830499263c0c"
+    },
+    "modifiers": [
+     {
+      "property_key": "itemresource_powergeneration",
+      "property_uuid": null,
+      "label": "Power Pips",
+      "better_when": "neutral",
+      "quality_range": {
+       "min": 0,
+       "max": 399
+      },
+      "modifier_range": {
+       "at_min_quality": null,
+       "at_max_quality": null
+      },
+      "value_range_type": "linear_integer_additive",
+      "value_segments": [
+       {
+        "quality_min": 0,
+        "quality_max": 399,
+        "modifier_at_start": 1,
+        "modifier_at_end": 1
+       },
+       {
+        "quality_min": 400,
+        "quality_max": 899,
+        "modifier_at_start": 1,
+        "modifier_at_end": 1
+       },
+       {
+        "quality_min": 900,
+        "quality_max": 1000,
+        "modifier_at_start": 1,
+        "modifier_at_end": 1
+       }
+      ]
+     }
+    ],
+    "initial_quality": 500,
+    "slider_min": 1,
+    "slider_max": 1000,
+    "has_modifiers": true,
+    "has_dynamic_modifiers": false,
+    "is_selected": true
+   }
+  ],
+  "aspect_groups": [
+   {
+    "key": "__aspect_0",
+    "name": "Shell",
+    "display_name": "Shell",
+    "required_count": 1,
+    "option_count": 1,
+    "is_choice_group": false,
+    "selected_count": 1,
+    "aspect_indexes": [
+     0
+    ]
+   },
+   {
+    "key": "__aspect_1",
+    "name": "Voltage Regulator",
+    "display_name": "Voltage Regulator",
+    "required_count": 1,
+    "option_count": 1,
+    "is_choice_group": false,
+    "selected_count": 1,
+    "aspect_indexes": [
+     1
+    ]
+   },
+   {
+    "key": "__aspect_2",
+    "name": "Stator Cores",
+    "display_name": "Stator Cores",
+    "required_count": 1,
+    "option_count": 1,
+    "is_choice_group": false,
+    "selected_count": 1,
+    "aspect_indexes": [
+     2
+    ]
+   }
+  ],
+  "has_interactive_aspects": true
+ },
+ "tiers": [
+  {
+   "tier_index": 0,
+   "requirements": {
+    "kind": "root",
+    "children": [
+     {
+      "key": "SHELL",
+      "kind": "group",
+      "name": "Shell",
+      "children": [
+       {
+        "kind": "resource",
+        "name": "Tin",
+        "uuid": "1b4c4042-5fdc-4b52-bec4-07085cb3520a",
+        "min_quality": 1,
+        "quantity_scu": 0.1
+       }
+      ],
+      "modifiers": [
+       {
+        "key": "health_maxhealth",
+        "name": "Integrity",
+        "uuid": "93a49e68-01cf-4d7e-b995-8224466a9982",
+        "quality_range": {
+         "max": 500,
+         "min": 0
+        },
+        "modifier_range": {
+         "at_max_quality": 1,
+         "at_min_quality": 0.8
+        },
+        "value_segments": [
+         {
+          "quality_max": 500,
+          "quality_min": 0,
+          "modifier_at_end": 1,
+          "modifier_at_start": 0.8
+         },
+         {
+          "quality_max": 1000,
+          "quality_min": 501,
+          "modifier_at_end": 1.2,
+          "modifier_at_start": 1
+         }
+        ],
+        "value_range_type": "linear"
+       }
+      ],
+      "required_count": 1
+     },
+     {
+      "key": "VOLTAGE REGULATOR",
+      "kind": "group",
+      "name": "Voltage Regulator",
+      "children": [
+       {
+        "kind": "resource",
+        "name": "Silicon",
+        "uuid": "7bbd3197-a6e1-49b3-a495-0b7ef4f8ce40",
+        "min_quality": 1,
+        "quantity_scu": 0.04
+       }
+      ],
+      "modifiers": [
+       {
+        "key": "itemresource_powergeneration",
+        "name": "Power Pips",
+        "uuid": "d01a2751-f605-42a7-97b2-ce0b8322e172",
+        "quality_range": {
+         "max": 399,
+         "min": 0
+        },
+        "modifier_range": [],
+        "value_segments": [
+         {
+          "quality_max": 399,
+          "quality_min": 0,
+          "additive_at_end": -1,
+          "additive_at_start": -1
+         },
+         {
+          "quality_max": 899,
+          "quality_min": 400,
+          "additive_at_end": 0,
+          "additive_at_start": 0
+         },
+         {
+          "quality_max": 1000,
+          "quality_min": 900,
+          "additive_at_end": 1,
+          "additive_at_start": 1
+         }
+        ],
+        "value_range_type": "linear_integer_additive"
+       }
+      ],
+      "required_count": 1
+     },
+     {
+      "key": "STATOR CORES",
+      "kind": "group",
+      "name": "Stator Cores",
+      "children": [
+       {
+        "kind": "resource",
+        "name": "Silicon",
+        "uuid": "7bbd3197-a6e1-49b3-a495-0b7ef4f8ce40",
+        "min_quality": 1,
+        "quantity_scu": 0.07
+       }
+      ],
+      "modifiers": [
+       {
+        "key": "itemresource_powergeneration",
+        "name": "Power Pips",
+        "uuid": "d01a2751-f605-42a7-97b2-ce0b8322e172",
+        "quality_range": {
+         "max": 399,
+         "min": 0
+        },
+        "modifier_range": [],
+        "value_segments": [
+         {
+          "quality_max": 399,
+          "quality_min": 0,
+          "additive_at_end": -1,
+          "additive_at_start": -1
+         },
+         {
+          "quality_max": 899,
+          "quality_min": 400,
+          "additive_at_end": 0,
+          "additive_at_start": 0
+         },
+         {
+          "quality_max": 1000,
+          "quality_min": 900,
+          "additive_at_end": 1,
+          "additive_at_start": 1
+         }
+        ],
+        "value_range_type": "linear_integer_additive"
+       }
+      ],
+      "required_count": 1
+     }
+    ]
+   },
+   "craft_time_seconds": 420
+  }
+ ],
+ "link": "https://api.star-citizen.wiki/api/blueprints/7a18b345-06c7-40be-b0ac-b7177307ab21"
+}

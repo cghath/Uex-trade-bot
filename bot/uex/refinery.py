@@ -9,6 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from bot.uex.trading import resolve_raw_material_name
+
 HIGH_YIELD_RATING = 3
 
 COST_LABELS = {1: "low", 2: "medium", 3: "high"}
@@ -30,7 +32,34 @@ def resolve_raw_commodity(commodities: list[dict[str, Any]], query: str) -> dict
     substring_matches = [c for c in candidates if query_lower in (c.get("name") or "").lower()]
     if len(substring_matches) == 1:
         return substring_matches[0]
-    return None
+    # A typo sent without picking a suggestion, scored against every raw material so a
+    # non-refinable ore's typo can't land on a refinable one (resolve_raw_material_name).
+    corrected = resolve_raw_material_name(
+        query, [c["name"] for c in candidates if c.get("name")],
+        compete_with=[c["name"] for c in commodities if c.get("is_raw") and c.get("name")],
+    )
+    return next((c for c in candidates if c.get("name") == corrected), None) if corrected else None
+
+
+def refined_form(commodities: list[dict[str, Any]], raw: dict[str, Any]) -> dict[str, Any] | None:
+    """The commodity a raw ore refines into, for its sell price. UEX normally links the raw
+    ore to it through the raw row's own id_parent - but checked live (2026-09-29, again
+    2026-10-01), 5 of 32 refinable ores have id_parent 0 there (Taranite, Lindinium,
+    Savrilium, Torite, Aslarite) while their refined row still points back at the raw one.
+    So: the forward link first, then a single refined row linking back. Two back-links is a
+    guess, not an answer - None. Jaclium has neither: it has no refined form at all.
+    Ported from aiv2 commit f2785ae."""
+    by_id = {c.get("id"): c for c in commodities}
+    forward = by_id.get(raw.get("id_parent")) if raw.get("id_parent") else None
+    if forward is not None and not forward.get("is_raw"):
+        return forward
+    back = [c for c in commodities if c.get("id_parent") == raw.get("id") and not c.get("is_raw")]
+    return back[0] if len(back) == 1 else None
+
+
+def format_yield_bonus(bonus: int | float) -> str:
+    """"+5%" / "-3%" / "+0%" - an unsigned template showed a negative bonus as "+-3%"."""
+    return f"{bonus:+}%"
 
 
 def high_yield_refining_methods(methods: list[dict[str, Any]]) -> list[dict[str, Any]]:

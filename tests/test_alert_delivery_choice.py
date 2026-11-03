@@ -104,12 +104,14 @@ def test_send_alert_dms_or_posts_with_a_ping():
         return channel, user
 
     channel, user = asyncio.run(run({"user_id": 10, "channel_id": 5, "scope": "global"}))
-    channel.send.assert_awaited_once_with("<@10> price alert #3 triggered")
+    channel.send.assert_awaited_once()
+    assert channel.send.await_args.args == ("<@10> price alert #3 triggered",)
     user.send.assert_not_awaited()
     for alert in ({"user_id": 10, "channel_id": 5, "scope": "personal"},
                   {"user_id": 10, "channel_id": None, "scope": "global"}):
         channel, user = asyncio.run(run(alert))
-        user.send.assert_awaited_once_with("Your price alert #3 triggered")
+        user.send.assert_awaited_once()
+        assert user.send.await_args.args == ("Your price alert #3 triggered",)
         channel.send.assert_not_awaited()
 
 

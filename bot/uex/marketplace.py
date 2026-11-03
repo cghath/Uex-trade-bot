@@ -315,7 +315,8 @@ def extract_item_activity(trend_rows: list[dict]) -> list[dict]:
                 "negotiations_open": row.get("negotiations_open") or 0,
                 "negotiations_success": row.get("negotiations_success") or 0,
                 "listings_count": row.get("total_listings_count") or 0,
-                "listings_count_sell": row.get("listings_count_sell") or 0,
+                # Kept as None when UEX sends none: see sell_count_unknown.
+                "listings_count_sell": row.get("listings_count_sell"),
                 "listings_count_buy": row.get("listings_count_buy") or 0,
             }
         )
@@ -335,6 +336,22 @@ def extract_item_activity(trend_rows: list[dict]) -> list[dict]:
 # one with five real completed sales. That is backwards for a rating whose whole question
 # is "will this actually sell?", and it contradicted this module's own description of buy
 # postings as the weaker signal.
+def sell_count_unknown(activity: dict) -> bool:
+    """True when /marketplace_trends sent no sell-listing count for this item.
+
+    UEX sends null, never 0, for a count with nothing in it (425 of 500 items had a null buy
+    count on 2026-10-17, every one an item with no buy postings). But from 2026-10-16 the sell
+    count came back null for 18 items that were plainly still being sold - Ouratite had 27
+    unexpired, not-sold-out sell listings from about 30 sellers, one added that day. Read as 0,
+    that scored them 0/100 and put a false crash in the digest and /liquidity-trends. So a null
+    sell count is unknown: the item isn't rescored and keeps its last real score. A 0 score
+    from no sellers never meant "won't sell" anyway - it only guarded the division.
+
+    Only a row that carries the key counts: one built without it (older callers) still falls
+    back to its total listings in compute_liquidity_score."""
+    return "listings_count_sell" in activity and activity["listings_count_sell"] is None
+
+
 WEIGHT_COMPLETED_NEGOTIATION = 1.0
 WEIGHT_OPEN_NEGOTIATION = 0.5
 WEIGHT_BUY_POSTING = 0.25
@@ -460,3 +477,77 @@ def filter_listings_by_quality(
             continue
         kept.append(listing)
     return kept
+
+
+# -- picking a listing by name instead of by id -------------------------------------------
+
+# Where a listing in a player's pick list came from. /marketplace-listing shows the label
+# (its list mixes all three); /marketplace-delete-listing only ever lists the player's own.
+LISTING_SOURCE_LABELS = {"yours": "Yours", "favorite": "Favorite", "deal": "Deal"}
+
+
+@dataclass(frozen=True)
+class ListingChoice:
+    """One listing a player can pick from a menu, so they never have to copy its id."""
+    id: int
+    title: str
+    price: float | None
+    currency: str
+    source: str  # a LISTING_SOURCE_LABELS key
+
+
+def listing_choices_from_rows(rows: list[dict], source: str, *, id_key: str = "id") -> list[ListingChoice]:
+    """Rows from /marketplace_listings (id_key "id"), /marketplace_favorites or
+    /marketplace_negotiations (both id_key "id_listing": their own "id" is the favorite's or
+    the deal's, which no command takes). Rows without a usable listing id are skipped."""
+    choices = []
+    for row in rows:
+        listing_id = parse_uex_number(row.get(id_key))
+        if listing_id is None or listing_id <= 0:
+            continue
+        title = str(row.get("title") or row.get("listing_title") or "Untitled listing").strip()
+        choices.append(ListingChoice(
+            id=int(listing_id), title=title or "Untitled listing", price=parse_uex_number(row.get("price")),
+            currency=str(row.get("currency") or "UEC"), source=source,
+        ))
+    return choices
+
+
+def merge_listing_choices(*groups: list[ListingChoice]) -> list[ListingChoice]:
+    """Every listing once, in the order given: a listing that's both yours and in a deal
+    shows as yours. Several deals on one listing are one entry."""
+    seen: set[int] = set()
+    merged = []
+    for group in groups:
+        for choice in group:
+            if choice.id not in seen:
+                seen.add(choice.id)
+                merged.append(choice)
+    return merged
+
+
+def listing_choice_label(choice: ListingChoice, *, show_source: bool = False) -> str:
+    """"#175615 Ace Interceptor Helmet · 1,548,000 UEC", optionally led by where it came
+    from. Discord caps a choice name at 100 characters, so the title gives way first and
+    the id and price always show."""
+    price = f" · {choice.price:,.0f} {choice.currency}" if choice.price is not None else ""
+    prefix = f"{LISTING_SOURCE_LABELS.get(choice.source, choice.source)} · " if show_source else ""
+    head = f"{prefix}#{choice.id} "
+    room = 100 - len(head) - len(price)
+    title = choice.title if len(choice.title) <= room else choice.title[:max(room - 1, 0)].rstrip() + "…"
+    return f"{head}{title}{price}"
+
+
+def match_listing_choices(
+    choices: list[ListingChoice], query: str, *, show_source: bool = False, limit: int = 25,
+) -> list[tuple[str, int]]:
+    """(label, listing id) pairs for an autocomplete. A typed number matches the id's
+    start (so a known id still works); anything else matches anywhere in the label."""
+    query = query.strip().lower()
+    number = query.lstrip("#")
+    matched = []
+    for choice in choices:
+        label = listing_choice_label(choice, show_source=show_source)
+        if not query or (str(choice.id).startswith(number) if number.isdigit() else query in label.lower()):
+            matched.append((label, choice.id))
+    return matched[:limit]

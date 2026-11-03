@@ -25,6 +25,7 @@ from typing import Any
 
 from bot.uex.mining_difficulty import OreMiningProfile, get_mining_difficulty, get_mining_profile
 from bot.uex.mining_hotspots import MiningHotspot, get_mining_hotspots
+from bot.uex.trading import resolve_raw_material_name
 
 
 def resolve_mineable_commodity(commodities: list[dict[str, Any]], query: str) -> dict[str, Any] | None:
@@ -42,7 +43,9 @@ def resolve_mineable_commodity(commodities: list[dict[str, Any]], query: str) ->
     substring_matches = [c for c in candidates if query_lower in (c.get("name") or "").lower()]
     if len(substring_matches) == 1:
         return substring_matches[0]
-    return None
+    # A typo ('Quantanium') sent without picking a suggestion (resolve_raw_material_name).
+    corrected = resolve_raw_material_name(query, [c["name"] for c in candidates if c.get("name")])
+    return next((c for c in candidates if c.get("name") == corrected), None) if corrected else None
 
 
 def _parse_ids(ids_str: str | None) -> list[int]:

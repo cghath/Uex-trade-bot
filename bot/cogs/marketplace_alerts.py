@@ -46,7 +46,7 @@ class MarketplaceAlerts(commands.Cog):
 
     @app_commands.command(
         name="marketplace-alert-add",
-        description="DM me when a new Marketplace listing matches a keyword.",
+        description="Get notified when a new Marketplace listing matches a keyword.",
     )
     @app_commands.describe(
         keyword="Item name or keyword to watch for, e.g. 'Cutlass Black' or 'Laranite'",
@@ -98,7 +98,8 @@ class MarketplaceAlerts(commands.Cog):
         await interaction.followup.send(
             f"Marketplace alert #{alert_id} set: {delivery_note(scope)} when a new {side_note} matching "
             f"'{keyword}'{price_note}{quality_note} appears (checked every {POLL_INTERVAL_MINUTES} min)."
-            f"{quality_caveat} This keeps watching - it fires on every new matching listing, not just the first.",
+            f"{quality_caveat} This keeps watching - it fires on every new matching listing, not just the first. "
+            "Listings already up now are skipped.",
             ephemeral=private,
         )
 
@@ -163,6 +164,21 @@ class MarketplaceAlerts(commands.Cog):
         except UexApiError as exc:
             logger.warning("Failed to poll marketplace listings for '%s': %s", keyword, exc)
             return
+
+        # A new alert's first look records what's already listed without announcing it: those
+        # listings aren't new (audit UX-2; /negotiation-alerts seeds a baseline the same way).
+        # Done even when nothing matches yet, or the first real listing would be swallowed.
+        already_listed = [listing["id"] for listing in listings if listing.get("id") is not None]
+        watching = []
+        for alert in group_alerts:
+            if alert.get("baseline_done", 1):
+                watching.append(alert)
+                continue
+            try:
+                await self.bot.db.mark_marketplace_alert_baseline(alert["id"], already_listed)
+            except Exception:
+                logger.exception("Marketplace alert #%s couldn't record its starting listings", alert["id"])
+        group_alerts = watching
 
         listings = exclude_sold_out(listings)
         if not listings:

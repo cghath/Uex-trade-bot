@@ -7,9 +7,11 @@ from unittest.mock import AsyncMock
 
 from cryptography.fernet import Fernet
 import discord
+import pytest
 
 from bot.cogs import ship_parts_finder
 from bot.cogs.ship_parts_finder import ShipPartsFinder, ShipPartsShoppingService, ShipPartsShoppingView
+from bot.wiki_api import WikiDuplicateNameError
 from bot.db.database import Database
 from bot.uex.ship_parts import ShipPort
 
@@ -493,6 +495,45 @@ def test_ports_for_vehicle_retries_with_uexs_full_name():
     assert [c.args[0] for c in wiki.get_vehicle_loadout.await_args_list] == ["Reliant Tana", "MISC Reliant Tana"]
 
 
+def test_a_name_the_wiki_uses_twice_still_tries_the_full_name_then_says_why():
+    async def run(loadouts):
+        db = NS(get_ship_parts_reference=AsyncMock(return_value=[]))
+
+        async def get_vehicle_loadout(name):
+            found = loadouts[name]
+            if isinstance(found, Exception):
+                raise found
+            return found
+        wiki = NS(get_vehicle_loadout=AsyncMock(side_effect=get_vehicle_loadout))
+        cog = ShipPartsFinder(NS(db=db), wiki_client=wiki, start_refresh=False)
+        return await cog._ports_for_vehicle({"id": 7, "name": "Cutlass Black", "name_full": "Drake Cutlass Black"})
+
+    duplicate = WikiDuplicateNameError("Cutlass Black", 2)
+    power = ([{"name": "hp_power", "type": "PowerPlant", "sizes": {"min": 1, "max": 1}}], [])
+    # The full name resolving to one ship is used as before.
+    assert [p.name for p in asyncio.run(run({"Cutlass Black": duplicate, "Drake Cutlass Black": power}))] == ["hp_power"]
+    # Neither name giving slots: the duplicate is raised, not an empty "no slots".
+    with pytest.raises(WikiDuplicateNameError):
+        asyncio.run(run({"Cutlass Black": duplicate, "Drake Cutlass Black": ([], [])}))
+
+
+def test_command_warns_about_a_ship_the_wiki_lists_twice():
+    async def run():
+        db = NS(resolve_terminal_id_by_name=AsyncMock(return_value=(1, "Some Terminal")),
+                get_ship_parts_reference=AsyncMock(return_value=[]))
+        uex = NS(get_vehicles=AsyncMock(return_value=[{"id": 1, "name": "Cutlass Black"}]))
+        wiki = NS(get_vehicle_loadout=AsyncMock(side_effect=WikiDuplicateNameError("Cutlass Black", 2)))
+        cog = ShipPartsFinder(NS(db=db, uex=uex), wiki_client=wiki, start_refresh=False)
+        cog.bot = NS(db=db, uex=uex)
+        interaction = _interaction(NS(), user_id=1)
+        await cog.ship_parts_finder.callback(cog, interaction, "Cutlass Black", "Some Terminal")
+        return interaction
+
+    message = asyncio.run(run()).followup.send.await_args.args[0]
+    assert message.startswith("⚠️ The Star Citizen Wiki lists more than one ship named **Cutlass Black**")
+    assert "Known issue" in message
+
+
 def test_ports_for_vehicle_prefers_the_warm_db_reference_over_a_live_call():
     async def run():
         db = NS(get_ship_parts_reference=AsyncMock(return_value=[
@@ -571,6 +612,55 @@ def test_command_posts_the_browsing_view_inside_the_thread_not_ephemeral_elsewhe
     assert "Cutlass Black" in browsing_call.kwargs["content"]
     pointer = interaction.followup.send.await_args
     assert thread.mention in pointer.args[0] and pointer.kwargs["ephemeral"] is True
+
+
+def test_location_is_optional():
+    params = {p.name: p for p in ShipPartsFinder.ship_parts_finder.parameters}
+    assert params["ship"].required and not params["location"].required
+    assert str(params["location"].description).endswith("Optional.")
+
+
+def test_command_without_a_location_opens_the_browser_with_no_origin(tmp_path, monkeypatch):
+    """Left out, no terminal is looked up and the browser has no origin: parts load without
+    distances, and ties go to the cheaper part."""
+    async def run():
+        db_real = Database(tmp_path / "cmd.sqlite", Fernet(Fernet.generate_key()))
+        await db_real.init()
+        await db_real.replace_ship_parts_reference(1, "Cutlass Black", [
+            {"name": "hardpoint_power_plant", "port_type": "PowerPlant", "size_min": 1, "size_max": 1},
+        ])
+        db_real.resolve_terminal_id_by_name = AsyncMock()
+        thread = FakeThread()
+        monkeypatch.setattr(ship_parts_finder.discord, "TextChannel", FakeChannel)
+        uex = NS(get_vehicles=AsyncMock(return_value=[{"id": 1, "name": "Cutlass Black"}]))
+        cog = ShipPartsFinder(NS(db=db_real, uex=uex), wiki_client=NS(), start_refresh=False)
+        cog.bot = NS(db=db_real, uex=uex)
+        await cog.ship_parts_finder.callback(cog, _interaction(FakeChannel(thread), user_id=1), "Cutlass Black")
+        return db_real, thread
+
+    db, thread = asyncio.run(run())
+    db.resolve_terminal_id_by_name.assert_not_awaited()
+    view = thread.send.await_args_list[-1].kwargs["view"]
+    assert isinstance(view, ship_parts_finder.PartsBrowserView)
+    assert view.origin_terminal is None and view.origin_id is None
+
+
+def test_a_browser_without_a_location_loads_parts_without_one():
+    async def run():
+        seen = {}
+
+        async def candidates(port, *, category=None, limit=None, origin_id="unset"):
+            seen["origin_id"] = origin_id
+            return [_detail("PowerBolt")]
+
+        port = ShipPort(name="hardpoint_power_plant", port_type="PowerPlant", size_min=1, size_max=1)
+        view = ship_parts_finder.PartsBrowserView(NS(candidates_for_port=candidates), {"id": 100, "name": "Avenger Stalker"},
+                                                    None, {"Power Plants": [port]})
+        await view.show_category(_component_interaction(), "Power Plants")
+        return view, seen
+
+    view, seen = asyncio.run(run())
+    assert seen["origin_id"] is None and [c["name"] for c in view.candidates] == ["PowerBolt"]
 
 
 # -- audit fixes: deferred category select, multi-slot, distance wiring, selected marker ----

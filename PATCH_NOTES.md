@@ -1,7 +1,361 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.33.
+the oldest entry below); the next new entry is 2.76.
+
+---
+
+## 2.75 - 2026-10-30 - Name colors
+
+**New**
+- Pick the color your name shows in text channels from the new Colors panel in #🙋‍♂️pick-your-roles: ten colors, one at a time. Pick yours again to go back to no color.
+
+---
+
+## 2.74 - 2026-10-30 - Finding your ship
+
+**Fixed**
+- Typing the ship you're bringing on an op card now finds it however you write it: "aurora mr", "hercules c2", "drake cutlass" or "hornet mk2". When a name fits several ships, pick yours from a list.
+
+---
+
+## 2.73 - 2026-10-30 - Sign up for ops
+
+**New**
+- Every op now gets a card in #📅events: when it starts in your own time, where, and who's coming. Pick a role (or just Join), say Maybe, or Leave - all from the card.
+- A full role puts you on its wait list, and you get a DM if a spot opens.
+- Say which ship you're bringing, and sign up for a weekly op every week with one button.
+- You get a ping an hour before an op you've signed up for, and another when it starts.
+
+---
+
+## 2.72 - 2026-10-30 - A better first hello
+
+**Changed**
+- New members' welcome message now shows where to say hi, where upcoming ops are posted, where to pick your roles and where the rules are, before the bot commands.
+
+---
+
+## 2.71 - 2026-10-30 - Streams and videos
+
+**New**
+- A new ping on the Pings panel, Streams & Videos: get pinged when someone from Star Tech Dynamics goes live or posts a new video.
+- Say hello in #👋welcome: our mentors now hear about every first post there, so someone will say hi back.
+
+---
+
+## 2.70 - 2026-10-30 - Every ping at once
+
+**New**
+- The Pings panel has an Everything button: one press and you're pinged for all announcements. Press it again to turn them all off.
+
+---
+
+## 2.69 - 2026-10-30 - Pick your own roles
+
+**New**
+- Pick your roles: the role panels let you choose your activities, your timezone, your experience and which announcements ping you - just press a button or pick from the list. Press again to take one off.
+
+---
+
+## 2.68 - 2026-10-29 - Veteran roles and welcome backs
+
+**New**
+- Veteran roles: each server anniversary now gives you a role for your years with Star Tech Dynamics - 1-Year Veteran, 2-Year Veteran and so on. Members already past an anniversary have theirs now.
+- Anniversary messages now name your new veteran role, and the DM points you to the server's next event, at your own local time.
+- Welcome back: come back to chat or voice after a month or more away and the bot sends you a quick welcome back, with the next event.
+
+---
+
+## 2.67 - 2026-10-26 - Voice ranks
+
+**New**
+- Voice ranks: time in voice with others earns ranks, from Cadet (1 hour) to Admiral (1,000 hours), with a role and an announcement in the bot channel at each promotion. Time in the Ops channels counts double, up to 5 hours a day count, and it never needs a microphone or reads any audio.
+- Ops ranks: attending ops (3 or more people in the Ops channels for 30 minutes or more) earns Operator, Veteran Operator, Op Specialist and Wing Commander.
+- `/rank` - Your rank or another member's: progress to the next one, time in voice, this week, and ops attended.
+- `/rank-leaderboard` - The most time in voice this week, this season or all time, or the most ops attended.
+
+---
+
+## 2.66 - 2026-10-17 - Sellability ratings that didn't really crash
+
+**Fixed**
+- `/liquidity-rank`, `/liquidity-trends` and the daily digest - Some items (Ouratite, Gold, Aslarite and others) dropped to 0/100 overnight even though they were still selling: UEX stopped reporting how many people were selling them. Those items now keep their last real rating until UEX reports it again, and the false drops are gone from their history.
+
+---
+
+## 2.65 - 2026-10-14 - Fire rate in loadouts
+
+**Changed**
+- `/ship-loadout` - Each gun now shows its fire rate (rpm) beside DPS, alpha and projectile speed, compared with your stock gun's, as `/ship-parts-finder` already did.
+
+---
+
+## 2.64 - 2026-10-14 - A welcome for new members
+
+**New**
+- When you join Star Tech Dynamics, the bot now sends you a short welcome with a few commands to get you started and the channel to use them in.
+
+---
+
+## 2.63 - 2026-10-14 - Server anniversaries
+
+**New**
+- On the day you joined Star Tech Dynamics, at the time you joined, the bot now sends you a short anniversary message and marks it in the bot channel. Don't want them? Press "Stop anniversary messages" under the message.
+
+---
+
+## 2.62 - 2026-10-07 - Ship part crafting stats
+
+**Fixed**
+- `/blueprint-search` - Configure crafting now shows what material quality does for most ship parts (shields, coolers, power plants, quantum drives and more). Before, every stat said "the exact effect isn't published" and "Your craft" stayed empty. The FR-86 at qualities 947/1000/1000 now reads Integrity 18% better, Max. Shield Strength 21% better.
+- `/blueprint-search` - Once you've picked every quality, "Your craft" no longer asks you to pick every quality. A stat the wiki gives no figure for (like a power plant's power pips) now says so.
+
+---
+
+## 2.61 - 2026-10-07 - What does this ore craft?
+
+**New**
+- `/blueprint-search material:` - Pick an ore or mineral to see every blueprint it's used in that you can actually get (from a contract, or unlocked by default). A button per category (armor, guns, ship parts), armor grouped into sets, and pages for the long lists. Pick a blueprint to open its usual reply, with where to get it, Configure crafting and Mine.
+
+---
+
+## 2.60 - 2026-10-07 - An easier-to-read loadout
+
+**Changed**
+- `/ship-loadout` - Laid out in sections: the total cost and power pips up top, then each upgrade with what it changes (`546 → 684` DPS) and its shop right under it, then the slots that keep their stock part, each reason said once. A big ship fits on one page more often (the Polaris did take two).
+- `/ship-loadout` - Guns now show their projectile speed beside DPS and alpha, compared with the stock gun's (`1,480 → 1,184` m/s). It's shown to help you judge, not used to pick.
+
+**Fixed**
+- `/ship-loadout` - The header said ties go to the cheaper part. Ties actually go to the tougher part first, then the cheaper one; it now says so.
+
+---
+
+## 2.59 - 2026-10-04 - Clearer crafting choices
+
+**Changed**
+- `/blueprint-search` - Configure crafting now shows each material with what its quality does. Before you pick, you see the range ("11% worse at 363 → 40% better at 1000") and the best the craft can reach; after, each material's effect and your craft's totals. Each quality menu says what that quality does and keeps showing your pick.
+
+---
+
+## 2.58 - 2026-10-04 - Tracked routes keep their details
+
+**Fixed**
+- `/multi-stop-route` - Track this route copies the whole route into its tracking thread again. Since 2.57 the thread only had the leg-by-leg buttons.
+
+---
+
+## 2.57 - 2026-10-04 - Easier-to-read multi-stop routes
+
+**Changed**
+- `/multi-stop-route` - Each route now reads top to bottom: profit and ROI first, then one section per leg with its cargo, its own profit, and its own warnings right under it, instead of one long list at the bottom. A station's container limit or missing loading dock is said once, by name. Refuel and repair stops are no longer listed, and the small print is down to what you can act on.
+
+---
+
+## 2.56 - 2026-10-03 - Where the contracts are
+
+**Changed**
+- `/blueprint-search` - When every contract is in one star system, it now stands out under the blueprint's name ("Every contract is in Nyx") instead of hiding in the small print. Otherwise each contract giver shows its system beside its name when all its contracts are in one.
+
+---
+
+## 2.55 - 2026-10-03 - Easier-to-read lookups
+
+**Changed**
+- `/blueprint-search` - A cleaner layout: headings, divider lines, and each contract's name in bold with its details in small print below. What every contract shares - the reward pool, the star system, a giver's rank - is said once instead of on every line.
+- `/blueprint-search` - The crafting details moved behind the **Configure crafting** button, which now sits beside a short Crafting line. The blueprint ID and the long game build number are gone.
+- `/ingame-item-finder` - A cleaner layout with the answer first: the nearest shop and the cheapest. When every shop in a star system charges the same, the price is said once and the shops share a line.
+
+---
+
+## 2.54 - 2026-10-03 - Guns that hurt heavy fighters
+
+**Changed**
+- `/ship-loadout` - A recommended gun now has to get through heavy-fighter armor. Since 4.7, rounds below a ship's armor threshold do nothing to it, and the S3 Mantis's 32-damage rounds bounce off every heavy fighter. S3 wing guns on ships like the Avenger Titan and Gladius now get the M5A Cannon instead of the Mantis, and the Gladius's stock nose Mantis gets replaced too. The line says when stock can't get through.
+- `/ship-loadout` - Budget only buys a gun that beats your stock one by the same rules and loses no DPS. It no longer suggests a cheap gun whose rounds bounce off, like the YellowJacket over a Deadbolt I, and it can now suggest a gun with the same DPS that hits harder, like the AD4B on the Avenger Titan's nose.
+
+---
+
+## 2.53 - 2026-10-03 - Sharper loadout picks
+
+**Fixed**
+- `/ship-loadout` - A gun slot no longer says "stock is already the best pick" when a sold gun beats the stock one by the alpha rule (within 5% DPS, more alpha).
+- `/ship-loadout` - When parts tie on their main stat, like the 7SA Concord, 6SA Arbiter and 5SA Rhada shields (all 3,000 shield HP), the better grade wins - faster shield regen, tougher component - instead of whichever shop was nearer or cheaper. Budget still picks the cheapest.
+- `/ship-loadout` - Budget no longer suggests buying a shop copy of the part you already have.
+- `/ship-parts-finder` - Without a location, parts no longer say "distance unknown".
+
+---
+
+## 2.52 - 2026-10-03 - Alerts that arrive
+
+**Fixed**
+- `/alert-add`, `/stock-alert-add` and `/marketplace-alert-add` - An alert set to DM you now reaches you even with your DMs closed: it's posted in the channel you set it in, pinging only you. Before, it was lost, and a price alert was used up without ever arriving.
+- `/marketplace-alert-add` - A new alert no longer announces the listings that were already up as "new" - only listings posted after you set it.
+- `/test-dm` - No longer mentions an option that no longer exists.
+
+---
+
+## 2.51 - 2026-10-03 - Deleted means gone
+
+**Fixed**
+- Personal inventory relisting, `/inventory-cancel-post` and `/marketplace-delete-listing` - After deleting a listing, the bot checks UEX actually removed it before relisting, releasing your stock or saying it's deleted. If UEX still shows it, the bot says so, keeps tracking it so a sale still counts, and pauses relisting it until you sort it out.
+
+---
+
+## 2.50 - 2026-10-03 - No surprise pings
+
+**Fixed**
+- Alerts posted in a channel - Only ping you, the alert's owner. A Marketplace listing whose title or seller name contained @everyone, a role or someone else's name could have pinged them too.
+- The bot never pings @everyone, @here or a role, whatever text ends up in its messages.
+
+---
+
+## 2.49 - 2026-10-02 - Deletes that delete
+
+**Fixed**
+- Personal inventory relisting, `/inventory-cancel-post` and deleting a Marketplace listing - The bot now sends deletes to UEX as real (production) deletes, the likely reason they didn't work. Before, UEX said the delete worked but the listing stayed up, so a 48h relist couldn't post the lower-priced copy and told you the item had no listing when the old one was still live. 2.51 makes the bot check it.
+
+---
+
+## 2.48 - 2026-10-02 - Your missile racks stay
+
+**Changed**
+- `/ship-loadout` - Keeps your ship's own missile racks instead of swapping them for racks with fewer, bigger missiles, like the Cutlass Black's 4x S2 racks becoming 1x S4. More missiles or bigger ones is your call. A rack slot that comes empty still gets a recommendation.
+
+---
+
+## 2.47 - 2026-10-02 - Idle loadouts with a location
+
+**Fixed**
+- `/ship-loadout` - A loadout made with a location now greys out its buttons once it's been left idle, the same as one made without a location, and says how to get it back. Before, its buttons kept looking live but no longer answered. Done still removes it either way.
+
+---
+
+## 2.46 - 2026-10-02 - Browse parts from anywhere
+
+**Changed**
+- `/ship-parts-finder` - Location is optional now. Give it and each shop shows how far it is from you; leave it out and the parts are listed the same way, just without distances.
+
+---
+
+## 2.45 - 2026-10-02 - Every ship's parts
+
+**Fixed**
+- `/ship-parts-finder` and `/ship-loadout` - Work for the 12 ships the Star Citizen Wiki lists twice under one name, like the Cutlass Black, Carrack, Polaris, Hammerhead and Idris-P, instead of saying their parts aren't available. They use the standard ship, not a special edition.
+
+---
+
+## 2.44 - 2026-10-01 - Done with a loadout
+
+**Added**
+- `/ship-loadout` - A Done button removes the loadout message once you're finished with it, even after its other buttons have greyed out from sitting idle or a bot restart. Anything you added to your shopping list stays there.
+
+---
+
+## 2.43 - 2026-10-01 - Turret guns in ship loadouts
+
+**Fixed**
+- `/ship-loadout` - Recommends guns for turrets it used to leave out: manned turrets, and remote turrets whose gimbals the game locks. The Idris-M now lists all 22 of its turret guns, and the Perseus, Constellation Andromeda and Redeemer gain their manned-turret guns.
+
+**Changed**
+- `/ship-loadout` - Between two guns within 5% DPS of each other, the one with more alpha damage wins, not only on an exact tie.
+
+---
+
+## 2.42 - 2026-10-01 - Better weapon picks in ship loadouts
+
+**Changed**
+- `/ship-loadout` - Never recommends a scattergun, and replaces one a ship comes with. When two guns do the same DPS, the one with more alpha damage wins, and every gun line shows both, like "1,266 DPS / 84.4 alpha".
+- `/ship-loadout` - Always keeps a ship's stock point-defense turrets (PDCs): they shoot down incoming missiles and never run out of ammo.
+
+---
+
+## 2.41 - 2026-10-01 - Recommended ship loadouts
+
+**Added**
+- `/ship-loadout` - Pick a ship and get a recommended part for every slot: Balanced, Stealth, Tank or Budget, with buttons to switch. Each line shows the part, how it compares with the stock one, its price and shop, or says to keep the stock part when nothing sold beats it. Guns stay in the ship's own gimbals. Stealth picks the lowest EM signature. Shows the total cost and the loadout's total power pips. "Add all to shopping list" adds every purchase to your private ship parts list. Add a location and ties go to the nearest shop.
+- `/ship-parts-finder` - A "Recommend a loadout" button opens the same loadout for the ship and location you're browsing.
+
+**Changed**
+- `/ship-parts-finder` - Ships the Star Citizen Wiki lists twice under one name, like the Cutlass Black, Carrack and Polaris, now say so instead of reporting no slots. Their parts aren't available yet.
+
+---
+
+## 2.40 - 2026-10-01 - Suspicious prices flagged
+
+**Added**
+- `/best-route`, `/mixed-routes`, `/multi-stop-route` and `/intelligence-brief` - A route warns when its buy or sell price is 4x or more off what every other terminal charges for that commodity. It could be a real deal or a UEX data error, so check before you fly. This would have caught UEX once listing Fresh Food at 2,614 instead of about 21,614.
+
+---
+
+## 2.39 - 2026-10-01 - Misspelled ores understood
+
+**Fixed**
+- `/where-to-mine` and `/refinery-advisor` - A misspelled ore sent without picking a suggestion, like "Quantanium", finds the right one instead of failing. A typo that could be two different ores still asks you to pick.
+
+---
+
+## 2.38 - 2026-10-01 - Pick listings by name
+
+**Changed**
+- `/marketplace-listing` - Pick one of your listings, favorites or deals from a list by name, instead of typing its id. Typing an id still works.
+- `/marketplace-delete-listing` - Pick one of your own listings from a list by name.
+- `/marketplace-search`, `/my-favorites` and `/my-negotiations` - A "Show details for…" menu under the results shows any listing in full, privately.
+
+---
+
+## 2.37 - 2026-10-01 - Prices for the commodity you named
+
+**Fixed**
+- `/price` - Shows only the commodity you named. Gold, Diamond and Carbon showed another commodity's higher price: Gold's top sell was Golden Medmon's 71,000, against Gold's own ~31,000.
+- `/best-route` - Tin and Jaclium get their own routes, not Astatine's or Jaclium (Ore)'s.
+- `/refinery-advisor` - Gold (Ore)'s sell price is Gold's own, not Golden Medmon's.
+- Price and stock alerts - A Gold alert no longer goes off on Golden Medmon's price or stock.
+- `/trending`, `/top-routes` and `/commodity-history` - Each commodity uses only its own prices.
+
+**Changed**
+- `/price`, `/best-route` and `/commodity-history` - A name that matches several commodities, like "Gol", asks which one you mean.
+- `/price` - Says so in a line of text when no terminal buys or sells the commodity, instead of an empty card.
+
+---
+
+## 2.36 - 2026-10-01 - Refinery prices for every ore
+
+**Fixed**
+- `/refinery-advisor` - Shows a sell price for Taranite, Lindinium, Savrilium, Torite and Aslarite, which had none.
+- `/refinery-advisor` - A negative yield bonus reads "-3%", not "+-3%".
+
+---
+
+## 2.35 - 2026-10-01 - Inventory listings tracked again
+
+**Fixed**
+- `/inventory-sell` - Listings you've posted are checked, repriced and reported on again. Since September 30 the
+  bot stopped at the first listing that had gone live on UEX, so none of it happened.
+- `/marketplace-listing`, `/marketplace-delete-listing`, `/inventory-cancel-post`, `/my-favorites`, `/my-negotiations`
+  - No longer fail on a listing that's live on UEX.
+
+---
+
+## 2.34 - 2026-09-30 - Risky hedges are labelled
+
+**Fixed**
+- `/best-route`, `/top-routes` - A "Hedge:" line now shows the ⚠️ cargo risk of what it suggests, e.g. "⚠️ Cargo
+  risk: restricted in some jurisdictions". Since 2.33 a hedge can be any cargo, illegal goods included, and it had no
+  label.
+- Route tracking threads - The "this could fill it" suggestion after a short purchase, and the other cargo in a backup
+  route, carry the same label.
+
+---
+
+## 2.33 - 2026-09-30 - Risk tolerance removed
+
+**Removed**
+- `/set-trading-preferences` `risk-tolerance` - Gone. Almost nobody used it, and Low and Medium left out the same
+  goods, the illegal ones. Route suggestions no longer leave out any cargo for being risky.
+  - Routes still label risky cargo with ⚠️, e.g. "⚠️ Cargo risk: restricted in some jurisdictions", so you can see
+    what you'd be hauling before you pick a route.
+  - A risk tolerance you saved before is simply no longer used. Your other saved preferences are unchanged.
 
 ---
 

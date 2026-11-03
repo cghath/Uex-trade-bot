@@ -202,13 +202,15 @@ def test_the_list_falls_back_to_lock_in_prices_when_uex_doesnt_answer():
 
 # -- MSG-14: README and intents ---------------------------------------------------------------
 
-def test_the_bot_asks_for_no_privileged_intents(tmp_path):
+def test_the_bot_asks_only_for_the_server_members_intent(tmp_path):
+    """Server Members for anniversaries (README step 3 says to switch it on); never Message
+    Content or Presence."""
     async def run():
         bot = bot_main.UexBot(NS(database_path=tmp_path / "uexbot.sqlite3", uex_app_token="token",
                                  uex_secret_key=None))
         try:
             intents = bot.intents
-            assert not (intents.message_content or intents.members or intents.presences)
+            assert intents.members and not (intents.message_content or intents.presences)
         finally:
             await bot.uex.aclose()
 

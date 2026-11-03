@@ -21,7 +21,7 @@ from bot.uex.data_health import (
 )
 from bot.uex.route_confidence import coalesce_report_count, compute_route_confidence, track_record_modifier
 from bot.uex.practical_routes import route_in_system, route_practical_notes, route_supports_auto_load
-from bot.uex.commodity_risk import format_commodity_risk, outside_risk_tolerance, within_risk_tolerance
+from bot.uex.commodity_risk import format_commodity_risk
 from bot.uex.supply_demand import (
     SELL_SIDE_STATUS_CLARIFIER,
     analyze_terminal_market_history,
@@ -32,7 +32,7 @@ from bot.uex.supply_demand import (
 )
 from bot.uex.ships import estimate_route_cargo, resolve_ship
 from bot.uex.status import build_status_lookup, resolve_status_label
-from bot.uex.trading import best_buy_locations, best_routes, best_sell_locations
+from bot.uex.trading import best_buy_locations, best_routes, best_sell_locations, rows_for_commodity
 from bot.uex.mixed_routes import build_mixed_routes, find_hedge_cargo, requires_capital_cargo_access
 from bot.uex.multi_stop_routes import (
     MAX_LEGS,
@@ -43,7 +43,6 @@ from bot.uex.multi_stop_routes import (
 from bot.uex.charts import render_budget_curve_chart
 from bot.uex.trading_preferences import (
     describe_active_preferences,
-    risk_tolerance_hint,
     saved_filter_labels,
     saved_filters_hint,
 )
@@ -56,12 +55,14 @@ def _filters_note(prefs: dict, saved_filters: dict, *, space_only: bool, auto_lo
     own record of which filters came from saved preferences."""
     return describe_active_preferences(
         space_only=space_only, capital_ship_access=bool(prefs["capital_ship_access"]),
-        auto_load_only=auto_load_only, system=system, risk_tolerance=prefs["risk_tolerance"],
+        auto_load_only=auto_load_only, system=system,
         saved={name for name, value in saved_filters.items() if value},
     )
 from bot.cogs.route_progression import RouteLegInput, TrackableRoute
-from bot.route_pages import RoutePage, send_route_pages, text_pages
+from bot.route_pages import RoutePage, layout_pages, send_route_pages, text_pages
+from bot.uex.price_outliers import PriceOutlierIndex, index_commodity_prices
 from bot.uex.route_presentation import (
+    MultiStopLegFacts,
     add_chunked_fields,
     approximation_note,
     capital_access_note,
@@ -74,6 +75,9 @@ from bot.uex.route_presentation import (
     hedge_room,
     missing_ship_cargo_line,
     missing_ship_note,
+    multi_stop_blocks,
+    multi_stop_footer,
+    price_outlier_warnings,
     stock_headroom_warning,
     travel_warning,
     worst_confidence,
@@ -105,6 +109,20 @@ MAX_LEGS_DESCRIPTION = "Optional: chain up to 4 hops instead of 3 - finds more p
 # trends.py and intelligence_brief.py) so it isn't copy-pasted per command surface.
 _chunk_lines = chunk_lines
 _add_chunked_fields = add_chunked_fields
+
+
+def ambiguous_commodity_text(commodity: str, names: list[str]) -> str:
+    """When a typed name matches several commodities and is none of them exactly
+    (rows_for_commodity) - /price, /best-route and /commodity-history ask instead of
+    picking one."""
+    listed = ", ".join(names[:5]) + (f" and {len(names) - 5} more" if len(names) > 5 else "")
+    return f"'{commodity}' matches more than one commodity: {listed}. Which one do you mean?"
+
+
+def no_terminal_trades_text(commodity: str) -> str:
+    """/price when UEX has rows for the commodity but no terminal currently buys or sells
+    it - it used to post an embed with no fields."""
+    return f"UEX lists {commodity}, but no terminal is buying or selling it right now."
 
 
 def _positive_int(value: object) -> int | None:
@@ -244,11 +262,21 @@ class Prices(commands.Cog):
             await interaction.followup.send(f"No price data found for '{commodity}'. Check the spelling.")
             return
 
-        commodity_display = rows[0].get("commodity_name", commodity)
-        embed = discord.Embed(title=f"{commodity_display} — Prices", color=discord.Color.blurple())
+        # UEX matches commodity_name as a SUBSTRING - /price Gold listed Golden Medmon's
+        # 71,000 (real Gold sells for ~31,000). Only the commodity asked for; a name that is
+        # several commodities asks which one.
+        rows, others = rows_for_commodity(rows, commodity)
+        if others:
+            await interaction.followup.send(ambiguous_commodity_text(commodity, others))
+            return
 
+        commodity_display = rows[0].get("commodity_name", commodity)
         top_sell = best_sell_locations(rows, limit=MAX_FIELD_ROWS)
         top_buy = best_buy_locations(rows, limit=MAX_FIELD_ROWS)
+        if not top_sell and not top_buy:
+            await interaction.followup.send(no_terminal_trades_text(commodity_display))
+            return
+        embed = discord.Embed(title=f"{commodity_display} — Prices", color=discord.Color.blurple())
         status_lookup = await self._get_status_lookup()
 
         terminal_ids = [
@@ -441,8 +469,6 @@ class Prices(commands.Cog):
         if auto_load_only is None:
             auto_load_only = prefs["auto_load_only"]
         system_value = system.value if system else prefs["preferred_system"]
-        # No risk_tolerance here: the player named this commodity, so it isn't filtered out;
-        # the note below says when it's outside their tolerance instead.
         preferences_note = describe_active_preferences(
             auto_load_only=auto_load_only, system=system_value,
             saved={name for name, on in (("auto_load_only", auto_load_saved), ("system", system_saved)) if on},
@@ -457,8 +483,19 @@ class Prices(commands.Cog):
             await interaction.followup.send(f"No price data found for '{commodity}'. Check the spelling.")
             return
 
+        # UEX matches commodity_name as a SUBSTRING - 'Tin' lists Astatine first, so taking
+        # rows[0]'s id_commodity routed Astatine for a Tin request. Only the commodity asked
+        # for goes on; a name that is several commodities asks which one.
+        rows, others = rows_for_commodity(rows, commodity)
+        if others:
+            await interaction.followup.send(ambiguous_commodity_text(commodity, others))
+            return
+
         id_commodity = rows[0].get("id_commodity")
         commodity_display = rows[0].get("commodity_name", commodity)
+        # Each shown route's buy and sell price against every other terminal trading this
+        # commodity (bot/uex/price_outliers.py), from the rows just fetched.
+        price_outlier_index = index_commodity_prices(rows)
 
         # Resolve the ship to use for cargo math: an explicit /best-route option wins,
         # otherwise fall back to the user's saved default (/set-trading-preferences). Either way
@@ -480,12 +517,7 @@ class Prices(commands.Cog):
         risk_warning: str | None = None
         if id_commodity is not None:
             commodity_references = await self.bot.db.get_commodity_references([int(id_commodity)])
-            reference = commodity_references.get(int(id_commodity))
-            risk_warning = format_commodity_risk(reference)
-            if outside_risk_tolerance(reference, prefs["risk_tolerance"]):
-                tolerance_note = (f"Outside your saved risk tolerance ({prefs['risk_tolerance']}) - other route "
-                                  "commands leave it out. Shown here because you asked for it.")
-                risk_warning = "\n".join(filter(None, [risk_warning, tolerance_note]))
+            risk_warning = format_commodity_risk(commodity_references.get(int(id_commodity)))
 
         # Loaded lazily, only when a route turns out to be stock-limited with room to spare
         # (see stock_headroom_warning) - most /best-route calls never need it.
@@ -654,6 +686,10 @@ class Prices(commands.Cog):
                     if sell_status:
                         status_bits.append(f"sell side: {sell_status}")
                     value_lines.append(" · ".join(status_bits))
+                value_lines.extend(price_outlier_warnings(
+                    price_outlier_index, id_commodity=id_commodity, origin_id=origin_id, buy_price=price_origin,
+                    destination_id=destination_id, sell_price=price_destination,
+                ))
 
                 origin_health_obj = classify_terminal_health(health_rows[origin_id]) if origin_id in health_rows else None
                 destination_health_obj = (
@@ -703,14 +739,13 @@ class Prices(commands.Cog):
                             # a raised exception here would silently never be sent.
                             try:
                                 if market_rows is None:
-                                    market_rows = within_risk_tolerance(
-                                        await self.bot.db.get_mixed_route_market_rows(), prefs["risk_tolerance"])
+                                    market_rows = await self.bot.db.get_mixed_route_market_rows()
                                 for hedge_item in find_hedge_cargo(
                                     market_rows, origin_terminal_id=origin_id, destination_terminal_id=destination_id,
                                     exclude_commodity_id=id_commodity, remaining_capacity_scu=room.capacity_scu,
                                     remaining_budget=room.budget,
                                 ):
-                                    value_lines.append(f"Hedge: {cargo_item_line(hedge_item)}")
+                                    value_lines.append(f"Hedge: {cargo_item_line(hedge_item, risk=True)}")
                             except Exception:
                                 logger.warning("Hedge suggestion unavailable for /best-route", exc_info=True)
                 elif not ship_vehicle:
@@ -921,6 +956,10 @@ class Prices(commands.Cog):
                 if sell_status:
                     status_bits.append(f"sell side: {sell_status}")
                 value_lines.append(" · ".join(status_bits))
+            value_lines.extend(price_outlier_warnings(
+                price_outlier_index, id_commodity=id_commodity, origin_id=route.buy_terminal_id,
+                buy_price=route.buy_price, destination_id=route.sell_terminal_id, sell_price=route.sell_price,
+            ))
 
             origin_health_obj = (
                 classify_terminal_health(route_health_rows[route.buy_terminal_id])
@@ -971,15 +1010,14 @@ class Prices(commands.Cog):
                         # Additive - see the identical try/except in the primary branch above.
                         try:
                             if market_rows is None:
-                                market_rows = within_risk_tolerance(
-                                    await self.bot.db.get_mixed_route_market_rows(), prefs["risk_tolerance"])
+                                market_rows = await self.bot.db.get_mixed_route_market_rows()
                             for hedge_item in find_hedge_cargo(
                                 market_rows, origin_terminal_id=route.buy_terminal_id,
                                 destination_terminal_id=route.sell_terminal_id,
                                 exclude_commodity_id=id_commodity, remaining_capacity_scu=room.capacity_scu,
                                 remaining_budget=room.budget,
                             ):
-                                value_lines.append(f"Hedge: {cargo_item_line(hedge_item)}")
+                                value_lines.append(f"Hedge: {cargo_item_line(hedge_item, risk=True)}")
                         except Exception:
                             logger.warning("Hedge suggestion unavailable for /best-route", exc_info=True)
             elif not ship_vehicle:
@@ -1120,9 +1158,7 @@ class Prices(commands.Cog):
             )
             return
 
-        all_market_rows = await self.bot.db.get_mixed_route_market_rows()
-        market_rows = within_risk_tolerance(all_market_rows, prefs["risk_tolerance"])
-        risk_hint = risk_tolerance_hint(prefs["risk_tolerance"]) if len(market_rows) < len(all_market_rows) else ""
+        market_rows = await self.bot.db.get_mixed_route_market_rows()
         # OR'd with the saved preference, not replaced by it - either a genuine capital
         # ship or an explicit "always require capital-ship access" preference should force
         # this filter on; the ship-derived signal never gets to silently disable it.
@@ -1172,7 +1208,7 @@ class Prices(commands.Cog):
             auto_load_note = " with auto-load at both ends" if auto_load_only else ""
             system_note = f" entirely within {system_value}" if system_value else ""
             saved_hint = saved_filters_hint(saved_filter_labels(**saved_filters, capital_ship_access=(
-                bool(prefs["capital_ship_access"]) and not requires_capital_cargo_access(ship_vehicle)))) + risk_hint
+                bool(prefs["capital_ship_access"]) and not requires_capital_cargo_access(ship_vehicle))))
             if origin_name and destination_name:
                 pin_note = f" from **{origin_name}** to **{destination_name}**"
             elif origin_name:
@@ -1188,6 +1224,7 @@ class Prices(commands.Cog):
             return
 
         terminal_ids = [terminal_id for route in routes for terminal_id in (route.origin_id, route.destination_id)]
+        price_outlier_index = index_commodity_prices(market_rows)
         health_rows = await self.bot.db.get_terminal_data_health_by_ids(terminal_ids)
         status_lookup = await self._get_status_lookup()
         # RouteProgression may not be loaded (a cog load failure elsewhere shouldn't break
@@ -1211,7 +1248,8 @@ class Prices(commands.Cog):
                 origin_health=origin_health, destination_health=destination_health
             )
             for item in route.cargo:
-                warnings.extend(cargo_item_warnings(item, status_lookup=status_lookup))
+                warnings.extend(cargo_item_warnings(
+                    item, status_lookup=status_lookup, price_outlier_index=price_outlier_index))
             warnings.extend(route_practical_notes(route.cargo[0].source, route.cargo[0].destination))
             if capital_access_only:
                 warnings.append(capital_access_note("both ends"))
@@ -1400,9 +1438,7 @@ class Prices(commands.Cog):
             )
             return
 
-        all_market_rows = await self.bot.db.get_mixed_route_market_rows()
-        market_rows = within_risk_tolerance(all_market_rows, prefs["risk_tolerance"])
-        risk_hint = risk_tolerance_hint(prefs["risk_tolerance"]) if len(market_rows) < len(all_market_rows) else ""
+        market_rows = await self.bot.db.get_mixed_route_market_rows()
         # OR'd with the saved preference, not replaced by it - either a genuine capital
         # ship or an explicit "always require capital-ship access" preference should force
         # this filter on; the ship-derived signal never gets to silently disable it.
@@ -1451,7 +1487,7 @@ class Prices(commands.Cog):
             auto_load_note = " with auto-load at every stop" if auto_load_only else ""
             system_note = f" entirely within {system_value}" if system_value else ""
             saved_hint = saved_filters_hint(saved_filter_labels(**saved_filters, capital_ship_access=(
-                bool(prefs["capital_ship_access"]) and not requires_capital_cargo_access(ship_vehicle)))) + risk_hint
+                bool(prefs["capital_ship_access"]) and not requires_capital_cargo_access(ship_vehicle))))
             await interaction.followup.send(
                 f"No multi-stop chains{f' from **{origin_name}**' if origin_name else ''} "
                 f"fit **{ship_vehicle.get('name', ship_query)}**"
@@ -1464,6 +1500,7 @@ class Prices(commands.Cog):
             space_only=space_only, capital_access_only=capital_access_only, auto_load_only=auto_load_only,
             system=system_value, filters_note=_filters_note(
                 prefs, saved_filters, space_only=space_only, auto_load_only=auto_load_only, system=system_value),
+            price_outlier_index=index_commodity_prices(market_rows),
         )
 
     async def _send_multi_stop_routes(
@@ -1479,8 +1516,9 @@ class Prices(commands.Cog):
         auto_load_only: bool,
         system: str | None = None,
         filters_note: str | None = None,
+        price_outlier_index: PriceOutlierIndex | None = None,
     ) -> None:
-        """Per-route embed/tracking/fallback sending for /multi-stop-route, whether its search
+        """Per-route layout/tracking/fallback sending for /multi-stop-route, whether its search
         was unconstrained or anchored to one starting terminal (`origin`, which was
         /route-from-multi before audit UX-8 folded it in)."""
         terminal_ids = [terminal_id for route in routes for terminal_id in route.stops]
@@ -1490,42 +1528,15 @@ class Prices(commands.Cog):
         # /multi-stop-route) - tracking buttons are additive, never required for the
         # command's own result.
         tracking_cog = self.bot.get_cog("RouteProgression")
+        ship_name = ship_vehicle.get("name", ship_query)
         pages: list[RoutePage] = []
         for index, route in enumerate(routes, 1):
             path_label = " → ".join(
                 [route.legs[0].origin_name, *(leg.destination_name for leg in route.legs)]
             )
-            route_embed = discord.Embed(
-                title=f"#{index} {path_label}",
-                description=(
-                    f"{len(route.legs)}-leg chain for **{ship_vehicle.get('name', ship_query)}** · "
-                    f"ranked by profit (ROI% as a tie-breaker)"
-                    f"{' · space stations only' if space_only else ''}"
-                ),
-                color=discord.Color.green(),
-            )
-            # Set before the per-leg field loop, not after - see the matching comment in
-            # /best-route above. This route's footer depends only on already-known
-            # per-command options and route.is_exact, all available before the loop runs.
-            route_footer = (
-                "Collected UEX data + live UEX distance · prices can change before arrival · "
-                "warnings do not change profit ranking"
-            )
-            if budget is not None:
-                route_footer += f" · starting budget {float(budget):,.0f} aUEC"
-            if filters_note:
-                route_footer += f" · {filters_note}"
-            if capital_access_only:
-                route_footer += " · capital access confirmed at every stop"
-            if note := approximation_note(route.is_exact, per_leg=True):
-                route_footer += f" · {note}"
-            route_embed.set_footer(text=route_footer)
-            warnings: list[str] = []
+            leg_facts: list[MultiStopLegFacts] = []
             leg_confidences = []
-            total_distance_gm = 0.0
-            distance_partial = False
-            all_legs_fit = True
-            for leg_index, leg in enumerate(route.legs, 1):
+            for leg in route.legs:
                 origin_health = (
                     classify_terminal_health(health_rows[leg.origin_id])
                     if leg.origin_id in health_rows else None
@@ -1538,88 +1549,26 @@ class Prices(commands.Cog):
                     distance_row = await self.bot.uex.get_terminal_distance(leg.origin_id, leg.destination_id)
                 except UexApiError:
                     distance_row = None
-                if distance_row and distance_row.get("distance") is not None:
-                    total_distance_gm += float(distance_row["distance"])
-                    distance_note = f"{float(distance_row['distance']):,.1f} Gm"
-                else:
-                    distance_partial = True
-                    distance_note = "distance unavailable"
-                cargo_lines = [cargo_item_line(item) for item in leg.cargo]
-                leg_lines = [
-                    *cargo_lines,
-                    f"Investment: **{leg.investment:,.0f}** · Revenue: **{leg.revenue:,.0f} aUEC** · "
-                    f"Profit: **{leg.profit:,.0f} aUEC** · {distance_note}",
-                ]
-                # Unlike /top-routes (where one route missing is just one omitted route),
-                # a route embed's title and "Route summary" field both unconditionally
-                # describe ALL of route.legs - if a leg's own field silently failed to
-                # fit, the embed would claim (and still total the profit/investment for)
-                # a leg it never actually shows. Tracked here and folded into
-                # embed_too_large below so that case routes into the same full-fidelity
-                # plain-text fallback as a real send failure, rather than sending a
-                # self-contradictory embed.
-                if not _add_chunked_fields(
-                    route_embed,
-                    name=f"Leg {leg_index}: {leg.origin_name} → {leg.destination_name}",
-                    lines=leg_lines,
-                ):
-                    all_legs_fit = False
-                leg_prefix = f"Leg {leg_index} "
-                warnings.extend(side_health_warnings(
-                    origin_health=origin_health, destination_health=destination_health,
-                    origin_label=f"{leg_prefix}Origin", destination_label=f"{leg_prefix}Destination",
-                ))
-                for item in leg.cargo:
-                    warnings.extend(cargo_item_warnings(item, status_lookup=status_lookup, prefix=leg_prefix))
-                warnings.extend(
-                    f"{leg_prefix}{note}"
-                    for note in route_practical_notes(leg.cargo[0].source, leg.cargo[0].destination)
+                distance_gm = (
+                    float(distance_row["distance"])
+                    if distance_row and distance_row.get("distance") is not None else None
                 )
-                origin_system = leg.cargo[0].source.get("star_system_name")
-                destination_system = leg.cargo[0].destination.get("star_system_name")
-                if note := travel_warning(
-                    origin_system, destination_system, has_real_distance=True, prefix=leg_prefix
-                ):
-                    warnings.append(note)
+                leg_facts.append(MultiStopLegFacts(distance_gm, origin_health, destination_health))
                 leg_confidences.extend(
                     cargo_confidences(leg.cargo, origin_health=origin_health, destination_health=destination_health)
                 )
-            if capital_access_only:
-                warnings.append(capital_access_note("every stop"))
-            confidence = worst_confidence(leg_confidences)
-            distance_summary = (
-                f"~{total_distance_gm:,.1f} Gm (partial - one or more legs' distance unavailable)"
-                if distance_partial
-                else f"{total_distance_gm:,.1f} Gm total"
+            # Laid out with each leg's warnings under it, the owner's pick from real-data mockups
+            # (2026-10-04) - see multi_stop_blocks. A route too long for one layout goes out as
+            # text pages carrying the same blocks, so no warning or disclosure is ever dropped.
+            blocks = multi_stop_blocks(
+                route, index=index, ship_name=ship_name, space_only=space_only, leg_facts=leg_facts,
+                confidence=worst_confidence(leg_confidences),
+                footer=multi_stop_footer(
+                    is_exact=route.is_exact, budget=budget, filters_note=filters_note,
+                    capital_access_only=capital_access_only,
+                ),
+                status_lookup=status_lookup, price_outlier_index=price_outlier_index,
             )
-            summary_lines = [
-                f"Investment: **{route.investment:,.0f}** · Revenue: **{route.revenue:,.0f} aUEC**",
-                f"Profit: **{route.profit:,.0f} aUEC** · ROI: **{route.roi_pct:.1f}%**",
-                f"Distance: {distance_summary}",
-                f"Confidence: **{confidence.label} ({confidence.score}/100)**",
-            ]
-            route_embed.add_field(name="Route summary", value="\n".join(summary_lines), inline=False)
-            unique_warnings = list(dict.fromkeys(warnings))
-            # _add_chunked_fields is atomic (see prices.py's own docstring) - for a route
-            # embed's leg fields, that's exactly what's wanted (never show a leg with its
-            # warning silently missing). But here the "logical field" being added is the
-            # WHOLE warnings section, not a single route - if it doesn't fit, atomicity
-            # means it adds NOTHING, silently dropping every cargo-risk/cross-system/stale-
-            # health warning while the smaller, warning-free embed still sends successfully
-            # (no discord.HTTPException, so the existing too-large fallback below never
-            # triggers). Its return value must be checked and treated the same as a real
-            # send failure - entering the same full-fidelity plain-text fallback - rather
-            # than silently accepting an embed that looks complete but isn't.
-            warnings_fit = _add_chunked_fields(
-                route_embed, name="Warnings & practical checks", lines=unique_warnings
-            )
-            # Sent one route per message, not batched like /mixed-routes: a multi-leg
-            # route's per-leg cargo/warning fields can push a single embed close to
-            # Discord's combined 6,000-character-per-message embed limit on their own,
-            # and bundling up to 5 of them (as one message with multiple embeds) hit that
-            # limit in testing - with nothing catching the send failure, Discord never
-            # got a followup at all and the interaction looked permanently "thinking."
-            embed_too_large = not warnings_fit or not all_legs_fit
             # A multi-stop leg carries several commodities at once (allocate_pair_cargo's
             # mixed load), not one - flattened here into one buy + one sell progression-
             # leg per commodity per hop, in order, so the existing leg-by-leg cog can walk
@@ -1658,22 +1607,7 @@ class Prices(commands.Cog):
                         space_only=space_only, capital_access_only=capital_access_only,
                         auto_load_only=auto_load_only, system=system,
                     )
-            # The plain-text version, for a route whose embed is too large (or whose warnings
-            # section didn't fit) - warnings (risk flags, stock/demand limits, practical
-            # notes) must survive here too, not just the profit figures, split over as many
-            # text pages as it takes rather than silently dropping anything.
-            per_leg_note = approximation_note(route.is_exact, per_leg=True)
-            fallback_lines = [
-                f"**#{index} {path_label}**",
-                *summary_lines,
-                "⚠️ Full leg-by-leg cargo/distance details omitted - too large for one Discord message.",
-                *([] if per_leg_note is None else [f"⚠️ {per_leg_note[0].upper()}{per_leg_note[1:]}"]),
-                *unique_warnings,
-            ]
-            if embed_too_large:
-                pages.extend(text_pages("\n".join(fallback_lines), route=trackable_route))
-            else:
-                pages.append(RoutePage(route_embed, "\n".join(fallback_lines), trackable_route))
+            pages.extend(layout_pages(blocks, route=trackable_route))
         # One results message, one route per page (audit UX-6).
         await send_route_pages(interaction, pages, tracking_cog=tracking_cog)
 
@@ -1733,9 +1667,7 @@ class Prices(commands.Cog):
             )
             return
 
-        all_market_rows = await self.bot.db.get_mixed_route_market_rows()
-        market_rows = within_risk_tolerance(all_market_rows, prefs["risk_tolerance"])
-        risk_hint = risk_tolerance_hint(prefs["risk_tolerance"]) if len(market_rows) < len(all_market_rows) else ""
+        market_rows = await self.bot.db.get_mixed_route_market_rows()
         capital_access_only = requires_capital_cargo_access(ship_vehicle) or prefs["capital_ship_access"]
         if capital_access_only:
             try:
@@ -1775,7 +1707,7 @@ class Prices(commands.Cog):
         plottable = [p for p in points if p.investment > 0]
         if len(plottable) < 2:
             saved_hint = saved_filters_hint(saved_filter_labels(**saved_filters, capital_ship_access=(
-                bool(prefs["capital_ship_access"]) and not requires_capital_cargo_access(ship_vehicle)))) + risk_hint
+                bool(prefs["capital_ship_access"]) and not requires_capital_cargo_access(ship_vehicle))))
             await interaction.followup.send(
                 f"Couldn't find enough profitable multi-stop chains for "
                 f"**{ship_vehicle.get('name', ship_query)}** to chart a budget curve right now.{saved_hint}"

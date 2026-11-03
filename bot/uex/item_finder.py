@@ -111,29 +111,73 @@ def rank_item_listings(
     return result
 
 
-def _distance_label(listing: ItemListing, *, origin_star_system: str | None = None) -> str:
+def distance_text(listing: ItemListing, *, origin_star_system: str | None = None) -> str:
+    """'3 Gm', 'here', 'same system' (unknown, but in the player's own system) or 'distance unknown'."""
     if listing.distance_gm is None:
         if origin_star_system is not None and listing.star_system_name == origin_star_system:
             return "same system"
-        return "unknown"
+        return "distance unknown"
     if listing.distance_gm == 0:
         return "here"
-    return f"{listing.distance_gm:.1f} Gm"
+    return f"{round(listing.distance_gm, 1):g} Gm"
 
 
-def format_item_listing_line(listing: ItemListing, *, origin_star_system: str | None = None) -> str:
-    """'**Place** (Vendor) — Price aUEC · Distance' - deliberately plain text, not a
-    monospace table. A fixed-width table column looked clean for the SHORT names it was
-    designed against, but two real problems surfaced live once real name-length variance
-    showed up: (1) a narrow fixed width truncated two DIFFERENT real places (e.g.
-    'People's Service Station Alpha' vs. '...Lambda') down to identical displayed text -
-    Discord has no hover/tooltip to recover the rest, since no JS runs in a message/embed;
-    (2) widening the column to fix that made rows wide enough that Discord WRAPS them
-    inside an embed field instead of scrolling horizontally (confirmed live - the earlier
-    assumption that a code block scrolls was wrong), breaking column alignment entirely.
-    Plain proportional text sidesteps both: it never collapses two different names to the
-    same string, and a long name just wraps gracefully like any other sentence instead of
-    misaligning a column."""
-    distance = _distance_label(listing, origin_star_system=origin_star_system)
-    shop = place_and_vendor_text(listing.place_label, listing.vendor_label, bold=True)
-    return f"{shop} — {listing.price_buy:,.0f} aUEC · {distance}"
+def _price(listing: ItemListing) -> str:
+    return f"{listing.price_buy:,.0f}"
+
+
+# The reply is built from these blocks, one text block each in the layout (the owner's pick,
+# 2026-10-03). Every shop line is plain proportional text, never a monospace table: a fixed
+# column truncated two different real places ('People's Service Station Alpha' vs '...Lambda')
+# to the same text, and once widened, Discord wrapped the rows and broke the columns anyway.
+
+
+def item_header(item_name: str, shop_count: int, origin: str) -> str:
+    shops = f"{shop_count} shop sells it" if shop_count == 1 else f"{shop_count} shops sell it"
+    return f"## {item_name}\n-# {shops} · prices in aUEC · from {origin}"
+
+
+def highlights_block(ranked: list[ItemListing], *, origin_star_system: str | None = None) -> str:
+    """The answer first: the nearest shop, and the cheapest (the nearest of those at the lowest
+    price), naming the star system when it isn't the player's own. One line when they're the same."""
+    nearest = ranked[0]
+    low = min(listing.price_buy for listing in ranked)
+    cheapest = next(listing for listing in ranked if listing.price_buy == low)
+
+    def line(label: str, listing: ItemListing) -> str:
+        where = place_and_vendor_text(listing.place_label, listing.vendor_label)
+        if listing.star_system_name and listing.star_system_name != origin_star_system:
+            where += f", {listing.star_system_name}"
+        return (f"**{label}** · {where} · {_price(listing)} · "
+                f"{distance_text(listing, origin_star_system=origin_star_system)}")
+
+    if cheapest is nearest:
+        return line("Nearest and cheapest", nearest)
+    return line("Nearest", nearest) + "\n" + line("Cheapest", cheapest)
+
+
+def system_block(system: str, listings: list[ItemListing], *, origin_star_system: str | None = None) -> str:
+    """One star system's shops, closest first. When every shop there charges the same, the
+    price (and the vendor, if they share one) goes in the heading once and the shops share a line."""
+    def distance(listing: ItemListing) -> str:
+        return distance_text(listing, origin_star_system=origin_star_system)
+
+    if len(listings) > 1 and len({listing.price_buy for listing in listings}) == 1:
+        vendors = {listing.vendor_label for listing in listings}
+        vendor = next(iter(vendors)) if len(vendors) == 1 else None
+        heading = f"### {system} · all {_price(listings[0])}" + (f" ({vendor})" if vendor else "")
+        shops = []
+        for listing in listings:
+            name = listing.place_label if vendor else place_and_vendor_text(listing.place_label, listing.vendor_label)
+            gap = distance(listing)
+            shops.append(f"{name} {gap}" if gap.endswith(" Gm") else f"{name} ({gap})")
+        return heading + "\n" + " · ".join(shops)
+    lines = [f"### {system}"]
+    lines += [f"- {place_and_vendor_text(listing.place_label, listing.vendor_label, bold=True)} · "
+              f"{_price(listing)} · {distance(listing)}" for listing in listings]
+    return "\n".join(lines)
+
+
+def item_footer(omitted: int) -> str:
+    more = f" · {omitted} more shop{'' if omitted == 1 else 's'} not shown" if omitted else ""
+    return f"-# UEX prices, up to 24h old{more}"
