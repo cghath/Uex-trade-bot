@@ -5381,6 +5381,19 @@ they're in sync).
        - 13 more tests (33 in all); 21 mutations, 20 caught, the 21st equivalent (an outer guard
          catches the same error).
 
+     - **Edit roles form** (PR #150, 2026-11-03, the owner: "having some difficulty setting up more
+       than one role"): `/event-roles` took every role in one slash-command line ("Miner 6, Hauler
+       2, Escort 2"), so changing one meant retyping all, the current roles were never shown, and
+       "Miner: 6" or "6 Miners" were refused. The owner picked a form over a step-by-step builder or
+       a forgiving one-liner: an **Edit roles** button in the organizers' row (beside Start/End, so
+       managers only - `on_roles` checks `_can_manage`) and `/event-roles event:` with no `roles`
+       both open `RolesModal`, a paragraph box with one role per line, filled in with the current
+       roles (`roles_text`). It answers with the form itself (one DB read before it), then
+       `save_roles` does what the command did (people on a role that's gone keep their place, a
+       longer line moves up). `parse_roles` is forgiving now: "Miner: 6", "Miner - 6", "Miner x6",
+       "Miner (6)", "Miner 6 spots", "6 Miners", "6x Miner", and list bullets; a name with no
+       number still says why. Typing roles on the command still works. 2 more tests.
+
 153. **The rest of the 2026-10-30 audit: its P3s and the 2026-10-03 findings still open.**
      The owner's "fix everything else" after PR #147. Report `docs/audits/2026-10-30-full-audit-2342dfc.md`
      (P3 ids there) and `docs/audits/2026-10-03-range-audit-0e8818b.md` (REL/UX/MSG/LOGIC ids). One PR,

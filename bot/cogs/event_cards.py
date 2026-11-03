@@ -11,7 +11,8 @@ list. Rules and wording live in bot/uex/events.py.
   with a DM, when a spot opens. The private reply after joining asks which ship you're bringing
   and offers "Sign me up every time" on a repeating event.
 - **The organizer and Event Managers** get Start (pings the roster with the voice channel and
-  marks the Discord event live) and End, and set roles with /event-roles. The event's creator,
+  marks the Discord event live), End, and Edit roles - a form with one role per line, filled in
+  with the current ones (/event-roles opens the same form, or takes them in one line). The event's creator,
   the Event Manager role, admins and anyone who can manage events count.
 - **Changes**: an hour before, the roster is reminded (again each minute while Discord refuses the
   post). A new time in Discord updates the card and pings the roster once; a cancelled event says
@@ -35,7 +36,7 @@ from bot.delivery import home_channel, send_dm
 from bot.discord_ui import BotDynamicItem, BotLayoutView, BotModal, BotView
 from bot.uex.events import (
     CANCELLED, ENDED, GOING, MAYBE, OPEN, REMIND_BEFORE, STARTED, WAITING, EventRole, Signup, announce_text,
-    cancelled_text, details_text, ended_text, joined_text, next_in_line, parse_roles, ping_messages, placed_status,
+    cancelled_text, details_text, ended_text, joined_text, next_in_line, parse_roles, ping_messages, placed_status, roles_text,
     SHIP_CHOICES, promoted_text, reminder_text, repeats_text, roster_text, ship_matches, start_text, time_change_text,
 )
 from bot.uex.welcome import EVENTS_CHANNEL_ID
@@ -49,7 +50,7 @@ CLOSE_AFTER = 12 * 3600         # seconds after its start that a card nobody end
 SYNC_EVERY = 10                 # minutes between re-reading every event (the loop ticks each minute)
 SHIP_MENU = 22                  # ships in the menu, leaving room for Not sure yet and Another ship
 NOT_SURE, OTHER_SHIP = "~none", "~other"
-BUTTON_TEMPLATE = r"ev:(?P<action>join|maybe|leave|start|end|every|stopevery):(?P<card>\d+)"
+BUTTON_TEMPLATE = r"ev:(?P<action>join|maybe|leave|start|end|roles|every|stopevery):(?P<card>\d+)"
 MENU_TEMPLATE = r"ev:(?P<kind>role|ship):(?P<card>\d+)"
 CLOSED = "This op's sign-ups are closed."
 NOT_MANAGER = "Only the organizer or an Event Manager can do that."
@@ -148,6 +149,7 @@ def build_card(card: dict, roles: list[EventRole], signups: list[Signup], regula
         managers = discord.ui.ActionRow()
         if card["state"] == OPEN:
             managers.add_item(CardButton(card_id, "start"))
+        managers.add_item(CardButton(card_id, "roles"))
         managers.add_item(CardButton(card_id, "end"))
         box.add_item(managers)
     view.add_item(box)
@@ -160,6 +162,7 @@ _BUTTONS = {
     "leave": ("Leave", discord.ButtonStyle.danger),
     "start": ("Start", discord.ButtonStyle.success),
     "end": ("End", discord.ButtonStyle.secondary),
+    "roles": ("Edit roles", discord.ButtonStyle.secondary),
     "every": ("Sign me up every time", discord.ButtonStyle.secondary),
     "stopevery": ("Stop signing me up every time", discord.ButtonStyle.secondary),
 }
@@ -219,6 +222,23 @@ class ShipModal(BotModal, title="What are you bringing?"):
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         await self.cog.typed_ship(interaction, self.card_id, str(self.ship.value))
+
+
+class RolesModal(BotModal):
+    """Edit roles: one role per line, filled in with the event's current roles."""
+
+    def __init__(self, cog: "EventCards", event_id: int, name: str, current: str) -> None:
+        super().__init__(title=f"Roles for {name}"[:45])
+        self.cog, self.event_id = cog, event_id
+        self.roles = discord.ui.TextInput(
+            label="One role per line: name and spots", style=discord.TextStyle.paragraph, required=False,
+            default=current or None, placeholder="Miner 6\nHauler 2\nEscort 2\n(empty: no roles, people just Join)",
+            max_length=1000)
+        self.add_item(self.roles)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+        await self.cog.save_roles(interaction, self.event_id, str(self.roles.value))
 
 
 class ShipChoice(BotView):
@@ -521,6 +541,24 @@ class EventCards(commands.Cog):
         reply = "Started - the roster has been pinged." if started else "It's already started."
         await interaction.followup.send(reply + (f"\n{problem}" if problem else ""), ephemeral=True)
 
+    async def on_roles(self, interaction: discord.Interaction, card_id: int) -> None:
+        card = await self.bot.db.get_event_card(card_id)
+        event = (interaction.guild.get_scheduled_event(card["event_id"])
+                 if card is not None and card["state"] in (OPEN, STARTED) and interaction.guild else None)
+        if event is None:
+            await interaction.response.send_message(CLOSED, ephemeral=True)
+            return
+        await self.open_roles_form(interaction, event)
+
+    async def open_roles_form(self, interaction: discord.Interaction, event: discord.ScheduledEvent) -> None:
+        """The Edit roles form, for the organizer or an Event Manager. Answers with the form itself,
+        so nothing slow comes before it (only one DB read)."""
+        if not self._can_manage(interaction.user, {"creator_id": event.creator_id}):
+            await interaction.response.send_message(NOT_MANAGER, ephemeral=True)
+            return
+        current = roles_text(_roles(await self.bot.db.get_event_roles(event.id)))
+        await interaction.response.send_modal(RolesModal(self, event.id, event.name, current))
+
     async def on_end(self, interaction: discord.Interaction, card_id: int) -> None:
         await interaction.response.defer(ephemeral=True, thinking=True)
         card = await self._open_card(interaction, card_id)
@@ -584,14 +622,27 @@ class EventCards(commands.Cog):
                         logger.warning("Couldn't post event card %s's ending: %s", card["card_id"], exc)
         return True
 
-    @app_commands.command(name="event-roles", description="Organizers: set an event's roles and spots, e.g. Miner 6, Hauler 2.")
-    @app_commands.describe(event="Which event", roles="Roles and spots, e.g. Miner 6, Hauler 2, Escort 2 - or none to just Join")
+    @app_commands.command(name="event-roles", description="Organizers: set an event's roles and spots in a form.")
+    @app_commands.describe(event="Which event",
+                           roles="Leave empty to edit them in a form - or type them, e.g. Miner 6, Hauler 2")
     @app_commands.guild_only()
-    async def event_roles(self, interaction: discord.Interaction, event: str, roles: str) -> None:
-        await interaction.response.defer(ephemeral=True)
+    async def event_roles(self, interaction: discord.Interaction, event: str, roles: str | None = None) -> None:
         scheduled = interaction.guild.get_scheduled_event(int(event)) if event.isdigit() else None
         if scheduled is None:
-            await interaction.followup.send("Pick the event from the list.", ephemeral=True)
+            await interaction.response.send_message("Pick the event from the list.", ephemeral=True)
+            return
+        if roles is None:
+            await self.open_roles_form(interaction, scheduled)
+            return
+        await interaction.response.defer(ephemeral=True)
+        await self.save_roles(interaction, scheduled.id, roles)
+
+    async def save_roles(self, interaction: discord.Interaction, event_id: int, roles: str) -> None:
+        """Set an event's roles from the form or the command (the interaction already deferred):
+        people on a role that's gone keep their place with no role, a longer line moves up."""
+        scheduled = interaction.guild.get_scheduled_event(event_id) if interaction.guild else None
+        if scheduled is None:
+            await interaction.followup.send("That event is gone.", ephemeral=True)
             return
         card = await self.bot.db.current_event_card(scheduled.id)
         creator = {"creator_id": scheduled.creator_id}

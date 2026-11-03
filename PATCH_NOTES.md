@@ -1,7 +1,15 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.78.
+the oldest entry below); the next new entry is 2.79.
+
+---
+
+## 2.78 - 2026-11-03 - Easier op roles
+
+**Changed**
+- Organizers: an **Edit roles** button on each op card (and `/event-roles` with just the event) opens a form with one role per line, already filled in with the current roles. Change a line, add one or delete one, then save - no more typing every role in one line.
+- Roles can be written however comes naturally: `Miner 6`, `Miner: 6`, `Miner x6` or `6 Miners`. Leave the form empty for no roles (people just press Join).
 
 ---
 

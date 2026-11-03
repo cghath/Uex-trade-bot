@@ -42,22 +42,27 @@ class Signup:
     ship: str | None = None
 
 
-_ROLE_ITEM = re.compile(r"^(?P<name>.+?)\s+(?P<spots>\d+)$")
+# "Miner 6", "Miner: 6", "Miner - 6", "Miner x6", "Miner (6)", "Miner 6 spots"; or spots first: "6 Miners", "6x Miner"
+_ROLE_ITEM = re.compile(r"(?P<name>.*?\S)\s*(?:[:=\u2013-]|\bx|\u00d7)?\s*\(?(?P<spots>\d+)\)?(?:\s*spots?)?", re.I)
+_SPOTS_FIRST = re.compile(r"(?P<spots>\d+)\s*(?:x|\u00d7)?\s+(?P<name>\D.*)", re.I)
+_BULLET = re.compile(r"^[-*\u2022\u00b7]\s*")
 
 
 def parse_roles(text: str) -> tuple[list[EventRole], str | None]:
-    """"Miner 6, Hauler 2, Escort 2" -> the roles, or ([], why) when it can't be read. Blank or
-    "none" means no roles: everyone just joins."""
+    """"Miner 6, Hauler 2, Escort 2" (or one per line, as the form has them) -> the roles, or
+    ([], why) when it can't be read. Forgiving about how a role is written: "Miner: 6", "Miner x6"
+    and "6 Miners" all work, and a list bullet is ignored. Blank or "none" means no roles:
+    everyone just joins."""
     text = text.strip()
     if not text or text.casefold() == "none":
         return [], None
     roles: list[EventRole] = []
     seen: set[str] = set()
     for item in re.split(r"[,\n]", text):
-        item = " ".join(item.split())
+        item = _BULLET.sub("", " ".join(item.split()))
         if not item:
             continue
-        match = _ROLE_ITEM.match(item)
+        match = _SPOTS_FIRST.fullmatch(item) or _ROLE_ITEM.fullmatch(item)
         if not match:
             return [], f"Each role needs a name and its number of spots, like `Miner 6` - I couldn't read `{item}`."
         name, spots = match["name"].strip(), int(match["spots"])
@@ -72,6 +77,11 @@ def parse_roles(text: str) -> tuple[list[EventRole], str | None]:
     if len(roles) > MAX_ROLES:
         return [], f"Up to {MAX_ROLES} roles."
     return roles, None
+
+
+def roles_text(roles: list[EventRole]) -> str:
+    """Roles as the form shows them, one per line: "Miner 6"."""
+    return "\n".join(f"{role.name} {role.capacity}" for role in roles)
 
 
 def _capacity(roles: list[EventRole], role: str | None) -> int | None:
