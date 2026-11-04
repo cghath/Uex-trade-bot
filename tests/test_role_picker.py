@@ -92,7 +92,7 @@ def test_every_group_fits_a_discord_panel():
         # a dropdown takes 25 options; buttons wrap 5 to a row, 5 rows to a message
         assert len(group.roles) + group.everything <= 25
     assert [g.key for g in GROUPS if g.everything] == ["pings"]
-    assert len(ALL_ROLES) == len(set(ALL_ROLES)) == 32
+    assert len(ALL_ROLES) == len(set(ALL_ROLES)) == 33
     assert GROUPS[-1].mode == ONE and GROUPS[-1].roles == tuple(name for name, _, _ in COLOR_ROLES)
     assert len(COLOR_ROLES) == 10 and len({colour for _, colour, _ in COLOR_ROLES}) == 10
     assert all(0 < colour <= 0xFFFFFF for _, colour, _ in COLOR_ROLES)
@@ -232,11 +232,11 @@ def test_rolesetup_creates_plain_roles_matches_existing_and_never_duplicates(tmp
         colours = {c["name"]: c["colour"] for c in guild.created}
         assert colours["Teal"].value == 0x2DD4BF and colours["Eastern"] == discord.Colour.default()
         saved = await db.get_role_picker_roles(GUILD_ID)
-        assert saved["Mining"] == 10 and len(saved) == 32
-        assert "Using existing: Mining" in reply and "32 of 32 ready" in reply
+        assert saved["Mining"] == 10 and len(saved) == 33
+        assert "Using existing: Mining" in reply and "33 of 33 ready" in reply
         guild.get_role(saved["Salvage"]).name = "Salvagers"   # renamed later: still the same role
         _, again = await _set_up(db, guild)
-        assert len(guild.created) == 31 and await db.get_role_picker_roles(GUILD_ID) == saved
+        assert len(guild.created) == 32 and await db.get_role_picker_roles(GUILD_ID) == saved
         assert "Created" not in again
     _run(tmp_path, body)
 
@@ -257,7 +257,7 @@ def test_rolesetup_says_a_problem_every_role_shares_once_in_a_reply_discord_acce
         # My role under every picker role, each one already there with permissions of its own:
         guild = FakeGuild([FakeRole(100 + i, name, permissions=8, assignable=False) for i, name in enumerate(ALL_ROLES)])
         _, reply = await _set_up(db, guild)
-        assert len(reply) <= 2000 and "32 of 32 ready" in reply
+        assert len(reply) <= 2000 and "33 of 33 ready" in reply
         assert reply.endswith("Next: `/rolepanel post` in your roles channel.")
         above = [line for line in reply.split("\n") if "above my role" in line]
         assert len(above) == 1 and "**Mining**" in above[0] and "**Teal**" in above[0]
@@ -268,7 +268,7 @@ def test_rolesetup_says_a_problem_every_role_shares_once_in_a_reply_discord_acce
         bare.create_error = discord.Forbidden(NS(status=403, reason="Forbidden"), "Missing Permissions")
         _, reply = await _set_up(db, bare)
         assert len(reply) <= 2000 and reply.count("Couldn't create") == 1 and reply.count("Missing Permissions") == 1
-        assert "**Eastern**" in reply and "0 of 32 ready" in reply and "Next:" not in reply
+        assert "**Eastern**" in reply and "0 of 33 ready" in reply and "Next:" not in reply
     _run(tmp_path, body)
 
 
@@ -491,9 +491,9 @@ def test_everything_gives_every_ping_then_takes_them_all_off(tmp_path):
         inter = _interaction(db, guild, member, staff)
         await EverythingButton("pings").callback(inter)
         assert {r.name for r in member.roles} == {"Mining", "Org Events", "Patch & Server Status",
-                                                  "Free Fly & Events", "Joint Ops", "Streams & Videos"}
+                                                  "Free Fly & Events", "Joint Ops", "Streams & Videos", "Polls"}
         assert inter.followup.send.await_args.args[0] == (
-            "Added **Org Events**, **Patch & Server Status**, **Free Fly & Events**, **Streams & Videos**.")
+            "Added **Org Events**, **Patch & Server Status**, **Free Fly & Events**, **Streams & Videos**, **Polls**.")
         inter = _interaction(db, guild, member, staff)
         await EverythingButton("pings").callback(inter)
         assert member.roles == [mining]

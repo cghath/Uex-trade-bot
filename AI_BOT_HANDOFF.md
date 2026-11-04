@@ -494,6 +494,8 @@ date - no open item, nothing to record here.
 - [ ] PR #150 - Event roles in a form: `RolesModal`, the Edit roles button (`on_roles`), `save_roles`,
       forgiving `parse_roles` and `roles_text` in `bot/uex/events.py`. Goes with PR #144. See
       PROJECT_CONTEXT.md entry 152
+- [ ] PR #151 - Polls ping role on the Pings panel (one name in `GROUPS`). Goes with PR #140. See
+      PROJECT_CONTEXT.md entry 151
 - [ ] PR #148 - The rest of the 2026-10-30 audit (PROJECT_CONTEXT.md entry 153). Worth porting
       where aiv2 has the same code: `BotDynamicItem` (bot/discord_ui.py), REL-3/REL-5 (wiki and
       UEX client), REL-6 deferrals, LOGIC-4 alert pollers, TRD-1/TRD-2 marketplace alert baseline

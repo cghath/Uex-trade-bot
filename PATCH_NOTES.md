@@ -1,7 +1,14 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.79.
+the oldest entry below); the next new entry is 2.80.
+
+---
+
+## 2.79 - 2026-11-04 - Poll pings
+
+**Added**
+- A **Polls** button in the Pings panel of the role picker: get pinged when there's a new poll. **Everything** includes it.
 
 ---
 

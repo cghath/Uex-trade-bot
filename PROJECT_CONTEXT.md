@@ -5275,6 +5275,11 @@ they're in sync).
          off. A pick is now answered by re-sending the panel (`edit_message`, the same options,
          none marked default), then the Added/Removed reply follows privately.
        - 1 more test (29 in all), 3 tightened; 8 mutations, all caught.
+     - **Polls** (PR #151, the owner's ask 2026-11-04): a sixth ping role, for new polls. Like
+       Streams & Videos, the bot doesn't post polls itself - whoever posts one pings the role.
+       Everything covers it; the Pings panel is 7 buttons on two rows. `/rolesetup` creates it
+       (33 roles); the Pings panel needs posting again to show it, and Onboarding's ping question
+       needs it added by hand if it should be offered there.
 
 152. **Event cards: sign-ups for Discord's scheduled events in #📅events.**
      The owner's ask (2026-10-30): members on phones couldn't find Discord's Events list. Designed
