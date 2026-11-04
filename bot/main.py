@@ -54,6 +54,7 @@ INITIAL_COGS = (
     "bot.cogs.welcome_back",
     "bot.cogs.role_picker",
     "bot.cogs.event_cards",
+    "bot.cogs.server_analytics",
 )
 
 
@@ -62,8 +63,8 @@ class UexBot(commands.Bot):
         # One privileged intent, Server Members: server anniversaries (bot/cogs/anniversaries.py)
         # need the member list and join dates. It must also be switched on in the Developer
         # Portal or Discord refuses the connection at startup - README says so. Nothing reads what
-        # other people write, so Message Content and Presence stay off (audit MSG-14); welcome_back
-        # and role_picker only note who posted where and when (audit DOC-1).
+        # other people write, so Message Content and Presence stay off (audit MSG-14); welcome_back,
+        # role_picker and server_analytics only note who posted where and when (audit DOC-1).
         intents = discord.Intents.default()
         intents.members = True
         # Never @everyone, @here or a role by default, whatever ends up in a message: replies echo

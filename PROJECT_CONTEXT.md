@@ -5448,6 +5448,42 @@ they're in sync).
        what the bot reads and pings), DOC-3, OPS-1 (`discord.py>=2.7.0`).
      - Not fixed, by decision: EVT-15, EVT-16, ROLE-6, TEST-1 (see the report). 71 tables.
 
+154. **Server analytics: `/server-stats`, `/invite-label` and a monthly DM to the owner.**
+     The owner's plan (2026-11-04, handed over from a planning session): track only the numbers
+     that say whether growth, activity and ops are working. `bot/cogs/server_analytics.py`
+     records, `bot/uex/server_analytics.py` holds every rule and the wording (pure, tested).
+     - **What's kept**: counts and "active that day", never what anyone wrote.
+       `member_active_days` (a member's UTC day as active when they post or join voice; voice
+       ranks' `voice_daily` counts too), `activity_hours` and `channel_days` (server totals of
+       posts and of people in voice, never per person), `member_movements` (joins with the matched
+       invite, and leaves), `invite_labels`, `event_attendance` and `event_interest`, and
+       `analytics_state` (tracking start, the history read, the last monthly report). 79 tables.
+     - **Join sources**: Discord doesn't say which invite a member used, so the bot keeps every
+       invite's use count (needs Manage Server, granted 2026-11-04) and on a join looks for the one
+       that went up, or a limited invite used up and gone (`match_invite`). Two candidates is no
+       answer, never a guess. Matched on the code, never the channel (Discord reuses an invite when
+       the channel and settings match, which is why each source invite points at its own channel).
+       Labels seeded from the owner's ten codes (`DEFAULT_INVITE_LABELS`), once - a name changed
+       with `/invite-label` is never overwritten. Anything else: "Unknown / temporary invite";
+       no invite matched at all (vanity link, Discovery): "Not known".
+     - **The scorecard** (last 30 days, or the month before in the DM): net joins; first hello
+       (of members who joined and have had 7 days, how many posted or joined voice within 7 days);
+       30-day retention by source (joined 30-60 days ago, still here and active in the last 30);
+       weekly active; average op attendance (voice ranks' ops); lapsed 30/60/90 days, each shown
+       only once history reaches back that far (welcome-back's activity times start 30 days before
+       its seed). Then sources, peak hours in Eastern time (people in voice on average, posts),
+       busiest and silent channels, and each event name's draw.
+     - **Event attendance**: a minute for everyone (not deafened) in the event's voice channel or
+       the Ops category while the op runs - from Start until it ends, or 4 hours from its start if
+       nobody pressed Start; 30 minutes counts as came. Compared with Going and Discord's
+       Interested (read every 10 minutes while it runs).
+     - **History**: the first start reads the 30 days of chat before tracking began (authors,
+       times and channels only, the same walk as welcome-back's, now shared as `recent_threads`).
+       Joins, sources, voice by hour and attendance can't be read back, so they start at deploy.
+     - **Monthly DM**: after 9 AM Eastern on the 1st, claimed in `analytics_state` before sending,
+       skipped for a month that ended before tracking began.
+     - Bans, kicks and timeouts from the audit log (View Audit Log, also granted) are a follow-up.
+
 ## Where to look for what
 
 Seven docs, deliberately scoped so they don't duplicate each other:
