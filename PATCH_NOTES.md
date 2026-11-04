@@ -1,7 +1,15 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.80.
+the oldest entry below); the next new entry is 2.81.
+
+---
+
+## 2.80 - 2026-11-04 - Server stats
+
+**Added**
+- The bot now keeps a few server-wide numbers for the owner, so Star Tech Dynamics can see what's working: joins and leaves (and which invite link brought each new member), how many members are active each week, when people are on, which channels are busy, and how many come to each event. It keeps counts and which days each member was active, never what anyone writes.
+- Event attendance: being in the event's voice channel or Ops for 30 minutes or more while the op runs counts as coming.
 
 ---
 

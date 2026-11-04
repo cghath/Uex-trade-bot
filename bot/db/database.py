@@ -15,6 +15,7 @@ from typing import Any, AsyncIterator
 import aiosqlite
 from cryptography.fernet import Fernet, InvalidToken
 
+from bot.uex.server_analytics import DEFAULT_INVITE_LABELS
 from bot.uex.trading_preferences import DEFAULT_TRADING_PREFERENCES, UNSET
 
 logger = logging.getLogger("uexbot.database")
@@ -1090,6 +1091,66 @@ CREATE TABLE IF NOT EXISTS ship_parts_shopping_threads (
     thread_id INTEGER NOT NULL UNIQUE,
     message_id INTEGER,
     PRIMARY KEY(user_id, guild_id)
+);
+
+-- Server analytics (bot/cogs/server_analytics.py, rules in bot/uex/server_analytics.py): counts
+-- and "active that day" only, never what anyone wrote. analytics_state.tracking_since is when
+-- live counting began; history_read_at marks the one-time read of the 30 days of chat before it
+-- (authors, times and channels only). member_active_days: one row per member per UTC day they
+-- posted or joined voice. activity_hours / channel_days: server totals per UTC hour and per
+-- channel per day, never per person. member_movements: joins (with the invite matched, if any)
+-- and leaves, from tracking_since on. invite_labels: what each recruiting invite is called.
+-- event_attendance: minutes each member was in an event's voice channel or Ops while it ran;
+-- event_interest: the most "Interested" Discord showed for it.
+CREATE TABLE IF NOT EXISTS analytics_state (
+    guild_id INTEGER PRIMARY KEY,
+    tracking_since TEXT NOT NULL,
+    history_read_at TEXT,
+    last_report_month TEXT
+);
+CREATE TABLE IF NOT EXISTS member_active_days (
+    guild_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    day TEXT NOT NULL,
+    PRIMARY KEY (guild_id, user_id, day)
+);
+CREATE INDEX IF NOT EXISTS idx_member_active_days_day ON member_active_days (guild_id, day);
+CREATE TABLE IF NOT EXISTS activity_hours (
+    guild_id INTEGER NOT NULL,
+    hour TEXT NOT NULL,
+    messages INTEGER NOT NULL DEFAULT 0,
+    voice_minutes INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (guild_id, hour)
+);
+CREATE TABLE IF NOT EXISTS channel_days (
+    guild_id INTEGER NOT NULL,
+    channel_id INTEGER NOT NULL,
+    day TEXT NOT NULL,
+    messages INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (guild_id, channel_id, day)
+);
+CREATE TABLE IF NOT EXISTS member_movements (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('join', 'leave')),
+    at TEXT NOT NULL,
+    invite_code TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_member_movements_at ON member_movements (guild_id, at);
+CREATE TABLE IF NOT EXISTS invite_labels (
+    code TEXT PRIMARY KEY,
+    label TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS event_attendance (
+    card_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    minutes INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (card_id, user_id)
+);
+CREATE TABLE IF NOT EXISTS event_interest (
+    card_id INTEGER PRIMARY KEY,
+    interested INTEGER NOT NULL
 );
 """
 
@@ -5610,3 +5671,162 @@ class Database:
                 )
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
+
+    # -- server analytics ------------------------------------------------------
+
+    async def analytics_start(self, guild_id: int, now: str) -> dict[str, Any]:
+        """The guild's analytics state, starting it (tracking from `now`) the first time, and
+        naming the recruiting invites the first time too (an existing name is never replaced)."""
+        async with self.connect() as db:
+            await db.execute("INSERT OR IGNORE INTO analytics_state (guild_id, tracking_since) VALUES (?, ?)",
+                             (guild_id, now))
+            await db.executemany("INSERT OR IGNORE INTO invite_labels (code, label) VALUES (?, ?)",
+                                 list(DEFAULT_INVITE_LABELS.items()))
+            await db.commit()
+            row = await (await db.execute("SELECT * FROM analytics_state WHERE guild_id = ?", (guild_id,))).fetchone()
+        return dict(row)
+
+    async def mark_active_day(self, guild_id: int, user_id: int, day: str) -> None:
+        async with self.connect() as db:
+            await db.execute("INSERT OR IGNORE INTO member_active_days (guild_id, user_id, day) VALUES (?, ?, ?)",
+                             (guild_id, user_id, day))
+            await db.commit()
+
+    async def add_activity_counts(self, guild_id: int, hours: dict[str, tuple[int, int]],
+                                  channels: dict[tuple[int, str], int]) -> None:
+        """Add to the server totals: hour -> (posts, voice minutes); (channel_id, day) -> posts."""
+        async with self.connect() as db:
+            await db.executemany(
+                """INSERT INTO activity_hours (guild_id, hour, messages, voice_minutes) VALUES (?, ?, ?, ?)
+                   ON CONFLICT(guild_id, hour) DO UPDATE SET messages = messages + excluded.messages,
+                       voice_minutes = voice_minutes + excluded.voice_minutes""",
+                [(guild_id, hour, messages, minutes) for hour, (messages, minutes) in hours.items()])
+            await db.executemany(
+                """INSERT INTO channel_days (guild_id, channel_id, day, messages) VALUES (?, ?, ?, ?)
+                   ON CONFLICT(guild_id, channel_id, day) DO UPDATE SET messages = messages + excluded.messages""",
+                [(guild_id, cid, day, count) for (cid, day), count in channels.items()])
+            await db.commit()
+
+    async def seed_analytics_history(self, guild_id: int, days: set[tuple[int, str]], hours: dict[str, int],
+                                     channels: dict[tuple[int, str], int]) -> bool:
+        """What the one-time read of chat before tracking began found, in one transaction with
+        marking it read - so a read cut short by a restart writes nothing and runs again. False if
+        it had already been recorded."""
+        async with self.connect() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            row = await (await db.execute("SELECT history_read_at FROM analytics_state WHERE guild_id = ?",
+                                          (guild_id,))).fetchone()
+            if row is None or row["history_read_at"] is not None:
+                await db.rollback()
+                return False
+            await db.executemany("INSERT OR IGNORE INTO member_active_days (guild_id, user_id, day) VALUES (?, ?, ?)",
+                                 [(guild_id, uid, day) for uid, day in days])
+            await db.executemany(
+                """INSERT INTO activity_hours (guild_id, hour, messages) VALUES (?, ?, ?)
+                   ON CONFLICT(guild_id, hour) DO UPDATE SET messages = messages + excluded.messages""",
+                [(guild_id, hour, count) for hour, count in hours.items()])
+            await db.executemany(
+                """INSERT INTO channel_days (guild_id, channel_id, day, messages) VALUES (?, ?, ?, ?)
+                   ON CONFLICT(guild_id, channel_id, day) DO UPDATE SET messages = messages + excluded.messages""",
+                [(guild_id, cid, day, count) for (cid, day), count in channels.items()])
+            await db.execute("UPDATE analytics_state SET history_read_at = datetime('now') WHERE guild_id = ?",
+                             (guild_id,))
+            await db.commit()
+        return True
+
+    async def record_member_movement(self, guild_id: int, user_id: int, kind: str, at: str,
+                                     invite_code: str | None = None) -> None:
+        async with self.connect() as db:
+            await db.execute(
+                "INSERT INTO member_movements (guild_id, user_id, kind, at, invite_code) VALUES (?, ?, ?, ?, ?)",
+                (guild_id, user_id, kind, at, invite_code))
+            await db.commit()
+
+    async def get_invite_labels(self) -> dict[str, str]:
+        async with self.connect() as db:
+            rows = await (await db.execute("SELECT code, label FROM invite_labels")).fetchall()
+        return {row["code"]: row["label"] for row in rows}
+
+    async def set_invite_label(self, code: str, label: str) -> None:
+        async with self.connect() as db:
+            await db.execute(
+                """INSERT INTO invite_labels (code, label) VALUES (?, ?)
+                   ON CONFLICT(code) DO UPDATE SET label = excluded.label""", (code, label))
+            await db.commit()
+
+    async def credit_event_minute(self, card_id: int, user_ids: list[int]) -> None:
+        async with self.connect() as db:
+            await db.executemany(
+                """INSERT INTO event_attendance (card_id, user_id, minutes) VALUES (?, ?, 1)
+                   ON CONFLICT(card_id, user_id) DO UPDATE SET minutes = minutes + 1""",
+                [(card_id, uid) for uid in user_ids])
+            await db.commit()
+
+    async def record_event_interest(self, card_id: int, interested: int) -> None:
+        async with self.connect() as db:
+            await db.execute(
+                """INSERT INTO event_interest (card_id, interested) VALUES (?, ?)
+                   ON CONFLICT(card_id) DO UPDATE SET interested = MAX(interested, excluded.interested)""",
+                (card_id, interested))
+            await db.commit()
+
+    async def claim_analytics_report(self, guild_id: int, month: str) -> bool:
+        """Claim the monthly report for `month` ('YYYY-MM'), once: False if it's already been."""
+        async with self.connect() as db:
+            cursor = await db.execute(
+                """UPDATE analytics_state SET last_report_month = ?
+                   WHERE guild_id = ? AND (last_report_month IS NULL OR last_report_month < ?)""",
+                (month, guild_id, month))
+            await db.commit()
+        return cursor.rowcount == 1
+
+    async def analytics_data(self, guild_id: int, start: str, end: str, since: str, start_ts: int, end_ts: int,
+                             attended_minutes: int) -> dict[str, Any]:
+        """Everything the report needs for `start` to `end` (UTC times; *_ts the same as Unix
+        seconds), raw. Joins, leaves and active days go back to `since`, for retention."""
+        async with self.connect() as db:
+            async def rows(sql: str, params: tuple) -> list[dict[str, Any]]:
+                return [dict(r) for r in await (await db.execute(sql, params)).fetchall()]
+
+            state = await rows("SELECT * FROM analytics_state WHERE guild_id = ?", (guild_id,))
+            seeded = await rows("SELECT seeded_at FROM activity_seed_state WHERE guild_id = ?", (guild_id,))
+            return {
+                "state": state[0] if state else None,
+                "activity_seeded_at": seeded[0]["seeded_at"] if seeded else None,
+                "movements": await rows(
+                    """SELECT user_id, kind, at, invite_code FROM member_movements
+                       WHERE guild_id = ? AND at >= ? AND at < ? ORDER BY at, id""", (guild_id, since, end)),
+                "active": await rows(
+                    """SELECT user_id, day FROM member_active_days WHERE guild_id = ? AND day >= ? AND day <= ?
+                       UNION SELECT user_id, day FROM voice_daily WHERE guild_id = ? AND day >= ? AND day <= ?""",
+                    (guild_id, since[:10], end[:10], guild_id, since[:10], end[:10])),
+                "last_active": await rows("SELECT user_id, last_active FROM member_activity WHERE guild_id = ?",
+                                          (guild_id,)),
+                "hours": await rows(
+                    """SELECT hour, messages, voice_minutes FROM activity_hours
+                       WHERE guild_id = ? AND hour >= ? AND hour < ?""", (guild_id, start[:13], end[:13])),
+                "channels": await rows(
+                    """SELECT channel_id, SUM(messages) AS messages FROM channel_days
+                       WHERE guild_id = ? AND day >= ? AND day <= ? GROUP BY channel_id""",
+                    (guild_id, start[:10], end[:10])),
+                "ops": [r["people"] for r in await rows(
+                    """SELECT COUNT(a.user_id) AS people FROM voice_ops o
+                       LEFT JOIN voice_op_attendance a ON a.op_id = o.id
+                       WHERE o.guild_id = ? AND o.started_at >= ? AND o.started_at < ? GROUP BY o.id""",
+                    (guild_id, start, end))],
+                "events": await rows(
+                    """SELECT c.card_id, c.name, c.starts_at,
+                              (SELECT COUNT(*) FROM event_signups s WHERE s.card_id = c.card_id
+                                 AND s.status = 'going') AS going,
+                              (SELECT interested FROM event_interest i WHERE i.card_id = c.card_id) AS interested,
+                              (SELECT COUNT(*) FROM event_attendance a WHERE a.card_id = c.card_id
+                                 AND a.minutes >= ?) AS attended,
+                              (SELECT COUNT(*) FROM event_signups s JOIN event_attendance a
+                                 ON a.card_id = s.card_id AND a.user_id = s.user_id
+                                 WHERE s.card_id = c.card_id AND s.status = 'going' AND a.minutes >= ?) AS going_came
+                       FROM event_cards c
+                       WHERE c.guild_id = ? AND c.starts_at >= ? AND c.starts_at < ? AND c.state != 'cancelled'
+                       ORDER BY c.starts_at""",
+                    (attended_minutes, attended_minutes, guild_id, start_ts, end_ts)),
+                "labels": {r["code"]: r["label"] for r in await rows("SELECT code, label FROM invite_labels", ())},
+            }

@@ -205,23 +205,27 @@ class WelcomeBack(commands.Cog):
                     len(seen), INACTIVE_DAYS, read)
 
     async def _threads(self, guild: discord.Guild, since: datetime) -> list:
-        """Every thread that can hold a post since `since`: the active ones discord.py has, and
-        the public ones archived since then under each text channel and forum (forum posts are
-        threads). Archived threads come newest-archived first, and a thread's last post can't
-        be after it was archived, so the walk stops at the first one archived before `since`."""
-        threads = {thread.id: thread for thread in guild.threads}
-        for parent in list(guild.text_channels) + list(guild.forums):
-            perms = parent.permissions_for(guild.me)
-            if not (perms.view_channel and perms.read_message_history):
-                continue
-            try:
-                async for thread in parent.archived_threads(limit=None):
-                    if thread.archive_timestamp < since:
-                        break
-                    threads.setdefault(thread.id, thread)
-            except discord.HTTPException as exc:
-                logger.warning("Couldn't list archived threads in channel %s: %s", parent.id, exc)
-        return list(threads.values())
+        return await recent_threads(guild, since)
+
+
+async def recent_threads(guild: discord.Guild, since: datetime) -> list:
+    """Every thread that can hold a post since `since`: the active ones discord.py has, and
+    the public ones archived since then under each text channel and forum (forum posts are
+    threads). Archived threads come newest-archived first, and a thread's last post can't
+    be after it was archived, so the walk stops at the first one archived before `since`."""
+    threads = {thread.id: thread for thread in guild.threads}
+    for parent in list(guild.text_channels) + list(guild.forums):
+        perms = parent.permissions_for(guild.me)
+        if not (perms.view_channel and perms.read_message_history):
+            continue
+        try:
+            async for thread in parent.archived_threads(limit=None):
+                if thread.archive_timestamp < since:
+                    break
+                threads.setdefault(thread.id, thread)
+        except discord.HTTPException as exc:
+            logger.warning("Couldn't list archived threads in channel %s: %s", parent.id, exc)
+    return list(threads.values())
 
 
 async def setup(bot: commands.Bot) -> None:

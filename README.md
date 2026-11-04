@@ -117,7 +117,8 @@ background posting/sale updates are delivered only by private DM.
    Message Content off. Server Members lets the bot see who's a member and when they joined, for
    server anniversaries, veteran roles and the welcome DMs; without it Discord refuses the bot's connection at startup. The bot
    never reads what anyone writes (Message Content stays off). It does note who posted and when: in
-   any channel, for welcome-back DMs (it reads the last 30 days of channel history once to start), and
+   any channel, for welcome-back DMs and the owner's server stats (each reads the last 30 days of
+   channel history once to start), and
    in #👋welcome, to answer a member's first post. Two posts ping a role on purpose: the Mentor ping
    in #👋welcome and an event card's @Org Events mention.
 4. Under **OAuth2 → URL Generator**, check the `bot` and `applications.commands` scopes, then these
@@ -132,6 +133,8 @@ background posting/sale updates are delivered only by private DM.
    - `Mention @everyone, @here and All Roles`, so the role picker can ping Mentor in #👋welcome when
      someone picks New Pilot (or make Mentor mentionable instead).
    - `Manage Events`, so an event card's Start and End also start and end the Discord event.
+   - `Manage Server`, so the bot can read invite use counts and tell which invite each new member
+     joined through (the sources in `/server-stats`). Without it joins still count, with no source.
 
    Use the generated URL to invite the bot to your server.
 5. (Optional, recommended while developing) Enable Developer Mode in Discord, right-click your
@@ -286,6 +289,7 @@ bot/
     welcome_back.py       a DM to members back after 30+ days away (activity times only)
     role_picker.py        self-serve role panels (buttons + a dropdown), /rolesetup, /rolepanel post
     event_cards.py        sign-up cards in #events for Discord's scheduled events, /event-roles
+    server_analytics.py   owner-only server stats (counts only) + monthly DM, /server-stats, /invite-label
     help.py               /intro (the categorized command guide)
 scripts/
   deploy_and_backup.sh, revert_last_deploy.sh   Pi deploys and rollback (see above)
