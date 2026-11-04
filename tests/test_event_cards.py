@@ -31,6 +31,7 @@ from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock
 
 import discord
+import pytest
 from cryptography.fernet import Fernet
 
 from bot.cogs.event_cards import (
@@ -48,6 +49,16 @@ GUILD_ID = 1132378045232197694
 ORG_ROLE = 77
 START = int(datetime(2026, 11, 3, 0, 30, tzinfo=timezone.utc).timestamp())
 WEEKLY = {"frequency": 2, "interval": 1, "by_weekday": [1]}
+
+
+@pytest.fixture(autouse=True)
+def _clock_before_the_op():
+    """Every test runs a day before START unless it sets its own time: with the real clock, a card
+    for an event more than CLOSE_AFTER past is closed as long over, so tests began failing once
+    2026-11-03 had gone by. Its own MonkeyPatch, so a test's monkeypatch.undo() comes back here."""
+    with pytest.MonkeyPatch.context() as clock:
+        clock.setattr("bot.cogs.event_cards.time.time", lambda: START - 86400)
+        yield
 
 
 # -- 1. rules ---------------------------------------------------------------------------------------
