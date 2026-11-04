@@ -5564,8 +5564,8 @@ they're in sync).
      every member, to compare. On live data (2026-11-04): 355 of 400 members had no timezone
      role yet (the picker is new), and 28 of the 48 new members.
      - **`export:True`, owner only** (the owner's call: moderators keep the list, not the file).
-       `/new-members` sends `new-members-YYYY-MM-DD.csv` (17 columns: names, id, Eastern join
-       date, days, source, inviter, timezone, activities, experience, first active, active days,
+       `/new-members` sends `new-members-YYYY-MM-DD.csv` (18 columns: names, id, Eastern join
+       date, days, source, inviter, timezone, activities, experience, onboarding status, first active, active days,
        voice minutes, status, reached out by/when, still in server), built in memory, honouring
        `days:` and `status:`; with no status it also lists members who joined in the window and
        left (from the join log; status `left`). `/server-stats` sends `server-stats-YYYY-MM-DD.csv`

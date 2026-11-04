@@ -14,13 +14,14 @@ from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock
 
+import discord
 from cryptography.fernet import Fernet
 
 from bot.cogs.anniversaries import ANNIVERSARY_CHANNEL_ID
-from bot.cogs.new_members import NewMembers
+from bot.cogs.new_members import NewMembers, NewMembersView
 from bot.db.database import Database
 from bot.uex.new_members import (
-    CSV_COLUMNS, DRIFTING, NEEDS_HELLO, NEW_MEMBER_ROLE, SETTLING, NewMember, breakdown_text, days_since, flag, is_new,
+    CSV_COLUMNS, DRIFTING, EMPTY, NEEDS_HELLO, NEW_MEMBER_ROLE, SETTLING, NewMember, breakdown_text, days_since, flag, is_new,
     member_picks, member_text, members_csv, onboarding_status, summary_text, timezone_counts, week_key, weekly_text,
     zone_bucket,
 )
@@ -217,7 +218,7 @@ def test_new_members_lists_the_newest_first_with_source_picks_activity_and_who_r
         await db.mark_active_day(GUILD_ID, 10, "2026-11-01")  # before they joined: doesn't count
         await db.mark_new_member_contacted(GUILD_ID, 12, OWNER, "2026-11-09 12:00:00")
         sent = []
-        interaction = NS(user=FakeMember(77, NOW - timedelta(days=500), name="Mod", moderator=True),
+        interaction = NS(guild_id=GUILD_ID, user=FakeMember(77, NOW - timedelta(days=500), name="Mod", moderator=True),
                          response=NS(defer=AsyncMock(), send_message=AsyncMock()),
                          followup=NS(send=AsyncMock(side_effect=lambda **kw: sent.append(kw["view"]))))
         await cog.new_members.callback(cog, interaction, 21, None)
@@ -228,10 +229,10 @@ def test_new_members_lists_the_newest_first_with_source_picks_activity_and_who_r
         text = "\n".join(c.content for c in view.walk_children() if hasattr(c, "content"))
         # mark one from the menu
         view.menu._values = ["10"]  # what discord.py fills in from the click
-        click = NS(user=interaction.user, response=NS(edit_message=AsyncMock()))
+        click = NS(guild_id=GUILD_ID, user=interaction.user, response=NS(edit_message=AsyncMock()))
         await view._mark(click)
         after = "\n".join(c.content for c in view.walk_children() if hasattr(c, "content"))
-        refused = NS(user=FakeMember(78, NOW, moderator=False), response=NS(send_message=AsyncMock(), defer=AsyncMock()))
+        refused = NS(guild_id=GUILD_ID, user=FakeMember(78, NOW, moderator=False), response=NS(send_message=AsyncMock(), defer=AsyncMock()))
         await cog.new_members.callback(cog, refused, 21, None)
         return text, after, refused.response.send_message.await_args.args[0], only, shown_text
 
@@ -341,7 +342,7 @@ def test_the_csv_export_is_for_the_owner_only_and_includes_who_left(tmp_path):
         sent = []
 
         def interaction(user):
-            return NS(user=user, response=NS(defer=AsyncMock(), send_message=AsyncMock()),
+            return NS(guild_id=GUILD_ID, user=user, response=NS(defer=AsyncMock(), send_message=AsyncMock()),
                       followup=NS(send=AsyncMock(side_effect=lambda *a, **kw: sent.append((a, kw)))))
 
         owner = interaction(FakeMember(OWNER, NOW - timedelta(days=900), name="Cheeno"))
@@ -364,3 +365,90 @@ def test_the_csv_export_is_for_the_owner_only_and_includes_who_left(tmp_path):
     assert len(hello_text.splitlines()) == 2, "the status filter leaves out who left"
     assert texts[0] == "New members, last 21 days: 2 rows, including any who have left."
     assert refused == "The CSV export is for the bot's owner."
+
+
+# -- the 2026-11-04 audit fixes ---------------------------------------------------------
+
+def test_the_weekly_note_stays_under_a_dms_limit_however_many_need_a_hello():
+    waiting = [NewMember(10_000_000_000_000_000 + i, NOW - timedelta(days=6), "Member referral") for i in range(80)]
+    text = weekly_text(waiting, NOW)
+    assert len(text) <= 2000 and "more" in text.splitlines()[-2]
+
+
+def test_a_weekly_note_that_couldnt_be_sent_is_tried_again_the_next_hour(tmp_path):
+    async def run():
+        quiet = FakeMember(10, NOW - timedelta(days=6))
+        cog, _db, _guild, owner = await _make(tmp_path, [quiet])
+        sent = owner.send
+
+        async def busy(content=None, **kwargs):
+            raise discord.HTTPException(NS(status=503, reason="Service Unavailable"), "busy")
+
+        owner.send = busy
+        first = await cog.send_weekly(NOW)
+        owner.send = sent
+        second = await cog.send_weekly(NOW + timedelta(hours=1))
+        third = await cog.send_weekly(NOW + timedelta(hours=2))
+        return first, second, third, len(owner.sent)
+
+    assert asyncio.run(run()) == (False, True, False, 1)
+
+
+def test_reaching_out_before_a_member_left_and_rejoined_doesnt_hide_them(tmp_path):
+    async def run():
+        back = FakeMember(10, NOW - timedelta(days=4))
+        cog, db, guild, _owner = await _make(tmp_path, [back])
+        await db.mark_new_member_contacted(GUILD_ID, 10, OWNER, "2026-10-01 12:00:00")  # their last stay
+        (member,) = await cog.gather(guild, 21, NOW)
+        return member.reached_by, flag(member, NOW)
+
+    assert asyncio.run(run()) == (None, NEEDS_HELLO)
+
+
+def test_the_role_waits_for_rules_screening_like_the_welcome_dm(tmp_path):
+    async def run():
+        pending = FakeMember(1, NOW - timedelta(hours=1))
+        pending.pending = True
+        cog, _db, guild, _owner = await _make(tmp_path, [pending])
+        pending.guild = guild
+        await cog.on_member_join(pending)
+        await cog.put_roles_right(guild, NOW)
+        before = len(pending.roles)
+        passed = FakeMember(1, pending.joined_at)
+        passed.pending, passed.guild, passed.roles = False, guild, pending.roles
+        await cog.on_member_update(pending, passed)
+        return before, [r.name for r in passed.roles]
+
+    assert asyncio.run(run()) == (0, [NEW_MEMBER_ROLE])
+
+
+def test_moderate_members_in_another_server_doesnt_open_this_servers_list(tmp_path):
+    async def run():
+        cog, _db, _guild, _owner = await _make(tmp_path, [])
+        elsewhere = NS(guild_id=123, user=FakeMember(77, NOW, moderator=True),
+                       response=NS(send_message=AsyncMock(), defer=AsyncMock()))
+        await cog.new_members.callback(cog, elsewhere, 21, None, None, False)
+        return elsewhere.response.send_message.await_args.args[0]
+
+    assert asyncio.run(run()) == "This command is for the owner and moderators."
+
+
+def test_long_member_lines_make_more_pages_and_none_drop_off(tmp_path):
+    async def run():
+        cog, _db, guild, _owner = await _make(tmp_path, [])
+        long_picks = ["Mining", "Salvage", "Cargo/Trade", "Combat/Bounty", "FPS", "Exploration", "Medical", "Racing"]
+        members = [NewMember(i, NOW - timedelta(days=4), "x" * 400, long_picks * 3) for i in range(8)]
+        view = NewMembersView(cog, guild, members, 21, NOW)
+        shown = [m.user_id for page in view.pages for m in page]
+        sizes = [sum(len(member_text(m, NOW)) for m in page) for page in view.pages]
+        return view.page_count, shown, max(sizes)
+
+    pages, shown, biggest = asyncio.run(run())
+    assert pages > 1 and shown == list(range(8)) and biggest < 4000
+
+
+def test_names_cant_become_links_or_mentions_and_empty_lists_read_right():
+    text = member_text(NewMember(5, NOW - timedelta(days=1), "Member referral", inviter="[free](https://x.y) <@1>"), NOW)
+    assert r"(\[free\]\(https://x.y\) \<@1\>)" in text
+    assert EMPTY[NEEDS_HELLO] == "Nobody needs a hello right now."
+    assert summary_text([], NOW, 1).startswith("## 🌱 New members: last 1 day\n")

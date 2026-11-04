@@ -5892,6 +5892,20 @@ class Database:
                 (guild_id, user_id, by_id, at))
             await db.commit()
 
+    async def new_member_week(self, guild_id: int) -> str | None:
+        """The week the weekly new-member note last went (claimed), or None."""
+        async with self.connect() as db:
+            row = await (await db.execute("SELECT last_weekly FROM new_member_state WHERE guild_id = ?",
+                                          (guild_id,))).fetchone()
+        return row["last_weekly"] if row else None
+
+    async def release_new_member_week(self, guild_id: int, week: str, previous: str | None) -> None:
+        """Undo a claim whose DM didn't go, so the next hourly check tries again."""
+        async with self.connect() as db:
+            await db.execute("UPDATE new_member_state SET last_weekly = ? WHERE guild_id = ? AND last_weekly = ?",
+                             (previous, guild_id, week))
+            await db.commit()
+
     async def claim_new_member_week(self, guild_id: int, week: str) -> bool:
         """Claim the weekly note for `week`, once: False if it's already gone."""
         async with self.connect() as db:

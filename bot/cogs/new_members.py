@@ -29,11 +29,11 @@ from discord.ext import commands, tasks
 
 from bot.cogs.anniversaries import ANNIVERSARY_CHANNEL_ID
 from bot.cogs.server_analytics import _inviter
-from bot.delivery import home_channel, send_dm
+from bot.delivery import Delivery, home_channel, send_dm
 from bot.discord_ui import LAYOUT_TEXT_LIMIT, BotLayoutView
 from bot.managed_roles import ManagedRoles
 from bot.uex.new_members import (
-    DRIFTING, FLAGS, MAX_DAYS, NEEDS_HELLO, NEW_MEMBER_DAYS, NEW_MEMBER_ROLE, PAGE_SIZE, SETTLING, NewMember,
+    DRIFTING, EMPTY, FLAGS, MAX_DAYS, NEEDS_HELLO, NEW_MEMBER_DAYS, NEW_MEMBER_ROLE, PAGE_SIZE, SETTLING, NewMember,
     breakdown_text, flag, is_new, member_picks, onboarding_status, member_text, members_csv, summary_text, week_key, weekly_text,
 )
 from bot.uex.server_analytics import EASTERN, MEMBER_REFERRAL, TIME_FORMAT, UTC, source_of
@@ -72,6 +72,7 @@ class NewMembersView(BotLayoutView):
         self.showing = showing
         self.members = [m for m in members if showing is None or flag(m, now) == showing]
         self.page = 0
+        self.pages = self._paginate()
         self.previous_button = discord.ui.Button(label="Newer", style=discord.ButtonStyle.secondary)
         self.previous_button.callback = self._previous
         self.next_button = discord.ui.Button(label="Older", style=discord.ButtonStyle.secondary)
@@ -80,31 +81,47 @@ class NewMembersView(BotLayoutView):
 
     @property
     def page_count(self) -> int:
-        return max(1, -(-len(self.members) // PAGE_SIZE))
+        return len(self.pages)
 
     def shown(self) -> list[NewMember]:
-        return self.members[self.page * PAGE_SIZE:(self.page + 1) * PAGE_SIZE]
+        return self.pages[self.page]
+
+    def _head(self, page: int, count: int) -> str:
+        head = summary_text(self.everyone, self.now, self.days, self.showing)
+        if page == 0 and self.everyone:
+            head += "\n" + breakdown_text(self.everyone, self.now)
+        if count > 1:
+            head += f"\n-# Page {page + 1} of {count}"
+        return head
+
+    def _paginate(self) -> list[list[NewMember]]:
+        """Pages of up to PAGE_SIZE members that each fit Discord's text limit with their header,
+        so a long member never falls off a page (and out of reach of its menu)."""
+        pages: list[list[NewMember]] = []
+        page: list[NewMember] = []
+        used = 0
+        for member in self.members:
+            block = len(member_text(member, self.now))
+            room = LAYOUT_TEXT_LIMIT - len(self._head(len(pages), 99))
+            if page and (len(page) >= PAGE_SIZE or used + block > room):
+                pages.append(page)
+                page, used = [], 0
+            page.append(member)
+            used += block
+        if page:
+            pages.append(page)
+        return pages or [[]]
 
     def render(self) -> None:
         self.clear_items()
         container = discord.ui.Container(accent_colour=discord.Colour.green())
-        head = summary_text(self.everyone, self.now, self.days, self.showing)
-        if self.page == 0 and self.everyone:
-            head += "\n" + breakdown_text(self.everyone, self.now)
-        if self.page_count > 1:
-            head += f"\n-# Page {self.page + 1} of {self.page_count}"
-        container.add_item(discord.ui.TextDisplay(head))
-        used = len(head)
+        container.add_item(discord.ui.TextDisplay(self._head(self.page, self.page_count)))
         for member in self.shown():
-            block = member_text(member, self.now)
-            if used + len(block) > LAYOUT_TEXT_LIMIT:
-                break
             container.add_item(discord.ui.Separator())
-            container.add_item(discord.ui.TextDisplay(block))
-            used += len(block)
+            container.add_item(discord.ui.TextDisplay(member_text(member, self.now)))
         if not self.members:
-            nobody = (f"Nobody is {FLAGS[self.showing][1].lower()} right now." if self.showing and self.everyone
-                      else f"Nobody joined in the last {self.days} days.")
+            nobody = (EMPTY[self.showing] if self.showing and self.everyone
+                      else f"Nobody joined in the last {self.days} day{'s' if self.days != 1 else ''}.")
             container.add_item(discord.ui.TextDisplay(nobody))
         self.add_item(container)
         if self.shown():
@@ -139,6 +156,8 @@ class NewMembersView(BotLayoutView):
         for member in self.members:
             if member.user_id == user_id:
                 member.reached_by, member.reached_at = interaction.user.display_name, now
+        self.pages = self._paginate()
+        self.page = min(self.page, self.page_count - 1)
         self.render()
         await interaction.response.edit_message(view=self, allowed_mentions=NO_MENTIONS)
 
@@ -177,6 +196,20 @@ class NewMembers(commands.Cog):
         guild = self._guild()
         if guild is None or member.guild.id != guild.id or member.bot:
             return
+        if getattr(member, "pending", False):  # still on Rules Screening: given once they pass it
+            return
+        await self._give(guild, member)
+
+    @commands.Cog.listener()
+    async def on_member_update(self, before: discord.Member, after: discord.Member) -> None:
+        """Rules Screening passed: the role now, like the welcome DM (welcome.py)."""
+        guild = self._guild()
+        if (guild is None or after.guild.id != guild.id or after.bot or not getattr(before, "pending", False)
+                or getattr(after, "pending", False) or not is_new(after.joined_at, self.now())):
+            return
+        await self._give(guild, after)
+
+    async def _give(self, guild: discord.Guild, member: discord.Member) -> None:
         try:
             await member.add_roles(await self._role(guild), reason="New member")
         except discord.HTTPException as exc:
@@ -206,7 +239,7 @@ class NewMembers(commands.Cog):
                 continue
             new, has = is_new(member.joined_at, now), role in member.roles
             try:
-                if new and not has:
+                if new and not has and not getattr(member, "pending", False):
                     await member.add_roles(role, reason="New member")
                     given += 1
                 elif has and not new:
@@ -275,6 +308,8 @@ class NewMembers(commands.Cog):
             zone, activities, experience = member_picks(held, picker)
             seen = sorted(d for d in active.get(user_id, []) if d >= joined_at.date())
             contact = contacts.get(user_id)
+            if contact is not None and _parse(contact["at"]) < joined_at:
+                contact = None  # from a stay before they left and came back
             members.append(NewMember(
                 user_id=user_id, joined_at=joined_at, source=source,
                 picks=[*activities, *([zone] if zone else []), *([experience] if experience else [])],
@@ -287,9 +322,13 @@ class NewMembers(commands.Cog):
                 username=username, display_name=display, still_here=still_here, onboarding=onboarding))
         return members
 
-    async def _allowed(self, interaction: discord.Interaction) -> bool:
+    async def _allowed(self, interaction: discord.Interaction, guild: discord.Guild) -> bool:
+        """The owner, or a moderator of Star Tech Dynamics itself - Moderate Members in another
+        server the bot is in doesn't count, since the list is always this server's."""
+        if await self.bot.is_owner(interaction.user):
+            return True
         perms = getattr(interaction.user, "guild_permissions", None)
-        return bool(perms and perms.moderate_members) or await self.bot.is_owner(interaction.user)
+        return interaction.guild_id == guild.id and bool(perms and perms.moderate_members)
 
     @app_commands.command(name="new-members",
                           description="Moderators: members who joined lately, whether they've said hello, and who reached out.")
@@ -307,17 +346,17 @@ class NewMembers(commands.Cog):
                           days: app_commands.Range[int, 1, MAX_DAYS] = NEW_MEMBER_DAYS,
                           status: str | None = None, reached_out: discord.Member | None = None,
                           export: bool = False) -> None:
-        if not await self._allowed(interaction):
+        guild = self._guild()
+        if guild is None:
+            await interaction.response.send_message("I can't find the server right now.", ephemeral=True)
+            return
+        if not await self._allowed(interaction, guild):
             await interaction.response.send_message("This command is for the owner and moderators.", ephemeral=True)
             return
         if export and not await self.bot.is_owner(interaction.user):
             await interaction.response.send_message("The CSV export is for the bot's owner.", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
-        guild = self._guild()
-        if guild is None:
-            await interaction.followup.send("I can't find the server right now.", ephemeral=True)
-            return
         now = self.now()
         if reached_out is not None:
             await self.bot.db.mark_new_member_contacted(guild.id, reached_out.id, interaction.user.id,
@@ -334,8 +373,9 @@ class NewMembers(commands.Cog):
                 + (f", {FLAGS[showing][1].lower()} only" if showing else ", including any who have left") + ".",
                 file=file, ephemeral=True)
             return
-        await interaction.followup.send(view=NewMembersView(self, guild, members, days, now, showing), ephemeral=True,
-                                        allowed_mentions=NO_MENTIONS)
+        view = NewMembersView(self, guild, members, days, now, showing)
+        view.origin = interaction  # the first followup after a defer is the original reply: greys out at timeout
+        await interaction.followup.send(view=view, ephemeral=True, allowed_mentions=NO_MENTIONS)
 
     # -- the weekly note ------------------------------------------------------
 
@@ -351,21 +391,29 @@ class NewMembers(commands.Cog):
         await self.bot.wait_until_ready()
 
     async def send_weekly(self, now: datetime) -> bool:
-        """Mondays from WEEKLY_HOUR Eastern, once a week (claimed first): the new members still
-        waiting for a hello, by DM to the owner - nothing when there are none."""
+        """Mondays from WEEKLY_HOUR Eastern, once a week: the new members who need a hello or are
+        drifting, by DM to the owner - nothing when there are none. Built before it's claimed, and
+        the claim is let go when the DM fails for a reason that may pass, so a hiccup costs an hour,
+        not the week."""
         local = now.astimezone(EASTERN)
         guild = self._guild()
         if guild is None or local.weekday() != WEEKLY_DAY or local.hour < WEEKLY_HOUR:
             return False
-        if not await self.bot.db.claim_new_member_week(guild.id, week_key(now)):
+        week = week_key(now)
+        previous = await self.bot.db.new_member_week(guild.id)
+        if previous is not None and previous >= week:
             return False
         text = weekly_text(await self.gather(guild, NEW_MEMBER_DAYS, now), now)
+        if not await self.bot.db.claim_new_member_week(guild.id, week):
+            return False
         if text is None:
             return False
         info = await self.bot.application_info()
         owner = info.team.owner_id if info.team and info.team.owner_id else info.owner.id
-        await send_dm(self.bot, owner, text, label="weekly new members", allowed_mentions=NO_MENTIONS)
-        return True
+        outcome = await send_dm(self.bot, owner, text, label="weekly new members", allowed_mentions=NO_MENTIONS)
+        if outcome is Delivery.RETRY:
+            await self.bot.db.release_new_member_week(guild.id, week, previous)
+        return outcome is Delivery.DELIVERED
 
 
 async def setup(bot: commands.Bot) -> None:
