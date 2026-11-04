@@ -5482,7 +5482,31 @@ they're in sync).
        Joins, sources, voice by hour and attendance can't be read back, so they start at deploy.
      - **Monthly DM**: after 9 AM Eastern on the 1st, claimed in `analytics_state` before sending,
        skipped for a month that ended before tracking began.
-     - Bans, kicks and timeouts from the audit log (View Audit Log, also granted) are a follow-up.
+     - Bans, kicks and timeouts from the audit log (View Audit Log, also granted) are a follow-up:
+       entry 155.
+
+155. **Server analytics: moderation counts from the audit log.** Entry 154's follow-up (the
+     owner's ask, 2026-11-04). `/server-stats` and the monthly DM gain a Moderation section: bans,
+     kicks, timeouts, messages deleted by someone other than their author, and AutoMod's actions
+     (block, flag, timeout, quarantine), each against the same length of time before.
+     - **Where from**: `on_audit_log_entry_create` (Intents.moderation, in the defaults; needs View
+       Audit Log), plus a read-back every 6 hours - the first one 45 days, as far as Discord keeps
+       the audit log, later ones from a day before the newest entry kept - so nothing is missed
+       while the bot is down. Each kind is read with its own `action=` filter: reading every entry
+       would mostly be the bot's own role changes. Rules in `moderation_kind` (a member update
+       counts only when its timeout changed; AutoMod rule edits never).
+     - **Kept**: `moderation_actions`, one row per audit log entry id, so a re-read never counts
+       one twice; a re-read keeps the higher `count`, since Discord adds quick deletes by the same
+       moderator in one channel to one entry without a new event. That's also why deleted
+       messages are shown as "at least". The moderator and target ids are kept with each entry;
+       only counts are shown. `analytics_state.audit_read_from` (an added column, migrated) says
+       how far back the counts reach. 80 tables.
+     - **Shown**: the period's counts, the period before (marked "counted from" when the audit log
+       doesn't reach all of it), "Up sharply" only for a kind that at least doubled and rose by 3
+       or more, and never against a period only partly counted (a warning that fires all the time
+       is noise), and what each bot did (Sapphire's Join Guard and spam filter, by name).
+     - Warns aren't in Discord's audit log (they live in whichever bot gives them), so aren't
+       counted.
 
 ## Where to look for what
 

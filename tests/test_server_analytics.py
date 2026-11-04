@@ -15,17 +15,18 @@ from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock
 
+import discord
 from cryptography.fernet import Fernet
 
 from bot.cogs.anniversaries import ANNIVERSARY_CHANNEL_ID
-from bot.cogs.server_analytics import ServerAnalytics, invite_code, invite_list_text
+from bot.cogs.server_analytics import ServerAnalytics, entry_action, invite_code, invite_list_text
 from bot.cogs.voice_ranks import OPS_CATEGORY_ID
 from bot.db.database import Database
 from bot.discord_ui import LAYOUT_TEXT_LIMIT
 from bot.uex.server_analytics import (
-    DEFAULT_INVITE_LABELS, NO_INVITE, UNKNOWN_INVITE, EventResult, InviteUse, Movement, build_report, event_kinds,
-    event_running, first_hello, kept, lapsed_counts, match_invite, peak_times, previous_month, report_blocks,
-    retention_cohort, slot_label,
+    DEFAULT_INVITE_LABELS, NO_INVITE, UNKNOWN_INVITE, EventResult, InviteUse, ModAction, Movement, build_report,
+    event_kinds, event_running, first_hello, kept, lapsed_counts, match_invite, moderation_block, moderation_kind,
+    peak_times, previous_month, report_blocks, retention_cohort, slot_label,
 )
 
 UTC = timezone.utc
@@ -358,3 +359,108 @@ def test_invite_label_names_an_invite_and_lists_them_for_the_owner_only(tmp_path
 def test_without_manage_server_the_invite_list_says_why():
     text = invite_list_text(None, {RSI: "RSI org page"})
     assert "the bot needs Manage Server" in text and "`6eXmvxEXsa` · RSI org page" in text
+
+
+# -- moderation ---------------------------------------------------------------------
+
+def test_audit_log_entries_count_as_moderation_only_when_they_are():
+    assert moderation_kind("ban", None, None) == "ban"
+    assert moderation_kind("kick", None, None) == "kick"
+    assert moderation_kind("message_bulk_delete", None, None) == "deleted"
+    assert moderation_kind("automod_block_message", None, None) == "automod"
+    assert moderation_kind("automod_rule_update", None, None) is None
+    assert moderation_kind("member_update", None, T0) == "timeout"
+    assert moderation_kind("member_update", T0, None) == "timeout_removed"
+    assert moderation_kind("member_update", None, None) is None, "a nickname change"
+    assert moderation_kind("member_role_update", None, None) is None
+
+
+def _mod(kind, days_ago, count=1, mod=None, bot=False):
+    return ModAction(kind, T0 - timedelta(days=days_ago), count, mod, bot)
+
+
+MOD_ACTIONS = [_mod("timeout", 1), _mod("timeout", 2), _mod("timeout", 3), _mod("timeout", 4), _mod("timeout", 40),
+               _mod("ban", 5, mod=7, bot=True), _mod("kick", 6, mod=7, bot=True), _mod("kick", 35),
+               _mod("deleted", 2, 12, 7, True), _mod("automod", 3, 2), _mod("unban", 4), _mod("timeout_removed", 1)]
+
+
+def _mod_report(moderation_from):
+    return build_report(title="last 30 days", start=T0 - timedelta(days=30), end=T0, tracking_since=T0,
+                        chat_from=None, movements=[], active={}, members={}, last_active={}, seen_from=None,
+                        hours=[], channel_counts={}, channel_names={}, ops=[], events=[], labels={},
+                        moderation=MOD_ACTIONS, bot_names={7: "Sapphire"}, moderation_from=moderation_from)
+
+
+def test_the_moderation_section_compares_with_the_period_before_and_flags_only_a_sharp_rise():
+    text = moderation_block(_mod_report(T0 - timedelta(days=60)))
+    assert "Bans **1** · kicks **1** · timeouts **4** · deleted messages **12** · AutoMod actions **2**" in text
+    assert "-# The 30 days before: bans 0 · kicks 1 · timeouts 1 · deleted messages 0 · AutoMod actions 0" in text
+    assert "⚠️ **Up sharply:** timeouts (1 → 4), deleted messages (0 → 12)" in text, "AutoMod 0 → 2 is too small"
+    assert "By bots: Sapphire (12 deleted messages, 1 ban, 1 kick)" in text
+    assert "at least this many" in text
+
+
+def test_a_period_before_the_audit_log_reaches_is_marked_and_never_called_a_rise():
+    text = moderation_block(_mod_report(T0 - timedelta(days=45)))
+    assert "-# The 30 days before (counted from Sep 20):" in text
+    assert "Up sharply" not in text
+    assert "the bot needs View Audit Log" in moderation_block(_mod_report(None))
+
+
+def test_entry_action_reads_the_kind_who_did_it_and_how_many_messages():
+    sapphire, mod = NS(id=7, bot=True), NS(id=8, bot=False)
+
+    def entry(eid, action, user, *, before=NS(), after=NS(), extra=None, target=50):
+        return NS(id=eid, action=getattr(discord.AuditLogAction, action), user=user, user_id=user.id,
+                  target=NS(id=target), created_at=T0, before=before, after=after, extra=extra)
+
+    assert entry_action(entry(1, "ban", sapphire)) == (1, "ban", "2026-11-04 15:00:00", 1, 7, True, 50)
+    assert entry_action(entry(2, "message_bulk_delete", mod, extra=NS(count=12)))[1:6] == (
+        "deleted", "2026-11-04 15:00:00", 12, 8, False)
+    assert entry_action(entry(3, "member_update", mod, before=NS(timed_out_until=None),
+                              after=NS(timed_out_until=T0 + timedelta(hours=1))))[1] == "timeout"
+    assert entry_action(entry(4, "member_update", mod, before=NS(nick="a"), after=NS(nick="b"))) is None
+    assert entry_action(entry(5, "automod_block_message", NS(id=50, bot=False)))[1:6:4] == ("automod", False)
+
+
+def test_the_audit_log_is_read_back_once_per_entry_and_without_view_audit_log_it_says_so(tmp_path, caplog):
+    def entry(eid, action, days_ago, *, extra=None, after=NS()):
+        return NS(id=eid, action=getattr(discord.AuditLogAction, action), user=NS(id=8, bot=False), user_id=8,
+                  target=NS(id=50), created_at=T0 - timedelta(days=days_ago), before=NS(), after=after,
+                  extra=extra, guild=NS(id=GUILD_ID))
+
+    async def run():
+        guild = FakeGuild(text=[FakeChannel(5, "general")])
+        log = {"ban": [entry(1, "ban", 50)],  # older than the audit log keeps
+               "member_update": [entry(2, "member_update", 10, after=NS(timed_out_until=T0))],
+               "message_bulk_delete": [entry(3, "message_bulk_delete", 2, extra=NS(count=12))]}
+        blocked = [False]
+
+        async def audit_logs(*, limit=None, after=None, action=None):
+            if blocked[0]:
+                raise discord.Forbidden(NS(status=403, reason="Forbidden"), {"code": 50013, "message": "Missing Access"})
+            for e in log.get(action.name, []):
+                if e.created_at > after:
+                    yield e
+
+        guild.audit_logs = audit_logs
+        cog, db, clock, _owner = await _make(tmp_path, guild)
+        first = await cog.catch_up_audit_log(guild, T0)
+        await cog.on_audit_log_entry_create(entry(3, "message_bulk_delete", 2, extra=NS(count=15)))  # merged deletes
+        await cog.on_audit_log_entry_create(entry(4, "ban", 3))
+        again = await cog.catch_up_audit_log(guild, T0)
+        async with db.connect() as conn:
+            rows = await (await conn.execute("SELECT entry_id, kind, count FROM moderation_actions ORDER BY entry_id")).fetchall()
+            read_from = (await (await conn.execute("SELECT audit_read_from FROM analytics_state")).fetchone())[0]
+        blocks = await cog.report(guild, T0 - timedelta(days=30), T0 + timedelta(days=1), "last 30 days")
+        blocked[0] = True
+        await cog.catch_up_audit_log(guild, T0)
+        await cog.catch_up_audit_log(guild, T0)
+        return first, again, [tuple(r) for r in rows], read_from, blocks
+
+    first, again, rows, read_from, blocks = asyncio.run(run())
+    assert (first, again) == (2, 1), "the second read goes back a day before the newest entry"
+    assert rows == [(2, "timeout", 1), (3, "deleted", 15), (4, "ban", 1)], "once each, the higher count kept"
+    assert read_from == "2026-09-20 15:00:00"
+    assert "Bans **1** · kicks **0** · timeouts **1** · deleted messages **15** · AutoMod actions **0**" in blocks[-1]
+    assert sum("Can't read the audit log" in r.message for r in caplog.records) == 1

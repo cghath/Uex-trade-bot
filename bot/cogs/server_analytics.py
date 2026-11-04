@@ -11,7 +11,11 @@ anyway (Guild Messages and Guild Voice States, in Intents.default(); Message Con
 - joins, with the invite whose use count went up (the bot needs Manage Server to read invites),
   and leaves,
 - each event card's attendance: minutes each member is in the event's voice channel or Ops while
-  the op runs, and the most "Interested" Discord showed.
+  the op runs, and the most "Interested" Discord showed,
+- moderation from the audit log (the bot needs View Audit Log): bans, kicks, timeouts, messages
+  a moderator or bot deleted, AutoMod's actions - each as it happens, and read back every
+  AUDIT_EVERY_HOURS (the first time, as far as Discord keeps it) so nothing is missed while the
+  bot is down. Who was acted on is kept with each entry, but only counts are ever shown.
 The first start reads the 30 days of chat before tracking began (authors, times and channels
 only, like welcome-back's read) so the activity numbers don't start from nothing. Joins, leaves,
 sources, voice-by-hour and attendance can't be read back, so they start when this shipped.
@@ -34,9 +38,9 @@ from bot.delivery import Delivery, home_channel, send_dm
 from bot.discord_ui import LAYOUT_TEXT_LIMIT, BotLayoutView
 from bot.uex.anniversaries import COMMUNITY_NAME, INACTIVE_DAYS
 from bot.uex.server_analytics import (
-    ATTENDED_MINUTES, DAY_FORMAT, EASTERN, HOUR_FORMAT, PERIOD_DAYS, RETENTION_DAYS, TIME_FORMAT, UTC, EventResult,
-    InviteUse, Movement, build_report, clean_label, event_running, match_invite, previous_month, report_blocks,
-    source_of,
+    ATTENDED_MINUTES, AUDIT_LOG_DAYS, DAY_FORMAT, EASTERN, HOUR_FORMAT, PERIOD_DAYS, RETENTION_DAYS, TIME_FORMAT, UTC,
+    EventResult, InviteUse, ModAction, Movement, build_report, clean_label, event_running, match_invite,
+    moderation_kind, previous_month, report_blocks, source_of,
 )
 from bot.uex.voice_ranks import counts
 
@@ -46,6 +50,24 @@ HISTORY_DAYS = 30
 INTEREST_EVERY = 10   # minutes between reads of a running event's Interested count
 INVITE_RETRY = 10     # minutes between tries to read invites while the bot can't
 REPORT_HOUR = 9       # the monthly DM goes from 9 AM Eastern on the 1st
+AUDIT_EVERY_HOURS = 6  # how often the audit log is read back
+# The audit log actions that can be moderation, each read on its own: reading every entry would
+# mostly be the bot's own role changes.
+AUDIT_ACTIONS = ("ban", "unban", "kick", "member_update", "message_delete", "message_bulk_delete",
+                 "automod_block_message", "automod_flag_message", "automod_timeout_member", "automod_quarantine_user")
+
+
+def entry_action(entry) -> tuple | None:
+    """An audit log entry as a moderation_actions row, or None when it isn't moderation."""
+    kind = moderation_kind(getattr(entry.action, "name", ""), getattr(entry.before, "timed_out_until", None),
+                           getattr(entry.after, "timed_out_until", None))
+    if kind is None:
+        return None
+    count = getattr(entry.extra, "count", None) if kind == "deleted" else None
+    user = entry.user
+    by_bot = kind != "automod" and user is not None and user.bot
+    return (entry.id, kind, _time(entry.created_at), count or 1, getattr(entry, "user_id", None),
+            by_bot, getattr(entry.target, "id", None))
 
 
 def _time(moment: datetime) -> str:
@@ -94,6 +116,7 @@ class ServerAnalytics(commands.Cog):
         self.invites: dict[str, InviteUse] | None = None  # use counts as last read
         self._invite_lock = asyncio.Lock()
         self._invites_warned = False
+        self._audit_warned = False
         self._state: dict | None = None
         self._seen: dict[str, set[int]] = {}               # day -> members already marked active
         self._messages: Counter = Counter()                # hour -> posts not yet saved
@@ -105,11 +128,13 @@ class ServerAnalytics(commands.Cog):
             self.tick.start()
             self.monthly.start()
             self.read_history.start()
+            self.read_audit_log.start()
 
     def cog_unload(self) -> None:
         self.tick.cancel()
         self.monthly.cancel()
         self.read_history.cancel()
+        self.read_audit_log.cancel()
 
     def _guild(self) -> discord.Guild | None:
         channel = home_channel(self.bot, ANNIVERSARY_CHANNEL_ID, feature="server analytics")
@@ -292,6 +317,60 @@ class ServerAnalytics(commands.Cog):
         if event.user_count is not None:
             await self.bot.db.record_event_interest(card["card_id"], event.user_count)
 
+    # -- moderation -----------------------------------------------------------
+
+    @commands.Cog.listener()
+    async def on_audit_log_entry_create(self, entry: discord.AuditLogEntry) -> None:
+        if self._ours(entry.guild.id) is None:
+            return
+        row = entry_action(entry)
+        if row is None:
+            return
+        try:
+            await self.bot.db.record_moderation_actions(entry.guild.id, [row])
+        except Exception:
+            logger.exception("Recording audit log entry %s failed", entry.id)
+
+    @tasks.loop(hours=AUDIT_EVERY_HOURS)
+    async def read_audit_log(self) -> None:
+        try:
+            guild = self._guild()
+            if guild is not None:
+                await self.catch_up_audit_log(guild, self.now())
+        except Exception:
+            logger.exception("Reading the audit log failed; it's tried again in %d hours", AUDIT_EVERY_HOURS)
+
+    @read_audit_log.before_loop
+    async def before_read_audit_log(self) -> None:
+        await self.bot.wait_until_ready()
+
+    async def catch_up_audit_log(self, guild: discord.Guild, now: datetime) -> int:
+        """Read the audit log back from a day before the newest entry kept (the first time, as far
+        as Discord keeps it), so anything missed while the bot was down is counted - once, by id."""
+        state = await self._start(guild)
+        latest = await self.bot.db.latest_moderation_action(guild.id)
+        oldest = now - timedelta(days=AUDIT_LOG_DAYS)
+        after = max(_parse(latest) - timedelta(days=1), oldest) if latest else oldest
+        rows = []
+        for name in AUDIT_ACTIONS:
+            try:
+                async for entry in guild.audit_logs(limit=None, after=after, action=getattr(discord.AuditLogAction, name)):
+                    row = entry_action(entry)
+                    if row is not None:
+                        rows.append(row)
+            except discord.Forbidden as exc:
+                if not self._audit_warned:
+                    logger.warning("Can't read the audit log (the bot needs View Audit Log), so moderation isn't "
+                                   "counted: %s", exc)
+                self._audit_warned = True
+                return 0
+        self._audit_warned = False
+        first = _time(after) if state.get("audit_read_from") is None else None
+        await self.bot.db.record_moderation_actions(guild.id, rows, read_from=first)
+        if first is not None:
+            state["audit_read_from"] = first
+        return len(rows)
+
     # -- the one-time read ----------------------------------------------------
 
     @tasks.loop(count=1)
@@ -343,7 +422,8 @@ class ServerAnalytics(commands.Cog):
     async def report(self, guild: discord.Guild, start: datetime, end: datetime, title: str) -> list[str]:
         since = min(start, end - timedelta(days=2 * RETENTION_DAYS))
         data = await self.bot.db.analytics_data(guild.id, _time(start), _time(end), _time(since),
-                                                int(start.timestamp()), int(end.timestamp()), ATTENDED_MINUTES)
+                                                int(start.timestamp()), int(end.timestamp()), ATTENDED_MINUTES,
+                                                mod_since=_time(start - (end - start)))
         state = data["state"] or await self._start(guild)
         tracking = _parse(state["tracking_since"])
         chat_from = tracking - timedelta(days=HISTORY_DAYS) if state["history_read_at"] else tracking
@@ -352,6 +432,8 @@ class ServerAnalytics(commands.Cog):
         for row in data["active"]:
             active[row["user_id"]].add(date.fromisoformat(row["day"]))
         names = {c.id: c.name for c in list(guild.text_channels) + list(guild.forums) if _readable(c, guild.me)}
+        moderation = [ModAction(r["kind"], _parse(r["at"]), r["count"], r["moderator_id"], bool(r["by_bot"]))
+                      for r in data["moderation"]]
         built = build_report(
             title=title, start=start, end=end, tracking_since=tracking, chat_from=chat_from,
             movements=[Movement(r["user_id"], r["kind"], _parse(r["at"]), r["invite_code"]) for r in data["movements"]],
@@ -366,8 +448,18 @@ class ServerAnalytics(commands.Cog):
             events=[EventResult(r["name"], datetime.fromtimestamp(r["starts_at"], UTC), r["going"], r["interested"],
                                 r["attended"], r["going_came"])
                     for r in data["events"] if r["starts_at"] >= tracking.timestamp()],
-            labels=data["labels"])
+            labels=data["labels"],
+            moderation=moderation, bot_names=self._names({a.moderator_id for a in moderation if a.by_bot}, guild),
+            moderation_from=_parse(state["audit_read_from"]) if state.get("audit_read_from") else None)
         return report_blocks(built)
+
+    def _names(self, user_ids: set, guild: discord.Guild) -> dict[int, str]:
+        names = {}
+        for uid in user_ids:
+            who = guild.get_member(uid) or self.bot.get_user(uid)
+            if who is not None:
+                names[uid] = getattr(who, "display_name", None) or who.name
+        return names
 
     @app_commands.command(name="server-stats",
                           description="Owner only: joins, activity, retention, ops and lapsed members, last 30 days.")
