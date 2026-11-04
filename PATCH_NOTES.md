@@ -1,7 +1,14 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.83.
+the oldest entry below); the next new entry is 2.84.
+
+---
+
+## 2.83 - 2026-11-04 - New members, a closer look
+
+**Changed**
+- Moderators can now see each new member's total voice time and how many days they've been active in their first weeks, so they know who's settling in and who could use a hello. Never what anyone wrote or said.
 
 ---
 

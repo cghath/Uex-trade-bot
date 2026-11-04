@@ -32,7 +32,7 @@ from bot.delivery import home_channel, send_dm
 from bot.discord_ui import LAYOUT_TEXT_LIMIT, BotLayoutView
 from bot.managed_roles import ManagedRoles
 from bot.uex.new_members import (
-    MAX_DAYS, NEW_MEMBER_DAYS, NEW_MEMBER_ROLE, PAGE_SIZE, PICK_GROUPS, NewMember, is_new, member_text, summary_text,
+    DRIFTING, FLAGS, NEEDS_HELLO, SETTLING, flag, MAX_DAYS, NEW_MEMBER_DAYS, NEW_MEMBER_ROLE, PAGE_SIZE, PICK_GROUPS, NewMember, is_new, member_text, summary_text,
     week_key, weekly_text,
 )
 from bot.uex.role_picker import GROUPS
@@ -49,13 +49,22 @@ def _parse(text: str) -> datetime:
     return datetime.strptime(text, TIME_FORMAT).replace(tzinfo=UTC)
 
 
+def latest(last_active: datetime | None, last_day: date | None) -> datetime | None:
+    """Their last activity: the exact last post or voice join, or the start of the last day the
+    activity log has them (voice ranks credit minutes all session long), whichever is later."""
+    day = datetime.combine(last_day, datetime.min.time(), tzinfo=UTC) if last_day else None
+    return max((t for t in (last_active, day) if t is not None), default=None)
+
+
 class NewMembersView(BotLayoutView):
     """The list, a page at a time, with a menu to mark who's been reached out to."""
 
     def __init__(self, cog: "NewMembers", guild: discord.Guild, members: list[NewMember], days: int,
-                 now: datetime) -> None:
+                 now: datetime, showing: str | None = None) -> None:
         super().__init__(timeout=600)  # ephemeral: editable only within the click's 15 minutes
-        self.cog, self.guild, self.members, self.days, self.now = cog, guild, members, days, now
+        self.cog, self.guild, self.everyone, self.days, self.now = cog, guild, members, days, now
+        self.showing = showing
+        self.members = [m for m in members if showing is None or flag(m, now) == showing]
         self.page = 0
         self.previous_button = discord.ui.Button(label="Newer", style=discord.ButtonStyle.secondary)
         self.previous_button.callback = self._previous
@@ -73,7 +82,7 @@ class NewMembersView(BotLayoutView):
     def render(self) -> None:
         self.clear_items()
         container = discord.ui.Container(accent_colour=discord.Colour.green())
-        head = summary_text(self.members, self.now, self.days)
+        head = summary_text(self.everyone, self.now, self.days, self.showing)
         if self.page_count > 1:
             head += f"\n-# Page {self.page + 1} of {self.page_count}"
         container.add_item(discord.ui.TextDisplay(head))
@@ -86,7 +95,9 @@ class NewMembersView(BotLayoutView):
             container.add_item(discord.ui.TextDisplay(block))
             used += len(block)
         if not self.members:
-            container.add_item(discord.ui.TextDisplay(f"Nobody joined in the last {self.days} days."))
+            nobody = (f"Nobody is {FLAGS[self.showing][1].lower()} right now." if self.showing and self.everyone
+                      else f"Nobody joined in the last {self.days} days.")
+            container.add_item(discord.ui.TextDisplay(nobody))
         self.add_item(container)
         if self.shown():
             menu = discord.ui.Select(placeholder="Mark as reached out…", min_values=1, max_values=1, options=[
@@ -220,6 +231,7 @@ class NewMembers(commands.Cog):
         for row in data["active"]:
             active.setdefault(row["user_id"], []).append(date.fromisoformat(row["day"]))
         contacts = {row["user_id"]: row for row in data["contacts"]}
+        last_active = {row["user_id"]: _parse(row["last_active"]) for row in data["last_active"]}
         voice: dict[int, list[tuple[date, int]]] = {}
         for row in data["voice"]:
             voice.setdefault(row["user_id"], []).append((date.fromisoformat(row["day"]), row["minutes"]))
@@ -251,6 +263,7 @@ class NewMembers(commands.Cog):
                 picks=[name for role_id, name in pick_ids if role_id in held],
                 first_active=seen[0] if seen else None, active_days=len(set(seen)),
                 voice_minutes=sum(m for d, m in voice.get(member.id, []) if d >= member.joined_at.date()),
+                last_active=latest(last_active.get(member.id), seen[-1] if seen else None),
                 reached_by=discord.utils.escape_markdown(self.name(guild, contact["by_id"])) if contact else None,
                 reached_at=_parse(contact["at"]) if contact else None))
         return members
@@ -262,11 +275,17 @@ class NewMembers(commands.Cog):
     @app_commands.command(name="new-members",
                           description="Moderators: members who joined lately, whether they've said hello, and who reached out.")
     @app_commands.describe(days=f"How far back, in days (default {NEW_MEMBER_DAYS})",
+                           status="Show only members with this flag (default: everyone)",
                            reached_out="Mark that you've reached out to this member")
+    @app_commands.choices(status=[
+        app_commands.Choice(name="🔴 Needs a hello", value=NEEDS_HELLO),
+        app_commands.Choice(name="🟡 Drifting", value=DRIFTING),
+        app_commands.Choice(name="🟢 Settling in", value=SETTLING),
+        app_commands.Choice(name="Everyone", value="all")])
     @app_commands.default_permissions(moderate_members=True)  # the owner and moderators
     async def new_members(self, interaction: discord.Interaction,
                           days: app_commands.Range[int, 1, MAX_DAYS] = NEW_MEMBER_DAYS,
-                          reached_out: discord.Member | None = None) -> None:
+                          status: str | None = None, reached_out: discord.Member | None = None) -> None:
         if not await self._allowed(interaction):
             await interaction.response.send_message("This command is for the owner and moderators.", ephemeral=True)
             return
@@ -280,7 +299,8 @@ class NewMembers(commands.Cog):
             await self.bot.db.mark_new_member_contacted(guild.id, reached_out.id, interaction.user.id,
                                                         now.strftime(TIME_FORMAT))
         members = await self.gather(guild, days, now)
-        await interaction.followup.send(view=NewMembersView(self, guild, members, days, now), ephemeral=True,
+        showing = status if status in FLAGS else None
+        await interaction.followup.send(view=NewMembersView(self, guild, members, days, now, showing), ephemeral=True,
                                         allowed_mentions=NO_MENTIONS)
 
     # -- the weekly note ------------------------------------------------------
