@@ -42,7 +42,7 @@ from bot.db.database import Database
 from bot.discord_ui import LAYOUT_TEXT_LIMIT, UNEXPECTED_ERROR_MESSAGE
 from bot.uex.events import (
     ENDED, GOING, MAYBE, OPEN, PING_CHARS, PING_USERS, ROSTER_BUDGET, STARTED, WAITING, EventRole, Signup, details_text,
-    next_in_line, parse_roles, ping_messages, placed_status, repeats_text, roster_text, ship_matches,
+    next_in_line, parse_roles, ping_messages, placed_status, repeats_text, roles_text, roster_text, ship_matches,
 )
 
 GUILD_ID = 1132378045232197694
@@ -79,6 +79,13 @@ def test_roles_read_from_one_line_and_bad_input_says_why():
                       ("X" * 41 + " 2", "40 characters")):
         roles, problem = parse_roles(bad)
         assert roles == [] and says in problem
+
+
+def test_a_roles_form_saved_unchanged_reads_back_the_same_roles():
+    roles = [EventRole("2 Seat Gunner", 1), EventRole("Pilot Mk2", 3), EventRole("890 Jump crew", 4)]
+    assert parse_roles(roles_text(roles)) == (roles, None), "names that start or end with a number survive"
+    for glued in ("Pilot Mk2", "Miner6"):
+        assert parse_roles(glued)[1] is not None, f"{glued}: no count, so refused, not a cut-down name"
 
 
 def test_a_full_role_waits_and_the_first_waiting_moves_up():

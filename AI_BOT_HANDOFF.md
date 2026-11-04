@@ -507,6 +507,9 @@ date - no open item, nothing to record here.
       See PROJECT_CONTEXT.md entries 156 and 157
 - [ ] PRs #155-#157 - `/new-members` activity, flags, timezone/activity breakdowns and the owner-only
       CSV exports (`members_csv`, `report_csv`). See PROJECT_CONTEXT.md entries 157 and 158
+- [ ] PR #158 - Fixes from the 2026-11-04 audit: system messages aren't posts (`INTRO_TYPES` in
+      analytics and welcome-back), the event roles parser reads a trailing count first. Worth
+      porting where aiv2 has welcome-back or event cards. See PROJECT_CONTEXT.md entry 159
 - [ ] PR #148 - The rest of the 2026-10-30 audit (PROJECT_CONTEXT.md entry 153). Worth porting
       where aiv2 has the same code: `BotDynamicItem` (bot/discord_ui.py), REL-3/REL-5 (wiki and
       UEX client), REL-6 deferrals, LOGIC-4 alert pollers, TRD-1/TRD-2 marketplace alert baseline

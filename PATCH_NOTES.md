@@ -1,7 +1,16 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.85.
+the oldest entry below); the next new entry is 2.86.
+
+---
+
+## 2.85 - 2026-11-04 - Fixes
+
+**Fixed**
+- The event roles form no longer renames a role whose name starts with a number when you save it unchanged (a "2 Seat Gunner" role stays "2 Seat Gunner"), and a role written without a count, like "Pilot Mk2", is refused instead of being cut short.
+- The 🌱 New Member role now waits until you've accepted the server rules, like the welcome message.
+- Discord's own "joined the server" message no longer counts as a new member's first post, so moderators can see who still needs a hello.
 
 ---
 
