@@ -63,7 +63,7 @@ GROUPS: tuple[RoleGroup, ...] = (
               ("New Pilot", "Getting There", "Veteran")),
     RoleGroup("pings", "🔔 Pings", "Which announcements do you want to be pinged for? Press again to turn one "
               "off, or Everything for all of them.", TOGGLE,
-              ("Org Events", "Patch & Server Status", "Free Fly & Events", "Joint Ops", "Streams & Videos"),
+              ("Org Events", "Patch & Server Status", "Free Fly & Events", "Joint Ops", "Streams & Videos", "Polls"),
               everything=True),
     RoleGroup("colors", "🎨 Colors", "What color do you want your name to have in text channels? One at a "
               "time - pick yours again to go back to no color.", ONE, tuple(name for name, _, _ in COLOR_ROLES)),
