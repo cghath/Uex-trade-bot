@@ -496,6 +496,9 @@ date - no open item, nothing to record here.
       PROJECT_CONTEXT.md entry 152
 - [ ] PR #151 - Polls ping role on the Pings panel (one name in `GROUPS`). Goes with PR #140. See
       PROJECT_CONTEXT.md entry 151
+- [ ] PR #152 - Server analytics: `/server-stats`, `/invite-label`, the monthly owner DM, invite
+      (join-source) matching and event attendance. Only if aiv2 serves the same server. See
+      PROJECT_CONTEXT.md entry 154
 - [ ] PR #148 - The rest of the 2026-10-30 audit (PROJECT_CONTEXT.md entry 153). Worth porting
       where aiv2 has the same code: `BotDynamicItem` (bot/discord_ui.py), REL-3/REL-5 (wiki and
       UEX client), REL-6 deferrals, LOGIC-4 alert pollers, TRD-1/TRD-2 marketplace alert baseline
