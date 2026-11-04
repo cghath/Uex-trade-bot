@@ -1109,7 +1109,9 @@ CREATE TABLE IF NOT EXISTS analytics_state (
     tracking_since TEXT NOT NULL,
     history_read_at TEXT,
     last_report_month TEXT,
-    audit_read_from TEXT
+    audit_read_from TEXT,
+    audit_checked_at TEXT,
+    system_cleaned_at TEXT
 );
 CREATE TABLE IF NOT EXISTS member_active_days (
     guild_id INTEGER NOT NULL,
@@ -1698,6 +1700,10 @@ class Database:
             # The same hourly totals for members in their first 3 weeks (entry 158).
             "ALTER TABLE activity_hours ADD COLUMN new_messages INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE activity_hours ADD COLUMN new_voice_minutes INTEGER NOT NULL DEFAULT 0",
+            # The 2026-11-04 audit: when the audit log was last read back, and the one-time removal
+            # of system messages ("X joined") that had been counted as posts.
+            "ALTER TABLE analytics_state ADD COLUMN audit_checked_at TEXT",
+            "ALTER TABLE analytics_state ADD COLUMN system_cleaned_at TEXT",
         ]
         for statement in migrations:
             try:
@@ -5827,7 +5833,7 @@ class Database:
         return cursor.rowcount == 1
 
     async def record_moderation_actions(self, guild_id: int, actions: list[tuple], *,
-                                        read_from: str | None = None) -> None:
+                                        read_from: str | None = None, checked_at: str | None = None) -> None:
         """Audit log entries as (entry_id, kind, at, count, moderator_id, by_bot, target_id). An entry
         seen again keeps the higher count (Discord adds quick deletes to one entry). `read_from`
         records how far back the first read of the audit log went."""
@@ -5842,7 +5848,41 @@ class Database:
                 await db.execute(
                     "UPDATE analytics_state SET audit_read_from = ? WHERE guild_id = ? AND audit_read_from IS NULL",
                     (read_from, guild_id))
+            if checked_at is not None:
+                await db.execute("UPDATE analytics_state SET audit_checked_at = ? WHERE guild_id = ?",
+                                 (checked_at, guild_id))
             await db.commit()
+
+    async def voice_day_pairs(self, guild_id: int, since_day: str) -> set[tuple[int, str]]:
+        async with self.connect() as db:
+            rows = await (await db.execute(
+                "SELECT user_id, day FROM voice_daily WHERE guild_id = ? AND day >= ?", (guild_id, since_day))).fetchall()
+        return {(row["user_id"], row["day"]) for row in rows}
+
+    async def remove_system_posts(self, guild_id: int, days: set[tuple[int, str]], hours: dict[str, int],
+                                  new_hours: dict[str, int], channels: dict[tuple[int, str], int]) -> bool:
+        """Take system messages back out of the counts, once (with the done mark, in one
+        transaction): member-days that were only that, and their hour and channel totals."""
+        async with self.connect() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            row = await (await db.execute("SELECT system_cleaned_at FROM analytics_state WHERE guild_id = ?",
+                                          (guild_id,))).fetchone()
+            if row is None or row["system_cleaned_at"] is not None:
+                await db.rollback()
+                return False
+            await db.executemany("DELETE FROM member_active_days WHERE guild_id = ? AND user_id = ? AND day = ?",
+                                 [(guild_id, uid, day) for uid, day in days])
+            await db.executemany(
+                """UPDATE activity_hours SET messages = MAX(0, messages - ?), new_messages = MAX(0, new_messages - ?)
+                   WHERE guild_id = ? AND hour = ?""",
+                [(hours.get(hour, 0), new_hours.get(hour, 0), guild_id, hour) for hour in set(hours) | set(new_hours)])
+            await db.executemany(
+                "UPDATE channel_days SET messages = MAX(0, messages - ?) WHERE guild_id = ? AND channel_id = ? AND day = ?",
+                [(count, guild_id, cid, day) for (cid, day), count in channels.items()])
+            await db.execute("UPDATE analytics_state SET system_cleaned_at = datetime('now') WHERE guild_id = ?",
+                             (guild_id,))
+            await db.commit()
+        return True
 
     async def mark_new_member_contacted(self, guild_id: int, user_id: int, by_id: int, at: str) -> None:
         async with self.connect() as db:
@@ -5893,7 +5933,8 @@ class Database:
         return row["at"] if row else None
 
     async def analytics_data(self, guild_id: int, start: str, end: str, since: str, start_ts: int, end_ts: int,
-                             attended_minutes: int, mod_since: str | None = None) -> dict[str, Any]:
+                             attended_minutes: int, mod_since: str | None = None, first_day: str | None = None,
+                             last_day: str | None = None) -> dict[str, Any]:
         """Everything the report needs for `start` to `end` (UTC times; *_ts the same as Unix
         seconds), raw. Joins, leaves and active days go back to `since`, for retention; moderation
         to `mod_since`, for the period before."""
@@ -5912,7 +5953,9 @@ class Database:
                 "active": await rows(
                     """SELECT user_id, day FROM member_active_days WHERE guild_id = ? AND day >= ? AND day <= ?
                        UNION SELECT user_id, day FROM voice_daily WHERE guild_id = ? AND day >= ? AND day <= ?""",
-                    (guild_id, since[:10], end[:10], guild_id, since[:10], end[:10])),
+                    (guild_id, since[:10], last_day or end[:10], guild_id, since[:10], last_day or end[:10])),
+                "voice_history_start": (await rows("SELECT MIN(day) AS day FROM voice_daily WHERE guild_id = ?",
+                                                   (guild_id,)))[0]["day"],
                 "last_active": await rows("SELECT user_id, last_active FROM member_activity WHERE guild_id = ?",
                                           (guild_id,)),
                 "hours": await rows(
@@ -5924,7 +5967,7 @@ class Database:
                 "channels": await rows(
                     """SELECT channel_id, SUM(messages) AS messages FROM channel_days
                        WHERE guild_id = ? AND day >= ? AND day <= ? GROUP BY channel_id""",
-                    (guild_id, start[:10], end[:10])),
+                    (guild_id, first_day or start[:10], last_day or end[:10])),
                 "ops": [r["people"] for r in await rows(
                     """SELECT COUNT(a.user_id) AS people FROM voice_ops o
                        LEFT JOIN voice_op_attendance a ON a.op_id = o.id
