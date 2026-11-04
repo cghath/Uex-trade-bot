@@ -1101,12 +1101,15 @@ CREATE TABLE IF NOT EXISTS ship_parts_shopping_threads (
 -- channel per day, never per person. member_movements: joins (with the invite matched, if any)
 -- and leaves, from tracking_since on. invite_labels: what each recruiting invite is called.
 -- event_attendance: minutes each member was in an event's voice channel or Ops while it ran;
--- event_interest: the most "Interested" Discord showed for it.
+-- event_interest: the most "Interested" Discord showed for it. moderation_actions: bans, kicks,
+-- timeouts, deletes by others and AutoMod actions from the audit log, one row per entry (so a
+-- re-read never counts one twice); analytics_state.audit_read_from is how far back that reaches.
 CREATE TABLE IF NOT EXISTS analytics_state (
     guild_id INTEGER PRIMARY KEY,
     tracking_since TEXT NOT NULL,
     history_read_at TEXT,
-    last_report_month TEXT
+    last_report_month TEXT,
+    audit_read_from TEXT
 );
 CREATE TABLE IF NOT EXISTS member_active_days (
     guild_id INTEGER NOT NULL,
@@ -1152,6 +1155,17 @@ CREATE TABLE IF NOT EXISTS event_interest (
     card_id INTEGER PRIMARY KEY,
     interested INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS moderation_actions (
+    entry_id INTEGER PRIMARY KEY,
+    guild_id INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    at TEXT NOT NULL,
+    count INTEGER NOT NULL DEFAULT 1,
+    moderator_id INTEGER,
+    by_bot INTEGER NOT NULL DEFAULT 0,
+    target_id INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_moderation_actions_at ON moderation_actions (guild_id, at);
 """
 
 
@@ -1659,6 +1673,8 @@ class Database:
             # A new marketplace alert's first poll records what's already listed rather than
             # announcing it (audit UX-2); existing alerts had already been polling, hence 1.
             "ALTER TABLE marketplace_alerts ADD COLUMN baseline_done INTEGER NOT NULL DEFAULT 1",
+            # Server analytics' moderation counts (PROJECT_CONTEXT.md entry 155).
+            "ALTER TABLE analytics_state ADD COLUMN audit_read_from TEXT",
         ]
         for statement in migrations:
             try:
@@ -5780,10 +5796,35 @@ class Database:
             await db.commit()
         return cursor.rowcount == 1
 
+    async def record_moderation_actions(self, guild_id: int, actions: list[tuple], *,
+                                        read_from: str | None = None) -> None:
+        """Audit log entries as (entry_id, kind, at, count, moderator_id, by_bot, target_id). An entry
+        seen again keeps the higher count (Discord adds quick deletes to one entry). `read_from`
+        records how far back the first read of the audit log went."""
+        async with self.connect() as db:
+            await db.executemany(
+                """INSERT INTO moderation_actions (entry_id, guild_id, kind, at, count, moderator_id, by_bot, target_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(entry_id) DO UPDATE SET count = MAX(count, excluded.count)""",
+                [(entry_id, guild_id, kind, at, count, moderator, int(bot), target)
+                 for entry_id, kind, at, count, moderator, bot, target in actions])
+            if read_from is not None:
+                await db.execute(
+                    "UPDATE analytics_state SET audit_read_from = ? WHERE guild_id = ? AND audit_read_from IS NULL",
+                    (read_from, guild_id))
+            await db.commit()
+
+    async def latest_moderation_action(self, guild_id: int) -> str | None:
+        async with self.connect() as db:
+            row = await (await db.execute(
+                "SELECT MAX(at) AS at FROM moderation_actions WHERE guild_id = ?", (guild_id,))).fetchone()
+        return row["at"] if row else None
+
     async def analytics_data(self, guild_id: int, start: str, end: str, since: str, start_ts: int, end_ts: int,
-                             attended_minutes: int) -> dict[str, Any]:
+                             attended_minutes: int, mod_since: str | None = None) -> dict[str, Any]:
         """Everything the report needs for `start` to `end` (UTC times; *_ts the same as Unix
-        seconds), raw. Joins, leaves and active days go back to `since`, for retention."""
+        seconds), raw. Joins, leaves and active days go back to `since`, for retention; moderation
+        to `mod_since`, for the period before."""
         async with self.connect() as db:
             async def rows(sql: str, params: tuple) -> list[dict[str, Any]]:
                 return [dict(r) for r in await (await db.execute(sql, params)).fetchall()]
@@ -5829,4 +5870,7 @@ class Database:
                        ORDER BY c.starts_at""",
                     (attended_minutes, attended_minutes, guild_id, start_ts, end_ts)),
                 "labels": {r["code"]: r["label"] for r in await rows("SELECT code, label FROM invite_labels", ())},
+                "moderation": await rows(
+                    """SELECT kind, at, count, moderator_id, by_bot FROM moderation_actions
+                       WHERE guild_id = ? AND at >= ? AND at < ?""", (guild_id, mod_since or start, end)),
             }

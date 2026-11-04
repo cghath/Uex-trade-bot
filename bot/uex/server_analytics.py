@@ -6,6 +6,10 @@ plus when people are on, which channels are busy or dead, and how each kind of e
 Pure rules, no Discord and no I/O: bot/cogs/server_analytics.py records, bot/db/database.py
 stores. Only counts and "active that day" are ever kept, never what anyone wrote.
 
+Moderation comes from the audit log (the bot needs View Audit Log): bans, kicks, timeouts,
+messages a moderator or bot deleted, and AutoMod's actions, each counted once by its entry id,
+and compared with the period before so a sudden rise stands out.
+
 Join sources come from invites: Discord doesn't say which invite a member used, so the bot keeps
 each invite's use count and, on a join, looks for the one that went up (match_invite). Each
 recruiting place has its own permanent invite, labelled in invite_labels (seeded with
@@ -56,6 +60,13 @@ DEFAULT_INVITE_LABELS = {
     "pznqwZjP7q": "Legacy",
 }
 LABEL_MAX = 60
+
+AUDIT_LOG_DAYS = 45  # how far back Discord keeps the audit log
+MOD_SHOWN = ("ban", "kick", "timeout", "deleted", "automod")
+MOD_LABELS = {"ban": "bans", "kick": "kicks", "timeout": "timeouts", "deleted": "deleted messages",
+              "automod": "AutoMod actions"}
+MOD_ONE = {"ban": "ban", "kick": "kick", "timeout": "timeout", "deleted": "deleted message", "automod": "AutoMod action"}
+_AUTOMOD_RULE_CHANGES = {"automod_rule_create", "automod_rule_update", "automod_rule_delete"}
 _WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 
 
@@ -94,6 +105,57 @@ def source_of(code: str | None, labels: dict[str, str]) -> str:
 
 def clean_label(text: str) -> str:
     return " ".join(text.split())[:LABEL_MAX]
+
+
+# -- moderation ---------------------------------------------------------------
+
+@dataclass(frozen=True)
+class ModAction:
+    kind: str  # ban, unban, kick, timeout, timeout_removed, deleted, automod
+    at: datetime
+    count: int = 1
+    moderator_id: int | None = None
+    by_bot: bool = False
+
+
+def moderation_kind(action: str, timeout_before: datetime | None, timeout_after: datetime | None) -> str | None:
+    """What an audit log entry counts as, from its action's name (discord.py's AuditLogAction) and,
+    for a member update, the timeout before and after it. None: not moderation (a nickname or
+    role change, an AutoMod rule edited)."""
+    if action in ("ban", "unban", "kick"):
+        return action
+    if action in ("message_delete", "message_bulk_delete"):
+        return "deleted"
+    if action.startswith("automod_") and action not in _AUTOMOD_RULE_CHANGES:
+        return "automod"
+    if action == "member_update":
+        if timeout_after is not None:
+            return "timeout"
+        if timeout_before is not None:
+            return "timeout_removed"
+    return None
+
+
+def moderation_counts(actions: list[ModAction], start: datetime, end: datetime) -> Counter:
+    counts: Counter = Counter()
+    for action in actions:
+        if start <= action.at < end and action.kind in MOD_SHOWN:
+            counts[action.kind] += action.count
+    return counts
+
+
+def sharp_rises(now: Counter, before: Counter) -> list[str]:
+    """Kinds that at least doubled and went up by 3 or more: worth a look, not noise."""
+    return [kind for kind in MOD_SHOWN if now[kind] >= before[kind] + 3 and now[kind] >= 2 * before[kind]]
+
+
+def by_bots(actions: list[ModAction], start: datetime, end: datetime, names: dict[int, str]) -> list[tuple[str, Counter]]:
+    """What each bot (Sapphire's Join Guard and spam filter, say) did, busiest first."""
+    groups: dict[str, Counter] = defaultdict(Counter)
+    for action in actions:
+        if action.by_bot and start <= action.at < end and action.kind in MOD_SHOWN and action.kind != "automod":
+            groups[names.get(action.moderator_id, "A bot")][action.kind] += action.count
+    return sorted(groups.items(), key=lambda kv: (-sum(kv[1].values()), kv[0]))
 
 
 # -- the report ---------------------------------------------------------------
@@ -139,6 +201,11 @@ class Report:
     busiest: list[tuple[str, int]] = field(default_factory=list)
     quiet: list[str] = field(default_factory=list)
     events: list[tuple[str, int, float, float, float | None, float]] = field(default_factory=list)
+    moderation_from: datetime | None = None
+    mod_now: Counter = field(default_factory=Counter)
+    mod_before: Counter = field(default_factory=Counter)
+    mod_rises: list[str] = field(default_factory=list)
+    mod_bots: list[tuple[str, Counter]] = field(default_factory=list)
 
 
 def _here_at(movements: list[Movement], user_id: int, when: datetime) -> bool:
@@ -251,7 +318,8 @@ def build_report(*, title: str, start: datetime, end: datetime, tracking_since: 
                  members: dict[int, datetime], last_active: dict[int, datetime], seen_from: datetime | None,
                  hours: list[tuple[datetime, int, int]], channel_counts: dict[int, int],
                  channel_names: dict[int, str], ops: list[int], events: list[EventResult],
-                 labels: dict[str, str]) -> Report:
+                 labels: dict[str, str], moderation: list[ModAction] = (), bot_names: dict[int, str] | None = None,
+                 moderation_from: datetime | None = None) -> Report:
     """Everything /server-stats and the monthly DM show, for `start` to `end`."""
     report = Report(title=title, start=start, end=end, tracking_since=tracking_since, chat_from=chat_from)
     joins = [m for m in movements if m.kind == "join"]
@@ -286,6 +354,13 @@ def build_report(*, title: str, start: datetime, end: datetime, tracking_since: 
                       for cid, count in sorted(named.items(), key=lambda kv: (-kv[1], channel_names[kv[0]]))[:SHOW_ROWS]]
     report.quiet = sorted(name for cid, name in channel_names.items() if not channel_counts.get(cid))
     report.events = event_kinds(events)
+
+    report.moderation_from = moderation_from
+    before = start - (end - start)
+    report.mod_now = moderation_counts(list(moderation), start, end)
+    report.mod_before = moderation_counts(list(moderation), before, start)
+    report.mod_rises = sharp_rises(report.mod_now, report.mod_before) if moderation_from and moderation_from <= before else []
+    report.mod_bots = by_bots(list(moderation), start, end, bot_names or {})
     return report
 
 
@@ -382,7 +457,38 @@ def report_blocks(report: Report) -> list[str]:
             lines.append(f"**{name}** ×{held}: {_one(came)} came · {_one(going)} going "
                          f"({_one(going_came)} of them came){extra}")
         blocks.append("\n".join(lines))
+    blocks.append(moderation_block(report))
     return blocks
+
+
+def _mod_row(counts: Counter, *, bold: bool) -> str:
+    mark = "**" if bold else ""
+    text = " · ".join(f"{MOD_LABELS[kind]} {mark}{counts[kind]}{mark}" for kind in MOD_SHOWN)
+    return text[0].upper() + text[1:] if bold else text
+
+
+def moderation_block(report: Report) -> str:
+    lines = ["### Moderation"]
+    if report.moderation_from is None:
+        lines.append("-# Not counted yet: the bot needs View Audit Log.")
+        return "\n".join(lines)
+    lines.append(_mod_row(report.mod_now, bold=True) if sum(report.mod_now.values()) else "None in this time.")
+    before = report.start - (report.end - report.start)
+    if report.moderation_from < report.start:
+        partial = (f" (counted from {_day(report.moderation_from)})" if report.moderation_from > before else "")
+        lines.append(f"-# The {(report.end - report.start).days} days before{partial}: "
+                     + _mod_row(report.mod_before, bold=False))
+    if report.mod_rises:
+        lines.append("⚠️ **Up sharply:** " + ", ".join(
+            f"{MOD_LABELS[k]} ({report.mod_before[k]} → {report.mod_now[k]})" for k in report.mod_rises))
+    if report.mod_bots:
+        lines.append("By bots: " + " · ".join(
+            f"{name} ({', '.join(f'{n} {MOD_ONE[k] if n == 1 else MOD_LABELS[k]}' for k, n in counts.most_common())})"
+            for name, counts in report.mod_bots[:3]))
+    if report.mod_now["deleted"]:
+        lines.append("-# Deleted messages: removed by a moderator or bot (not by their author); Discord merges "
+                     "quick runs of deletes, so it's at least this many.")
+    return "\n".join(lines)
 
 
 def previous_month(now: datetime) -> tuple[datetime, datetime, str, str]:

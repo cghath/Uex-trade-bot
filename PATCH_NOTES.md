@@ -1,7 +1,14 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.81.
+the oldest entry below); the next new entry is 2.82.
+
+---
+
+## 2.81 - 2026-11-04 - Moderation counts
+
+**Added**
+- The owner's server stats now count moderation from Discord's audit log: bans, kicks, timeouts, messages removed by moderators or bots, and AutoMod's actions, compared with the month before so a sudden rise stands out. Only the numbers are shown.
 
 ---
 

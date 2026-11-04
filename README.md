@@ -135,6 +135,8 @@ background posting/sale updates are delivered only by private DM.
    - `Manage Events`, so an event card's Start and End also start and end the Discord event.
    - `Manage Server`, so the bot can read invite use counts and tell which invite each new member
      joined through (the sources in `/server-stats`). Without it joins still count, with no source.
+   - `View Audit Log`, for the moderation counts in `/server-stats` (bans, kicks, timeouts,
+     deleted messages, AutoMod). Without it that section says it can't count.
 
    Use the generated URL to invite the bot to your server.
 5. (Optional, recommended while developing) Enable Developer Mode in Discord, right-click your
