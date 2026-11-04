@@ -20,7 +20,8 @@ from bot.cogs.anniversaries import ANNIVERSARY_CHANNEL_ID
 from bot.cogs.new_members import NewMembers
 from bot.db.database import Database
 from bot.uex.new_members import (
-    NEW_MEMBER_ROLE, NewMember, is_new, member_text, needs_hello, voice_time, week_key, weekly_text,
+    DRIFTING, NEEDS_HELLO, NEW_MEMBER_ROLE, SETTLING, NewMember, days_since, flag, is_new, member_text, summary_text,
+    week_key, weekly_text,
 )
 
 UTC = timezone.utc
@@ -39,37 +40,72 @@ def test_a_member_is_new_for_their_first_21_days_by_join_date():
     assert is_new(NOW - timedelta(days=40), NOW, days=45)
 
 
-def test_needs_a_hello_after_three_quiet_days_unless_someone_reached_out():
-    quiet = NewMember(1, NOW - timedelta(days=3))
-    assert needs_hello(quiet, NOW)
-    assert not needs_hello(NewMember(1, NOW - timedelta(days=2)), NOW), "give them a couple of days"
-    assert not needs_hello(NewMember(1, NOW - timedelta(days=5), first_active=date(2026, 11, 5)), NOW)
-    assert not needs_hello(NewMember(1, NOW - timedelta(days=5), reached_by="Cheeno", reached_at=NOW), NOW)
+def test_days_are_eastern_calendar_days_so_joining_yesterday_is_one_day_whatever_the_hour():
+    morning = datetime(2026, 11, 4, 14, tzinfo=UTC)  # Nov 4, 9 AM Eastern
+    assert days_since(datetime(2026, 11, 1, 3, tzinfo=UTC), morning) == 4, "Oct 31, 11 PM Eastern"
+    assert days_since(datetime(2026, 11, 3, 6, tzinfo=UTC), morning) == 1, "Nov 3, 1 AM Eastern"
+    assert days_since(datetime(2026, 11, 4, 4, tzinfo=UTC), morning) == 1, "Nov 3, 11 PM Eastern: a UTC Nov 4"
+    assert days_since(datetime(2026, 11, 4, 13, tzinfo=UTC), morning) == 0
 
 
-def test_a_members_lines_say_where_they_came_from_what_they_picked_and_whether_theyre_around():
+def test_the_flags_needs_a_hello_drifting_and_settling_in():
+    def member(days_ago, *, active=0, voice=0, quiet=None, reached=None):
+        last = NOW - timedelta(days=quiet) if quiet is not None else None
+        return NewMember(1, NOW - timedelta(days=days_ago), first_active=date(2026, 11, 1) if active else None,
+                         active_days=active, voice_minutes=voice, last_active=last,
+                         reached_by="Cheeno" if reached is not None else None,
+                         reached_at=NOW - timedelta(days=reached) if reached is not None else None)
+
+    assert flag(member(3), NOW) == NEEDS_HELLO
+    assert flag(member(2), NOW) is None, "give them a couple of days"
+    assert flag(member(5, reached=1), NOW) is None
+    assert flag(member(10, active=2, quiet=5), NOW) == DRIFTING
+    assert flag(member(10, active=2, quiet=6, reached=7), NOW) == DRIFTING, "reached out before they went quiet"
+    assert flag(member(10, active=2, quiet=6, reached=2), NOW) is None
+    assert flag(member(10, active=6, voice=200, quiet=6), NOW) == DRIFTING, "quiet now beats a good start"
+    assert flag(member(3, active=2, quiet=0), NOW) == SETTLING, "2 of 4 days"
+    assert flag(member(3, active=1, voice=60, quiet=0), NOW) == SETTLING
+    assert flag(member(3, active=1, voice=59, quiet=0), NOW) is None
+    assert flag(member(0, active=1, quiet=0), NOW) is None, "posting on day 0 is too soon to call"
+    assert flag(member(0, active=1, voice=75, quiet=0), NOW) == SETTLING
+
+
+def test_a_members_lines_say_where_they_came_from_what_they_picked_how_active_and_the_flag():
     joined = NOW - timedelta(days=4)
     text = member_text(NewMember(5, joined, "RSI org page", ["Mining", "Eastern", "New Pilot"]), NOW)
     assert text.splitlines() == [
         f"<@5> · joined <t:{int(joined.timestamp())}:d> (4 days) · RSI org page",
         "-# Mining · Eastern · New Pilot",
-        "⚠️ **Needs a hello**: no posts or voice in 4 days"]
-    active = member_text(NewMember(6, joined, None, [], date(2026, 11, 6), 2, reached_by="Cheeno",
-                                   reached_at=NOW - timedelta(days=1)), NOW)
+        "🎙️ 0 min voice · 📅 active 0 of 5 days",
+        "🔴 **Needs a hello**: no posts or voice yet, 4 days in"]
+    active = member_text(NewMember(6, joined, None, [], date(2026, 11, 6), 2, 95, NOW - timedelta(days=1),
+                                   "Cheeno", NOW - timedelta(days=1)), NOW)
     assert "before join sources were tracked" in active and "No Onboarding picks" in active
-    assert "💬 Active 2 of 5 days · ✅ Reached out: Cheeno, Nov 8" in active, "joined Nov 5, today Nov 9"
-    voice = member_text(NewMember(6, joined, "Reddit ad", [], date(2026, 11, 6), 3, voice_minutes=130), NOW)
-    assert "💬 Active 3 of 5 days · 2h 10m in voice" in voice
-    assert [voice_time(m) for m in (45, 60, 130)] == ["45m", "1h", "2h 10m"]
+    assert active.splitlines()[2:] == ["🎙️ 95 min voice · 📅 active 2 of 5 days",
+                                       "🟢 **Settling in** · ✅ Reached out: Cheeno, Nov 8"]
 
 
-def test_the_weekly_note_lists_only_members_still_waiting_and_is_skipped_when_nobody_is():
-    waiting = NewMember(5, NOW - timedelta(days=6), "Reddit ad")
-    fine = NewMember(6, NOW - timedelta(days=6), first_active=date(2026, 11, 4))
-    text = weekly_text([waiting, fine], NOW)
-    assert text.startswith("🌱 **1 new member still needs a hello**")
-    assert "- <@5>, joined 6 days ago · Reddit ad" in text and "<@6>" not in text
-    assert weekly_text([fine], NOW) is None
+def _flagged():
+    return [NewMember(5, NOW - timedelta(days=6), "Reddit ad"),
+            NewMember(7, NOW - timedelta(days=12), None, [], date(2026, 10, 30), 2, 10, NOW - timedelta(days=6)),
+            NewMember(8, NOW - timedelta(days=12), None, [], date(2026, 10, 30), 1, 0, NOW - timedelta(days=9)),
+            NewMember(6, NOW - timedelta(days=6), first_active=date(2026, 11, 4), active_days=5,
+                      last_active=NOW)]
+
+
+def test_the_header_counts_every_flag_whatever_is_shown():
+    assert summary_text(_flagged(), NOW, 21).splitlines()[1] == (
+        "4 joined · **1 needs a hello** · **2 drifting** · 1 settling in")
+    assert "Showing 🟡 Drifting only" in summary_text(_flagged(), NOW, 21, DRIFTING)
+
+
+def test_the_weekly_note_lists_who_needs_a_hello_or_is_drifting_with_why_and_is_skipped_when_nobody_is():
+    text = weekly_text(_flagged(), NOW)
+    assert text.splitlines()[:4] == ["🌱 **New members this week: 1 needs a hello · 2 drifting**",
+                                     "🔴 <@5>: no posts or voice yet, 6 days in · Reddit ad",
+                                     "🟡 <@7>: quiet 6 days", "🟡 <@8>: quiet 9 days"]
+    assert "<@6>" not in text
+    assert weekly_text(_flagged()[3:], NOW) is None
     assert week_key(NOW) == "2026-W46"
 
 
@@ -172,6 +208,7 @@ def test_new_members_lists_the_newest_first_with_source_picks_activity_and_who_r
         await db.record_member_movement(GUILD_ID, 10, "join", "2026-11-04 16:00:00", RSI)
         await db.record_member_movement(GUILD_ID, 12, "join", "2026-11-08 16:00:00", "sc1abc", 31)
         await db.mark_active_day(GUILD_ID, 11, "2026-11-08")
+        await db.touch_member_activity(GUILD_ID, 11, "2026-11-08 20:00:00")
         await db.credit_voice_minute(GUILD_ID, "2026-11-08", [(11, 1)], 300)
         await db.credit_voice_minute(GUILD_ID, "2026-11-08", [(11, 1)], 300)
         await db.credit_voice_minute(GUILD_ID, "2026-11-01", [(11, 1)], 300)  # before they joined
@@ -183,6 +220,9 @@ def test_new_members_lists_the_newest_first_with_source_picks_activity_and_who_r
                          followup=NS(send=AsyncMock(side_effect=lambda **kw: sent.append(kw["view"]))))
         await cog.new_members.callback(cog, interaction, 21, None)
         view = sent[0]
+        await cog.new_members.callback(cog, interaction, 21, "needs-hello", None)
+        shown_text = "\n".join(c.content for c in sent[1].walk_children() if hasattr(c, "content"))
+        only = [line.split(" ·")[0] for line in shown_text.splitlines() if line.startswith("<@")]
         text = "\n".join(c.content for c in view.walk_children() if hasattr(c, "content"))
         # mark one from the menu
         view.menu._values = ["10"]  # what discord.py fills in from the click
@@ -191,18 +231,19 @@ def test_new_members_lists_the_newest_first_with_source_picks_activity_and_who_r
         after = "\n".join(c.content for c in view.walk_children() if hasattr(c, "content"))
         refused = NS(user=FakeMember(78, NOW, moderator=False), response=NS(send_message=AsyncMock(), defer=AsyncMock()))
         await cog.new_members.callback(cog, refused, 21, None)
-        return text, after, refused.response.send_message.await_args.args[0]
+        return text, after, refused.response.send_message.await_args.args[0], only, shown_text
 
-    text, after, refused = asyncio.run(run())
+    text, after, refused, only, shown_text = asyncio.run(run())
     lines = text.splitlines()
     assert lines[1] == "3 joined · **1 needs a hello**"
     order = [line.split(" ·")[0] for line in lines if line.startswith("<@")]
     assert order == ["<@12>", "<@11>", "<@10>"], "newest first; the owner and Kara aren't new"
     assert "Member referral (Kara)" in text
     assert "✅ Reached out: Cheeno, Nov 9" in text
-    assert "💬 Active 1 of 3 days · 2m in voice" in text
+    assert "🎙️ 2 min voice · 📅 active 1 of 3 days" in text
     assert "RSI org page" in text and "-# Mining · Eastern" in text
-    assert "⚠️ **Needs a hello**: no posts or voice in 5 days" in text
+    assert "🔴 **Needs a hello**: no posts or voice yet, 5 days in" in text
+    assert only == ["<@10>"] and "Showing 🔴 Needs a hello only" in shown_text
     assert "✅ Reached out: Mod, Nov 9" in after and "Needs a hello" not in after
     assert refused == "This command is for the owner and moderators."
 
@@ -219,4 +260,4 @@ def test_the_weekly_note_goes_once_on_monday_and_only_when_someone_is_waiting(tm
 
     results, dms = asyncio.run(run())
     assert results == (False, False, True, False)
-    assert len(dms) == 1 and "<@10>, joined 6 days ago" in dms[0]
+    assert len(dms) == 1 and "🔴 <@10>: no posts or voice yet, 6 days in" in dms[0]

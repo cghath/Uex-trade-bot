@@ -5539,11 +5539,19 @@ they're in sync).
        first day they posted or were in voice since joining (analytics' `member_active_days` and
        `voice_daily`), and who reached out (`new_member_contacts`, the latest). "Needs a hello":
        nothing after `HELLO_AFTER_DAYS` (3) and nobody's reached out. A menu marks reached out.
-       Activity shows as "Active N of M days" (days with a post or voice since the join day, of
-       the days from it through today), the owner's pick over a post count: no per-person
-       message counting, and a day count says more about sticking around than message volume.
-       Then voice time since joining, from voice ranks' `voice_daily` (minutes with someone else
-       there, up to 5h a day), when there is any: "Active 4 of 6 days · 2h 10m in voice".
+       Activity is one line, "🎙️ 95 min voice · 📅 active 4 of 6 days": voice ranks' `voice_daily`
+       minutes since joining (the rank rules: 2+ people, not deafened, never AFK, up to 5h a day),
+       and days with a post or voice since the join day, of the days from it through today - the
+       owner's pick over a post count (no per-person message counting; days say more about
+       sticking around). Days are Eastern calendar days (joined yesterday = 1), for every count
+       and rule; the activity log's own days are UTC, so X is counted from the join's UTC day and
+       capped at Y.
+     - **Flags** (thresholds at the top of `bot/uex/new_members.py`): 🔴 Needs a hello - nothing
+       after 3 days and nobody's reached out; 🟡 Drifting - active once, then quiet 5+ days
+       (welcome-back's `member_activity.last_active`, the exact last post or voice join) and
+       nobody's reached out since; 🟢 Settling in - active on half their days or 60+ voice
+       minutes. In that order, so a good start that's gone quiet reads as drifting. The header
+       counts all three; `status:` shows one. The weekly note lists 🔴 and 🟡, each with why.
      - **Weekly note**: Mondays from 10 AM Eastern, claimed in `new_member_state`, a DM to the owner
        naming members still waiting for a hello; nothing when nobody is. 82 tables.
 
