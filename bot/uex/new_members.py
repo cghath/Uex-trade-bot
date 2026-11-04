@@ -34,6 +34,19 @@ def days_in(joined_at: datetime, now: datetime) -> int:
     return max(0, (now - joined_at).days)
 
 
+def voice_time(minutes: int) -> str:
+    hours, rest = divmod(minutes, 60)
+    if not hours:
+        return f"{rest}m"
+    return f"{hours}h {rest}m" if rest else f"{hours}h"
+
+
+def days_counted(joined_at: datetime, now: datetime) -> int:
+    """The days "Active N of M days" counts: the day they joined through today (UTC days, like
+    the activity log), so it's never 0."""
+    return max(1, (now.date() - joined_at.date()).days + 1)
+
+
 @dataclass
 class NewMember:
     user_id: int
@@ -41,6 +54,8 @@ class NewMember:
     source: str | None = None            # None: joined before join sources were tracked
     picks: list[str] = field(default_factory=list)
     first_active: date | None = None      # first day they posted or joined voice since joining
+    active_days: int = 0                  # how many days since joining they posted or joined voice
+    voice_minutes: int = 0                # voice ranks' minutes since joining (with someone else there)
     reached_by: str | None = None
     reached_at: datetime | None = None
 
@@ -63,7 +78,10 @@ def member_text(member: NewMember, now: datetime) -> str:
     head += f" · {member.source}" if member.source else " · before join sources were tracked"
     lines = [head, "-# " + (" · ".join(member.picks) if member.picks else "No Onboarding picks")]
     if member.first_active is not None:
-        status = f"💬 Posted or in voice since {member.first_active:%b} {member.first_active.day}"
+        here = days_counted(member.joined_at, now)
+        status = f"💬 Active {max(member.active_days, 1)} of {here} day{'s' if here != 1 else ''}"
+        if member.voice_minutes:
+            status += f" · {voice_time(member.voice_minutes)} in voice"
     elif needs_hello(member, now):
         status = f"⚠️ **Needs a hello**: no posts or voice in {days} days"
     else:

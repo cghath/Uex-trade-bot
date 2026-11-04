@@ -220,6 +220,9 @@ class NewMembers(commands.Cog):
         for row in data["active"]:
             active.setdefault(row["user_id"], []).append(date.fromisoformat(row["day"]))
         contacts = {row["user_id"]: row for row in data["contacts"]}
+        voice: dict[int, list[tuple[date, int]]] = {}
+        for row in data["voice"]:
+            voice.setdefault(row["user_id"], []).append((date.fromisoformat(row["day"]), row["minutes"]))
         invites = None
         picker = await self.bot.db.get_role_picker_roles(guild.id)
         groups = {g.key: g for g in GROUPS}
@@ -246,7 +249,8 @@ class NewMembers(commands.Cog):
             members.append(NewMember(
                 user_id=member.id, joined_at=member.joined_at, source=source,
                 picks=[name for role_id, name in pick_ids if role_id in held],
-                first_active=seen[0] if seen else None,
+                first_active=seen[0] if seen else None, active_days=len(set(seen)),
+                voice_minutes=sum(m for d, m in voice.get(member.id, []) if d >= member.joined_at.date()),
                 reached_by=discord.utils.escape_markdown(self.name(guild, contact["by_id"])) if contact else None,
                 reached_at=_parse(contact["at"]) if contact else None))
         return members

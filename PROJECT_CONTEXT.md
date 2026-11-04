@@ -5539,6 +5539,11 @@ they're in sync).
        first day they posted or were in voice since joining (analytics' `member_active_days` and
        `voice_daily`), and who reached out (`new_member_contacts`, the latest). "Needs a hello":
        nothing after `HELLO_AFTER_DAYS` (3) and nobody's reached out. A menu marks reached out.
+       Activity shows as "Active N of M days" (days with a post or voice since the join day, of
+       the days from it through today), the owner's pick over a post count: no per-person
+       message counting, and a day count says more about sticking around than message volume.
+       Then voice time since joining, from voice ranks' `voice_daily` (minutes with someone else
+       there, up to 5h a day), when there is any: "Active 4 of 6 days · 2h 10m in voice".
      - **Weekly note**: Mondays from 10 AM Eastern, claimed in `new_member_state`, a DM to the owner
        naming members still waiting for a hello; nothing when nobody is. 82 tables.
 

@@ -20,7 +20,7 @@ from bot.cogs.anniversaries import ANNIVERSARY_CHANNEL_ID
 from bot.cogs.new_members import NewMembers
 from bot.db.database import Database
 from bot.uex.new_members import (
-    NEW_MEMBER_ROLE, NewMember, is_new, member_text, needs_hello, week_key, weekly_text,
+    NEW_MEMBER_ROLE, NewMember, is_new, member_text, needs_hello, voice_time, week_key, weekly_text,
 )
 
 UTC = timezone.utc
@@ -54,9 +54,13 @@ def test_a_members_lines_say_where_they_came_from_what_they_picked_and_whether_t
         f"<@5> · joined <t:{int(joined.timestamp())}:d> (4 days) · RSI org page",
         "-# Mining · Eastern · New Pilot",
         "⚠️ **Needs a hello**: no posts or voice in 4 days"]
-    active = member_text(NewMember(6, joined, None, [], date(2026, 11, 6), "Cheeno", NOW - timedelta(days=1)), NOW)
+    active = member_text(NewMember(6, joined, None, [], date(2026, 11, 6), 2, reached_by="Cheeno",
+                                   reached_at=NOW - timedelta(days=1)), NOW)
     assert "before join sources were tracked" in active and "No Onboarding picks" in active
-    assert "💬 Posted or in voice since Nov 6 · ✅ Reached out: Cheeno, Nov 8" in active
+    assert "💬 Active 2 of 5 days · ✅ Reached out: Cheeno, Nov 8" in active, "joined Nov 5, today Nov 9"
+    voice = member_text(NewMember(6, joined, "Reddit ad", [], date(2026, 11, 6), 3, voice_minutes=130), NOW)
+    assert "💬 Active 3 of 5 days · 2h 10m in voice" in voice
+    assert [voice_time(m) for m in (45, 60, 130)] == ["45m", "1h", "2h 10m"]
 
 
 def test_the_weekly_note_lists_only_members_still_waiting_and_is_skipped_when_nobody_is():
@@ -168,6 +172,9 @@ def test_new_members_lists_the_newest_first_with_source_picks_activity_and_who_r
         await db.record_member_movement(GUILD_ID, 10, "join", "2026-11-04 16:00:00", RSI)
         await db.record_member_movement(GUILD_ID, 12, "join", "2026-11-08 16:00:00", "sc1abc", 31)
         await db.mark_active_day(GUILD_ID, 11, "2026-11-08")
+        await db.credit_voice_minute(GUILD_ID, "2026-11-08", [(11, 1)], 300)
+        await db.credit_voice_minute(GUILD_ID, "2026-11-08", [(11, 1)], 300)
+        await db.credit_voice_minute(GUILD_ID, "2026-11-01", [(11, 1)], 300)  # before they joined
         await db.mark_active_day(GUILD_ID, 10, "2026-11-01")  # before they joined: doesn't count
         await db.mark_new_member_contacted(GUILD_ID, 12, OWNER, "2026-11-09 12:00:00")
         sent = []
@@ -193,7 +200,7 @@ def test_new_members_lists_the_newest_first_with_source_picks_activity_and_who_r
     assert order == ["<@12>", "<@11>", "<@10>"], "newest first; the owner and Kara aren't new"
     assert "Member referral (Kara)" in text
     assert "✅ Reached out: Cheeno, Nov 9" in text
-    assert "💬 Posted or in voice since Nov 8" in text
+    assert "💬 Active 1 of 3 days · 2m in voice" in text
     assert "RSI org page" in text and "-# Mining · Eastern" in text
     assert "⚠️ **Needs a hello**: no posts or voice in 5 days" in text
     assert "✅ Reached out: Mod, Nov 9" in after and "Needs a hello" not in after

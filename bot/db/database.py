@@ -5867,6 +5867,8 @@ class Database:
                     (guild_id, since[:10], guild_id, since[:10])),
                 "contacts": await rows("SELECT user_id, by_id, at FROM new_member_contacts WHERE guild_id = ?",
                                        (guild_id,)),
+                "voice": await rows("SELECT user_id, day, minutes FROM voice_daily WHERE guild_id = ? AND day >= ?",
+                                    (guild_id, since[:10])),
                 "labels": {r["code"]: r["label"] for r in await rows("SELECT code, label FROM invite_labels", ())},
             }
 
