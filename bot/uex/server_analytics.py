@@ -43,6 +43,7 @@ RETENTION_DAYS = 30       # joined 30-60 days before: still here and active in t
 WEEK_DAYS = 7
 ATTENDED_MINUTES = 30     # in the event's voice channel or Ops for this long: came to the event
 EVENT_OPEN_HOURS = 4      # a card nobody pressed Start on still counts this long from its start
+EVENT_STARTED_HOURS = 6   # a Started card nobody Ended stops counting this long after its start
 LAPSED_STEPS = (30, 60, 90)
 SHOW_ROWS = 5
 
@@ -90,25 +91,51 @@ class InviteUse:
     uses: int
     max_uses: int = 0  # 0 = no limit
     inviter_id: int | None = None  # the member who made it; None for a bot's or an unknown maker
+    expires_at: datetime | None = None
 
 
-def match_invite(before: dict[str, InviteUse], after: dict[str, InviteUse]) -> str | None:
-    """The invite a member just joined with: the one whose use count went up since `before`.
-    When none did, an invite that's gone and was one use from its limit (Discord deletes a
-    limited invite on its last use). Only ever one answer: two candidates - two joins at once,
-    say - is no answer, never a guess."""
-    grew = [code for code, now in after.items() if now.uses > before.get(code, InviteUse(0)).uses]
-    if grew:
-        return grew[0] if len(grew) == 1 else None
-    used_up = [code for code, was in before.items()
-               if code not in after and was.max_uses and was.uses + 1 >= was.max_uses]
-    return used_up[0] if len(used_up) == 1 else None
+# A limited invite deleted this long before a join was revoked, not used up by that join.
+USED_UP_GRACE = timedelta(seconds=60)
+
+
+def match_invite(before: dict[str, InviteUse], after: dict[str, InviteUse], *, now: datetime | None = None,
+                 deleted: dict[str, datetime] | None = None) -> str | None:
+    """The invite a member just joined with: the one whose use count went up since `before`, or
+    a limited invite that's gone and was one use from its limit (Discord deletes it on its last
+    use) - but not one that had expired, or was deleted well before the join (revoked: `deleted`
+    holds when each delete was seen). Only ever one answer: two candidates - two joins at once,
+    or a count that grew while a limited invite vanished - is no answer, never a guess."""
+    grew = [code for code, use in after.items() if use.uses > before.get(code, InviteUse(0)).uses]
+
+    def used_up(code: str, was: InviteUse) -> bool:
+        if code in after or not was.max_uses or was.uses + 1 < was.max_uses:
+            return False
+        if now is not None and was.expires_at is not None and was.expires_at <= now:
+            return False
+        seen = (deleted or {}).get(code)
+        return not (now is not None and seen is not None and now - seen > USED_UP_GRACE)
+
+    candidates = grew + [code for code, was in before.items() if used_up(code, was)]
+    return candidates[0] if len(candidates) == 1 else None
 
 
 def event_running(state: str, starts_at: int, now: int) -> bool:
     """Whether an event card's op is on now, for attendance: from Start (on the card or in
-    Discord) until it's ended - or, for one nobody started, from its start for EVENT_OPEN_HOURS."""
-    return state == "started" or (state == "open" and starts_at <= now < starts_at + EVENT_OPEN_HOURS * 3600)
+    Discord) until it's ended, at most EVENT_STARTED_HOURS after its start - or, for one nobody
+    started, from its start for EVENT_OPEN_HOURS. A card left Started isn't credited all day."""
+    if state == "started":
+        return now < starts_at + EVENT_STARTED_HOURS * 3600
+    return state == "open" and starts_at <= now < starts_at + EVENT_OPEN_HOURS * 3600
+
+
+def ops_card(cards: list[tuple[int, int]], now: int) -> int | None:
+    """Of the running cards as (card_id, starts_at), the one Ops channels count for this minute:
+    the latest to have started, else (all started early) the soonest. One op at a time, so two
+    overlapping cards never both claim the same people in Ops."""
+    if not cards:
+        return None
+    begun = [c for c in cards if c[1] <= now]
+    return (max(begun, key=lambda c: c[1]) if begun else min(cards, key=lambda c: c[1]))[0]
 
 
 def source_of(code: str | None, labels: dict[str, str], inviter_id: int | None = None) -> str:
@@ -234,6 +261,7 @@ class Report:
     best_times: list[str] = field(default_factory=list)
     best_from_joins: bool = True
     newcomer_since: datetime | None = None
+    lapsed_at: datetime | None = None   # when lapsed was measured (now, for a past month's report)
 
 
 def _here_at(movements: list[Movement], user_id: int, when: datetime) -> bool:
@@ -246,15 +274,24 @@ def _here_at(movements: list[Movement], user_id: int, when: datetime) -> bool:
 
 
 def _last_day(end: datetime) -> date:
-    """The last whole or part day before `end` (a midnight end belongs to the day before)."""
-    return (end - timedelta(seconds=1)).date()
+    """The last whole or part day before `end`, by the Eastern calendar (a midnight end belongs to
+    the day before), so a monthly report stops at the month's last day."""
+    return (end - timedelta(seconds=1)).astimezone(EASTERN).date()
+
+
+def _first_per_member(joins: list[Movement]) -> list[Movement]:
+    """Each member's first join of these: one who left and came back is one person, not two."""
+    first: dict[int, Movement] = {}
+    for join in sorted(joins, key=lambda j: j.at):
+        first.setdefault(join.user_id, join)
+    return list(first.values())
 
 
 def first_hello(joins: list[Movement], active: dict[int, set[date]], start: datetime,
                 end: datetime) -> tuple[int, int]:
     """Of members who joined from `start` until 7 days before `end` (so each had the full 7
     days), how many posted or joined voice by 7 days after joining: (said hello, joined)."""
-    eligible = [j for j in joins if start <= j.at < end - timedelta(days=FIRST_HELLO_DAYS)]
+    eligible = _first_per_member([j for j in joins if start <= j.at < end - timedelta(days=FIRST_HELLO_DAYS)])
     hello = sum(1 for j in eligible
                 if any(j.at.date() <= d <= (j.at + timedelta(days=FIRST_HELLO_DAYS)).date()
                        for d in active.get(j.user_id, ())))
@@ -263,12 +300,16 @@ def first_hello(joins: list[Movement], active: dict[int, set[date]], start: date
 
 def retention_cohort(joins: list[Movement], end: datetime) -> list[Movement]:
     """Members who joined 30-60 days before `end`: each has had a full 30 days."""
-    return [j for j in joins
-            if end - timedelta(days=2 * RETENTION_DAYS) <= j.at < end - timedelta(days=RETENTION_DAYS)]
+    return _first_per_member([j for j in joins
+                              if end - timedelta(days=2 * RETENTION_DAYS) <= j.at < end - timedelta(days=RETENTION_DAYS)])
 
 
-def kept(join: Movement, movements: list[Movement], active: dict[int, set[date]], end: datetime) -> bool:
-    """Still here at `end` and posted or joined voice in the 30 days before it."""
+def kept(join: Movement, movements: list[Movement], active: dict[int, set[date]], end: datetime,
+         present: set[int] | None = None) -> bool:
+    """Still here at `end` and posted or joined voice in the 30 days before it. `present`, when
+    given, is who's in the server now: a leave the bot missed while down still counts."""
+    if present is not None and join.user_id not in present:
+        return False
     last = _last_day(end)
     first = last - timedelta(days=RETENTION_DAYS - 1)
     return _here_at(movements, join.user_id, end) and any(first <= d <= last for d in active.get(join.user_id, ()))
@@ -338,7 +379,8 @@ def best_windows(grid: Counter, n: int = 3, width: int = WINDOW_HOURS) -> list[t
     scored.sort(key=lambda s: (-s[0], s[1], s[2]))
     chosen: list[tuple[int, int]] = []
     for _score, weekday, hour in scored:
-        if any(weekday == w and abs(hour - h) < width for w, h in chosen):
+        at = weekday * 24 + hour
+        if any(min((at - (w * 24 + h)) % 168, ((w * 24 + h) - at) % 168) < width for w, h in chosen):
             continue
         chosen.append((weekday, hour))
         if len(chosen) == n:
@@ -391,7 +433,8 @@ def build_report(*, title: str, start: datetime, end: datetime, tracking_since: 
                  labels: dict[str, str], moderation: list[ModAction] = (), bot_names: dict[int, str] | None = None,
                  moderation_from: datetime | None = None, referrer_names: dict[int, str] | None = None,
                  timezones: list[tuple[str, int]] | None = None, joined_all: list[datetime] = (),
-                 newcomer_since: datetime | None = None) -> Report:
+                 newcomer_since: datetime | None = None, present: set[int] | None = None,
+                 lapsed_at: datetime | None = None) -> Report:
     """Everything /server-stats and the monthly DM show, for `start` to `end`."""
     report = Report(title=title, start=start, end=end, tracking_since=tracking_since, chat_from=chat_from)
     joins = [m for m in movements if m.kind == "join"]
@@ -401,7 +444,7 @@ def build_report(*, title: str, start: datetime, end: datetime, tracking_since: 
     report.new_this_week = sum(1 for j in joins if end - timedelta(days=FIRST_HELLO_DAYS) <= j.at < end)
 
     cohort = retention_cohort(joins, end)
-    stayed = {id(j): kept(j, movements, active, end) for j in cohort}
+    stayed = {id(j): kept(j, movements, active, end, present) for j in cohort}
     report.retention = (sum(stayed.values()), len(cohort))
     per_source: dict[str, list[int]] = defaultdict(lambda: [0, 0, 0])
     referrals: Counter = Counter()
@@ -422,10 +465,12 @@ def build_report(*, title: str, start: datetime, end: datetime, tracking_since: 
 
     last = _last_day(end)
     week = last - timedelta(days=WEEK_DAYS - 1)
-    report.weekly_active = sum(1 for days in active.values() if any(week <= d <= last for d in days))
+    report.weekly_active = sum(1 for uid, days in active.items()
+                               if uid in members and any(week <= d <= last for d in days))
     report.member_count = len(members)
     report.ops = ops
-    report.lapsed, report.lapsed_known_from = lapsed_counts(members, last_active, seen_from, end)
+    report.lapsed_at = lapsed_at or end
+    report.lapsed, report.lapsed_known_from = lapsed_counts(members, last_active, seen_from, report.lapsed_at)
     report.peak_voice, report.peak_chat = peak_times(hours, max(start, tracking_since), end)
 
     named = {cid: count for cid, count in channel_counts.items() if cid in channel_names and count}
@@ -519,7 +564,9 @@ def report_blocks(report: Report) -> list[str]:
             steps.append(f"{count} silent {n}+ days")
         elif n in report.lapsed_known_from:
             steps.append(f"{n}+ days known from {_day(report.lapsed_known_from[n])}")
-    head.append("**Lapsed:** " + (" · ".join(steps) if steps else "not known yet"))
+    as_of = (f" (as of {_day(report.lapsed_at)})" if report.lapsed_at and report.lapsed_at - report.end > timedelta(hours=1)
+             else "")
+    head.append(f"**Lapsed{as_of}:** " + (" · ".join(steps) if steps else "not known yet"))
     blocks = ["\n".join(head)]
 
     if report.sources:
@@ -601,7 +648,11 @@ def joins_block(report: Report) -> str:
 
 def csv_cell(value) -> str:
     """A cell as text, with a leading = + - @ made harmless: a spreadsheet would run it as a formula."""
-    text = "" if value is None else str(value)
+    if value is None:
+        return ""
+    if isinstance(value, (int, float)):  # a number can't carry a formula, and -3 must stay a number
+        return str(value)
+    text = str(value)
     return "'" + text if text[:1] in ("=", "+", "-", "@") else text
 
 

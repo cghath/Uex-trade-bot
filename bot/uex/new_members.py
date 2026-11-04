@@ -34,6 +34,9 @@ NEW_MEMBER_DAYS = 21       # the role comes off after this many days
 MAX_DAYS = 90              # /new-members days: at most this far back
 PAGE_SIZE = 8
 PICK_GROUPS = ("activity", "timezone", "experience")  # the Onboarding picks shown for each member
+WEEKLY_TEXT_LIMIT = 1900    # under a DM's 2,000 characters
+EMPTY = {"needs-hello": "Nobody needs a hello right now.", "drifting": "Nobody is drifting right now.",
+         "settling": "Nobody is settling in right now."}
 
 # The flags' thresholds (the owner's, 2026-11-04): change them here.
 HELLO_AFTER_DAYS = 3        # 🔴 no posts or voice after this many days
@@ -136,7 +139,7 @@ def timezone_counts(zones: list[str | None]) -> list[tuple[str, int]]:
 
 def _md(text: str) -> str:
     """A name as plain text in Discord markdown."""
-    return re.sub(r"([\\*_~|`>])", r"\\\1", text)
+    return re.sub(r"([\\*_~|`>\[\]()<])", r"\\\1", text)  # [..](..) would be a link, <@..> a mention
 
 
 def days_here(member: NewMember, now: datetime) -> int:
@@ -285,7 +288,7 @@ def summary_text(members: list[NewMember], now: datetime, days: int, showing: st
     unfinished_count = sum(1 for member in members if unfinished(member))
     if unfinished_count:
         parts.append(f"⚠️ {unfinished_count} didn't finish Onboarding")
-    text = f"## 🌱 New members: last {days} days\n" + " · ".join(parts)
+    text = f"## 🌱 New members: last {_plural(days, 'day')}\n" + " · ".join(parts)
     if showing:
         emoji, name = FLAGS[showing]
         text += f"\nShowing {emoji} {name} only"
@@ -299,13 +302,18 @@ def weekly_text(members: list[NewMember], now: datetime) -> str | None:
     flagged = [m for m in members if flag(m, now) in (NEEDS_HELLO, DRIFTING)]
     if not flagged:
         return None
-    lines = [f"🌱 **New members this week: {' · '.join(_flag_parts(flag_counts(members, now), bold=False))}**"]
-    for member in flagged[:20]:
+    head = f"🌱 **New members this week: {' · '.join(_flag_parts(flag_counts(members, now), bold=False))}**"
+    foot = "-# `/new-members` has the full list and marks who's reached out."
+    lines, used = [head], len(head) + len(foot) + 40  # room for the "and N more" line
+    for shown, member in enumerate(flagged):
         emoji, _name = FLAGS[flag(member, now)]
-        lines.append(f"{emoji} <@{member.user_id}>: {reason(member, now)}" + (f" · {member.source}" if member.source else ""))
-    if len(flagged) > 20:
-        lines.append(f"- and {len(flagged) - 20} more")
-    lines.append("-# `/new-members` has the full list and marks who's reached out.")
+        line = f"{emoji} <@{member.user_id}>: {reason(member, now)}" + (f" · {member.source}" if member.source else "")
+        if used + len(line) + 1 > WEEKLY_TEXT_LIMIT:  # a DM's 2,000-character limit, by length not a row count
+            lines.append(f"- and {len(flagged) - shown} more")
+            break
+        lines.append(line)
+        used += len(line) + 1
+    lines.append(foot)
     return "\n".join(lines)
 
 

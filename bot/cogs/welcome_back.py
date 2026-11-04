@@ -30,6 +30,7 @@ import discord
 from discord.ext import commands, tasks
 
 from bot.cogs.anniversaries import ANNIVERSARY_CHANNEL_ID, next_event_line
+from bot.cogs.role_picker import INTRO_TYPES
 from bot.delivery import home_channel, send_dm
 from bot.discord_ui import BotDynamicItem
 from bot.uex.anniversaries import COMMUNITY_NAME, INACTIVE_DAYS, welcome_back_text
@@ -125,7 +126,8 @@ class WelcomeBack(commands.Cog):
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
         guild = self._guild()
-        if guild is None or message.guild is None or message.guild.id != guild.id or message.author.bot:
+        if (guild is None or message.guild is None or message.guild.id != guild.id or message.author.bot
+                or message.type not in INTRO_TYPES):  # Discord's own "X joined" isn't them coming back
             return
         member = message.author if isinstance(message.author, discord.Member) else guild.get_member(message.author.id)
         if member is not None:

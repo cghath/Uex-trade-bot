@@ -5564,8 +5564,8 @@ they're in sync).
      every member, to compare. On live data (2026-11-04): 355 of 400 members had no timezone
      role yet (the picker is new), and 28 of the 48 new members.
      - **`export:True`, owner only** (the owner's call: moderators keep the list, not the file).
-       `/new-members` sends `new-members-YYYY-MM-DD.csv` (17 columns: names, id, Eastern join
-       date, days, source, inviter, timezone, activities, experience, first active, active days,
+       `/new-members` sends `new-members-YYYY-MM-DD.csv` (18 columns: names, id, Eastern join
+       date, days, source, inviter, timezone, activities, experience, onboarding status, first active, active days,
        voice minutes, status, reached out by/when, still in server), built in memory, honouring
        `days:` and `status:`; with no status it also lists members who joined in the window and
        left (from the join log; status `left`). `/server-stats` sends `server-stats-YYYY-MM-DD.csv`
@@ -5591,6 +5591,38 @@ they're in sync).
        plus 10 per post (`NEWCOMER_POST_WEIGHT`), from join times until that series covers 14 days.
        All four histograms and the windows are in the CSV. The report now goes in as many messages
        as it needs (`stats_views`) instead of dropping trailing sections past Discord's limit.
+
+159. **Fixes from the 2026-11-04 range audit** (`8182235..2e30def`, PRs #150-#157; report local,
+     `docs/audits/2026-11-04-range-audit-2e30def.md`; a 9-agent workflow, 28 confirmed findings).
+     - **P1, system messages as posts:** Discord's own "X joined" message is authored by the member
+       who joined, so it marked every joiner active on their join day - first hello near 100%, 🔴
+       Needs a hello almost never, the newcomer series leaning to join hours. Analytics, the
+       history read and welcome-back now count only `INTRO_TYPES` (default, reply), as the role
+       picker already did. `clean_system_posts` re-reads the counted chat once
+       (`analytics_state.system_cleaned_at`) and takes system messages back out of the hour and
+       channel totals, and drops member-days that were only that (no real post, no voice).
+     - **Analytics:** lapsed waits for voice history too (`_seen_from`: the later of the chat seed
+       and voice ranks' first day); a rejoin is one person in first hello and retention
+       (`_first_per_member`); retention and weekly active count only members here now (`present`,
+       for a report ending now); Ops counts for one running card a minute (`ops_card`, the newest)
+       and a Started card stops at 6 hours (`EVENT_STARTED_HOURS`); report days follow the Eastern
+       calendar (`first_day`/`last_day`, `_last_day`); lapsed says "as of" when measured after the
+       period; the monthly DM is built before it's claimed; best windows don't overlap across
+       midnight; negative numbers stay numbers in the CSV.
+     - **Joins and moderation:** a network error reading invites leaves the source unknown instead
+       of dropping the join (`_INVITE_ERRORS`); `match_invite` takes grown and used-up invites as one
+       candidate set and skips an expired one or one deleted over a minute before the join
+       (`on_invite_delete`, `USED_UP_GRACE`); the audit log is read back from the last completed
+       read (`audit_checked_at`), not the newest entry; invite links lose `?event=`.
+     - **New members:** the weekly note is cut by length (under a DM's 2,000 characters), built
+       before it's claimed and released on a passing failure; a reached-out from before a rejoin is
+       ignored; the role waits for Rules Screening (`member.pending`, `on_member_update`, as
+       welcome.py); Moderate Members only counts in the home server; pages are measured
+       (`_paginate`) so nobody drops off; the view greys out (`origin`); `_md` escapes link and
+       mention syntax; empty lists and "1 day" read right.
+     - **Event roles (PR #150):** a trailing count is read first, so a form saved unchanged keeps
+       "2 Seat Gunner 1" as that role, not "Seat Gunner 1" with 2 spots; the count needs a space or
+       separator, so "Pilot Mk2" is refused rather than read as "Pilot Mk", 2.
 
 ## Where to look for what
 

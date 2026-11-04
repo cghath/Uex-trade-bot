@@ -25,7 +25,7 @@ from bot.cogs.voice_ranks import OPS_CATEGORY_ID
 from bot.db.database import Database
 from bot.discord_ui import LAYOUT_TEXT_LIMIT
 from bot.uex.server_analytics import (
-    DEFAULT_INVITE_LABELS, best_windows, join_histogram, joins_block, window_label, MEMBER_REFERRAL, NO_INVITE, UNKNOWN_INVITE, EventResult, InviteUse, ModAction, Movement, build_report,
+    DEFAULT_INVITE_LABELS, best_windows, csv_cell, ops_card, join_histogram, joins_block, window_label, MEMBER_REFERRAL, NO_INVITE, UNKNOWN_INVITE, EventResult, InviteUse, ModAction, Movement, build_report,
     event_kinds, event_running, first_hello, kept, lapsed_counts, match_invite, moderation_block, moderation_kind,
     peak_times, previous_month, report_blocks, report_csv, retention_cohort, slot_label, source_of,
 )
@@ -205,8 +205,8 @@ async def _make(tmp_path, guild):
     return cog, db, clock, owner
 
 
-def _message(author, channel, at):
-    return NS(guild=NS(id=GUILD_ID), author=author, channel=channel, created_at=at)
+def _message(author, channel, at, kind=discord.MessageType.default):
+    return NS(guild=NS(id=GUILD_ID), author=author, channel=channel, created_at=at, type=kind)
 
 
 # -- the database -----------------------------------------------------------------
@@ -461,7 +461,7 @@ def test_the_audit_log_is_read_back_once_per_entry_and_without_view_audit_log_it
         return first, again, [tuple(r) for r in rows], read_from, blocks
 
     first, again, rows, read_from, blocks = asyncio.run(run())
-    assert (first, again) == (2, 1), "the second read goes back a day before the newest entry"
+    assert (first, again) == (2, 0), "the second read goes back a day before the last read, not the newest entry"
     assert rows == [(2, "timeout", 1), (3, "deleted", 15), (4, "ban", 1)], "once each, the higher count kept"
     assert read_from == "2026-09-20 15:00:00"
     assert "Bans **1** · kicks **0** · timeouts **1** · deleted messages **15** · AutoMod actions **0**" in blocks[-1]
@@ -613,3 +613,202 @@ def test_a_long_report_goes_in_more_messages_rather_than_losing_a_section():
     views = stats_views(["a" * 3000, "b" * 3000, "c" * 100])
     texts = [[c.content for c in v.walk_children() if hasattr(c, "content")] for v in views]
     assert [len(t) for t in texts] == [1, 2] and texts[1][1] == "c" * 100
+
+
+# -- the 2026-11-04 audit fixes ---------------------------------------------------------
+
+def test_discords_own_join_message_and_other_system_posts_are_never_counted_as_posts(tmp_path):
+    async def run():
+        new = _member(10, joined=T0)
+        new.guild = None
+        general = FakeChannel(5, "general")
+        guild = FakeGuild(text=[general], members=[new])
+        cog, db, _clock, _owner = await _make(tmp_path, guild)
+        await cog.minute(T0)
+        await cog.on_message(_message(new, general, T0 + timedelta(minutes=1), kind=discord.MessageType.new_member))
+        await cog.on_message(_message(new, general, T0 + timedelta(minutes=2), kind=discord.MessageType.pins_add))
+        await cog.minute(T0 + timedelta(minutes=3))
+        async with db.connect() as conn:
+            days = await (await conn.execute("SELECT COUNT(*) FROM member_active_days")).fetchone()
+            hours = await (await conn.execute("SELECT COUNT(*) FROM activity_hours WHERE messages > 0")).fetchone()
+        return days[0], hours[0]
+
+    assert asyncio.run(run()) == (0, 0)
+
+
+def test_the_one_time_clean_up_takes_system_posts_back_out_of_the_counts(tmp_path):
+    async def run():
+        joiner, chatty = _member(1, joined=T0 - timedelta(days=3)), _member(2)
+        day = T0 - timedelta(days=3)
+        general = FakeChannel(5, "general", history=[
+            _message(joiner, None, day, kind=discord.MessageType.new_member),       # only the join message
+            _message(chatty, None, day, kind=discord.MessageType.new_member),
+            _message(chatty, None, day + timedelta(minutes=5))])                    # and a real post
+        guild = FakeGuild(text=[general], members=[joiner, chatty])
+        cog, db, _clock, _owner = await _make(tmp_path, guild)
+        state = await cog._start(guild)
+        # as the old code counted them: all three posts, both members active that day
+        await db.seed_analytics_history(GUILD_ID, {(1, day.strftime("%Y-%m-%d")), (2, day.strftime("%Y-%m-%d"))},
+                                        {day.strftime("%Y-%m-%d %H"): 3}, {(5, day.strftime("%Y-%m-%d")): 3})
+        state["history_read_at"] = "done"
+        dropped = await cog.clean_system_posts(guild, T0 + timedelta(minutes=10))
+        again = await cog.clean_system_posts(guild, T0 + timedelta(minutes=10))
+        async with db.connect() as conn:
+            days = await (await conn.execute("SELECT user_id FROM member_active_days")).fetchall()
+            hours = await (await conn.execute("SELECT messages FROM activity_hours")).fetchone()
+            chans = await (await conn.execute("SELECT messages FROM channel_days")).fetchone()
+        return dropped, again, [r[0] for r in days], hours[0], chans[0]
+
+    dropped, again, days, hours, chans = asyncio.run(run())
+    assert (dropped, again) == (1, 0), "once"
+    assert days == [2], "the member who only had a join message isn't active that day"
+    assert (hours, chans) == (1, 1), "the two join messages come off the totals"
+
+
+def test_an_invite_is_matched_only_when_its_the_one_candidate_and_was_really_used():
+    now = T0
+    assert match_invite({RSI: InviteUse(3), "once": InviteUse(0, 1)}, {RSI: InviteUse(4)}, now=now) is None, (
+        "a count grew and a limited invite vanished: two candidates")
+    expired = {"old": InviteUse(0, 1, None, now - timedelta(hours=1)), RSI: InviteUse(3)}
+    assert match_invite(expired, {RSI: InviteUse(3)}, now=now) is None, "expired, not used"
+    assert match_invite({"rev": InviteUse(0, 1), RSI: InviteUse(3)}, {RSI: InviteUse(3)}, now=now,
+                        deleted={"rev": now - timedelta(hours=2)}) is None, "revoked well before the join"
+    assert match_invite({"used": InviteUse(0, 1), RSI: InviteUse(3)}, {RSI: InviteUse(3)}, now=now,
+                        deleted={"used": now - timedelta(seconds=5)}) == "used", "deleted by its last use"
+
+
+def test_a_join_is_recorded_even_when_reading_invites_fails_at_the_network(tmp_path):
+    async def run():
+        guild = FakeGuild(invites=[_invite(RSI, 1)])
+        cog, db, _clock, _owner = await _make(tmp_path, guild)
+        await cog.minute(T0)
+
+        async def broken():
+            raise OSError("connection reset")
+
+        guild.invites = broken
+        joiner = _member(10, joined=T0)
+        joiner.guild = guild
+        await cog.on_member_join(joiner)
+        async with db.connect() as conn:
+            return [tuple(r) for r in await (await conn.execute("SELECT user_id, invite_code FROM member_movements")).fetchall()]
+
+    assert asyncio.run(run()) == [(10, None)]
+
+
+def test_invite_links_with_an_event_or_fragment_give_the_bare_code():
+    assert invite_code("https://discord.gg/abcDEF?event=1234") == "abcDEF"
+    assert invite_code("discord.gg/abcDEF#x") == "abcDEF"
+
+
+def test_a_started_card_stops_counting_and_only_one_card_holds_ops_at_a_time():
+    start = int(T0.timestamp())
+    assert event_running("started", start, start + 5 * 3600)
+    assert not event_running("started", start, start + 6 * 3600), "a card left Started all evening"
+    assert ops_card([(1, start - 3600), (2, start)], start + 60) == 2, "the newest op"
+    assert ops_card([(1, start + 3600), (2, start + 1800)], start) == 2, "both started early: the soonest"
+    assert ops_card([], start) is None
+
+
+def test_overlapping_cards_dont_both_count_the_same_people_in_ops(tmp_path):
+    async def run():
+        a, b = _member(1), _member(2)
+        ops = FakeChannel(7, "Ops 1", members=[a, b], category_id=OPS_CATEGORY_ID)
+        own = FakeChannel(8, "Mining VC", members=[a])
+        guild = FakeGuild(voice=[ops, own], members=[a, b])
+        cog, db, _clock, _owner = await _make(tmp_path, guild)
+        await cog._start(guild)
+        older = await db.create_event_card(guild_id=GUILD_ID, event_id=1, starts_at=int(T0.timestamp()) - 3600,
+                                           channel_id=1, repeats=None, name="Old op", voice_channel_id=8)
+        newer = await db.create_event_card(guild_id=GUILD_ID, event_id=2, starts_at=int(T0.timestamp()) - 60,
+                                           channel_id=1, repeats=None, name="New op", voice_channel_id=None)
+        await cog.count_attendance(guild, T0)
+        async with db.connect() as conn:
+            rows = await (await conn.execute("SELECT card_id, user_id FROM event_attendance ORDER BY card_id, user_id")).fetchall()
+        return [tuple(r) for r in rows], older, newer
+
+    rows, older, newer = asyncio.run(run())
+    assert rows == [(older, 1), (newer, 1), (newer, 2)], "Ops counts for the newer op; the older keeps its own channel"
+
+
+def test_a_member_who_left_and_rejoined_is_one_person_in_retention_and_first_hello():
+    end = T0 + timedelta(days=45)
+    moves = [Movement(1, "join", T0 - timedelta(days=5)), Movement(1, "leave", T0),
+             Movement(1, "join", T0 + timedelta(days=5)), Movement(2, "join", T0)]
+    active = {1: {(end - timedelta(days=2)).date()}, 2: set()}
+    joins = [m for m in moves if m.kind == "join"]
+    cohort = retention_cohort(joins, end)
+    assert [j.user_id for j in cohort] == [1, 2]
+    assert first_hello(joins, active, T0 - timedelta(days=10), end) == (0, 2)
+    assert kept(cohort[0], moves, active, end) and not kept(cohort[0], moves, active, end, present={2}), (
+        "a leave the bot missed: not in the server now, so not kept")
+
+
+def test_weekly_active_counts_only_members_still_here_and_lapsed_waits_for_voice_history():
+    report = build_report(title="t", start=T0 - timedelta(days=30), end=T0, tracking_since=T0, chat_from=None,
+                          movements=[], active={1: {T0.date()}, 99: {T0.date()}}, members={1: T0 - timedelta(days=200)},
+                          last_active={}, seen_from=None, hours=[], channel_counts={}, channel_names={}, ops=[],
+                          events=[], labels={})
+    assert report.weekly_active == 1, "member 99 posted and was banned"
+    seen = ServerAnalytics._seen_from("2026-10-30 12:00:00", "2026-10-26")
+    assert seen == datetime(2026, 10, 26, tzinfo=UTC), "voice history starts later than chat's"
+    assert ServerAnalytics._seen_from("2026-10-30 12:00:00", None) is None
+
+
+def test_best_windows_dont_overlap_across_midnight_and_numbers_stay_numbers_in_the_csv():
+    grid = Counter({(0, 23): 10, (1, 0): 10, (3, 20): 2})
+    assert best_windows(grid)[:2] == [(0, 23), (3, 19)], "Mon 11 PM-1 AM already covers Tue 12 AM"
+    assert csv_cell(-3) == "-3" and csv_cell("-3") == "'-3" and csv_cell(2.5) == "2.5"
+
+
+def test_a_monthly_report_that_fails_to_build_is_tried_again_not_lost(tmp_path):
+    async def run():
+        guild = FakeGuild(text=[FakeChannel(5, "general")], members=[_member(1)])
+        cog, _db, _clock, owner = await _make(tmp_path, guild)
+        state = await cog._start(guild)
+        state["tracking_since"] = "2026-11-01 00:00:00"
+        real = cog.report
+
+        async def broken(*args, **kwargs):
+            raise RuntimeError("database is locked")
+
+        cog.report = broken
+        try:
+            await cog.send_monthly(datetime(2026, 12, 1, 15, tzinfo=UTC))
+        except RuntimeError:
+            pass
+        cog.report = real
+        retried = await cog.send_monthly(datetime(2026, 12, 1, 16, tzinfo=UTC))
+        return retried, len(owner.sent)
+
+    assert asyncio.run(run()) == (True, 1)
+
+
+def test_the_audit_log_is_read_back_from_the_last_completed_read(tmp_path):
+    async def run():
+        guild = FakeGuild()
+        seen = []
+
+        async def audit_logs(*, limit=None, after=None, action=None):
+            seen.append(after)
+            return
+            yield
+
+        guild.audit_logs = audit_logs
+        cog, db, _clock, _owner = await _make(tmp_path, guild)
+        await cog.catch_up_audit_log(guild, T0 - timedelta(days=3))
+        # a live entry recorded right after a restart three days later
+        await db.record_moderation_actions(GUILD_ID, [(9, "deleted", "2026-11-04 15:00:00", 1, 8, False, 50)])
+        seen.clear()
+        await cog.catch_up_audit_log(guild, T0)
+        return seen[0]
+
+    assert asyncio.run(run()) == T0 - timedelta(days=4), "not a day before the live entry"
+
+
+def test_lapsed_in_a_past_months_report_says_when_it_was_measured():
+    report = build_report(title="October 2026", start=T0 - timedelta(days=30), end=T0, tracking_since=T0,
+                          chat_from=None, movements=[], active={}, members={}, last_active={},
+                          seen_from=T0 - timedelta(days=100), hours=[], channel_counts={}, channel_names={}, ops=[],
+                          events=[], labels={}, lapsed_at=T0 + timedelta(days=1))
+    assert "**Lapsed (as of Nov 5):** 0 silent 30+ days" in report_blocks(report)[0]

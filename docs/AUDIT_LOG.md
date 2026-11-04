@@ -14,18 +14,19 @@ any `main` sync under **Syncs to main**. Audit reports stay local (`docs/audits/
 
 ## Status
 
-- **Audited up to:** `2342dfc` (2026-10-30). The 2026-10-30 full audit covered `0e8818b..2342dfc`
-  and swept the whole repo; the 2026-10-03 range audit covered `cffa68e..0e8818b`; the 2026-09-25
-  full-project audit covered everything up to `cffa68e`.
-- **Not yet audited:** `2342dfc..TestBranch` (nothing as of 2026-10-30). The next audit starts at
-  `2342dfc`.
+- **Audited up to:** `2342dfc` (2026-10-30), and separately `8182235..2e30def` (2026-11-04, PRs
+  #150-#157). The 2026-10-30 full audit covered `0e8818b..2342dfc` and swept the whole repo; the
+  2026-10-03 range audit covered `cffa68e..0e8818b`; the 2026-09-25 full-project audit covered
+  everything up to `cffa68e`.
+- **Not yet audited:** `2342dfc..8182235` (production PRs #147 and #148, 2026-10-30) and
+  everything after `2e30def` (the 2026-11-04 fixes, PR #158, onward). A `main` sync past `2342dfc`
+  needs #147 and #148 audited first, since they sit between the two audited ranges.
 - **Open findings:** from 2026-10-30, none to speak of: the P2s and EVT-6/EVT-7 are fixed by
   production PR #147, the rest by PR #148 (neither audited yet), except four left by decision
   (EVT-15, EVT-16, ROLE-6, TEST-1). From 2026-10-03, all fixed by PR #148 except LOGIC-6 (shown
   unreachable), MSG-9's second half and `/marketplace-index-status`'s visibility (UX-10). The next
-  audit starts at `2342dfc` and covers both PRs.
-- **`main`:** at `865a3b3` (production PR #95, 2026-09-30). Everything up to `2342dfc` is audited,
-  but the owner holds the sync until the audits' findings are fixed (2026-10-03).
+  audit starts at `2342dfc` and covers both PRs. From 2026-11-04: all 28 fixed by PR #158.
+- **`main`:** at `81eae90` (production PR #149, 2026-11-03), synced up to the audited `2342dfc`.
 
 ## Audits
 
@@ -35,6 +36,7 @@ one. The 2026-09-25 audit re-read the whole repo, so it supersedes everything be
 
 | Date | Commits covered | Kind | Report (local) | Result |
 |---|---|---|---|---|
+| 2026-11-04 | `8182235..2e30def` (8 merges, entries 152 and 154-158, production PRs #150-#157) | Range audit: a workflow of 9 read-only agents - 4 reviewers (analytics core; joins, invites, moderation; new members; events and cross-cutting), a skeptic per reviewer, a completeness critic | `docs/audits/2026-11-04-range-audit-2e30def.md` | 28 confirmed (1 P1, 8 P2, 19 P3), 2 rejected. P1: Discord's "X joined" message counted as a first post. All fixed in PR #158 (entry 159) |
 | 2026-10-30 | `0e8818b..2342dfc` (75 commits, entries ~131-152, production PRs #116-#146), plus a whole-repo pattern sweep | Full audit: a workflow of 31 read-only agents - 9 auditors (COMM, SAFE, EVLOGIC, TRADE, UX, MSG, DATA, XCUT, REG), a re-check of the 37 open 2026-10-03 findings, a skeptic per P0-P2 finding, a completeness critic and 3 gap auditors; read-only live checks on the Pi | `docs/audits/2026-10-30-full-audit-2342dfc.md` | 81 raw findings, merged to 7 P2 and ~45 P3; no P0/P1. EVT-1 (card redraws strip the Org Events mention) confirmed live and explains the PR #144 deploy note; 11 of the 37 old findings fixed |
 | 2026-10-03 | `cffa68e..0e8818b` (88 commits, entries 87-130, production PRs #64-#115) | Range audit: 4 read-only auditors (REL, UX, MSG, LOGIC), coordinated; each re-checked the 2026-09-25 fixes in its area | `docs/audits/2026-10-03-range-audit-0e8818b.md` | 37 findings (9 REL, 12 UX, 9 MSG, 7 LOGIC); no P0; 1 P1 (REL-1, the 48h relist trusting a delete's "ok") until PR #115 is proven; most 2026-09-25 fixes closed, the rest partly closed with siblings left |
 | 2026-09-25 | whole repo at `cffa68e` | Full-project audit: 3 read-only auditors (UX, MSG, REL), coordinated | `docs/audits/2026-09-25-full-project-audit.md` | 58 findings (20 UX, 21 MSG, 17 REL); fixed in entries 87-112, re-checked by the 2026-10-03 audit |
@@ -65,3 +67,4 @@ Not production: the 2026-09-17 audit of the aiv2 fork (`docs/audits/2026-09-17-a
 | Date | PR | `main` after | Audited? |
 |---|---|---|---|
 | 2026-09-30 | production PR #95 | `865a3b3` | Partly: up to `cffa68e`; `cffa68e..865a3b3` (33 commits) synced before this rule |
+| 2026-11-03 | production PR #149 | `81eae90` | Yes: up to `2342dfc` |

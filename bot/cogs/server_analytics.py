@@ -25,6 +25,8 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+
+import aiohttp
 from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta
 
@@ -33,6 +35,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from bot.cogs.anniversaries import ANNIVERSARY_CHANNEL_ID
+from bot.cogs.role_picker import INTRO_TYPES
 from bot.cogs.voice_ranks import OPS_CATEGORY_ID
 from bot.cogs.welcome_back import recent_threads
 from bot.delivery import Delivery, home_channel, send_dm
@@ -40,7 +43,7 @@ from bot.discord_ui import LAYOUT_TEXT_LIMIT, BotLayoutView
 from bot.uex.anniversaries import COMMUNITY_NAME, INACTIVE_DAYS
 from bot.uex.server_analytics import (
     MEMBER_REFERRAL, ATTENDED_MINUTES, AUDIT_LOG_DAYS, DAY_FORMAT, EASTERN, HOUR_FORMAT, PERIOD_DAYS, RETENTION_DAYS, TIME_FORMAT, UTC,
-    EventResult, InviteUse, ModAction, Movement, build_report, clean_label, event_running, match_invite,
+    EventResult, InviteUse, ModAction, Movement, build_report, clean_label, event_running, match_invite, ops_card,
     Report, moderation_kind, previous_month, report_blocks, report_csv, source_of,
 )
 from bot.uex.new_members import is_new, member_picks, onboarding_status, timezone_counts, zone_bucket
@@ -122,7 +125,12 @@ def _inviter(invite) -> int | None:
 
 
 def _uses(invite) -> InviteUse:
-    return InviteUse(invite.uses or 0, invite.max_uses or 0, _inviter(invite))
+    return InviteUse(invite.uses or 0, invite.max_uses or 0, _inviter(invite), getattr(invite, "expires_at", None))
+
+
+# Reading invites can fail at the network too, not only with an HTTP error: either way the
+# join's source is unknown, never a lost join.
+_INVITE_ERRORS = (discord.HTTPException, OSError, asyncio.TimeoutError, aiohttp.ClientError)
 
 
 def _who(user) -> str:
@@ -130,14 +138,16 @@ def _who(user) -> str:
 
 
 def invite_code(text: str) -> str:
-    """The code from a pasted invite link or a bare code."""
-    return text.strip().rstrip("/").rsplit("/", 1)[-1]
+    """The code from a pasted invite link or a bare code (an event link's ?event=... dropped)."""
+    return text.strip().split("?", 1)[0].split("#", 1)[0].rstrip("/").rsplit("/", 1)[-1]
 
 
 class ServerAnalytics(commands.Cog):
     def __init__(self, bot: commands.Bot, *, start_loop: bool = True) -> None:
         self.bot = bot
         self.invites: dict[str, InviteUse] | None = None  # use counts as last read
+        self._deleted: dict[str, datetime] = {}           # invite code -> when its delete was seen
+        self._started = datetime.now(UTC)                  # posts before this were counted by the old rules
         self._invite_lock = asyncio.Lock()
         self._invites_warned = False
         self._audit_warned = False
@@ -179,7 +189,10 @@ class ServerAnalytics(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
-        if message.guild is None or message.author.bot or self._ours(message.guild.id) is None:
+        # Only real posts: Discord's own "X joined" message is authored by the member who joined,
+        # and boosts, pins and the like are system messages too (audit 2026-11-04).
+        if (message.guild is None or message.author.bot or message.type not in INTRO_TYPES
+                or self._ours(message.guild.id) is None):
             return
         moment = message.created_at
         if self._state is not None:  # tracking has begun: the history read covers what came before
@@ -219,6 +232,10 @@ class ServerAnalytics(commands.Cog):
             return
         try:
             code, inviter = await self.joined_with(guild)
+        except Exception:  # the join still counts, its source unknown
+            logger.exception("Matching member %s's invite failed", member.id)
+            code = inviter = None
+        try:
             await self.bot.db.record_member_movement(guild.id, member.id, "join", _time(self.now()), code, inviter)
             logger.info("Member %s joined (invite %s%s)", member.id, code or "not known",
                         f", made by {inviter}" if inviter else "")
@@ -240,10 +257,16 @@ class ServerAnalytics(commands.Cog):
         if self.invites is not None and invite.guild is not None and self._ours(invite.guild.id) is not None:
             self.invites[invite.code] = _uses(invite)
 
+    @commands.Cog.listener()
+    async def on_invite_delete(self, invite: discord.Invite) -> None:
+        """Note when: a limited invite deleted well before a join was revoked, not used up by it."""
+        if invite.guild is not None and self._ours(invite.guild.id) is not None:
+            self._deleted[invite.code] = self.now()
+
     async def _read_invites(self, guild: discord.Guild) -> list[discord.Invite] | None:
         try:
             invites = await guild.invites()
-        except discord.HTTPException as exc:
+        except _INVITE_ERRORS as exc:
             if not self._invites_warned:
                 logger.warning("Can't read invites (the bot needs Manage Server), so join sources aren't known: %s", exc)
             self._invites_warned = True
@@ -264,7 +287,7 @@ class ServerAnalytics(commands.Cog):
             if after is None:
                 return None, None
             before, self.invites = self.invites, after
-            code = match_invite(before, after) if before is not None else None
+            code = match_invite(before, after, now=self.now(), deleted=self._deleted) if before is not None else None
             if code is None:
                 return None, None
             used = after.get(code) or before.get(code)
@@ -342,8 +365,10 @@ class ServerAnalytics(commands.Cog):
             return
         channels = list(guild.voice_channels) + list(guild.stage_channels)
         ops = {c.id for c in channels if c.category_id == OPS_CATEGORY_ID}
+        ops_for = ops_card([(c["card_id"], c["starts_at"]) for c in cards], stamp)  # one op holds Ops at a time
         for card in cards:
-            where = ops | ({card["voice_channel_id"]} if card["voice_channel_id"] else set())
+            where = (ops if card["card_id"] == ops_for else set()) | (
+                {card["voice_channel_id"]} if card["voice_channel_id"] else set())
             present = sorted({m.id for c in channels if c.id in where for m in c.members if counts(m)})
             if present:
                 await self.bot.db.credit_event_minute(card["card_id"], present)
@@ -387,12 +412,16 @@ class ServerAnalytics(commands.Cog):
         await self.bot.wait_until_ready()
 
     async def catch_up_audit_log(self, guild: discord.Guild, now: datetime) -> int:
-        """Read the audit log back from a day before the newest entry kept (the first time, as far
-        as Discord keeps it), so anything missed while the bot was down is counted - once, by id."""
+        """Read the audit log back from a day before the last completed read (the first time, as far
+        as Discord keeps it), so anything missed while the bot was down is counted - once, by id.
+        From the last read, not the newest entry kept: a live entry recorded just after a restart
+        would otherwise hide the downtime before it."""
         state = await self._start(guild)
-        latest = await self.bot.db.latest_moderation_action(guild.id)
         oldest = now - timedelta(days=AUDIT_LOG_DAYS)
-        after = max(_parse(latest) - timedelta(days=1), oldest) if latest else oldest
+        checked = state.get("audit_checked_at")
+        latest = None if checked else await self.bot.db.latest_moderation_action(guild.id)
+        mark = checked or latest
+        after = max(_parse(mark) - timedelta(days=1), oldest) if mark else oldest
         rows = []
         for name in AUDIT_ACTIONS:
             try:
@@ -408,9 +437,10 @@ class ServerAnalytics(commands.Cog):
                 return 0
         self._audit_warned = False
         first = _time(after) if state.get("audit_read_from") is None else None
-        await self.bot.db.record_moderation_actions(guild.id, rows, read_from=first)
+        await self.bot.db.record_moderation_actions(guild.id, rows, read_from=first, checked_at=_time(now))
         if first is not None:
             state["audit_read_from"] = first
+        state["audit_checked_at"] = _time(now)
         return len(rows)
 
     # -- the one-time read ----------------------------------------------------
@@ -423,6 +453,7 @@ class ServerAnalytics(commands.Cog):
                 state = await self._start(guild)
                 if state["history_read_at"] is None:
                     await self.read_chat_history(guild, _parse(state["tracking_since"]))
+                await self.clean_system_posts(guild, self._started)
         except Exception:
             logger.exception("Reading chat history for server analytics failed; it's tried again on the next start")
 
@@ -444,7 +475,7 @@ class ServerAnalytics(commands.Cog):
                 continue
             try:
                 async for message in channel.history(after=since, before=until, limit=None):
-                    if message.author.bot:
+                    if message.author.bot or message.type not in INTRO_TYPES:
                         continue
                     day = message.created_at.strftime(DAY_FORMAT)
                     days.add((message.author.id, day))
@@ -459,6 +490,48 @@ class ServerAnalytics(commands.Cog):
             logger.info("Server analytics read %d days of chat: %d posts across %d channels", HISTORY_DAYS,
                         sum(hours.values()), read)
 
+    async def clean_system_posts(self, guild: discord.Guild, until: datetime) -> int:
+        """Once (audit 2026-11-04): until then Discord's system messages - the member's own "X
+        joined" one, boosts, pins - were counted as posts. Re-read the chat those counts cover and
+        take them back out: from the hour and channel totals, and a member's day where that was
+        all there was (no real post, no voice). Recorded in one transaction with the done mark."""
+        state = await self._start(guild)
+        if state.get("system_cleaned_at") is not None or state["history_read_at"] is None:
+            return 0
+        tracking = _parse(state["tracking_since"])
+        since = tracking - timedelta(days=HISTORY_DAYS)
+        real: set[tuple[int, str]] = set()
+        system: set[tuple[int, str]] = set()
+        hours: Counter = Counter()
+        new_hours: Counter = Counter()
+        per_channel: Counter = Counter()
+        for channel in list(guild.text_channels) + list(guild.voice_channels) + await recent_threads(guild, since):
+            if not _readable(channel, guild.me):
+                continue
+            try:
+                async for message in channel.history(after=since, before=until, limit=None):
+                    if message.author.bot:
+                        continue
+                    moment = message.created_at
+                    key = (message.author.id, moment.strftime(DAY_FORMAT))
+                    if message.type in INTRO_TYPES:
+                        real.add(key)
+                        continue
+                    system.add(key)
+                    hours[moment.strftime(HOUR_FORMAT)] += 1
+                    per_channel[(_channel_id(channel), key[1])] += 1
+                    if moment >= tracking and is_new(getattr(message.author, "joined_at", None), moment):
+                        new_hours[moment.strftime(HOUR_FORMAT)] += 1  # only live counting had a newcomer series
+            except discord.HTTPException as exc:
+                logger.warning("Couldn't read history in channel %s: %s", channel.id, exc)
+        voice = await self.bot.db.voice_day_pairs(guild.id, since.strftime(DAY_FORMAT))
+        drop = {key for key in system if key not in real and key not in voice}
+        if await self.bot.db.remove_system_posts(guild.id, drop, dict(hours), dict(new_hours), dict(per_channel)):
+            state["system_cleaned_at"] = _time(self.now())
+            logger.info("Server analytics took out %d system messages (%d member-days that were only that)",
+                        sum(hours.values()), len(drop))
+        return len(drop)
+
     # -- the report -----------------------------------------------------------
 
     async def report(self, guild: discord.Guild, start: datetime, end: datetime, title: str) -> list[str]:
@@ -468,7 +541,9 @@ class ServerAnalytics(commands.Cog):
         since = min(start, end - timedelta(days=2 * RETENTION_DAYS))
         data = await self.bot.db.analytics_data(guild.id, _time(start), _time(end), _time(since),
                                                 int(start.timestamp()), int(end.timestamp()), ATTENDED_MINUTES,
-                                                mod_since=_time(start - (end - start)))
+                                                mod_since=_time(start - (end - start)),
+                                                first_day=start.astimezone(EASTERN).date().isoformat(),
+                                                last_day=(end - timedelta(seconds=1)).astimezone(EASTERN).date().isoformat())
         state = data["state"] or await self._start(guild)
         tracking = _parse(state["tracking_since"])
         chat_from = tracking - timedelta(days=HISTORY_DAYS) if state["history_read_at"] else tracking
@@ -490,7 +565,7 @@ class ServerAnalytics(commands.Cog):
             active=active,
             members={m.id: m.joined_at for m in guild.members if not m.bot and m.joined_at is not None},
             last_active={r["user_id"]: _parse(r["last_active"]) for r in data["last_active"]},
-            seen_from=_parse(seeded) - timedelta(days=INACTIVE_DAYS) if seeded else None,
+            seen_from=self._seen_from(seeded, data["voice_history_start"]),
             hours=[(datetime.strptime(r["hour"], HOUR_FORMAT).replace(tzinfo=UTC), r["messages"], r["voice_minutes"],
                     r["new_messages"], r["new_voice_minutes"]) for r in data["hours"]],
             channel_counts={r["channel_id"]: r["messages"] for r in data["channels"]},
@@ -505,7 +580,11 @@ class ServerAnalytics(commands.Cog):
             timezones=await self._timezones(guild),
             joined_all=[m.joined_at for m in guild.members if not m.bot and m.joined_at is not None],
             newcomer_since=(datetime.strptime(data["newcomer_since"], HOUR_FORMAT).replace(tzinfo=UTC)
-                            if data["newcomer_since"] else None))
+                            if data["newcomer_since"] else None),
+            # A report that ends now also knows who's here now: a leave missed while the bot was down
+            # doesn't count as kept. Lapsed is always as of now - the activity times are today's.
+            present={m.id for m in guild.members if not m.bot} if self.now() - end < timedelta(hours=1) else None,
+            lapsed_at=self.now())
         return built
 
     async def _timezones(self, guild: discord.Guild) -> list[tuple[str, int]]:
@@ -520,6 +599,16 @@ class ServerAnalytics(commands.Cog):
                                            bool(getattr(flags, "completed_onboarding", False)))
             zones.append(zone_bucket(member_picks({r.id for r in getattr(m, "roles", ())}, picker)[0], onboarding))
         return timezone_counts(zones)
+
+    @staticmethod
+    def _seen_from(seeded: str | None, voice_start: str | None) -> datetime | None:
+        """How far back "no activity seen" means silent: chat goes back INACTIVE_DAYS before
+        welcome-back's seed, voice only to when voice ranks began recording - the later of the two,
+        or a voice-only member would read as silent before then (welcome-back's own COMM-2 guard)."""
+        if not seeded or not voice_start:
+            return None
+        chat = _parse(seeded) - timedelta(days=INACTIVE_DAYS)
+        return max(chat, datetime.strptime(voice_start, DAY_FORMAT).replace(tzinfo=UTC))
 
     def _names(self, user_ids: set, guild: discord.Guild) -> dict[int, str]:
         names = {}
@@ -573,14 +662,18 @@ class ServerAnalytics(commands.Cog):
             return False
         state = await self._start(guild)
         start, end, title, month = previous_month(now)
-        if (state.get("last_report_month") or "") >= month or not await self.bot.db.claim_analytics_report(guild.id, month):
+        if (state.get("last_report_month") or "") >= month:
+            return False
+        # Built before it's claimed: a report that fails to build is tried again next hour, not lost.
+        blocks = await self.report(guild, start, end, title) if _parse(state["tracking_since"]) < end else []
+        if not await self.bot.db.claim_analytics_report(guild.id, month):
             return False
         state["last_report_month"] = month
         if _parse(state["tracking_since"]) >= end:
             return False
         owner_id = await self._owner_id()
         outcomes = [await send_dm(self.bot, owner_id, label="monthly server stats", view=view)
-                    for view in stats_views(await self.report(guild, start, end, title))]
+                    for view in stats_views(blocks)]
         return all(outcome is Delivery.DELIVERED for outcome in outcomes)
 
     async def _owner_id(self) -> int:

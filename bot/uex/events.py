@@ -42,8 +42,10 @@ class Signup:
     ship: str | None = None
 
 
-# "Miner 6", "Miner: 6", "Miner - 6", "Miner x6", "Miner (6)", "Miner 6 spots"; or spots first: "6 Miners", "6x Miner"
-_ROLE_ITEM = re.compile(r"(?P<name>.*?\S)\s*(?:[:=\u2013-]|\bx|\u00d7)?\s*\(?(?P<spots>\d+)\)?(?:\s*spots?)?", re.I)
+# "Miner 6", "Miner: 6", "Miner - 6", "Miner x6", "Miner (6)", "Miner 6 spots"; or spots first: "6 Miners", "6x Miner".
+# The count needs a space or a separator before it, so "Pilot Mk2" is refused rather than read as "Pilot Mk", 2.
+_ROLE_ITEM = re.compile(r"(?P<name>.*?\S)(?:\s+|\s*(?:[:=\u2013-]|\bx|\u00d7)\s*|\s*(?=\())\(?(?P<spots>\d+)\)?"
+                        r"(?:\s*spots?)?", re.I)
 _SPOTS_FIRST = re.compile(r"(?P<spots>\d+)\s*(?:x|\u00d7)?\s+(?P<name>\D.*)", re.I)
 _BULLET = re.compile(r"^[-*\u2022\u00b7]\s*")
 
@@ -62,7 +64,9 @@ def parse_roles(text: str) -> tuple[list[EventRole], str | None]:
         item = _BULLET.sub("", " ".join(item.split()))
         if not item:
             continue
-        match = _SPOTS_FIRST.fullmatch(item) or _ROLE_ITEM.fullmatch(item)
+        # A trailing count first: "2 Seat Gunner 1" is the role "2 Seat Gunner" with 1 spot, as it was
+        # saved and as roles_text writes it back, so a form saved unchanged never renames a role.
+        match = _ROLE_ITEM.fullmatch(item) or _SPOTS_FIRST.fullmatch(item)
         if not match:
             return [], f"Each role needs a name and its number of spots, like `Miner 6` - I couldn't read `{item}`."
         name, spots = match["name"].strip(), int(match["spots"])
