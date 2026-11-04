@@ -23,6 +23,7 @@ sources, voice-by-hour and attendance can't be read back, so they start when thi
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
 from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta
@@ -40,8 +41,9 @@ from bot.uex.anniversaries import COMMUNITY_NAME, INACTIVE_DAYS
 from bot.uex.server_analytics import (
     MEMBER_REFERRAL, ATTENDED_MINUTES, AUDIT_LOG_DAYS, DAY_FORMAT, EASTERN, HOUR_FORMAT, PERIOD_DAYS, RETENTION_DAYS, TIME_FORMAT, UTC,
     EventResult, InviteUse, ModAction, Movement, build_report, clean_label, event_running, match_invite,
-    moderation_kind, previous_month, report_blocks, source_of,
+    Report, moderation_kind, previous_month, report_blocks, report_csv, source_of,
 )
+from bot.uex.new_members import is_new, member_picks, onboarding_status, timezone_counts, zone_bucket
 from bot.uex.voice_ranks import counts
 
 logger = logging.getLogger("uexbot.server_analytics")
@@ -88,21 +90,29 @@ def _readable(channel, me) -> bool:
     return perms.view_channel and perms.read_message_history
 
 
-def stats_view(blocks: list[str]) -> BotLayoutView:
-    """The report as one layout message, sections split by lines; trailing sections are left out
-    rather than going over Discord's text limit."""
-    view = BotLayoutView(timeout=None)
-    container = discord.ui.Container(accent_colour=discord.Colour.blurple())
-    used = 0
+def stats_views(blocks: list[str]) -> list[BotLayoutView]:
+    """The report as layout messages, sections split by lines: as many messages as Discord's text
+    limit needs, so no section is ever left out."""
+    views: list[BotLayoutView] = []
+    container, used = None, 0
     for block in blocks:
-        if used + len(block) > LAYOUT_TEXT_LIMIT:
-            break
-        if used:
+        block = block[:LAYOUT_TEXT_LIMIT]
+        if container is None or used + len(block) > LAYOUT_TEXT_LIMIT:
+            view = BotLayoutView(timeout=None)
+            container = discord.ui.Container(accent_colour=discord.Colour.blurple())
+            view.add_item(container)
+            views.append(view)
+            used = 0
+        elif used:
             container.add_item(discord.ui.Separator())
         container.add_item(discord.ui.TextDisplay(block))
         used += len(block)
-    view.add_item(container)
-    return view
+    return views
+
+
+def stats_view(blocks: list[str]) -> BotLayoutView:
+    """The first message of the report (tests and short reports)."""
+    return stats_views(blocks)[0]
 
 
 def _inviter(invite) -> int | None:
@@ -135,6 +145,8 @@ class ServerAnalytics(commands.Cog):
         self._seen: dict[str, set[int]] = {}               # day -> members already marked active
         self._messages: Counter = Counter()                # hour -> posts not yet saved
         self._voice: Counter = Counter()                   # hour -> voice minutes not yet saved
+        self._new_messages: Counter = Counter()            # the same two, for members in their first weeks
+        self._new_voice: Counter = Counter()
         self._channels: Counter = Counter()                # (channel_id, day) -> posts not yet saved
         self._minute = 0
         self.now = lambda: datetime.now(UTC)  # the clock; tests set their own
@@ -173,6 +185,8 @@ class ServerAnalytics(commands.Cog):
         if self._state is not None:  # tracking has begun: the history read covers what came before
             self._messages[moment.strftime(HOUR_FORMAT)] += 1
             self._channels[(_channel_id(message.channel), moment.strftime(DAY_FORMAT))] += 1
+            if is_new(getattr(message.author, "joined_at", None), moment):
+                self._new_messages[moment.strftime(HOUR_FORMAT)] += 1
         await self._active(message.guild.id, message.author.id, moment)
 
     @commands.Cog.listener()
@@ -286,10 +300,13 @@ class ServerAnalytics(commands.Cog):
                 logger.exception("Reading invites failed")
         try:
             afk = guild.afk_channel.id if guild.afk_channel else None
-            in_voice = sum(1 for channel in list(guild.voice_channels) + list(guild.stage_channels)
-                           if channel.id != afk for m in channel.members if not m.bot)
-            if in_voice:
-                self._voice[now.strftime(HOUR_FORMAT)] += in_voice
+            people = [m for channel in list(guild.voice_channels) + list(guild.stage_channels)
+                      if channel.id != afk for m in channel.members if not m.bot]
+            if people:
+                self._voice[now.strftime(HOUR_FORMAT)] += len(people)
+                newcomers = sum(1 for m in people if is_new(getattr(m, "joined_at", None), now))
+                if newcomers:
+                    self._new_voice[now.strftime(HOUR_FORMAT)] += newcomers
         except Exception:
             logger.exception("Counting who's in voice failed")
         await self._flush(guild.id)
@@ -300,16 +317,21 @@ class ServerAnalytics(commands.Cog):
 
     async def _flush(self, guild_id: int) -> None:
         messages, voice, channels = self._messages, self._voice, self._channels
+        new_messages, new_voice = self._new_messages, self._new_voice
         if not (messages or voice or channels):
             return
         self._messages, self._voice, self._channels = Counter(), Counter(), Counter()
-        hours = {hour: (messages[hour], voice[hour]) for hour in set(messages) | set(voice)}
+        self._new_messages, self._new_voice = Counter(), Counter()
+        hours = {hour: (messages[hour], voice[hour], new_messages[hour], new_voice[hour])
+                 for hour in set(messages) | set(voice)}
         try:
             await self.bot.db.add_activity_counts(guild_id, hours, dict(channels))
         except Exception:
             self._messages.update(messages)
             self._voice.update(voice)
             self._channels.update(channels)
+            self._new_messages.update(new_messages)
+            self._new_voice.update(new_voice)
             logger.exception("Saving activity counts failed; they're kept for the next minute")
 
     async def count_attendance(self, guild: discord.Guild, now: datetime) -> None:
@@ -440,6 +462,9 @@ class ServerAnalytics(commands.Cog):
     # -- the report -----------------------------------------------------------
 
     async def report(self, guild: discord.Guild, start: datetime, end: datetime, title: str) -> list[str]:
+        return report_blocks(await self.build(guild, start, end, title))
+
+    async def build(self, guild: discord.Guild, start: datetime, end: datetime, title: str) -> Report:
         since = min(start, end - timedelta(days=2 * RETENTION_DAYS))
         data = await self.bot.db.analytics_data(guild.id, _time(start), _time(end), _time(since),
                                                 int(start.timestamp()), int(end.timestamp()), ATTENDED_MINUTES,
@@ -466,8 +491,8 @@ class ServerAnalytics(commands.Cog):
             members={m.id: m.joined_at for m in guild.members if not m.bot and m.joined_at is not None},
             last_active={r["user_id"]: _parse(r["last_active"]) for r in data["last_active"]},
             seen_from=_parse(seeded) - timedelta(days=INACTIVE_DAYS) if seeded else None,
-            hours=[(datetime.strptime(r["hour"], HOUR_FORMAT).replace(tzinfo=UTC), r["messages"], r["voice_minutes"])
-                   for r in data["hours"]],
+            hours=[(datetime.strptime(r["hour"], HOUR_FORMAT).replace(tzinfo=UTC), r["messages"], r["voice_minutes"],
+                    r["new_messages"], r["new_voice_minutes"]) for r in data["hours"]],
             channel_counts={r["channel_id"]: r["messages"] for r in data["channels"]},
             channel_names=names, ops=data["ops"],
             events=[EventResult(r["name"], datetime.fromtimestamp(r["starts_at"], UTC), r["going"], r["interested"],
@@ -476,8 +501,25 @@ class ServerAnalytics(commands.Cog):
             labels=data["labels"],
             moderation=moderation, bot_names=self._names({a.moderator_id for a in moderation if a.by_bot}, guild),
             moderation_from=_parse(state["audit_read_from"]) if state.get("audit_read_from") else None,
-            referrer_names=self._names({m.inviter_id for m in movements if m.inviter_id}, guild))
-        return report_blocks(built)
+            referrer_names=self._names({m.inviter_id for m in movements if m.inviter_id}, guild),
+            timezones=await self._timezones(guild),
+            joined_all=[m.joined_at for m in guild.members if not m.bot and m.joined_at is not None],
+            newcomer_since=(datetime.strptime(data["newcomer_since"], HOUR_FORMAT).replace(tzinfo=UTC)
+                            if data["newcomer_since"] else None))
+        return built
+
+    async def _timezones(self, guild: discord.Guild) -> list[tuple[str, int]]:
+        """Every member (not bots) by their Onboarding timezone role."""
+        picker = await self.bot.db.get_role_picker_roles(guild.id)
+        zones = []
+        for m in guild.members:
+            if m.bot:
+                continue
+            flags = getattr(m, "flags", None)
+            onboarding = onboarding_status(m.joined_at, bool(getattr(flags, "started_onboarding", False)),
+                                           bool(getattr(flags, "completed_onboarding", False)))
+            zones.append(zone_bucket(member_picks({r.id for r in getattr(m, "roles", ())}, picker)[0], onboarding))
+        return timezone_counts(zones)
 
     def _names(self, user_ids: set, guild: discord.Guild) -> dict[int, str]:
         names = {}
@@ -489,8 +531,9 @@ class ServerAnalytics(commands.Cog):
 
     @app_commands.command(name="server-stats",
                           description="Owner only: joins, activity, retention, ops and lapsed members, last 30 days.")
+    @app_commands.describe(export="Get the scorecard and breakdowns as a CSV file instead")
     @app_commands.default_permissions(administrator=True)  # hidden from members
-    async def server_stats(self, interaction: discord.Interaction) -> None:
+    async def server_stats(self, interaction: discord.Interaction, export: bool = False) -> None:
         if not await self.bot.is_owner(interaction.user):
             await interaction.response.send_message("This command is for the bot's owner.", ephemeral=True)
             return
@@ -500,8 +543,14 @@ class ServerAnalytics(commands.Cog):
             await interaction.followup.send(f"I can't find {COMMUNITY_NAME} right now.", ephemeral=True)
             return
         end = self.now()
-        blocks = await self.report(guild, end - timedelta(days=PERIOD_DAYS), end, f"last {PERIOD_DAYS} days")
-        await interaction.followup.send(view=stats_view(blocks), ephemeral=True)
+        built = await self.build(guild, end - timedelta(days=PERIOD_DAYS), end, f"last {PERIOD_DAYS} days")
+        if export:
+            stamp = end.astimezone(EASTERN).date().isoformat()
+            file = discord.File(io.BytesIO(report_csv(built).encode("utf-8-sig")), filename=f"server-stats-{stamp}.csv")
+            await interaction.followup.send(f"Server stats, last {PERIOD_DAYS} days, as CSV.", file=file, ephemeral=True)
+            return
+        for view in stats_views(report_blocks(built)):
+            await interaction.followup.send(view=view, ephemeral=True)
 
     # -- the monthly DM -------------------------------------------------------
 
@@ -530,9 +579,9 @@ class ServerAnalytics(commands.Cog):
         if _parse(state["tracking_since"]) >= end:
             return False
         owner_id = await self._owner_id()
-        outcome = await send_dm(self.bot, owner_id, label="monthly server stats",
-                                view=stats_view(await self.report(guild, start, end, title)))
-        return outcome is Delivery.DELIVERED
+        outcomes = [await send_dm(self.bot, owner_id, label="monthly server stats", view=view)
+                    for view in stats_views(await self.report(guild, start, end, title))]
+        return all(outcome is Delivery.DELIVERED for outcome in outcomes)
 
     async def _owner_id(self) -> int:
         info = await self.bot.application_info()

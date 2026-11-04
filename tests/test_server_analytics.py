@@ -11,6 +11,7 @@ Eastern on the 1st, and never for a month before tracking began. Every clock her
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock
@@ -19,14 +20,14 @@ import discord
 from cryptography.fernet import Fernet
 
 from bot.cogs.anniversaries import ANNIVERSARY_CHANNEL_ID
-from bot.cogs.server_analytics import ServerAnalytics, entry_action, invite_code, invite_list_text
+from bot.cogs.server_analytics import ServerAnalytics, entry_action, invite_code, invite_list_text, stats_views
 from bot.cogs.voice_ranks import OPS_CATEGORY_ID
 from bot.db.database import Database
 from bot.discord_ui import LAYOUT_TEXT_LIMIT
 from bot.uex.server_analytics import (
-    DEFAULT_INVITE_LABELS, MEMBER_REFERRAL, NO_INVITE, UNKNOWN_INVITE, EventResult, InviteUse, ModAction, Movement, build_report,
+    DEFAULT_INVITE_LABELS, best_windows, join_histogram, joins_block, window_label, MEMBER_REFERRAL, NO_INVITE, UNKNOWN_INVITE, EventResult, InviteUse, ModAction, Movement, build_report,
     event_kinds, event_running, first_hello, kept, lapsed_counts, match_invite, moderation_block, moderation_kind,
-    peak_times, previous_month, report_blocks, retention_cohort, slot_label, source_of,
+    peak_times, previous_month, report_blocks, report_csv, retention_cohort, slot_label, source_of,
 )
 
 UTC = timezone.utc
@@ -265,7 +266,8 @@ def test_joins_posts_voice_and_an_event_add_up_to_the_report(tmp_path):
         async with db.connect() as conn:
             days = await (await conn.execute("SELECT user_id, day FROM member_active_days")).fetchall()
             moves = await (await conn.execute("SELECT user_id, kind, invite_code FROM member_movements ORDER BY id")).fetchall()
-            hour = await (await conn.execute("SELECT messages, voice_minutes FROM activity_hours")).fetchall()
+            hour = await (await conn.execute(
+                "SELECT messages, voice_minutes, new_messages, new_voice_minutes FROM activity_hours")).fetchall()
         end = T0 + timedelta(days=8)
         blocks = await cog.report(guild, T0 - timedelta(days=1), end, "last 30 days")
         return ([tuple(r) for r in days], [tuple(r) for r in moves], [tuple(r) for r in hour], blocks)
@@ -273,7 +275,7 @@ def test_joins_posts_voice_and_an_event_add_up_to_the_report(tmp_path):
     days, moves, hour, blocks = asyncio.run(run())
     assert days == [(10, "2026-11-04")], "one row a day, not one per post; bots never"
     assert moves == [(10, "join", RSI), (11, "join", "temp1"), (12, "join", None), (12, "leave", None)]
-    assert hour == [(2, 3 * 31)], "2 posts; 3 people in voice for 31 minutes"
+    assert hour == [(2, 3 * 31, 2, 2 * 31)], "2 posts; 3 in voice for 31 minutes, 2 of them new members"
     text = "\n".join(blocks)
     assert "**Net joins:** +2 (3 joined, 1 left)" in text
     assert "**First hello:** 1 of 3 new members (33%)" in text
@@ -527,3 +529,87 @@ def test_the_invite_list_puts_named_invites_first_and_groups_the_ones_members_ma
     assert lines[2] == f"**{MEMBER_REFERRAL}**: 3 invites made by members, 6 uses (1 unused)"
     assert lines[3] == "-# `m1` · Kara · 5 uses · #Star Citizen 1"
     assert "-# 1 unused invite with no name not shown" in text and "vanity" not in text
+
+
+# -- timezones and the CSV ------------------------------------------------------------
+
+def test_the_report_shows_every_member_by_timezone_and_exports_the_same_numbers_as_csv():
+    report = build_report(title="last 30 days", start=T0 - timedelta(days=30), end=T0, tracking_since=T0,
+                          chat_from=None, movements=[], active={}, members={1: T0 - timedelta(days=100)},
+                          last_active={}, seen_from=None, hours=[], channel_counts={5: 12},
+                          channel_names={5: "=general"}, ops=[4, 6], events=[], labels={},
+                          timezones=[("Eastern", 5), ("Not picked", 3)])
+    text = "\n".join(report_blocks(report))
+    assert "### Members by timezone\nEastern 5 · Not picked 3\n-# All 8 members, by their Onboarding timezone role" in text
+    rows = report_csv(report).splitlines()
+    assert rows[0] == "section,item,metric,value"
+    assert "period,start,date,2026-10-05" in rows and "scorecard,ops,average_attendance,5.0" in rows
+    assert "timezone,Eastern,members,5" in rows and "scorecard,lapsed,30_days," in rows, "unknown stays blank"
+    assert "channel,'=general,posts,12" in rows, "a name that looks like a formula is defused"
+
+
+def test_server_stats_export_sends_a_csv(tmp_path):
+    async def run():
+        guild = FakeGuild(text=[FakeChannel(5, "general")], members=[_member(1)])
+        cog, _db, _clock, _owner = await _make(tmp_path, guild)
+        await cog._start(guild)
+        sent = []
+        interaction = NS(user=NS(id=OWNER), response=NS(defer=AsyncMock(), send_message=AsyncMock()),
+                         followup=NS(send=AsyncMock(side_effect=lambda *a, **kw: sent.append((a, kw)))))
+        await cog.server_stats.callback(cog, interaction, True)
+        args, kwargs = sent[0]
+        return args[0], kwargs["file"].filename, kwargs["file"].fp.read().decode("utf-8-sig"), kwargs["ephemeral"]
+
+    text, name, body, private = asyncio.run(run())
+    assert text == "Server stats, last 30 days, as CSV." and name == "server-stats-2026-11-04.csv" and private
+    assert "scorecard,members,total,1" in body.splitlines()
+
+
+# -- join times and newcomer op times ---------------------------------------------------
+
+def test_windows_are_labelled_in_eastern_time_across_noon_and_midnight():
+    assert window_label(0, 20) == "Mon 8–10 PM"
+    assert window_label(5, 11) == "Sat 11 AM–1 PM"
+    assert window_label(4, 23) == "Fri 11 PM–1 AM"
+    assert window_label(2, 10) == "Wed 10 AM–12 PM"
+
+
+def test_join_times_count_by_eastern_day_and_hour():
+    days, hours = join_histogram([datetime(2026, 11, 3, 1, tzinfo=UTC), datetime(2026, 11, 4, 1, tzinfo=UTC)])
+    assert days == [1, 1, 0, 0, 0, 0, 0] and hours[20] == 2, "Mon and Tue, 8 PM Eastern"
+
+
+def test_the_best_windows_never_overlap_on_the_same_day():
+    grid = Counter({(0, 20): 10, (0, 21): 9, (0, 22): 8, (2, 19): 5, (6, 14): 1})
+    assert best_windows(grid) == [(0, 20), (0, 22), (2, 18)]
+
+
+def _times_report(newcomer_since, hours):
+    joined = [datetime(2026, 10, 27, 1, tzinfo=UTC)] * 3 + [datetime(2026, 11, 1, 18, tzinfo=UTC)]
+    return build_report(title="last 30 days", start=T0 - timedelta(days=30), end=T0, tracking_since=T0,
+                        chat_from=None, movements=[], active={}, members={}, last_active={}, seen_from=None,
+                        hours=hours, channel_counts={}, channel_names={}, ops=[], events=[], labels={},
+                        joined_all=joined, newcomer_since=newcomer_since)
+
+
+def test_newcomer_op_times_come_from_join_times_until_new_members_activity_covers_two_weeks():
+    sat = datetime(2026, 10, 31, 18, tzinfo=UTC)  # Saturday 2 PM Eastern
+    hours = [(sat, 9, 30, 3, 20), (sat + timedelta(hours=1), 1, 5, 0, 40)]
+    early = _times_report(T0 - timedelta(days=5), hours)
+    assert early.best_from_joins and early.best_times[:2] == ["Mon 8–10 PM", "Sun 12–2 PM"], "Oct 27 01:00 UTC is Mon Oct 26, 9 PM"
+    text = joins_block(early)
+    assert "All members, by join day: Mon 3 · Tue 0 · Wed 0 · Thu 0 · Fri 0 · Sat 0 · Sun 1" in text
+    assert "Busiest join hours: 9 PM (3) · 1 PM (1)" in text, "EDT before Nov 1, EST after"
+    assert "-# From join times, until new members' own posts and voice cover 14 days (from Nov 13)" in text
+    later = _times_report(T0 - timedelta(days=20), hours)
+    assert not later.best_from_joins and later.best_times[0] == "Sat 2–4 PM"
+    assert later.newcomer_posts[0][5] == 3 and later.newcomer_voice[1][15] == 40
+    rows = report_csv(later).splitlines()
+    assert "joins_all,Mon,by_day,3" in rows and "newcomer_voice_minutes,15:00,by_hour,40" in rows
+    assert "newcomer_op,Sat 2–4 PM,best_time,1 (from activity)" in rows
+
+
+def test_a_long_report_goes_in_more_messages_rather_than_losing_a_section():
+    views = stats_views(["a" * 3000, "b" * 3000, "c" * 100])
+    texts = [[c.content for c in v.walk_children() if hasattr(c, "content")] for v in views]
+    assert [len(t) for t in texts] == [1, 2] and texts[1][1] == "c" * 100

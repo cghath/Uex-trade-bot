@@ -5555,6 +5555,43 @@ they're in sync).
      - **Weekly note**: Mondays from 10 AM Eastern, claimed in `new_member_state`, a DM to the owner
        naming members still waiting for a hello; nothing when nobody is. 82 tables.
 
+158. **New members by timezone and activity, and CSV exports.** The planning session's two asks
+     (2026-11-04). `/new-members`' first page adds "By timezone" (Eastern ... Outside US, Not
+     picked, each with its 🟢/🟡/🔴 counts - do some zones drift more because ops run when they
+     can't make them?) and "By activity" (counts; members pick several), over everyone in the
+     window whatever `status:` shows. Picks come from the role picker's saved role ids
+     (`member_picks` in `bot/uex/new_members.py`). `/server-stats` adds "Members by timezone" for
+     every member, to compare. On live data (2026-11-04): 355 of 400 members had no timezone
+     role yet (the picker is new), and 28 of the 48 new members.
+     - **`export:True`, owner only** (the owner's call: moderators keep the list, not the file).
+       `/new-members` sends `new-members-YYYY-MM-DD.csv` (17 columns: names, id, Eastern join
+       date, days, source, inviter, timezone, activities, experience, first active, active days,
+       voice minutes, status, reached out by/when, still in server), built in memory, honouring
+       `days:` and `status:`; with no status it also lists members who joined in the window and
+       left (from the join log; status `left`). `/server-stats` sends `server-stats-YYYY-MM-DD.csv`
+       as (section, item, metric, value) rows with the same keys every time, so monthly snapshots
+       line up. A cell starting with = + - @ gets a leading `'` (`csv_cell`): a spreadsheet would
+       run it as a formula, and names are typed by members. UTF-8 with a BOM, for Excel.
+     - **Onboarding status** (the owner's correction: Timezone and Experience are already
+       Required). Discord's member flags `started_onboarding`/`completed_onboarding` give
+       `onboarding_status`: completed, didn't finish (started), not started, or joined before
+       Onboarding went live (2026-10-30, `ONBOARDING_LIVE`). No timezone role then reads "Joined
+       before Onboarding" or "Didn't finish Onboarding" in both breakdowns, "Not picked" only when
+       they completed it without one. `/new-members` marks ⚠️ Didn't finish Onboarding (started or
+       not) and counts it in the header; one with no posts or voice is 🔴 after 1 day, not 3
+       (Onboarding may be what keeps them out). CSV column `onboarding_status`. Live: of 48 new,
+       30 joined before it, 15 completed, 2 didn't finish, 1 never started; server-wide 350 joined
+       before it.
+     - **Join times and newcomer op times** (`/server-stats` "Joins and newcomer op times"): every
+       member's Discord join date by Eastern day and hour, and the period's - no new tracking.
+       `activity_hours` gains `new_messages`/`new_voice_minutes` (added columns, migrated): the
+       same hourly totals for members in their first 21 days (by `joined_at`, the role's own rule,
+       so a role a mod removed doesn't matter) - server totals, never who. "Best times for a
+       newcomer op": the 3 best non-overlapping day + 2-hour windows by new members' voice minutes
+       plus 10 per post (`NEWCOMER_POST_WEIGHT`), from join times until that series covers 14 days.
+       All four histograms and the windows are in the CSV. The report now goes in as many messages
+       as it needs (`stats_views`) instead of dropping trailing sections past Discord's limit.
+
 ## Where to look for what
 
 Seven docs, deliberately scoped so they don't duplicate each other:
