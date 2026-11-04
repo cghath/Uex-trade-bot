@@ -21,6 +21,8 @@ voice channel, to bring friends - they're one source, with the top referrers nam
 """
 from __future__ import annotations
 
+import csv
+import io
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
@@ -64,6 +66,13 @@ DEFAULT_INVITE_LABELS = {
     "pznqwZjP7q": "Legacy",
 }
 LABEL_MAX = 60
+
+# Newcomer op times: a new member's post counts like this many minutes in voice when ranking
+# 2-hour windows, and their activity picks the times once it covers this many days (before
+# that, join times do).
+NEWCOMER_POST_WEIGHT = 10
+NEWCOMER_MIN_DAYS = 14
+WINDOW_HOURS = 2
 
 AUDIT_LOG_DAYS = 45  # how far back Discord keeps the audit log
 MOD_SHOWN = ("ban", "kick", "timeout", "deleted", "automod")
@@ -217,6 +226,14 @@ class Report:
     mod_before: Counter = field(default_factory=Counter)
     mod_rises: list[str] = field(default_factory=list)
     mod_bots: list[tuple[str, Counter]] = field(default_factory=list)
+    timezones: list[tuple[str, int]] = field(default_factory=list)  # every member, by Onboarding timezone
+    joins_all: tuple[list[int], list[int]] = ([0] * 7, [0] * 24)   # every member's join, by day and hour
+    joins_recent: tuple[list[int], list[int]] = ([0] * 7, [0] * 24)  # the period's joins (still here)
+    newcomer_posts: tuple[list[int], list[int]] = ([0] * 7, [0] * 24)
+    newcomer_voice: tuple[list[int], list[int]] = ([0] * 7, [0] * 24)
+    best_times: list[str] = field(default_factory=list)
+    best_from_joins: bool = True
+    newcomer_since: datetime | None = None
 
 
 def _here_at(movements: list[Movement], user_id: int, when: datetime) -> bool:
@@ -287,14 +304,56 @@ def _slot(moment: datetime) -> tuple[int, int]:
     return local.weekday(), local.hour
 
 
-def peak_times(hours: list[tuple[datetime, int, int]], voice_from: datetime, end: datetime,
+def hour_label(hour: int) -> str:
+    return f"{hour % 12 or 12} {'AM' if hour < 12 else 'PM'}"
+
+
+def window_label(weekday: int, hour: int, width: int = WINDOW_HOURS) -> str:
+    """'Mon 8–10 PM', 'Sat 11 AM–1 PM', 'Fri 11 PM–1 AM'."""
+    end = (hour + width) % 24
+    same_half = (hour < 12) == (end < 12) and end > hour
+    start = f"{hour % 12 or 12}" if same_half else hour_label(hour)
+    return f"{_WEEKDAYS[weekday]} {start}–{hour_label(end)}"
+
+
+def join_histogram(joined: list[datetime]) -> tuple[list[int], list[int]]:
+    """Joins by day of the week (Mon first) and by hour of the day, in Eastern time."""
+    days, hours = [0] * 7, [0] * 24
+    for moment in joined:
+        local = moment.astimezone(EASTERN)
+        days[local.weekday()] += 1
+        hours[local.hour] += 1
+    return days, hours
+
+
+def best_windows(grid: Counter, n: int = 3, width: int = WINDOW_HOURS) -> list[tuple[int, int]]:
+    """The n best (weekday, start hour) windows `width` hours long by `grid`'s (weekday, hour)
+    scores, Eastern, never two overlapping on the same day."""
+    scored = []
+    for weekday in range(7):
+        for hour in range(24):
+            score = sum(grid[((weekday + (hour + i) // 24) % 7, (hour + i) % 24)] for i in range(width))
+            if score:
+                scored.append((score, weekday, hour))
+    scored.sort(key=lambda s: (-s[0], s[1], s[2]))
+    chosen: list[tuple[int, int]] = []
+    for _score, weekday, hour in scored:
+        if any(weekday == w and abs(hour - h) < width for w, h in chosen):
+            continue
+        chosen.append((weekday, hour))
+        if len(chosen) == n:
+            break
+    return chosen
+
+
+def peak_times(hours: list[tuple], voice_from: datetime, end: datetime,
                ) -> tuple[list[tuple[str, float]], list[tuple[str, int]]]:
     """The busiest weekday-hours in Eastern time: by people in voice on average (voice minutes
     in that hour over how many times it came round since `voice_from`), and by posts."""
     voice: Counter = Counter()
     chat: Counter = Counter()
     label: dict[tuple[int, int], str] = {}
-    for moment, messages, minutes in hours:
+    for moment, messages, minutes, *_new in hours:
         slot = _slot(moment)
         label.setdefault(slot, slot_label(moment))
         voice[slot] += minutes
@@ -327,10 +386,12 @@ def event_kinds(events: list[EventResult]) -> list[tuple[str, int, float, float,
 def build_report(*, title: str, start: datetime, end: datetime, tracking_since: datetime,
                  chat_from: datetime | None, movements: list[Movement], active: dict[int, set[date]],
                  members: dict[int, datetime], last_active: dict[int, datetime], seen_from: datetime | None,
-                 hours: list[tuple[datetime, int, int]], channel_counts: dict[int, int],
+                 hours: list[tuple], channel_counts: dict[int, int],
                  channel_names: dict[int, str], ops: list[int], events: list[EventResult],
                  labels: dict[str, str], moderation: list[ModAction] = (), bot_names: dict[int, str] | None = None,
-                 moderation_from: datetime | None = None, referrer_names: dict[int, str] | None = None) -> Report:
+                 moderation_from: datetime | None = None, referrer_names: dict[int, str] | None = None,
+                 timezones: list[tuple[str, int]] | None = None, joined_all: list[datetime] = (),
+                 newcomer_since: datetime | None = None) -> Report:
     """Everything /server-stats and the monthly DM show, for `start` to `end`."""
     report = Report(title=title, start=start, end=end, tracking_since=tracking_since, chat_from=chat_from)
     joins = [m for m in movements if m.kind == "join"]
@@ -379,6 +440,28 @@ def build_report(*, title: str, start: datetime, end: datetime, tracking_since: 
     report.mod_before = moderation_counts(list(moderation), before, start)
     report.mod_rises = sharp_rises(report.mod_now, report.mod_before) if moderation_from and moderation_from <= before else []
     report.mod_bots = by_bots(list(moderation), start, end, bot_names or {})
+    report.timezones = list(timezones or [])
+
+    report.joins_all = join_histogram(list(joined_all))
+    report.joins_recent = join_histogram([t for t in joined_all if start <= t < end])
+    posts, voice, grid = ([0] * 7, [0] * 24), ([0] * 7, [0] * 24), Counter()
+    for moment, _messages, _minutes, *new in hours:
+        new_posts, new_minutes = (new + [0, 0])[:2]
+        local = moment.astimezone(EASTERN)
+        posts[0][local.weekday()] += new_posts
+        posts[1][local.hour] += new_posts
+        voice[0][local.weekday()] += new_minutes
+        voice[1][local.hour] += new_minutes
+        grid[(local.weekday(), local.hour)] += new_minutes + NEWCOMER_POST_WEIGHT * new_posts
+    report.newcomer_posts, report.newcomer_voice = posts, voice
+    report.newcomer_since = newcomer_since
+    report.best_from_joins = newcomer_since is None or end - newcomer_since < timedelta(days=NEWCOMER_MIN_DAYS)
+    if report.best_from_joins:
+        grid = Counter()
+        for moment in joined_all:
+            local = moment.astimezone(EASTERN)
+            grid[(local.weekday(), local.hour)] += 1
+    report.best_times = [window_label(w, h) for w, h in best_windows(grid)]
     return report
 
 
@@ -458,6 +541,14 @@ def report_blocks(report: Report) -> list[str]:
             lines.append("In chat: " + " · ".join(f"{slot} ({count} posts)" for slot, count in report.peak_chat))
         blocks.append("\n".join(lines))
 
+    if sum(report.joins_all[0]):
+        blocks.append(joins_block(report))
+
+    if report.timezones:
+        total = sum(n for _name, n in report.timezones)
+        blocks.append("### Members by timezone\n" + " · ".join(f"{name} {n}" for name, n in report.timezones)
+                      + f"\n-# All {total} members, by their Onboarding timezone role")
+
     lines = ["### Channels"]
     if report.busiest:
         lines.append("Busiest: " + " · ".join(f"#{name} {count:,}" for name, count in report.busiest))
@@ -479,6 +570,103 @@ def report_blocks(report: Report) -> list[str]:
         blocks.append("\n".join(lines))
     blocks.append(moderation_block(report))
     return blocks
+
+
+def _busiest_hours(hours: list[int], n: int = 3) -> str:
+    top = sorted((h for h in range(24) if hours[h]), key=lambda h: (-hours[h], h))[:n]
+    return " · ".join(f"{hour_label(h)} ({hours[h]})" for h in top)
+
+
+def _by_day(days: list[int]) -> str:
+    return " · ".join(f"{_WEEKDAYS[d]} {days[d]}" for d in range(7))
+
+
+def joins_block(report: Report) -> str:
+    """When members join, and the best times for a newcomer op (Eastern)."""
+    lines = ["### Joins and newcomer op times (Eastern)",
+             f"All members, by join day: {_by_day(report.joins_all[0])}",
+             f"Busiest join hours: {_busiest_hours(report.joins_all[1])}"]
+    if sum(report.joins_recent[0]):
+        lines.append(f"This period: {_by_day(report.joins_recent[0])} · busiest {_busiest_hours(report.joins_recent[1])}")
+    if report.best_times:
+        lines.append("**Best times for a newcomer op:** " + " · ".join(report.best_times))
+        if report.best_from_joins:
+            ready = (f" (from {_day(report.newcomer_since + timedelta(days=NEWCOMER_MIN_DAYS))})"
+                     if report.newcomer_since else "")
+            lines.append(f"-# From join times, until new members' own posts and voice cover {NEWCOMER_MIN_DAYS} days{ready}")
+        else:
+            lines.append(f"-# From when members in their first 3 weeks post and are in voice, since {_day(report.newcomer_since)}")
+    return "\n".join(lines)
+
+
+def csv_cell(value) -> str:
+    """A cell as text, with a leading = + - @ made harmless: a spreadsheet would run it as a formula."""
+    text = "" if value is None else str(value)
+    return "'" + text if text[:1] in ("=", "+", "-", "@") else text
+
+
+def report_csv(report: Report) -> str:
+    """The report as rows of (section, item, metric, value), the same keys every time, so monthly
+    snapshots line up side by side."""
+    rows: list[tuple] = []
+
+    def add(section, item, metric, value):
+        rows.append((section, item, metric, "" if value is None else value))
+
+    add("period", "start", "date", report.start.astimezone(EASTERN).date().isoformat())
+    add("period", "end", "date", (report.end - timedelta(seconds=1)).astimezone(EASTERN).date().isoformat())
+    add("period", "tracking_since", "date", report.tracking_since.astimezone(EASTERN).date().isoformat())
+    add("scorecard", "joins", "joined", report.joined)
+    add("scorecard", "joins", "left", report.left)
+    add("scorecard", "joins", "net", report.joined - report.left)
+    add("scorecard", "first_hello", "said_hello", report.hello[0])
+    add("scorecard", "first_hello", "joined", report.hello[1])
+    add("scorecard", "retention_30d", "kept", report.retention[0])
+    add("scorecard", "retention_30d", "cohort", report.retention[1])
+    add("scorecard", "weekly_active", "members", report.weekly_active)
+    add("scorecard", "members", "total", report.member_count)
+    add("scorecard", "ops", "count", len(report.ops))
+    add("scorecard", "ops", "average_attendance", round(sum(report.ops) / len(report.ops), 2) if report.ops else None)
+    for n in LAPSED_STEPS:
+        add("scorecard", "lapsed", f"{n}_days", report.lapsed.get(n))
+    for name, joins, stayed, cohort in report.sources:
+        add("source", name, "joined", joins)
+        add("source", name, "kept_30d", stayed)
+        add("source", name, "cohort_30d", cohort)
+    for name, n in report.referrers:
+        add("referrer", name, "joins", n)
+    for name, n in report.timezones:
+        add("timezone", name, "members", n)
+    for section, (days, hours) in (("joins_all", report.joins_all), ("joins_period", report.joins_recent),
+                                   ("newcomer_posts", report.newcomer_posts),
+                                   ("newcomer_voice_minutes", report.newcomer_voice)):
+        for d in range(7):
+            add(section, _WEEKDAYS[d], "by_day", days[d])
+        for h in range(24):
+            add(section, f"{h:02d}:00", "by_hour", hours[h])
+    for rank, label in enumerate(report.best_times, 1):
+        add("newcomer_op", label, "best_time", f"{rank} (from {'joins' if report.best_from_joins else 'activity'})")
+    for slot, avg in report.peak_voice:
+        add("peak_voice", slot, "average_in_voice", round(avg, 2))
+    for slot, count in report.peak_chat:
+        add("peak_chat", slot, "posts", count)
+    for name, count in report.busiest:
+        add("channel", name, "posts", count)
+    add("channel", "silent", "count", len(report.quiet))
+    for name, held, came, going, interested, going_came in report.events:
+        add("event", name, "held", held)
+        add("event", name, "average_came", round(came, 2))
+        add("event", name, "average_going", round(going, 2))
+        add("event", name, "average_interested", round(interested, 2) if interested is not None else None)
+    if report.moderation_from is not None:
+        for kind in MOD_SHOWN:
+            add("moderation", kind, "count", report.mod_now[kind])
+            add("moderation", kind, "period_before", report.mod_before[kind])
+    out = io.StringIO()
+    writer = csv.writer(out, lineterminator="\n")
+    writer.writerow(("section", "item", "metric", "value"))
+    writer.writerows([csv_cell(v) for v in row] for row in rows)
+    return out.getvalue()
 
 
 def _mod_row(counts: Counter, *, bold: bool) -> str:

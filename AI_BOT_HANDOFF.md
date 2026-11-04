@@ -505,6 +505,8 @@ date - no open item, nothing to record here.
       `member_movements.inviter_id`, top referrers, the grouped invite list), and new members:
       the 🌱 New Member role and `/new-members` (bot/cogs/new_members.py). Goes with PR #152.
       See PROJECT_CONTEXT.md entries 156 and 157
+- [ ] PRs #155-#157 - `/new-members` activity, flags, timezone/activity breakdowns and the owner-only
+      CSV exports (`members_csv`, `report_csv`). See PROJECT_CONTEXT.md entries 157 and 158
 - [ ] PR #148 - The rest of the 2026-10-30 audit (PROJECT_CONTEXT.md entry 153). Worth porting
       where aiv2 has the same code: `BotDynamicItem` (bot/discord_ui.py), REL-3/REL-5 (wiki and
       UEX client), REL-6 deferrals, LOGIC-4 alert pollers, TRD-1/TRD-2 marketplace alert baseline

@@ -20,8 +20,9 @@ from bot.cogs.anniversaries import ANNIVERSARY_CHANNEL_ID
 from bot.cogs.new_members import NewMembers
 from bot.db.database import Database
 from bot.uex.new_members import (
-    DRIFTING, NEEDS_HELLO, NEW_MEMBER_ROLE, SETTLING, NewMember, days_since, flag, is_new, member_text, summary_text,
-    week_key, weekly_text,
+    CSV_COLUMNS, DRIFTING, NEEDS_HELLO, NEW_MEMBER_ROLE, SETTLING, NewMember, breakdown_text, days_since, flag, is_new,
+    member_picks, member_text, members_csv, onboarding_status, summary_text, timezone_counts, week_key, weekly_text,
+    zone_bucket,
 )
 
 UTC = timezone.utc
@@ -112,8 +113,9 @@ def test_the_weekly_note_lists_who_needs_a_hello_or_is_drifting_with_why_and_is_
 # -- fakes --------------------------------------------------------------------------
 
 class FakeMember:
-    def __init__(self, uid, joined_at, *, name=None, roles=(), bot=False, moderator=False):
+    def __init__(self, uid, joined_at, *, name=None, roles=(), bot=False, moderator=False, onboarded=True):
         self.id, self.joined_at, self.bot = uid, joined_at, bot
+        self.flags = NS(started_onboarding=True, completed_onboarding=onboarded)
         self.name = self.display_name = name or f"member{uid}"
         self.roles = list(roles)
         self.guild_permissions = NS(moderate_members=moderator)
@@ -261,3 +263,104 @@ def test_the_weekly_note_goes_once_on_monday_and_only_when_someone_is_waiting(tm
     results, dms = asyncio.run(run())
     assert results == (False, False, True, False)
     assert len(dms) == 1 and "🔴 <@10>: no posts or voice yet, 6 days in" in dms[0]
+
+
+# -- breakdowns and the CSV -----------------------------------------------------------
+
+def test_onboarding_picks_by_role_id_and_timezone_counts_in_panel_order():
+    picker = {"Eastern": 1, "Pacific": 2, "Mining": 3, "Salvage": 4, "New Pilot": 5}
+    assert member_picks({1, 3, 5}, picker) == ("Eastern", ["Mining"], "New Pilot")
+    assert member_picks({99}, picker) == (None, [], None)
+    assert timezone_counts(["Pacific", None, "Eastern", "Pacific", None]) == [
+        ("Eastern", 1), ("Pacific", 2), ("Not picked", 2)]
+
+
+def test_the_breakdown_shows_each_timezones_flags_and_activity_counts():
+    def member(zone, activities, *, days_ago, active=0, quiet=None):
+        return NewMember(1, NOW - timedelta(days=days_ago), first_active=date(2026, 11, 1) if active else None,
+                         active_days=active, last_active=NOW - timedelta(days=quiet) if quiet is not None else None,
+                         timezone=zone, activities=activities)
+
+    members = [member("Eastern", ["Mining", "Salvage"], days_ago=10, active=6, quiet=0),  # settling
+               member("Eastern", ["Mining"], days_ago=10, active=1, quiet=8),             # drifting
+               member("Eastern", [], days_ago=4),                                         # needs a hello
+               member("Pacific", ["FPS"], days_ago=1),                                    # nothing yet
+               member(None, ["Salvage"], days_ago=10, active=1, quiet=7)]                 # drifting
+    assert breakdown_text(members, NOW).splitlines() == [
+        "**By timezone:** Eastern 3 (🟢1 🟡1 🔴1) · Pacific 1 · Not picked 1 (🟡1)",
+        "**By activity:** Mining 2 · Salvage 2 · FPS 1 · Not picked 1"]
+
+
+def test_onboarding_status_from_discords_flags_and_where_a_member_without_a_timezone_counts():
+    before, after = datetime(2026, 10, 20, tzinfo=UTC), datetime(2026, 11, 2, tzinfo=UTC)
+    assert onboarding_status(after, True, True) == "completed"
+    assert onboarding_status(before, False, False) == "before_onboarding"
+    assert onboarding_status(after, True, False) == "didnt_finish"
+    assert onboarding_status(after, False, False) == "not_started"
+    assert zone_bucket("Pacific", "didnt_finish") == "Pacific"
+    assert zone_bucket(None, "before_onboarding") == "Joined before Onboarding"
+    assert zone_bucket(None, "not_started") == zone_bucket(None, "didnt_finish") == "Didn't finish Onboarding"
+    assert zone_bucket(None, "completed") == zone_bucket(None, None) == "Not picked"
+
+
+def test_a_member_who_didnt_finish_onboarding_needs_a_hello_after_a_day_and_is_marked():
+    stuck = NewMember(5, NOW - timedelta(days=1), "Reddit ad", onboarding="didnt_finish")
+    assert flag(stuck, NOW) == NEEDS_HELLO, "a day, not three: Onboarding may be what's keeping them out"
+    assert member_text(stuck, NOW).splitlines()[-1] == "🔴 **Needs a hello**: didn't finish Onboarding, 1 day in"
+    assert flag(NewMember(5, NOW - timedelta(hours=2), onboarding="didnt_finish"), NOW) is None
+    posting = NewMember(6, NOW - timedelta(days=4), "Reddit ad", first_active=date(2026, 11, 6), active_days=3,
+                        last_active=NOW, onboarding="not_started")
+    assert member_text(posting, NOW).splitlines()[-1] == "🟢 **Settling in** · ⚠️ Didn't finish Onboarding"
+    header = summary_text([stuck, posting, NewMember(7, NOW, onboarding="completed")], NOW, 21).splitlines()[1]
+    assert header == "3 joined · **1 needs a hello** · 1 settling in · ⚠️ 2 didn't finish Onboarding"
+    zones = breakdown_text([stuck, posting, NewMember(8, NOW, onboarding="before_onboarding")], NOW).splitlines()[0]
+    assert zones == "**By timezone:** Joined before Onboarding 1 · Didn't finish Onboarding 2 (🟢1 🔴1)"
+
+
+def test_the_csv_has_every_column_including_members_who_left_and_defuses_formulas():
+    stay = NewMember(10, NOW - timedelta(days=5), "Reddit ad", timezone="Eastern", activities=["Mining", "FPS"],
+                     experience="New Pilot", username="=cmd|calc", display_name="Kara", reached_by="Cheeno",
+                     reached_at=NOW)
+    gone = NewMember(13, NOW - timedelta(days=3), None, still_here=False)
+    lines = members_csv([stay, gone], NOW).splitlines()
+    assert lines[0] == ",".join(CSV_COLUMNS)
+    assert lines[1] == ("'=cmd|calc,Kara,10,2026-11-04,5,Reddit ad,,Eastern,Mining;FPS,New Pilot,,,0,0,"
+                        "none,Cheeno,2026-11-09,yes"), "reached out, so no flag"
+    assert lines[2] == ",,13,2026-11-06,3,before tracking,,,,,,,0,0,left,,,no"
+
+
+def test_the_csv_export_is_for_the_owner_only_and_includes_who_left(tmp_path):
+    async def run():
+        quiet = FakeMember(10, NOW - timedelta(days=5), name="Quiet", roles=[NS(id=501), NS(id=502)])
+        cog, db, guild, _owner = await _make(tmp_path, [quiet])
+        await db.save_role_picker_roles(GUILD_ID, {"Mining": 501, "Eastern": 502})
+        await db.analytics_start(GUILD_ID, "2026-11-01 00:00:00")
+        await db.record_member_movement(GUILD_ID, 10, "join", "2026-11-04 16:00:00", RSI)
+        await db.record_member_movement(GUILD_ID, 13, "join", "2026-11-06 16:00:00", None)
+        await db.record_member_movement(GUILD_ID, 13, "leave", "2026-11-07 16:00:00")
+        sent = []
+
+        def interaction(user):
+            return NS(user=user, response=NS(defer=AsyncMock(), send_message=AsyncMock()),
+                      followup=NS(send=AsyncMock(side_effect=lambda *a, **kw: sent.append((a, kw)))))
+
+        owner = interaction(FakeMember(OWNER, NOW - timedelta(days=900), name="Cheeno"))
+        await cog.new_members.callback(cog, owner, 21, None, None, True)
+        hello_only = interaction(FakeMember(OWNER, NOW - timedelta(days=900), name="Cheeno"))
+        await cog.new_members.callback(cog, hello_only, 21, NEEDS_HELLO, None, True)
+        mod = interaction(FakeMember(77, NOW - timedelta(days=500), name="Mod", moderator=True))
+        await cog.new_members.callback(cog, mod, 21, None, None, True)
+        files = [kw["file"] for _a, kw in sent]
+        return ([(f.filename, f.fp.read().decode("utf-8-sig")) for f in files], [a[0] for a, _kw in sent],
+                mod.response.send_message.await_args.args[0])
+
+    files, texts, refused = asyncio.run(run())
+    (name, csv_text), (_name2, hello_text) = files
+    assert name == "new-members-2026-11-09.csv"
+    rows = csv_text.splitlines()
+    assert len(rows) == 3, "newest first: the one who left joined Nov 6"
+    assert rows[1] == ",,13,2026-11-06,3,Not known (no invite matched),,,,,,,0,0,left,,,no"
+    assert rows[2] == "Quiet,Quiet,10,2026-11-04,5,RSI org page,,Eastern,Mining,,completed,,0,0,needs_hello,,,yes"
+    assert len(hello_text.splitlines()) == 2, "the status filter leaves out who left"
+    assert texts[0] == "New members, last 21 days: 2 rows, including any who have left."
+    assert refused == "The CSV export is for the bot's owner."

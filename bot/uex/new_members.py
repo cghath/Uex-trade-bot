@@ -19,10 +19,15 @@ day of the join, never more than Y.
 """
 from __future__ import annotations
 
+import csv
+import io
+import re
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 
-from bot.uex.server_analytics import EASTERN
+from bot.uex.role_picker import GROUPS
+from bot.uex.server_analytics import EASTERN, csv_cell
 
 NEW_MEMBER_ROLE = "🌱 New Member"
 NEW_MEMBER_DAYS = 21       # the role comes off after this many days
@@ -39,6 +44,20 @@ SETTLED_MIN_DAYS = 3        # the share rule waits this many days: 1 post on day
 
 NEEDS_HELLO, DRIFTING, SETTLING = "needs-hello", "drifting", "settling"
 FLAGS = {NEEDS_HELLO: ("🔴", "Needs a hello"), DRIFTING: ("🟡", "Drifting"), SETTLING: ("🟢", "Settling in")}
+
+_GROUPS = {group.key: group for group in GROUPS}
+TIMEZONES = _GROUPS["timezone"].roles       # the Onboarding timezone roles, in panel order
+ACTIVITIES = _GROUPS["activity"].roles
+EXPERIENCES = _GROUPS["experience"].roles
+NOT_PICKED = "Not picked"
+
+# Onboarding (Timezone and Experience required) went live 2026-10-30; Discord flags each member
+# who started it and who completed it (member.flags).
+ONBOARDING_LIVE = datetime(2026, 10, 30, tzinfo=EASTERN)
+COMPLETED, DIDNT_FINISH, NOT_STARTED, BEFORE_ONBOARDING = "completed", "didnt_finish", "not_started", "before_onboarding"
+JOINED_BEFORE_LABEL = "Joined before Onboarding"
+DIDNT_FINISH_LABEL = "Didn't finish Onboarding"
+UNFINISHED_HELLO_DAYS = 1   # 🔴 for a member who didn't finish Onboarding and hasn't posted: after a day
 
 
 def is_new(joined_at: datetime | None, now: datetime, days: int = NEW_MEMBER_DAYS) -> bool:
@@ -62,6 +81,62 @@ class NewMember:
     last_active: datetime | None = None   # their last post or voice join
     reached_by: str | None = None
     reached_at: datetime | None = None
+    timezone: str | None = None
+    activities: list[str] = field(default_factory=list)
+    experience: str | None = None
+    inviter: str | None = None            # who made the invite, for a member referral
+    username: str = ""
+    display_name: str = ""
+    still_here: bool = True               # False: joined in the window and has left (the CSV only)
+    onboarding: str | None = None         # COMPLETED, DIDNT_FINISH, NOT_STARTED, BEFORE_ONBOARDING; None unknown
+
+
+def onboarding_status(joined_at: datetime | None, started: bool, completed: bool) -> str:
+    """Where a member is with Onboarding, from Discord's member flags."""
+    if completed:
+        return COMPLETED
+    if joined_at is not None and joined_at < ONBOARDING_LIVE:
+        return BEFORE_ONBOARDING
+    return DIDNT_FINISH if started else NOT_STARTED
+
+
+def unfinished(member: NewMember) -> bool:
+    """Joined since Onboarding went live and hasn't completed it (started or not)."""
+    return member.onboarding in (DIDNT_FINISH, NOT_STARTED)
+
+
+def zone_bucket(timezone: str | None, onboarding: str | None) -> str:
+    """Where a member counts in a timezone breakdown: their timezone role, else why they have none."""
+    if timezone:
+        return timezone
+    if onboarding == BEFORE_ONBOARDING:
+        return JOINED_BEFORE_LABEL
+    if onboarding in (DIDNT_FINISH, NOT_STARTED):
+        return DIDNT_FINISH_LABEL
+    return NOT_PICKED
+
+
+def member_picks(held: set[int], picker: dict[str, int]) -> tuple[str | None, list[str], str | None]:
+    """A member's Onboarding picks from the role ids they hold: (timezone, activities, experience)."""
+    def picked(names):
+        return [name for name in names if picker.get(name) in held]
+
+    zones, levels = picked(TIMEZONES), picked(EXPERIENCES)
+    return (zones[0] if zones else None), picked(ACTIVITIES), (levels[0] if levels else None)
+
+
+ZONE_ORDER = (*TIMEZONES, JOINED_BEFORE_LABEL, DIDNT_FINISH_LABEL, NOT_PICKED)
+
+
+def timezone_counts(zones: list[str | None]) -> list[tuple[str, int]]:
+    """How many in each zone_bucket, in panel order, then those with none and why."""
+    counts = Counter(zone or NOT_PICKED for zone in zones)
+    return [(name, counts[name]) for name in ZONE_ORDER if counts[name]]
+
+
+def _md(text: str) -> str:
+    """A name as plain text in Discord markdown."""
+    return re.sub(r"([\\*_~|`>])", r"\\\1", text)
 
 
 def days_here(member: NewMember, now: datetime) -> int:
@@ -83,7 +158,8 @@ def flag(member: NewMember, now: datetime) -> str | None:
     """🔴 needs a hello, 🟡 drifting, 🟢 settling in, or nothing. The first two only while nobody
     has reached out - for drifting, nobody since they went quiet."""
     if member.first_active is None:
-        if member.reached_by is None and days_since(member.joined_at, now) >= HELLO_AFTER_DAYS:
+        wait = UNFINISHED_HELLO_DAYS if unfinished(member) else HELLO_AFTER_DAYS
+        if member.reached_by is None and days_since(member.joined_at, now) >= wait:
             return NEEDS_HELLO
         return None
     quiet = quiet_days(member, now)
@@ -115,6 +191,8 @@ def reason(member: NewMember, now: datetime) -> str:
     """Why a member is flagged, in a few words ("" for settling in)."""
     kind = flag(member, now)
     if kind == NEEDS_HELLO:
+        if unfinished(member):
+            return f"didn't finish Onboarding, {_plural(days_since(member.joined_at, now), 'day')} in"
         return f"no posts or voice yet, {_plural(days_since(member.joined_at, now), 'day')} in"
     if kind == DRIFTING:
         return f"quiet {_plural(quiet_days(member, now), 'day')}"
@@ -130,7 +208,10 @@ def member_text(member: NewMember, now: datetime) -> str:
     """One member's lines in /new-members."""
     days = days_since(member.joined_at, now)
     head = f"<@{member.user_id}> · joined <t:{int(member.joined_at.timestamp())}:d> ({_plural(days, 'day')})"
-    head += f" · {member.source}" if member.source else " · before join sources were tracked"
+    if member.source:
+        head += f" · {member.source}" + (f" ({_md(member.inviter)})" if member.inviter else "")
+    else:
+        head += " · before join sources were tracked"
     lines = [head, "-# " + (" · ".join(member.picks) if member.picks else "No Onboarding picks"),
              activity_line(member, now)]
     status = []
@@ -139,10 +220,40 @@ def member_text(member: NewMember, now: datetime) -> str:
         emoji, name = FLAGS[kind]
         why = reason(member, now)
         status.append(f"{emoji} **{name}**" + (f": {why}" if why else ""))
+    if unfinished(member) and kind != NEEDS_HELLO:
+        status.append(f"⚠️ {DIDNT_FINISH_LABEL}")
     if member.reached_by:
-        status.append(f"✅ Reached out: {member.reached_by}, {_day(member.reached_at)}")
+        status.append(f"✅ Reached out: {_md(member.reached_by)}, {_day(member.reached_at)}")
     if status:
         lines.append(" · ".join(status))
+    return "\n".join(lines)
+
+
+def breakdown_text(members: list[NewMember], now: datetime) -> str:
+    """New members by timezone, with each zone's flags, and by activity: counts only."""
+    totals: Counter = Counter()
+    flags: dict[str, Counter] = defaultdict(Counter)
+    for member in members:
+        zone = zone_bucket(member.timezone, member.onboarding)
+        totals[zone] += 1
+        kind = flag(member, now)
+        if kind is not None:
+            flags[zone][kind] += 1
+    zones = []
+    for name in ZONE_ORDER:
+        if totals[name]:
+            marks = " ".join(f"{FLAGS[k][0]}{flags[name][k]}" for k in (SETTLING, DRIFTING, NEEDS_HELLO) if flags[name][k])
+            zones.append(f"{name} {totals[name]}" + (f" ({marks})" if marks else ""))
+    picked = Counter(activity for member in members for activity in member.activities)
+    activities = [f"{name} {n}" for name, n in sorted(picked.items(), key=lambda kv: (-kv[1], ACTIVITIES.index(kv[0])))]
+    unpicked = sum(1 for member in members if not member.activities)
+    if unpicked:
+        activities.append(f"{NOT_PICKED} {unpicked}")
+    lines = []
+    if zones:
+        lines.append("**By timezone:** " + " · ".join(zones))
+    if activities:
+        lines.append("**By activity:** " + " · ".join(activities))
     return "\n".join(lines)
 
 
@@ -171,6 +282,9 @@ def summary_text(members: list[NewMember], now: datetime, days: int, showing: st
     parts = [f"{len(members)} joined", *_flag_parts(counts, bold=True)]
     if counts[SETTLING]:
         parts.append(f"{counts[SETTLING]} settling in")
+    unfinished_count = sum(1 for member in members if unfinished(member))
+    if unfinished_count:
+        parts.append(f"⚠️ {unfinished_count} didn't finish Onboarding")
     text = f"## 🌱 New members: last {days} days\n" + " · ".join(parts)
     if showing:
         emoji, name = FLAGS[showing]
@@ -193,6 +307,33 @@ def weekly_text(members: list[NewMember], now: datetime) -> str | None:
         lines.append(f"- and {len(flagged) - 20} more")
     lines.append("-# `/new-members` has the full list and marks who's reached out.")
     return "\n".join(lines)
+
+
+CSV_COLUMNS = ("username", "display_name", "user_id", "joined_date", "days_in_server", "source", "inviter",
+               "timezone", "activities", "experience", "onboarding_status", "first_active_date", "active_days",
+               "voice_minutes",
+               "status", "reached_out_by", "reached_out_date", "still_in_server")
+_CSV_STATUS = {NEEDS_HELLO: "needs_hello", DRIFTING: "drifting", SETTLING: "settling"}
+
+
+def csv_row(member: NewMember, now: datetime) -> list[str]:
+    here = days_here(member, now)
+    status = _CSV_STATUS.get(flag(member, now), "none") if member.still_here else "left"
+    reached = member.reached_at.astimezone(EASTERN).date().isoformat() if member.reached_at else ""
+    return [csv_cell(v) for v in (
+        member.username, member.display_name, member.user_id, member.joined_at.astimezone(EASTERN).date().isoformat(),
+        days_since(member.joined_at, now), member.source or "before tracking", member.inviter, member.timezone,
+        ";".join(member.activities), member.experience, member.onboarding,
+        member.first_active.isoformat() if member.first_active else "", min(member.active_days, here),
+        member.voice_minutes, status, member.reached_by, reached, "yes" if member.still_here else "no")]
+
+
+def members_csv(members: list[NewMember], now: datetime) -> str:
+    out = io.StringIO()
+    writer = csv.writer(out, lineterminator="\n")
+    writer.writerow(CSV_COLUMNS)
+    writer.writerows(csv_row(member, now) for member in members)
+    return out.getvalue()
 
 
 def week_key(now: datetime) -> str:

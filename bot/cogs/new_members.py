@@ -19,6 +19,7 @@ for a hello - only when there are any.
 """
 from __future__ import annotations
 
+import io
 import logging
 from datetime import date, datetime, timedelta
 
@@ -27,15 +28,14 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from bot.cogs.anniversaries import ANNIVERSARY_CHANNEL_ID
-from bot.cogs.server_analytics import _inviter, _who
+from bot.cogs.server_analytics import _inviter
 from bot.delivery import home_channel, send_dm
 from bot.discord_ui import LAYOUT_TEXT_LIMIT, BotLayoutView
 from bot.managed_roles import ManagedRoles
 from bot.uex.new_members import (
-    DRIFTING, FLAGS, NEEDS_HELLO, SETTLING, flag, MAX_DAYS, NEW_MEMBER_DAYS, NEW_MEMBER_ROLE, PAGE_SIZE, PICK_GROUPS, NewMember, is_new, member_text, summary_text,
-    week_key, weekly_text,
+    DRIFTING, FLAGS, MAX_DAYS, NEEDS_HELLO, NEW_MEMBER_DAYS, NEW_MEMBER_ROLE, PAGE_SIZE, SETTLING, NewMember,
+    breakdown_text, flag, is_new, member_picks, onboarding_status, member_text, members_csv, summary_text, week_key, weekly_text,
 )
-from bot.uex.role_picker import GROUPS
 from bot.uex.server_analytics import EASTERN, MEMBER_REFERRAL, TIME_FORMAT, UTC, source_of
 
 logger = logging.getLogger("uexbot.new_members")
@@ -47,6 +47,12 @@ NO_MENTIONS = discord.AllowedMentions.none()
 
 def _parse(text: str) -> datetime:
     return datetime.strptime(text, TIME_FORMAT).replace(tzinfo=UTC)
+
+
+def _onboarding(member) -> str:
+    flags = getattr(member, "flags", None)
+    return onboarding_status(member.joined_at, bool(getattr(flags, "started_onboarding", False)),
+                             bool(getattr(flags, "completed_onboarding", False)))
 
 
 def latest(last_active: datetime | None, last_day: date | None) -> datetime | None:
@@ -83,6 +89,8 @@ class NewMembersView(BotLayoutView):
         self.clear_items()
         container = discord.ui.Container(accent_colour=discord.Colour.green())
         head = summary_text(self.everyone, self.now, self.days, self.showing)
+        if self.page == 0 and self.everyone:
+            head += "\n" + breakdown_text(self.everyone, self.now)
         if self.page_count > 1:
             head += f"\n-# Page {self.page + 1} of {self.page_count}"
         container.add_item(discord.ui.TextDisplay(head))
@@ -130,7 +138,7 @@ class NewMembersView(BotLayoutView):
                                                         now.strftime(TIME_FORMAT))
         for member in self.members:
             if member.user_id == user_id:
-                member.reached_by, member.reached_at = _who(interaction.user), now
+                member.reached_by, member.reached_at = interaction.user.display_name, now
         self.render()
         await interaction.response.edit_message(view=self, allowed_mentions=NO_MENTIONS)
 
@@ -219,14 +227,25 @@ class NewMembers(commands.Cog):
         who = guild.get_member(user_id) or self.bot.get_user(user_id)
         return (getattr(who, "display_name", None) or who.name) if who is not None else str(user_id)
 
-    async def gather(self, guild: discord.Guild, days: int, now: datetime) -> list[NewMember]:
-        """Everyone here who joined in the last `days`, newest first."""
-        joined = sorted((m for m in guild.members if not m.bot and is_new(m.joined_at, now, days)),
-                        key=lambda m: m.joined_at, reverse=True)
-        if not joined:
+    async def gather(self, guild: discord.Guild, days: int, now: datetime, *,
+                     include_left: bool = False) -> list[NewMember]:
+        """Everyone here who joined in the last `days`, newest first - and with `include_left`, those
+        who joined in that time and have gone (from the join log; the CSV only)."""
+        here = [m for m in guild.members if not m.bot and is_new(m.joined_at, now, days)]
+        if not here and not include_left:
             return []
         data = await self.bot.db.new_member_data(guild.id, (now - timedelta(days=days + 1)).strftime(TIME_FORMAT))
         joins = {row["user_id"]: row for row in data["joins"]}  # the latest join wins
+        people = [(m.id, m.joined_at, {r.id for r in m.roles}, m.name, m.display_name, True, _onboarding(m))
+                  for m in here]
+        if include_left:
+            for user_id, row in joins.items():
+                at = _parse(row["at"])
+                if guild.get_member(user_id) is None and is_new(at, now, days):
+                    user = self.bot.get_user(user_id)
+                    people.append((user_id, at, set(), getattr(user, "name", ""),
+                                   getattr(user, "display_name", "") or getattr(user, "name", ""), False, None))
+        people.sort(key=lambda p: p[1], reverse=True)
         active: dict[int, list[date]] = {}
         for row in data["active"]:
             active.setdefault(row["user_id"], []).append(date.fromisoformat(row["day"]))
@@ -237,12 +256,10 @@ class NewMembers(commands.Cog):
             voice.setdefault(row["user_id"], []).append((date.fromisoformat(row["day"]), row["minutes"]))
         invites = None
         picker = await self.bot.db.get_role_picker_roles(guild.id)
-        groups = {g.key: g for g in GROUPS}
-        pick_ids = [(picker[name], name) for key in PICK_GROUPS for name in groups[key].roles if name in picker]
         members = []
-        for member in joined:
-            source = None
-            row = joins.get(member.id)
+        for user_id, joined_at, held, username, display, still_here, onboarding in people:
+            source = inviter_name = None
+            row = joins.get(user_id)
             if row is not None:
                 inviter = row["inviter_id"]
                 if inviter is None and row["invite_code"] and row["invite_code"] not in data["labels"]:
@@ -254,18 +271,20 @@ class NewMembers(commands.Cog):
                     inviter = invites.get(row["invite_code"])
                 source = source_of(row["invite_code"], data["labels"], inviter)
                 if source == MEMBER_REFERRAL and inviter is not None:
-                    source += f" ({discord.utils.escape_markdown(self.name(guild, inviter))})"
-            held = {r.id for r in member.roles}
-            seen = sorted(d for d in active.get(member.id, []) if d >= member.joined_at.date())
-            contact = contacts.get(member.id)
+                    inviter_name = self.name(guild, inviter)
+            zone, activities, experience = member_picks(held, picker)
+            seen = sorted(d for d in active.get(user_id, []) if d >= joined_at.date())
+            contact = contacts.get(user_id)
             members.append(NewMember(
-                user_id=member.id, joined_at=member.joined_at, source=source,
-                picks=[name for role_id, name in pick_ids if role_id in held],
+                user_id=user_id, joined_at=joined_at, source=source,
+                picks=[*activities, *([zone] if zone else []), *([experience] if experience else [])],
                 first_active=seen[0] if seen else None, active_days=len(set(seen)),
-                voice_minutes=sum(m for d, m in voice.get(member.id, []) if d >= member.joined_at.date()),
-                last_active=latest(last_active.get(member.id), seen[-1] if seen else None),
-                reached_by=discord.utils.escape_markdown(self.name(guild, contact["by_id"])) if contact else None,
-                reached_at=_parse(contact["at"]) if contact else None))
+                voice_minutes=sum(m for d, m in voice.get(user_id, []) if d >= joined_at.date()),
+                last_active=latest(last_active.get(user_id), seen[-1] if seen else None),
+                reached_by=self.name(guild, contact["by_id"]) if contact else None,
+                reached_at=_parse(contact["at"]) if contact else None,
+                timezone=zone, activities=activities, experience=experience, inviter=inviter_name,
+                username=username, display_name=display, still_here=still_here, onboarding=onboarding))
         return members
 
     async def _allowed(self, interaction: discord.Interaction) -> bool:
@@ -276,7 +295,8 @@ class NewMembers(commands.Cog):
                           description="Moderators: members who joined lately, whether they've said hello, and who reached out.")
     @app_commands.describe(days=f"How far back, in days (default {NEW_MEMBER_DAYS})",
                            status="Show only members with this flag (default: everyone)",
-                           reached_out="Mark that you've reached out to this member")
+                           reached_out="Mark that you've reached out to this member",
+                           export="Owner only: get the list as a CSV file instead")
     @app_commands.choices(status=[
         app_commands.Choice(name="🔴 Needs a hello", value=NEEDS_HELLO),
         app_commands.Choice(name="🟡 Drifting", value=DRIFTING),
@@ -285,9 +305,13 @@ class NewMembers(commands.Cog):
     @app_commands.default_permissions(moderate_members=True)  # the owner and moderators
     async def new_members(self, interaction: discord.Interaction,
                           days: app_commands.Range[int, 1, MAX_DAYS] = NEW_MEMBER_DAYS,
-                          status: str | None = None, reached_out: discord.Member | None = None) -> None:
+                          status: str | None = None, reached_out: discord.Member | None = None,
+                          export: bool = False) -> None:
         if not await self._allowed(interaction):
             await interaction.response.send_message("This command is for the owner and moderators.", ephemeral=True)
+            return
+        if export and not await self.bot.is_owner(interaction.user):
+            await interaction.response.send_message("The CSV export is for the bot's owner.", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
         guild = self._guild()
@@ -300,6 +324,16 @@ class NewMembers(commands.Cog):
                                                         now.strftime(TIME_FORMAT))
         members = await self.gather(guild, days, now)
         showing = status if status in FLAGS else None
+        if export:
+            rows = await self.gather(guild, days, now, include_left=showing is None)
+            rows = [m for m in rows if showing is None or (m.still_here and flag(m, now) == showing)]
+            stamp = now.astimezone(EASTERN).date().isoformat()
+            file = discord.File(io.BytesIO(members_csv(rows, now).encode("utf-8-sig")), filename=f"new-members-{stamp}.csv")
+            await interaction.followup.send(
+                f"New members, last {days} days: {len(rows)} row{'s' if len(rows) != 1 else ''}"
+                + (f", {FLAGS[showing][1].lower()} only" if showing else ", including any who have left") + ".",
+                file=file, ephemeral=True)
+            return
         await interaction.followup.send(view=NewMembersView(self, guild, members, days, now, showing), ephemeral=True,
                                         allowed_mentions=NO_MENTIONS)
 

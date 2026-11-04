@@ -1,7 +1,14 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.84.
+the oldest entry below); the next new entry is 2.85.
+
+---
+
+## 2.84 - 2026-11-04 - Timezones and activities
+
+**Changed**
+- Moderators see new members counted by the timezone and activities they picked in Onboarding, to plan ops and newcomer runs at times and in styles that suit them. The owner's server stats count every member by timezone too, show when people join and the best times for a newcomer op, and the owner can save either list as a spreadsheet. New members who didn't finish Onboarding are flagged so someone can help. Counts, dates and Onboarding picks only, never what anyone wrote or said.
 
 ---
 

@@ -1123,6 +1123,8 @@ CREATE TABLE IF NOT EXISTS activity_hours (
     hour TEXT NOT NULL,
     messages INTEGER NOT NULL DEFAULT 0,
     voice_minutes INTEGER NOT NULL DEFAULT 0,
+    new_messages INTEGER NOT NULL DEFAULT 0,
+    new_voice_minutes INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (guild_id, hour)
 );
 CREATE TABLE IF NOT EXISTS channel_days (
@@ -1693,6 +1695,9 @@ class Database:
             "ALTER TABLE analytics_state ADD COLUMN audit_read_from TEXT",
             # Member referrals: who made the invite a join came through (entry 156).
             "ALTER TABLE member_movements ADD COLUMN inviter_id INTEGER",
+            # The same hourly totals for members in their first 3 weeks (entry 158).
+            "ALTER TABLE activity_hours ADD COLUMN new_messages INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE activity_hours ADD COLUMN new_voice_minutes INTEGER NOT NULL DEFAULT 0",
         ]
         for statement in migrations:
             try:
@@ -5726,15 +5731,22 @@ class Database:
                              (guild_id, user_id, day))
             await db.commit()
 
-    async def add_activity_counts(self, guild_id: int, hours: dict[str, tuple[int, int]],
+    async def add_activity_counts(self, guild_id: int, hours: dict[str, tuple[int, ...]],
                                   channels: dict[tuple[int, str], int]) -> None:
-        """Add to the server totals: hour -> (posts, voice minutes); (channel_id, day) -> posts."""
+        """Add to the server totals: hour -> (posts, voice minutes[, new members' posts, their voice
+        minutes]); (channel_id, day) -> posts."""
+        rows = []
+        for hour, counts in hours.items():
+            messages, minutes, new_messages, new_minutes = (*counts, 0, 0)[:4]
+            rows.append((guild_id, hour, messages, minutes, new_messages, new_minutes))
         async with self.connect() as db:
             await db.executemany(
-                """INSERT INTO activity_hours (guild_id, hour, messages, voice_minutes) VALUES (?, ?, ?, ?)
+                """INSERT INTO activity_hours (guild_id, hour, messages, voice_minutes, new_messages, new_voice_minutes)
+                   VALUES (?, ?, ?, ?, ?, ?)
                    ON CONFLICT(guild_id, hour) DO UPDATE SET messages = messages + excluded.messages,
-                       voice_minutes = voice_minutes + excluded.voice_minutes""",
-                [(guild_id, hour, messages, minutes) for hour, (messages, minutes) in hours.items()])
+                       voice_minutes = voice_minutes + excluded.voice_minutes,
+                       new_messages = new_messages + excluded.new_messages,
+                       new_voice_minutes = new_voice_minutes + excluded.new_voice_minutes""", rows)
             await db.executemany(
                 """INSERT INTO channel_days (guild_id, channel_id, day, messages) VALUES (?, ?, ?, ?)
                    ON CONFLICT(guild_id, channel_id, day) DO UPDATE SET messages = messages + excluded.messages""",
@@ -5904,8 +5916,11 @@ class Database:
                 "last_active": await rows("SELECT user_id, last_active FROM member_activity WHERE guild_id = ?",
                                           (guild_id,)),
                 "hours": await rows(
-                    """SELECT hour, messages, voice_minutes FROM activity_hours
+                    """SELECT hour, messages, voice_minutes, new_messages, new_voice_minutes FROM activity_hours
                        WHERE guild_id = ? AND hour >= ? AND hour < ?""", (guild_id, start[:13], end[:13])),
+                "newcomer_since": (await rows(
+                    """SELECT MIN(hour) AS hour FROM activity_hours
+                       WHERE guild_id = ? AND (new_messages > 0 OR new_voice_minutes > 0)""", (guild_id,)))[0]["hour"],
                 "channels": await rows(
                     """SELECT channel_id, SUM(messages) AS messages FROM channel_days
                        WHERE guild_id = ? AND day >= ? AND day <= ? GROUP BY channel_id""",
