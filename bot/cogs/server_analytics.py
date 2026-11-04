@@ -38,7 +38,7 @@ from bot.delivery import Delivery, home_channel, send_dm
 from bot.discord_ui import LAYOUT_TEXT_LIMIT, BotLayoutView
 from bot.uex.anniversaries import COMMUNITY_NAME, INACTIVE_DAYS
 from bot.uex.server_analytics import (
-    ATTENDED_MINUTES, AUDIT_LOG_DAYS, DAY_FORMAT, EASTERN, HOUR_FORMAT, PERIOD_DAYS, RETENTION_DAYS, TIME_FORMAT, UTC,
+    MEMBER_REFERRAL, ATTENDED_MINUTES, AUDIT_LOG_DAYS, DAY_FORMAT, EASTERN, HOUR_FORMAT, PERIOD_DAYS, RETENTION_DAYS, TIME_FORMAT, UTC,
     EventResult, InviteUse, ModAction, Movement, build_report, clean_label, event_running, match_invite,
     moderation_kind, previous_month, report_blocks, source_of,
 )
@@ -103,6 +103,20 @@ def stats_view(blocks: list[str]) -> BotLayoutView:
         used += len(block)
     view.add_item(container)
     return view
+
+
+def _inviter(invite) -> int | None:
+    """The member who made an invite; None when a bot made it or Discord doesn't say."""
+    who = getattr(invite, "inviter", None)
+    return who.id if who is not None and not who.bot else None
+
+
+def _uses(invite) -> InviteUse:
+    return InviteUse(invite.uses or 0, invite.max_uses or 0, _inviter(invite))
+
+
+def _who(user) -> str:
+    return discord.utils.escape_markdown(getattr(user, "display_name", None) or user.name)
 
 
 def invite_code(text: str) -> str:
@@ -190,9 +204,10 @@ class ServerAnalytics(commands.Cog):
         if guild is None or member.bot:
             return
         try:
-            code = await self.joined_with(guild)
-            await self.bot.db.record_member_movement(guild.id, member.id, "join", _time(self.now()), code)
-            logger.info("Member %s joined (invite %s)", member.id, code or "not known")
+            code, inviter = await self.joined_with(guild)
+            await self.bot.db.record_member_movement(guild.id, member.id, "join", _time(self.now()), code, inviter)
+            logger.info("Member %s joined (invite %s%s)", member.id, code or "not known",
+                        f", made by {inviter}" if inviter else "")
         except Exception:
             logger.exception("Recording member %s's join failed", member.id)
 
@@ -209,7 +224,7 @@ class ServerAnalytics(commands.Cog):
     @commands.Cog.listener()
     async def on_invite_create(self, invite: discord.Invite) -> None:
         if self.invites is not None and invite.guild is not None and self._ours(invite.guild.id) is not None:
-            self.invites[invite.code] = InviteUse(invite.uses or 0, invite.max_uses or 0)
+            self.invites[invite.code] = _uses(invite)
 
     async def _read_invites(self, guild: discord.Guild) -> list[discord.Invite] | None:
         try:
@@ -224,17 +239,22 @@ class ServerAnalytics(commands.Cog):
 
     async def _snapshot(self, guild: discord.Guild) -> dict[str, InviteUse] | None:
         invites = await self._read_invites(guild)
-        return None if invites is None else {i.code: InviteUse(i.uses or 0, i.max_uses or 0) for i in invites}
+        return None if invites is None else {i.code: _uses(i) for i in invites}
 
-    async def joined_with(self, guild: discord.Guild) -> str | None:
-        """The invite a member who just joined used, by which use count went up. One join at a
-        time, so two close together each compare against the count the other left."""
+    async def joined_with(self, guild: discord.Guild) -> tuple[str | None, int | None]:
+        """The invite a member who just joined used, by which use count went up, and the member
+        who made it. One join at a time, so two close together each compare against the count the
+        other left."""
         async with self._invite_lock:
             after = await self._snapshot(guild)
             if after is None:
-                return None
+                return None, None
             before, self.invites = self.invites, after
-            return match_invite(before, after) if before is not None else None
+            code = match_invite(before, after) if before is not None else None
+            if code is None:
+                return None, None
+            used = after.get(code) or before.get(code)
+            return code, used.inviter_id if used else None
 
     # -- every minute ---------------------------------------------------------
 
@@ -434,9 +454,14 @@ class ServerAnalytics(commands.Cog):
         names = {c.id: c.name for c in list(guild.text_channels) + list(guild.forums) if _readable(c, guild.me)}
         moderation = [ModAction(r["kind"], _parse(r["at"]), r["count"], r["moderator_id"], bool(r["by_bot"]))
                       for r in data["moderation"]]
+        # Joins recorded before inviters were kept: who made their invite, if it's still up.
+        makers = {i.code: _inviter(i) for i in await self._read_invites(guild) or []}
+        movements = [Movement(r["user_id"], r["kind"], _parse(r["at"]), r["invite_code"],
+                              r["inviter_id"] if r["inviter_id"] is not None else makers.get(r["invite_code"]))
+                     for r in data["movements"]]
         built = build_report(
             title=title, start=start, end=end, tracking_since=tracking, chat_from=chat_from,
-            movements=[Movement(r["user_id"], r["kind"], _parse(r["at"]), r["invite_code"]) for r in data["movements"]],
+            movements=movements,
             active=active,
             members={m.id: m.joined_at for m in guild.members if not m.bot and m.joined_at is not None},
             last_active={r["user_id"]: _parse(r["last_active"]) for r in data["last_active"]},
@@ -450,7 +475,8 @@ class ServerAnalytics(commands.Cog):
                     for r in data["events"] if r["starts_at"] >= tracking.timestamp()],
             labels=data["labels"],
             moderation=moderation, bot_names=self._names({a.moderator_id for a in moderation if a.by_bot}, guild),
-            moderation_from=_parse(state["audit_read_from"]) if state.get("audit_read_from") else None)
+            moderation_from=_parse(state["audit_read_from"]) if state.get("audit_read_from") else None,
+            referrer_names=self._names({m.inviter_id for m in movements if m.inviter_id}, guild))
         return report_blocks(built)
 
     def _names(self, user_ids: set, guild: discord.Guild) -> dict[int, str]:
@@ -458,7 +484,7 @@ class ServerAnalytics(commands.Cog):
         for uid in user_ids:
             who = guild.get_member(uid) or self.bot.get_user(uid)
             if who is not None:
-                names[uid] = getattr(who, "display_name", None) or who.name
+                names[uid] = _who(who)
         return names
 
     @app_commands.command(name="server-stats",
@@ -536,7 +562,8 @@ class ServerAnalytics(commands.Cog):
         name = clean_label(label or "")
         known = live is None or any(i.code == code for i in live)
         if not name:
-            await interaction.followup.send(f"`{code}` shows as **{source_of(code, labels)}**.", ephemeral=True)
+            maker = next((_inviter(i) for i in live or [] if i.code == code), None)
+            await interaction.followup.send(f"`{code}` shows as **{source_of(code, labels, maker)}**.", ephemeral=True)
             return
         await self.bot.db.set_invite_label(code, name)
         note = "" if known else " No invite on the server has that code right now, so check it's right."
@@ -563,10 +590,27 @@ def invite_list_text(live: list | None, labels: dict[str, str]) -> str:
         lines.append("-# I can't read the server's invites: the bot needs Manage Server. Names saved so far:")
         lines += [f"`{code}` · {label}" for code, label in sorted(labels.items(), key=lambda kv: kv[1])]
         return "\n".join(lines)[:2000]
-    for inv in sorted(live, key=lambda i: (-(i.uses or 0), i.code)):
+    def line(inv, name: str) -> str:
         where = f" · #{inv.channel.name}" if getattr(inv, "channel", None) is not None else ""
         limit = f"/{inv.max_uses}" if inv.max_uses else ""
-        lines.append(f"`{inv.code}` · **{labels.get(inv.code, 'no name')}** · {inv.uses or 0}{limit} uses{where}")
+        return f"`{inv.code}` · {name} · {inv.uses or 0}{limit} uses{where}"
+
+    by_uses = sorted(live, key=lambda i: (-(i.uses or 0), i.code))
+    lines += [line(inv, f"**{labels[inv.code]}**") for inv in by_uses if inv.code in labels]
+    members = [inv for inv in by_uses if inv.code not in labels and _inviter(inv) is not None]
+    if members:
+        used = [inv for inv in members if inv.uses]
+        unused = len(members) - len(used)
+        lines.append(f"**{MEMBER_REFERRAL}**: {len(members)} invite{'s' if len(members) != 1 else ''} made by members, "
+                     f"{sum(inv.uses or 0 for inv in members)} uses" + (f" ({unused} unused)" if unused else ""))
+        lines += ["-# " + line(inv, _who(inv.inviter)) for inv in used[:5]]
+        if len(used) > 5:
+            lines.append(f"-# and {len(used) - 5} more")
+    others = [inv for inv in by_uses if inv.code not in labels and _inviter(inv) is None]
+    lines += [line(inv, "**no name**") for inv in others if inv.uses]
+    idle = sum(1 for inv in others if not inv.uses)
+    if idle:
+        lines.append(f"-# {idle} unused invite{'s' if idle != 1 else ''} with no name not shown")
     gone = sorted(set(labels) - {i.code for i in live})
     if gone:
         lines.append("-# Named but no longer on the server: " + ", ".join(f"`{c}` ({labels[c]})" for c in gone))

@@ -24,9 +24,9 @@ from bot.cogs.voice_ranks import OPS_CATEGORY_ID
 from bot.db.database import Database
 from bot.discord_ui import LAYOUT_TEXT_LIMIT
 from bot.uex.server_analytics import (
-    DEFAULT_INVITE_LABELS, NO_INVITE, UNKNOWN_INVITE, EventResult, InviteUse, ModAction, Movement, build_report,
+    DEFAULT_INVITE_LABELS, MEMBER_REFERRAL, NO_INVITE, UNKNOWN_INVITE, EventResult, InviteUse, ModAction, Movement, build_report,
     event_kinds, event_running, first_hello, kept, lapsed_counts, match_invite, moderation_block, moderation_kind,
-    peak_times, previous_month, report_blocks, retention_cohort, slot_label,
+    peak_times, previous_month, report_blocks, retention_cohort, slot_label, source_of,
 )
 
 UTC = timezone.utc
@@ -178,8 +178,8 @@ def _member(uid, *, joined=T0 - timedelta(days=300), bot=False):
     return NS(id=uid, bot=bot, joined_at=joined, voice=NS(self_deaf=False, deaf=False))
 
 
-def _invite(code, uses, max_uses=0, channel="welcome"):
-    return NS(code=code, uses=uses, max_uses=max_uses, channel=NS(name=channel))
+def _invite(code, uses, max_uses=0, channel="welcome", inviter=None):
+    return NS(code=code, uses=uses, max_uses=max_uses, channel=NS(name=channel), inviter=inviter)
 
 
 class FakeUser:
@@ -464,3 +464,66 @@ def test_the_audit_log_is_read_back_once_per_entry_and_without_view_audit_log_it
     assert read_from == "2026-09-20 15:00:00"
     assert "Bans **1** · kicks **0** · timeouts **1** · deleted messages **15** · AutoMod actions **0**" in blocks[-1]
     assert sum("Can't read the audit log" in r.message for r in caplog.records) == 1
+
+
+# -- member referrals -----------------------------------------------------------------
+
+def test_an_unlabelled_invite_a_member_made_is_a_member_referral_and_a_label_always_wins():
+    labels = {RSI: "RSI org page"}
+    assert source_of(RSI, labels, 5) == "RSI org page"
+    assert source_of("abc", labels, 5) == MEMBER_REFERRAL
+    assert source_of("abc", labels, None) == UNKNOWN_INVITE, "a bot's invite, or Discord didn't say"
+    assert source_of(None, labels, 5) == NO_INVITE
+
+
+def test_member_referrals_are_one_source_with_the_top_referrers_named(tmp_path):
+    async def run():
+        kara = NS(id=31, bot=False, name="kara", display_name="Kara_", joined_at=T0 - timedelta(days=200))
+        vex = NS(id=32, bot=False, name="vex", display_name="Vex", joined_at=T0 - timedelta(days=200))
+        joiners = [_member(uid, joined=T0) for uid in (40, 41, 42)]
+        guild = FakeGuild(members=[kara, vex, *joiners],
+                          invites=[_invite("sc1abc", 0, inviter=kara), _invite("sc2xyz", 0, inviter=vex),
+                                   _invite("botinv", 0, inviter=NS(id=99, bot=True))])
+        guild.get_member = lambda uid: next((m for m in guild.members if m.id == uid), None)
+        for m in joiners:
+            m.guild = guild
+        cog, db, _clock, _owner = await _make(tmp_path, guild)
+        await cog.minute(T0)
+        # a join recorded before inviters were kept: the report finds who made its invite
+        await db.record_member_movement(GUILD_ID, 39, "join", "2026-11-04 15:00:00", "sc1abc")
+        guild.invite_list = [_invite("sc1abc", 1, inviter=kara), _invite("sc2xyz", 0, inviter=vex),
+                             _invite("botinv", 0, inviter=NS(id=99, bot=True))]
+        await cog.on_member_join(joiners[0])
+        guild.invite_list = [_invite("sc1abc", 1, inviter=kara), _invite("sc2xyz", 1, inviter=vex),
+                             _invite("botinv", 0, inviter=NS(id=99, bot=True))]
+        await cog.on_member_join(joiners[1])
+        guild.invite_list = [_invite("sc1abc", 1, inviter=kara), _invite("sc2xyz", 1, inviter=vex),
+                             _invite("botinv", 1, inviter=NS(id=99, bot=True))]
+        await cog.on_member_join(joiners[2])
+        async with db.connect() as conn:
+            rows = await (await conn.execute(
+                "SELECT user_id, invite_code, inviter_id FROM member_movements ORDER BY id")).fetchall()
+        report = "\n".join(await cog.report(guild, T0 - timedelta(days=1), T0 + timedelta(days=8), "last 30 days"))
+        await db.set_invite_label("sc2xyz", "Star Citizen 2 regulars")
+        labelled = "\n".join(await cog.report(guild, T0 - timedelta(days=1), T0 + timedelta(days=8), "last 30 days"))
+        return [tuple(r) for r in rows], report, labelled
+
+    rows, report, labelled = asyncio.run(run())
+    assert rows == [(39, "sc1abc", None), (40, "sc1abc", 31), (41, "sc2xyz", 32), (42, "botinv", None)]
+    assert f"{MEMBER_REFERRAL}: **3** joined" in report
+    assert f"{UNKNOWN_INVITE}: **1** joined" in report, "an invite a bot made isn't a referral"
+    assert "Top referrers: Kara\\_ (2) · Vex (1)" in report
+    assert f"{MEMBER_REFERRAL}: **2** joined" in labelled and "Star Citizen 2 regulars: **1** joined" in labelled
+    assert "Top referrers: Kara\\_ (2)" in labelled and "Vex (1)" not in labelled
+
+
+def test_the_invite_list_puts_named_invites_first_and_groups_the_ones_members_made():
+    kara = NS(id=31, bot=False, name="kara", display_name="Kara")
+    live = [_invite("m1", 5, inviter=kara, channel="Star Citizen 1"), _invite(RSI, 2, channel="org-page"),
+            _invite("m2", 0, inviter=kara), _invite("m3", 1, inviter=kara), _invite("vanity", 0)]
+    text = invite_list_text(live, {RSI: "RSI org page"})
+    lines = text.splitlines()
+    assert lines[1] == "`6eXmvxEXsa` · **RSI org page** · 2 uses · #org-page"
+    assert lines[2] == f"**{MEMBER_REFERRAL}**: 3 invites made by members, 6 uses (1 unused)"
+    assert lines[3] == "-# `m1` · Kara · 5 uses · #Star Citizen 1"
+    assert "-# 1 unused invite with no name not shown" in text and "vanity" not in text

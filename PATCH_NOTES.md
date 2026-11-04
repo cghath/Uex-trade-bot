@@ -1,7 +1,18 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.82.
+the oldest entry below); the next new entry is 2.83.
+
+---
+
+## 2.82 - 2026-11-04 - New members
+
+**Added**
+- A **🌱 New Member** role for your first 3 weeks in Star Tech Dynamics, shown in its own group in the member list so everyone can spot new people and say hello. It comes off by itself after 21 days and gives no permissions.
+- For moderators: `/new-members` lists who joined lately, whether they've posted or been in voice yet, and who has already reached out, so new members get a hello without five people DMing them at once.
+
+**Changed**
+- In the owner's server stats, members who join through an invite another member made now count as a **Member referral**, with the top referrers named, instead of an unknown invite.
 
 ---
 
