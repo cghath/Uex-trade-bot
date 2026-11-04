@@ -1138,7 +1138,8 @@ CREATE TABLE IF NOT EXISTS member_movements (
     user_id INTEGER NOT NULL,
     kind TEXT NOT NULL CHECK (kind IN ('join', 'leave')),
     at TEXT NOT NULL,
-    invite_code TEXT
+    invite_code TEXT,
+    inviter_id INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_member_movements_at ON member_movements (guild_id, at);
 CREATE TABLE IF NOT EXISTS invite_labels (
@@ -1166,6 +1167,21 @@ CREATE TABLE IF NOT EXISTS moderation_actions (
     target_id INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_moderation_actions_at ON moderation_actions (guild_id, at);
+
+-- New members (bot/cogs/new_members.py): who reached out to a new member, and when (the latest,
+-- so the owner and moderators don't all DM the same person), and the week the owner's weekly
+-- note last went. The temporary role itself needs no table: Discord's join date says when it's due.
+CREATE TABLE IF NOT EXISTS new_member_contacts (
+    guild_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    by_id INTEGER NOT NULL,
+    at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (guild_id, user_id)
+);
+CREATE TABLE IF NOT EXISTS new_member_state (
+    guild_id INTEGER PRIMARY KEY,
+    last_weekly TEXT
+);
 """
 
 
@@ -1675,6 +1691,8 @@ class Database:
             "ALTER TABLE marketplace_alerts ADD COLUMN baseline_done INTEGER NOT NULL DEFAULT 1",
             # Server analytics' moderation counts (PROJECT_CONTEXT.md entry 155).
             "ALTER TABLE analytics_state ADD COLUMN audit_read_from TEXT",
+            # Member referrals: who made the invite a join came through (entry 156).
+            "ALTER TABLE member_movements ADD COLUMN inviter_id INTEGER",
         ]
         for statement in migrations:
             try:
@@ -5751,11 +5769,11 @@ class Database:
         return True
 
     async def record_member_movement(self, guild_id: int, user_id: int, kind: str, at: str,
-                                     invite_code: str | None = None) -> None:
+                                     invite_code: str | None = None, inviter_id: int | None = None) -> None:
         async with self.connect() as db:
             await db.execute(
-                "INSERT INTO member_movements (guild_id, user_id, kind, at, invite_code) VALUES (?, ?, ?, ?, ?)",
-                (guild_id, user_id, kind, at, invite_code))
+                """INSERT INTO member_movements (guild_id, user_id, kind, at, invite_code, inviter_id)
+                   VALUES (?, ?, ?, ?, ?, ?)""", (guild_id, user_id, kind, at, invite_code, inviter_id))
             await db.commit()
 
     async def get_invite_labels(self) -> dict[str, str]:
@@ -5814,6 +5832,44 @@ class Database:
                     (read_from, guild_id))
             await db.commit()
 
+    async def mark_new_member_contacted(self, guild_id: int, user_id: int, by_id: int, at: str) -> None:
+        async with self.connect() as db:
+            await db.execute(
+                """INSERT INTO new_member_contacts (guild_id, user_id, by_id, at) VALUES (?, ?, ?, ?)
+                   ON CONFLICT(guild_id, user_id) DO UPDATE SET by_id = excluded.by_id, at = excluded.at""",
+                (guild_id, user_id, by_id, at))
+            await db.commit()
+
+    async def claim_new_member_week(self, guild_id: int, week: str) -> bool:
+        """Claim the weekly note for `week`, once: False if it's already gone."""
+        async with self.connect() as db:
+            await db.execute("INSERT OR IGNORE INTO new_member_state (guild_id) VALUES (?)", (guild_id,))
+            cursor = await db.execute(
+                """UPDATE new_member_state SET last_weekly = ?
+                   WHERE guild_id = ? AND (last_weekly IS NULL OR last_weekly < ?)""", (week, guild_id, week))
+            await db.commit()
+        return cursor.rowcount == 1
+
+    async def new_member_data(self, guild_id: int, since: str) -> dict[str, Any]:
+        """For members who joined since `since` (UTC): their joins (invite, inviter), the days they
+        were active (posts or voice), who reached out to them, and the invite labels."""
+        async with self.connect() as db:
+            async def rows(sql: str, params: tuple) -> list[dict[str, Any]]:
+                return [dict(r) for r in await (await db.execute(sql, params)).fetchall()]
+
+            return {
+                "joins": await rows(
+                    """SELECT user_id, at, invite_code, inviter_id FROM member_movements
+                       WHERE guild_id = ? AND kind = 'join' AND at >= ? ORDER BY at, id""", (guild_id, since)),
+                "active": await rows(
+                    """SELECT user_id, day FROM member_active_days WHERE guild_id = ? AND day >= ?
+                       UNION SELECT user_id, day FROM voice_daily WHERE guild_id = ? AND day >= ?""",
+                    (guild_id, since[:10], guild_id, since[:10])),
+                "contacts": await rows("SELECT user_id, by_id, at FROM new_member_contacts WHERE guild_id = ?",
+                                       (guild_id,)),
+                "labels": {r["code"]: r["label"] for r in await rows("SELECT code, label FROM invite_labels", ())},
+            }
+
     async def latest_moderation_action(self, guild_id: int) -> str | None:
         async with self.connect() as db:
             row = await (await db.execute(
@@ -5835,7 +5891,7 @@ class Database:
                 "state": state[0] if state else None,
                 "activity_seeded_at": seeded[0]["seeded_at"] if seeded else None,
                 "movements": await rows(
-                    """SELECT user_id, kind, at, invite_code FROM member_movements
+                    """SELECT user_id, kind, at, invite_code, inviter_id FROM member_movements
                        WHERE guild_id = ? AND at >= ? AND at < ? ORDER BY at, id""", (guild_id, since, end)),
                 "active": await rows(
                     """SELECT user_id, day FROM member_active_days WHERE guild_id = ? AND day >= ? AND day <= ?

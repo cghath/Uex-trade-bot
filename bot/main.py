@@ -55,6 +55,7 @@ INITIAL_COGS = (
     "bot.cogs.role_picker",
     "bot.cogs.event_cards",
     "bot.cogs.server_analytics",
+    "bot.cogs.new_members",
 )
 
 

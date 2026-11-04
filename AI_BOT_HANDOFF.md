@@ -501,6 +501,10 @@ date - no open item, nothing to record here.
       PROJECT_CONTEXT.md entry 154
 - [ ] PR #153 - Moderation counts in server analytics, from the audit log (`moderation_actions`,
       `entry_action`, `catch_up_audit_log`). Goes with PR #152. See PROJECT_CONTEXT.md entry 155
+- [ ] PR #154 - Member referrals in server analytics (`source_of` with the inviter,
+      `member_movements.inviter_id`, top referrers, the grouped invite list), and new members:
+      the 🌱 New Member role and `/new-members` (bot/cogs/new_members.py). Goes with PR #152.
+      See PROJECT_CONTEXT.md entries 156 and 157
 - [ ] PR #148 - The rest of the 2026-10-30 audit (PROJECT_CONTEXT.md entry 153). Worth porting
       where aiv2 has the same code: `BotDynamicItem` (bot/discord_ui.py), REL-3/REL-5 (wiki and
       UEX client), REL-6 deferrals, LOGIC-4 alert pollers, TRD-1/TRD-2 marketplace alert baseline

@@ -5508,6 +5508,40 @@ they're in sync).
      - Warns aren't in Discord's audit log (they live in whichever bot gives them), so aren't
        counted.
 
+156. **Server analytics: member referrals.** The planning session's ask (2026-11-04): `/invite-label`
+     showed about 22 uses on unlabelled invites, mostly short-lived ones members make (often on a
+     voice channel like Star Citizen 1) to bring friends - more than the legacy link (12) or
+     Disboard (3), and lost in "Unknown". Now `source_of` reads a label first, then "Member
+     referral" when a member (not a bot) made the invite (`invite.inviter`), then unknown - so
+     naming a member's invite later moves its joins to that name. `member_movements.inviter_id`
+     (an added column, migrated) keeps who made it at join time, since a used-up invite is gone
+     afterwards; joins recorded before that take the maker from the live invite when the report
+     is built. The sources section adds "Top referrers" (top 3 by joins in the period).
+     `/invite-label`'s list puts named invites first, folds members' invites into one Member
+     referral line (the 5 most used under it, with who made each) and hides unused unnamed ones.
+     Matching is unchanged: two candidates is still no answer.
+
+157. **New members: a temporary role and `/new-members`.** The owner's ask (2026-11-04, through the
+     planning session), shipped with entry 156. `bot/cogs/new_members.py`, rules and wording in
+     `bot/uex/new_members.py`.
+     - **The 🌱 New Member role**: given on join, taken off after `NEW_MEMBER_DAYS` (21), by
+       Discord's own `joined_at` - no table, nothing lost on a restart, and a rejoin starts again.
+       A check every 30 minutes puts it right both ways; its first run is the deploy's backfill.
+       A bot-owned role (`bot/managed_roles.py`, whose `get` now takes creation settings): made
+       hoisted and not mentionable, no permissions; staff can change those and the bot never
+       changes them back. A member list groups a member under their highest hoisted role, so it
+       shows only where staff place it. Not Sapphire's new-account role (account age); a member
+       can have both. A staff member who takes it off someone new sees it come back at the next check.
+     - **`/new-members`** (`days`, default 21, up to 90; `reached_out`): private, for the owner and
+       anyone with Moderate Members (`default_permissions(moderate_members=True)` plus a check).
+       Newest first, 8 a page: join date and days here, source (entry 154/156, with the referrer's
+       name), Onboarding picks (activity, timezone, experience, by the picker's saved role ids),
+       first day they posted or were in voice since joining (analytics' `member_active_days` and
+       `voice_daily`), and who reached out (`new_member_contacts`, the latest). "Needs a hello":
+       nothing after `HELLO_AFTER_DAYS` (3) and nobody's reached out. A menu marks reached out.
+     - **Weekly note**: Mondays from 10 AM Eastern, claimed in `new_member_state`, a DM to the owner
+       naming members still waiting for a hello; nothing when nobody is. 82 tables.
+
 ## Where to look for what
 
 Seven docs, deliberately scoped so they don't duplicate each other:

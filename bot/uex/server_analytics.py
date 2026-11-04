@@ -15,7 +15,9 @@ each invite's use count and, on a join, looks for the one that went up (match_in
 recruiting place has its own permanent invite, labelled in invite_labels (seeded with
 DEFAULT_INVITE_LABELS, changed with /invite-label). Matching is on the code, never the channel:
 Discord hands back an existing invite when the channel and settings match, which is why each
-source invite points at a different channel.
+source invite points at a different channel. An invite with no label that a member made
+(Discord names its inviter) is a member referral: members make short-lived ones, often on a
+voice channel, to bring friends - they're one source, with the top referrers named.
 """
 from __future__ import annotations
 
@@ -43,6 +45,8 @@ LAPSED_STEPS = (30, 60, 90)
 SHOW_ROWS = 5
 
 UNKNOWN_INVITE = "Unknown / temporary invite"
+MEMBER_REFERRAL = "Member referral"
+TOP_REFERRERS = 3
 NO_INVITE = "Not known (no invite matched)"
 
 # The per-source invites, created 2026-11-04 (the owner's list). Seeded once; /invite-label
@@ -76,6 +80,7 @@ _WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 class InviteUse:
     uses: int
     max_uses: int = 0  # 0 = no limit
+    inviter_id: int | None = None  # the member who made it; None for a bot's or an unknown maker
 
 
 def match_invite(before: dict[str, InviteUse], after: dict[str, InviteUse]) -> str | None:
@@ -97,10 +102,14 @@ def event_running(state: str, starts_at: int, now: int) -> bool:
     return state == "started" or (state == "open" and starts_at <= now < starts_at + EVENT_OPEN_HOURS * 3600)
 
 
-def source_of(code: str | None, labels: dict[str, str]) -> str:
+def source_of(code: str | None, labels: dict[str, str], inviter_id: int | None = None) -> str:
+    """Where a join came from: its invite's label, else a member referral when a member made the
+    invite, else unknown. A label always wins, so naming a member's invite moves its joins there."""
     if code is None:
         return NO_INVITE
-    return labels.get(code, UNKNOWN_INVITE)
+    if code in labels:
+        return labels[code]
+    return MEMBER_REFERRAL if inviter_id is not None else UNKNOWN_INVITE
 
 
 def clean_label(text: str) -> str:
@@ -166,6 +175,7 @@ class Movement:
     kind: str  # "join" or "leave"
     at: datetime
     code: str | None = None
+    inviter_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -196,6 +206,7 @@ class Report:
     lapsed: dict[int, int | None] = field(default_factory=dict)
     lapsed_known_from: dict[int, datetime] = field(default_factory=dict)
     sources: list[tuple[str, int, int, int]] = field(default_factory=list)  # label, joined, kept, cohort
+    referrers: list[tuple[str, int]] = field(default_factory=list)
     peak_voice: list[tuple[str, float]] = field(default_factory=list)
     peak_chat: list[tuple[str, int]] = field(default_factory=list)
     busiest: list[tuple[str, int]] = field(default_factory=list)
@@ -319,7 +330,7 @@ def build_report(*, title: str, start: datetime, end: datetime, tracking_since: 
                  hours: list[tuple[datetime, int, int]], channel_counts: dict[int, int],
                  channel_names: dict[int, str], ops: list[int], events: list[EventResult],
                  labels: dict[str, str], moderation: list[ModAction] = (), bot_names: dict[int, str] | None = None,
-                 moderation_from: datetime | None = None) -> Report:
+                 moderation_from: datetime | None = None, referrer_names: dict[int, str] | None = None) -> Report:
     """Everything /server-stats and the monthly DM show, for `start` to `end`."""
     report = Report(title=title, start=start, end=end, tracking_since=tracking_since, chat_from=chat_from)
     joins = [m for m in movements if m.kind == "join"]
@@ -332,14 +343,21 @@ def build_report(*, title: str, start: datetime, end: datetime, tracking_since: 
     stayed = {id(j): kept(j, movements, active, end) for j in cohort}
     report.retention = (sum(stayed.values()), len(cohort))
     per_source: dict[str, list[int]] = defaultdict(lambda: [0, 0, 0])
+    referrals: Counter = Counter()
     for j in joins:
         if start <= j.at < end:
-            per_source[source_of(j.code, labels)][0] += 1
+            source = source_of(j.code, labels, j.inviter_id)
+            per_source[source][0] += 1
+            if source == MEMBER_REFERRAL:
+                referrals[j.inviter_id] += 1
     for j in cohort:
-        row = per_source[source_of(j.code, labels)]
+        row = per_source[source_of(j.code, labels, j.inviter_id)]
         row[1] += stayed[id(j)]
         row[2] += 1
     report.sources = sorted(((name, *row) for name, row in per_source.items()), key=lambda r: (-r[1], -r[3], r[0]))
+    names = referrer_names or {}
+    report.referrers = [(names.get(uid, "a member no longer here"), n)
+                        for uid, n in sorted(referrals.items(), key=lambda kv: (-kv[1], names.get(kv[0], "")))[:TOP_REFERRERS]]
 
     last = _last_day(end)
     week = last - timedelta(days=WEEK_DAYS - 1)
@@ -428,6 +446,8 @@ def report_blocks(report: Report) -> list[str]:
             if cohort:
                 line += f" · kept {stayed} of {cohort} after 30 days"
             lines.append(line)
+        if report.referrers:
+            lines.append("Top referrers: " + " · ".join(f"{name} ({n})" for name, n in report.referrers))
         blocks.append("\n".join(lines))
 
     if report.peak_voice or report.peak_chat:

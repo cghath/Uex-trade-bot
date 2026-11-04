@@ -49,9 +49,10 @@ class ManagedRoles:
             self._ids[guild.id] = await self.bot.db.get_managed_roles(guild.id)
         return self._ids[guild.id]
 
-    async def get(self, guild: discord.Guild, name: str) -> Any:
+    async def get(self, guild: discord.Guild, name: str, **create: Any) -> Any:
         """The role the bot calls `name`: by its remembered id, else matched by name the first
-        time, else created. Raises discord.HTTPException when it has to be created and can't be."""
+        time, else created (with `create`'s settings, e.g. hoist - only then: staff can change
+        them afterwards). Raises discord.HTTPException when it has to be created and can't be."""
         async with self._lock:
             ids = await self.ids(guild)
             role_id = ids.get(name)
@@ -69,7 +70,7 @@ class ManagedRoles:
                     if any(r.name == name for r in guild.roles):
                         logger.warning("A role named %s has permissions, so it isn't used; making the bot's own",
                                        name)
-                    role = await guild.create_role(name=name, reason=self.reason)
+                    role = await guild.create_role(name=name, reason=self.reason, **create)
                     self._created[role.id] = role
                 ids[name] = role.id
                 try:
