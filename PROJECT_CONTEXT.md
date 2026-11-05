@@ -5640,6 +5640,19 @@ they're in sync).
        Who left list and the CSV. The CSV gains `left_date`; `status` is left, kicked or banned.
      - **Colour guide:** `LEGEND`, one `-#` line under the header, is built from the threshold
        constants, so changing a threshold changes the guide.
+161. **Join and leave cards for staff** (2026-11-05; bot/uex/join_cards.py, posted by
+     bot/cogs/server_analytics.py). After `on_member_join` matches the invite and records the
+     join, a small embed goes to #staff (`STAFF_CHANNEL_ID`) next to Sapphire's join alert: the
+     name as a profile link, the user ID, the source (`source_text`: the label and code, "Member
+     referral (invited by X)", "Unnamed invite (code)", or "Source unknown" when no single invite
+     matched - never a guess), the account age (`account_age`; ⚠️ under `NEW_ACCOUNT_DAYS`, 7)
+     and the member count. `on_raw_member_remove` reads the latest join first (`last_join`) and
+     posts one line: how long they stayed (`stay_length`: minutes or hours on the first day, then
+     days) and the original source, or "joined before join tracking began".
+     - **Where:** `analytics_state.join_cards_channel_id`: NULL #staff, 0 off, else that channel;
+       `/join-cards` (owner only) shows, moves or turns them off. A missing channel or a failed
+       post (no Send Messages / Embed Links) logs one warning, never stops the join being
+       recorded.
 
 ## Where to look for what
 

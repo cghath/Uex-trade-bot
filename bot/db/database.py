@@ -1111,7 +1111,8 @@ CREATE TABLE IF NOT EXISTS analytics_state (
     last_report_month TEXT,
     audit_read_from TEXT,
     audit_checked_at TEXT,
-    system_cleaned_at TEXT
+    system_cleaned_at TEXT,
+    join_cards_channel_id INTEGER
 );
 CREATE TABLE IF NOT EXISTS member_active_days (
     guild_id INTEGER NOT NULL,
@@ -1704,6 +1705,8 @@ class Database:
             # of system messages ("X joined") that had been counted as posts.
             "ALTER TABLE analytics_state ADD COLUMN audit_checked_at TEXT",
             "ALTER TABLE analytics_state ADD COLUMN system_cleaned_at TEXT",
+            # Join and leave cards for staff (entry 161): NULL #staff, 0 off, else that channel.
+            "ALTER TABLE analytics_state ADD COLUMN join_cards_channel_id INTEGER",
         ]
         for statement in migrations:
             try:
@@ -5792,6 +5795,28 @@ class Database:
             await db.execute(
                 """INSERT INTO member_movements (guild_id, user_id, kind, at, invite_code, inviter_id)
                    VALUES (?, ?, ?, ?, ?, ?)""", (guild_id, user_id, kind, at, invite_code, inviter_id))
+            await db.commit()
+
+    async def last_join(self, guild_id: int, user_id: int) -> dict[str, Any] | None:
+        """A member's latest recorded join (when, the invite, who made it), or None."""
+        async with self.connect() as db:
+            row = await (await db.execute(
+                """SELECT at, invite_code, inviter_id FROM member_movements
+                   WHERE guild_id = ? AND user_id = ? AND kind = 'join' ORDER BY at DESC, id DESC LIMIT 1""",
+                (guild_id, user_id))).fetchone()
+        return dict(row) if row else None
+
+    async def get_join_cards_channel(self, guild_id: int) -> int | None:
+        """Where join and leave cards go: None for the default (#staff), 0 for off."""
+        async with self.connect() as db:
+            row = await (await db.execute("SELECT join_cards_channel_id FROM analytics_state WHERE guild_id = ?",
+                                          (guild_id,))).fetchone()
+        return row["join_cards_channel_id"] if row else None
+
+    async def set_join_cards_channel(self, guild_id: int, channel_id: int | None) -> None:
+        async with self.connect() as db:
+            await db.execute("UPDATE analytics_state SET join_cards_channel_id = ? WHERE guild_id = ?",
+                             (channel_id, guild_id))
             await db.commit()
 
     async def get_invite_labels(self) -> dict[str, str]:

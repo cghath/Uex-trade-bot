@@ -1,7 +1,14 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.87.
+the oldest entry below); the next new entry is 2.88.
+
+---
+
+## 2.87 - 2026-11-05 - Join cards
+
+**Changed**
+- Staff see a small card when someone joins Star Tech Dynamics: where they came from (which recruiting link, or which member invited them), how old their Discord account is, with a warning for brand-new accounts, and the member count. When someone leaves, one line says how long they stayed and where they'd come from. Names, counts and dates only.
 
 ---
 
