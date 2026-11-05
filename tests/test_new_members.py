@@ -10,6 +10,7 @@ remembered; the weekly note goes once on a Monday and only when someone's waitin
 from __future__ import annotations
 
 import asyncio
+import re
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock
@@ -21,7 +22,7 @@ from bot.cogs.anniversaries import ANNIVERSARY_CHANNEL_ID
 from bot.cogs.new_members import NewMembers, NewMembersView
 from bot.db.database import Database
 from bot.uex.new_members import (
-    CSV_COLUMNS, DRIFTING, EMPTY, NEEDS_HELLO, NEW_MEMBER_ROLE, SETTLING, NewMember, breakdown_text, days_since, flag, is_new,
+    CSV_COLUMNS, DRIFTING, EMPTY, member_label, NEEDS_HELLO, NEW_MEMBER_ROLE, SETTLING, NewMember, breakdown_text, days_since, flag, is_new,
     member_picks, member_text, members_csv, onboarding_status, summary_text, timezone_counts, week_key, weekly_text,
     zone_bucket,
 )
@@ -31,6 +32,16 @@ GUILD_ID = 1132378045232197694
 OWNER = 999
 NOW = datetime(2026, 11, 9, 16, 0, tzinfo=UTC)  # a Monday, 11 AM Eastern
 RSI = "6eXmvxEXsa"
+
+
+def _ids(text: str) -> list[int]:
+    return [int(uid) for uid in re.findall(r"discord\.com/users/(\d+)\)\*\* ", text)]
+
+
+def test_a_member_shows_by_name_linked_to_their_profile_never_as_unknown_user():
+    named = NewMember(5, NOW - timedelta(days=1), username="kara_sc", display_name="Kara*")
+    assert member_label(named) == "**[Kara\*](https://discord.com/users/5)** (@kara\_sc)"
+    assert member_label(NewMember(6, NOW, username="vex", display_name="vex")) == "**[vex](https://discord.com/users/6)**"
 
 
 # -- the rules ----------------------------------------------------------------------
@@ -76,7 +87,7 @@ def test_a_members_lines_say_where_they_came_from_what_they_picked_how_active_an
     joined = NOW - timedelta(days=4)
     text = member_text(NewMember(5, joined, "RSI org page", ["Mining", "Eastern", "New Pilot"]), NOW)
     assert text.splitlines() == [
-        f"<@5> · joined <t:{int(joined.timestamp())}:d> (4 days) · RSI org page",
+        f"**[5](https://discord.com/users/5)** · joined <t:{int(joined.timestamp())}:d> (4 days) · RSI org page",
         "-# Mining · Eastern · New Pilot",
         "🎙️ 0 min voice · 📅 active 0 of 5 days",
         "🔴 **Needs a hello**: no posts or voice yet, 4 days in"]
@@ -104,9 +115,10 @@ def test_the_header_counts_every_flag_whatever_is_shown():
 def test_the_weekly_note_lists_who_needs_a_hello_or_is_drifting_with_why_and_is_skipped_when_nobody_is():
     text = weekly_text(_flagged(), NOW)
     assert text.splitlines()[:4] == ["🌱 **New members this week: 1 needs a hello · 2 drifting**",
-                                     "🔴 <@5>: no posts or voice yet, 6 days in · Reddit ad",
-                                     "🟡 <@7>: quiet 6 days", "🟡 <@8>: quiet 9 days"]
-    assert "<@6>" not in text
+                                     "🔴 **[5](https://discord.com/users/5)**: no posts or voice yet, 6 days in · Reddit ad",
+                                     "🟡 **[7](https://discord.com/users/7)**: quiet 6 days",
+                                     "🟡 **[8](https://discord.com/users/8)**: quiet 9 days"]
+    assert "users/6)" not in text
     assert weekly_text(_flagged()[3:], NOW) is None
     assert week_key(NOW) == "2026-W46"
 
@@ -225,7 +237,7 @@ def test_new_members_lists_the_newest_first_with_source_picks_activity_and_who_r
         view = sent[0]
         await cog.new_members.callback(cog, interaction, 21, "needs-hello", None)
         shown_text = "\n".join(c.content for c in sent[1].walk_children() if hasattr(c, "content"))
-        only = [line.split(" ·")[0] for line in shown_text.splitlines() if line.startswith("<@")]
+        only = _ids(shown_text)
         text = "\n".join(c.content for c in view.walk_children() if hasattr(c, "content"))
         # mark one from the menu
         view.menu._values = ["10"]  # what discord.py fills in from the click
@@ -239,14 +251,14 @@ def test_new_members_lists_the_newest_first_with_source_picks_activity_and_who_r
     text, after, refused, only, shown_text = asyncio.run(run())
     lines = text.splitlines()
     assert lines[1] == "3 joined · **1 needs a hello**"
-    order = [line.split(" ·")[0] for line in lines if line.startswith("<@")]
-    assert order == ["<@12>", "<@11>", "<@10>"], "newest first; the owner and Kara aren't new"
+    assert _ids(text) == [12, 11, 10], "newest first; the owner and Kara aren't new"
+    assert "**[member12](https://discord.com/users/12)** · joined" in text and "<@12>" not in text
     assert "Member referral (Kara)" in text
     assert "✅ Reached out: Cheeno, Nov 9" in text
     assert "🎙️ 2 min voice · 📅 active 1 of 3 days" in text
     assert "RSI org page" in text and "-# Mining · Eastern" in text
     assert "🔴 **Needs a hello**: no posts or voice yet, 5 days in" in text
-    assert only == ["<@10>"] and "Showing 🔴 Needs a hello only" in shown_text
+    assert only == [10] and "Showing 🔴 Needs a hello only" in shown_text
     assert "✅ Reached out: Mod, Nov 9" in after and "Needs a hello" not in after
     assert refused == "This command is for the owner and moderators."
 
@@ -263,7 +275,7 @@ def test_the_weekly_note_goes_once_on_monday_and_only_when_someone_is_waiting(tm
 
     results, dms = asyncio.run(run())
     assert results == (False, False, True, False)
-    assert len(dms) == 1 and "🔴 <@10>: no posts or voice yet, 6 days in" in dms[0]
+    assert len(dms) == 1 and "🔴 **[member10](https://discord.com/users/10)**: no posts or voice yet, 6 days in" in dms[0]
 
 
 # -- breakdowns and the CSV -----------------------------------------------------------
