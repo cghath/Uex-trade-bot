@@ -142,6 +142,17 @@ def _md(text: str) -> str:
     return re.sub(r"([\\*_~|`>\[\]()<])", r"\\\1", text)  # [..](..) would be a link, <@..> a mention
 
 
+def member_label(member: NewMember) -> str:
+    """A member's name, linked to their profile, and their username when it's different. Plain text
+    rather than a mention: a mention only shows a name if the reader's Discord has that member
+    loaded, and brand-new members usually aren't, so it read "@unknown-user"."""
+    name = member.display_name or member.username or str(member.user_id)
+    text = f"**[{_md(name)}](https://discord.com/users/{member.user_id})**"
+    if member.username and member.username != name:
+        text += f" (@{_md(member.username)})"
+    return text
+
+
 def days_here(member: NewMember, now: datetime) -> int:
     """The days "active X of Y days" counts: the join day through today."""
     return days_since(member.joined_at, now) + 1
@@ -210,7 +221,7 @@ def activity_line(member: NewMember, now: datetime) -> str:
 def member_text(member: NewMember, now: datetime) -> str:
     """One member's lines in /new-members."""
     days = days_since(member.joined_at, now)
-    head = f"<@{member.user_id}> · joined <t:{int(member.joined_at.timestamp())}:d> ({_plural(days, 'day')})"
+    head = f"{member_label(member)} · joined <t:{int(member.joined_at.timestamp())}:d> ({_plural(days, 'day')})"
     if member.source:
         head += f" · {member.source}" + (f" ({_md(member.inviter)})" if member.inviter else "")
     else:
@@ -307,7 +318,7 @@ def weekly_text(members: list[NewMember], now: datetime) -> str | None:
     lines, used = [head], len(head) + len(foot) + 40  # room for the "and N more" line
     for shown, member in enumerate(flagged):
         emoji, _name = FLAGS[flag(member, now)]
-        line = f"{emoji} <@{member.user_id}>: {reason(member, now)}" + (f" · {member.source}" if member.source else "")
+        line = f"{emoji} {member_label(member)}: {reason(member, now)}" + (f" · {member.source}" if member.source else "")
         if used + len(line) + 1 > WEEKLY_TEXT_LIMIT:  # a DM's 2,000-character limit, by length not a row count
             lines.append(f"- and {len(flagged) - shown} more")
             break
