@@ -5623,6 +5623,23 @@ they're in sync).
      - **Event roles (PR #150):** a trailing count is read first, so a form saved unchanged keeps
        "2 Seat Gunner 1" as that role, not "Seat Gunner 1" with 2 spots; the count needs a space or
        separator, so "Pilot Mk2" is refused rather than read as "Pilot Mk", 2.
+160. **`/new-members`: who left, and a colour guide** (2026-11-04, after PR #159 showed names as
+     profile links, `member_label`, instead of mentions that read "@unknown-user").
+     - **Who left:** the command always gathers with `include_left=True`; the view lists only
+       `still_here` members by default, and `status: 👋 Who left` (`LEFT`, in `FILTERS` beside
+       `FLAGS`) lists the rest. `summary_text` counts "👋 N left" and takes flags and "didn't
+       finish Onboarding" from those still here; `breakdown_text` is those still here too.
+     - **How they left:** `new_member_data` adds `leaves` (`member_movements`) and `removals`
+       (kicks and bans in `moderation_actions` by `target_id`); `gather` sets `left_at` (the
+       latest leave since the join) and `removed` ("kicked"/"banned"). `left_text` shows "Left /
+       Kicked / Banned <date>, after N days"; `stay_end` makes "active X of Y days" and the CSV's
+       `days_in_server` count the stay, not until today. A left member has no picks line (their
+       roles went with them), no flag and no reached-out menu.
+     - **Names:** the cache usually drops someone once they share no server with the bot, so
+       `look_up_names` calls `fetch_user` for them (at most `LOOKUP_LIMIT`, 50), only for the
+       Who left list and the CSV. The CSV gains `left_date`; `status` is left, kicked or banned.
+     - **Colour guide:** `LEGEND`, one `-#` line under the header, is built from the threshold
+       constants, so changing a threshold changes the guide.
 
 ## Where to look for what
 

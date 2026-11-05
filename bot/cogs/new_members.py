@@ -33,7 +33,7 @@ from bot.delivery import Delivery, home_channel, send_dm
 from bot.discord_ui import LAYOUT_TEXT_LIMIT, BotLayoutView
 from bot.managed_roles import ManagedRoles
 from bot.uex.new_members import (
-    DRIFTING, EMPTY, FLAGS, MAX_DAYS, NEEDS_HELLO, NEW_MEMBER_DAYS, NEW_MEMBER_ROLE, PAGE_SIZE, SETTLING, NewMember,
+    DRIFTING, EMPTY, FILTERS, LEFT, MAX_DAYS, NEEDS_HELLO, NEW_MEMBER_DAYS, NEW_MEMBER_ROLE, PAGE_SIZE, SETTLING, NewMember,
     breakdown_text, flag, is_new, member_picks, onboarding_status, member_text, members_csv, summary_text, week_key, weekly_text,
 )
 from bot.uex.server_analytics import EASTERN, MEMBER_REFERRAL, TIME_FORMAT, UTC, source_of
@@ -55,6 +55,9 @@ def _onboarding(member) -> str:
                              bool(getattr(flags, "completed_onboarding", False)))
 
 
+LOOKUP_LIMIT = 50  # names fetched from Discord for members who have left, per /new-members
+
+
 def latest(last_active: datetime | None, last_day: date | None) -> datetime | None:
     """Their last activity: the exact last post or voice join, or the start of the last day the
     activity log has them (voice ranks credit minutes all session long), whichever is later."""
@@ -70,7 +73,11 @@ class NewMembersView(BotLayoutView):
         super().__init__(timeout=600)  # ephemeral: editable only within the click's 15 minutes
         self.cog, self.guild, self.everyone, self.days, self.now = cog, guild, members, days, now
         self.showing = showing
-        self.members = [m for m in members if showing is None or flag(m, now) == showing]
+        self.here = [m for m in members if m.still_here]
+        if showing == LEFT:
+            self.members = [m for m in members if not m.still_here]
+        else:
+            self.members = [m for m in self.here if showing is None or flag(m, now) == showing]
         self.page = 0
         self.pages = self._paginate()
         self.previous_button = discord.ui.Button(label="Newer", style=discord.ButtonStyle.secondary)
@@ -88,8 +95,8 @@ class NewMembersView(BotLayoutView):
 
     def _head(self, page: int, count: int) -> str:
         head = summary_text(self.everyone, self.now, self.days, self.showing)
-        if page == 0 and self.everyone:
-            head += "\n" + breakdown_text(self.everyone, self.now)
+        if page == 0 and self.here:
+            head += "\n" + breakdown_text(self.here, self.now)
         if count > 1:
             head += f"\n-# Page {page + 1} of {count}"
         return head
@@ -120,11 +127,15 @@ class NewMembersView(BotLayoutView):
             container.add_item(discord.ui.Separator())
             container.add_item(discord.ui.TextDisplay(member_text(member, self.now)))
         if not self.members:
-            nobody = (EMPTY[self.showing] if self.showing and self.everyone
-                      else f"Nobody joined in the last {self.days} day{'s' if self.days != 1 else ''}.")
+            if not self.everyone:
+                nobody = f"Nobody joined in the last {self.days} day{'s' if self.days != 1 else ''}."
+            elif self.showing:
+                nobody = EMPTY[self.showing]
+            else:
+                nobody = "Everyone who joined in this time has left: `status: Who left` lists them."
             container.add_item(discord.ui.TextDisplay(nobody))
         self.add_item(container)
-        if self.shown():
+        if self.shown() and self.showing != LEFT:  # nobody to reach out to once they've gone
             menu = discord.ui.Select(placeholder="Mark as reached out…", min_values=1, max_values=1, options=[
                 discord.SelectOption(label=self.cog.name(self.guild, m.user_id)[:100], value=str(m.user_id),
                                      description=("Reached out: " + m.reached_by)[:100] if m.reached_by else None)
@@ -263,7 +274,7 @@ class NewMembers(commands.Cog):
     async def gather(self, guild: discord.Guild, days: int, now: datetime, *,
                      include_left: bool = False) -> list[NewMember]:
         """Everyone here who joined in the last `days`, newest first - and with `include_left`, those
-        who joined in that time and have gone (from the join log; the CSV only)."""
+        who joined in that time and have gone (from the join log), with when and how they left."""
         here = [m for m in guild.members if not m.bot and is_new(m.joined_at, now, days)]
         if not here and not include_left:
             return []
@@ -310,8 +321,14 @@ class NewMembers(commands.Cog):
             contact = contacts.get(user_id)
             if contact is not None and _parse(contact["at"]) < joined_at:
                 contact = None  # from a stay before they left and came back
+            left_at = removed = None
+            if not still_here:  # the latest leave, kick or ban since this join
+                left_at = max((_parse(r["at"]) for r in data["leaves"] if r["user_id"] == user_id
+                               and _parse(r["at"]) >= joined_at), default=None)
+                kinds = [r["kind"] for r in data["removals"] if r["user_id"] == user_id and _parse(r["at"]) >= joined_at]
+                removed = {"kick": "kicked", "ban": "banned"}[kinds[-1]] if kinds else None
             members.append(NewMember(
-                user_id=user_id, joined_at=joined_at, source=source,
+                user_id=user_id, joined_at=joined_at, source=source, left_at=left_at, removed=removed,
                 picks=[*activities, *([zone] if zone else []), *([experience] if experience else [])],
                 first_active=seen[0] if seen else None, active_days=len(set(seen)),
                 voice_minutes=sum(m for d, m in voice.get(user_id, []) if d >= joined_at.date()),
@@ -321,6 +338,16 @@ class NewMembers(commands.Cog):
                 timezone=zone, activities=activities, experience=experience, inviter=inviter_name,
                 username=username, display_name=display, still_here=still_here, onboarding=onboarding))
         return members
+
+    async def look_up_names(self, gone: list[NewMember]) -> None:
+        """Names for members who have left: Discord's cache usually drops them once they share no
+        server with the bot, so ask for each (at most LOOKUP_LIMIT; the rest keep their id)."""
+        for member in [m for m in gone if not m.username][:LOOKUP_LIMIT]:
+            try:
+                user = await self.bot.fetch_user(member.user_id)
+            except discord.HTTPException:  # a deleted account, or Discord busy: the id stands in
+                continue
+            member.username, member.display_name = user.name, user.display_name or user.name
 
     async def _allowed(self, interaction: discord.Interaction, guild: discord.Guild) -> bool:
         """The owner, or a moderator of Star Tech Dynamics itself - Moderate Members in another
@@ -333,13 +360,14 @@ class NewMembers(commands.Cog):
     @app_commands.command(name="new-members",
                           description="Moderators: members who joined lately, whether they've said hello, and who reached out.")
     @app_commands.describe(days=f"How far back, in days (default {NEW_MEMBER_DAYS})",
-                           status="Show only members with this flag (default: everyone)",
+                           status="Show only members with this flag, or who left (default: everyone still here)",
                            reached_out="Mark that you've reached out to this member",
                            export="Owner only: get the list as a CSV file instead")
     @app_commands.choices(status=[
         app_commands.Choice(name="🔴 Needs a hello", value=NEEDS_HELLO),
         app_commands.Choice(name="🟡 Drifting", value=DRIFTING),
         app_commands.Choice(name="🟢 Settling in", value=SETTLING),
+        app_commands.Choice(name="👋 Who left", value=LEFT),
         app_commands.Choice(name="Everyone", value="all")])
     @app_commands.default_permissions(moderate_members=True)  # the owner and moderators
     async def new_members(self, interaction: discord.Interaction,
@@ -361,16 +389,20 @@ class NewMembers(commands.Cog):
         if reached_out is not None:
             await self.bot.db.mark_new_member_contacted(guild.id, reached_out.id, interaction.user.id,
                                                         now.strftime(TIME_FORMAT))
-        members = await self.gather(guild, days, now)
-        showing = status if status in FLAGS else None
+        members = await self.gather(guild, days, now, include_left=True)  # those who left: the header's count
+        showing = status if status in FILTERS else None
+        if showing == LEFT or export:
+            await self.look_up_names([m for m in members if not m.still_here])
         if export:
-            rows = await self.gather(guild, days, now, include_left=showing is None)
-            rows = [m for m in rows if showing is None or (m.still_here and flag(m, now) == showing)]
+            if showing == LEFT:
+                rows = [m for m in members if not m.still_here]
+            else:
+                rows = [m for m in members if showing is None or (m.still_here and flag(m, now) == showing)]
             stamp = now.astimezone(EASTERN).date().isoformat()
             file = discord.File(io.BytesIO(members_csv(rows, now).encode("utf-8-sig")), filename=f"new-members-{stamp}.csv")
             await interaction.followup.send(
                 f"New members, last {days} days: {len(rows)} row{'s' if len(rows) != 1 else ''}"
-                + (f", {FLAGS[showing][1].lower()} only" if showing else ", including any who have left") + ".",
+                + (f", {FILTERS[showing][1].lower()} only" if showing else ", including any who have left") + ".",
                 file=file, ephemeral=True)
             return
         view = NewMembersView(self, guild, members, days, now, showing)

@@ -1,7 +1,15 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.86.
+the oldest entry below); the next new entry is 2.87.
+
+---
+
+## 2.86 - 2026-11-04 - Who left
+
+**Changed**
+- Moderators can see which new members have already left Star Tech Dynamics: the new member list counts them, and a new "Who left" filter shows when each one left (or was kicked or banned), how long they stayed and how active they were while here.
+- The new member list now explains its colours: what puts someone on red, yellow or green.
 
 ---
 

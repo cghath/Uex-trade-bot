@@ -5917,8 +5917,9 @@ class Database:
         return cursor.rowcount == 1
 
     async def new_member_data(self, guild_id: int, since: str) -> dict[str, Any]:
-        """For members who joined since `since` (UTC): their joins (invite, inviter), the days they
-        were active (posts or voice), who reached out to them, and the invite labels."""
+        """For members who joined since `since` (UTC): their joins (invite, inviter), leaves, kicks
+        and bans, the days they were active (posts or voice), who reached out to them, and the
+        invite labels."""
         async with self.connect() as db:
             async def rows(sql: str, params: tuple) -> list[dict[str, Any]]:
                 return [dict(r) for r in await (await db.execute(sql, params)).fetchall()]
@@ -5927,6 +5928,13 @@ class Database:
                 "joins": await rows(
                     """SELECT user_id, at, invite_code, inviter_id FROM member_movements
                        WHERE guild_id = ? AND kind = 'join' AND at >= ? ORDER BY at, id""", (guild_id, since)),
+                "leaves": await rows(
+                    """SELECT user_id, at FROM member_movements
+                       WHERE guild_id = ? AND kind = 'leave' AND at >= ? ORDER BY at, id""", (guild_id, since)),
+                "removals": await rows(  # kicks and bans, to tell them from leaving
+                    """SELECT target_id AS user_id, kind, at FROM moderation_actions
+                       WHERE guild_id = ? AND kind IN ('kick', 'ban') AND target_id IS NOT NULL AND at >= ?
+                       ORDER BY at""", (guild_id, since)),
                 "active": await rows(
                     """SELECT user_id, day FROM member_active_days WHERE guild_id = ? AND day >= ?
                        UNION SELECT user_id, day FROM voice_daily WHERE guild_id = ? AND day >= ?""",
