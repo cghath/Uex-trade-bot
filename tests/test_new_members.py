@@ -22,7 +22,7 @@ from bot.cogs.anniversaries import ANNIVERSARY_CHANNEL_ID
 from bot.cogs.new_members import NewMembers, NewMembersView
 from bot.db.database import Database
 from bot.uex.new_members import (
-    CSV_COLUMNS, DRIFTING, EMPTY, member_label, NEEDS_HELLO, NEW_MEMBER_ROLE, SETTLING, NewMember, breakdown_text, days_since, flag, is_new,
+    CSV_COLUMNS, DRIFTING, EMPTY, LEFT, member_label, NEEDS_HELLO, NEW_MEMBER_ROLE, SETTLING, NewMember, breakdown_text, days_since, flag, is_new,
     member_picks, member_text, members_csv, onboarding_status, summary_text, timezone_counts, week_key, weekly_text,
     zone_bucket,
 )
@@ -40,7 +40,7 @@ def _ids(text: str) -> list[int]:
 
 def test_a_member_shows_by_name_linked_to_their_profile_never_as_unknown_user():
     named = NewMember(5, NOW - timedelta(days=1), username="kara_sc", display_name="Kara*")
-    assert member_label(named) == "**[Kara\*](https://discord.com/users/5)** (@kara\_sc)"
+    assert member_label(named) == r"**[Kara\*](https://discord.com/users/5)** (@kara\_sc)"
     assert member_label(NewMember(6, NOW, username="vex", display_name="vex")) == "**[vex](https://discord.com/users/6)**"
 
 
@@ -175,6 +175,7 @@ async def _make(tmp_path, members):
     owner.send = send
     bot = NS(db=db, get_channel=lambda cid: home if cid == ANNIVERSARY_CHANNEL_ID else None, is_ready=lambda: True,
              is_owner=AsyncMock(side_effect=lambda user: user.id == OWNER), get_user=lambda uid: owner if uid == OWNER else None,
+             fetch_user=AsyncMock(side_effect=lambda uid: NS(name=f"gone{uid}", display_name=f"Gone {uid}")),
              application_info=AsyncMock(return_value=NS(team=None, owner=NS(id=OWNER))))
     cog = NewMembers(bot, start_loop=False)
     cog.now = lambda: NOW
@@ -338,8 +339,10 @@ def test_the_csv_has_every_column_including_members_who_left_and_defuses_formula
     lines = members_csv([stay, gone], NOW).splitlines()
     assert lines[0] == ",".join(CSV_COLUMNS)
     assert lines[1] == ("'=cmd|calc,Kara,10,2026-11-04,5,Reddit ad,,Eastern,Mining;FPS,New Pilot,,,0,0,"
-                        "none,Cheeno,2026-11-09,yes"), "reached out, so no flag"
-    assert lines[2] == ",,13,2026-11-06,3,before tracking,,,,,,,0,0,left,,,no"
+                        "none,Cheeno,2026-11-09,yes,"), "reached out, so no flag"
+    assert lines[2] == ",,13,2026-11-06,3,before tracking,,,,,,,0,0,left,,,no,"
+    banned = NewMember(14, NOW - timedelta(days=3), None, still_here=False, left_at=NOW - timedelta(days=1), removed="banned")
+    assert members_csv([banned], NOW).splitlines()[1].endswith(",banned,,,no,2026-11-08")
 
 
 def test_the_csv_export_is_for_the_owner_only_and_includes_who_left(tmp_path):
@@ -372,8 +375,9 @@ def test_the_csv_export_is_for_the_owner_only_and_includes_who_left(tmp_path):
     assert name == "new-members-2026-11-09.csv"
     rows = csv_text.splitlines()
     assert len(rows) == 3, "newest first: the one who left joined Nov 6"
-    assert rows[1] == ",,13,2026-11-06,3,Not known (no invite matched),,,,,,,0,0,left,,,no"
-    assert rows[2] == "Quiet,Quiet,10,2026-11-04,5,RSI org page,,Eastern,Mining,,completed,,0,0,needs_hello,,,yes"
+    assert rows[1] == "gone13,Gone 13,13,2026-11-06,1,Not known (no invite matched),,,,,,,0,0,left,,,no,2026-11-07", (
+        "a name looked up from Discord, and the days they stayed")
+    assert rows[2] == "Quiet,Quiet,10,2026-11-04,5,RSI org page,,Eastern,Mining,,completed,,0,0,needs_hello,,,yes,"
     assert len(hello_text.splitlines()) == 2, "the status filter leaves out who left"
     assert texts[0] == "New members, last 21 days: 2 rows, including any who have left."
     assert refused == "The CSV export is for the bot's owner."
@@ -464,3 +468,71 @@ def test_names_cant_become_links_or_mentions_and_empty_lists_read_right():
     assert r"(\[free\]\(https://x.y\) \<@1\>)" in text
     assert EMPTY[NEEDS_HELLO] == "Nobody needs a hello right now."
     assert summary_text([], NOW, 1).startswith("## 🌱 New members: last 1 day\n")
+
+
+# -- who left ---------------------------------------------------------------------
+
+def test_the_header_counts_who_left_and_their_flags_dont_count():
+    quiet = NewMember(1, NOW - timedelta(days=5), "Reddit ad")
+    gone = NewMember(2, NOW - timedelta(days=6), "Reddit ad", still_here=False, left_at=NOW - timedelta(days=4))
+    header = summary_text([quiet, gone], NOW, 21).splitlines()
+    assert header[1] == "2 joined · 👋 1 left · **1 needs a hello**", "the one who left would need a hello too"
+    assert summary_text([quiet, gone], NOW, 21, LEFT).splitlines()[2] == "Showing 👋 Who left only"
+    assert EMPTY[LEFT] == "Nobody who joined in this time has left."
+
+
+def test_a_member_who_left_shows_how_and_when_and_what_they_did_while_here():
+    joined = datetime(2026, 11, 2, 16, tzinfo=UTC)
+    left = NewMember(5, joined, "Spectrum ad", active_days=1, voice_minutes=12, still_here=False,
+                     left_at=datetime(2026, 11, 4, 16, tzinfo=UTC), username="drifter", display_name="Drifter")
+    lines = member_text(left, NOW).splitlines()
+    assert lines[1] == f"👋 **Left** <t:{int(left.left_at.timestamp())}:d>, after 2 days"
+    assert lines[2] == "🎙️ 12 min voice · 📅 active 1 of 3 days", "counted over their stay, not until today"
+    assert len(lines) == 3, "no Onboarding picks line (their roles went with them) and no flag"
+    left.removed, left.left_at = "kicked", joined + timedelta(hours=2)
+    assert member_text(left, NOW).splitlines()[1].endswith(", the day they joined")
+    assert member_text(left, NOW).splitlines()[1].startswith("👋 **Kicked**")
+    left.left_at = None
+    assert member_text(left, NOW).splitlines()[1] == "👋 **Kicked** (the day wasn't recorded)"
+
+
+def test_who_left_lists_members_who_have_gone_with_their_names_and_kicks_and_bans(tmp_path):
+    async def run():
+        here = FakeMember(10, NOW - timedelta(days=5), name="Here")
+        back = FakeMember(14, NOW - timedelta(days=1), name="Back")  # left and came back: here, not gone
+        cog, db, guild, _owner = await _make(tmp_path, [here, back])
+        await db.analytics_start(GUILD_ID, "2026-11-01 00:00:00")
+        await db.record_member_movement(GUILD_ID, 10, "join", "2026-11-04 16:00:00", RSI)
+        await db.record_member_movement(GUILD_ID, 12, "join", "2026-11-05 16:00:00", RSI)
+        await db.record_member_movement(GUILD_ID, 12, "leave", "2026-11-07 16:00:00")
+        await db.record_member_movement(GUILD_ID, 13, "join", "2026-11-06 16:00:00", None)
+        await db.record_member_movement(GUILD_ID, 13, "leave", "2026-11-06 18:00:00")
+        await db.record_moderation_actions(GUILD_ID, [(1, "ban", "2026-11-06 18:00:00", 1, OWNER, False, 13)])
+        await db.record_member_movement(GUILD_ID, 14, "join", "2026-11-03 16:00:00", None)
+        await db.record_member_movement(GUILD_ID, 14, "leave", "2026-11-04 16:00:00")
+        await db.record_member_movement(GUILD_ID, 14, "join", "2026-11-08 16:00:00", None)
+        await db.mark_active_day(GUILD_ID, 12, "2026-11-06")
+        sent = []
+        interaction = NS(guild_id=GUILD_ID, user=FakeMember(77, NOW - timedelta(days=500), name="Mod", moderator=True),
+                         response=NS(defer=AsyncMock(), send_message=AsyncMock()),
+                         followup=NS(send=AsyncMock(side_effect=lambda **kw: sent.append(kw["view"]))))
+        await cog.new_members.callback(cog, interaction, 21, None)
+        await cog.new_members.callback(cog, interaction, 21, LEFT)
+        texts = ["\n".join(c.content for c in view.walk_children() if hasattr(c, "content")) for view in sent]
+        return texts, getattr(sent[1], "menu", None), cog.bot.fetch_user.await_count
+
+    (everyone, left), menu, fetched = asyncio.run(run())
+    assert everyone.splitlines()[1] == "4 joined · 👋 2 left · **1 needs a hello**", "the header counts them"
+    assert _ids(everyone) == [14, 10], "the list is who's still here"
+    assert _ids(left) == [13, 12], "newest first"
+    assert "**[Gone 13](https://discord.com/users/13)** (@gone13)" in left, "named from Discord"
+    assert "👋 **Banned** <t:" in left and ", the day they joined" in left
+    assert "👋 **Left** <t:" in left and "after 2 days" in left and "📅 active 1 of 3 days" in left
+    assert menu is None, "nobody to mark as reached out"
+    assert fetched == 2, "names are looked up only for the Who left list"
+
+
+def test_the_header_explains_what_each_colour_means():
+    header = summary_text([NewMember(1, NOW - timedelta(days=5))], NOW, 21).splitlines()
+    assert header[2] == ("-# 🔴 no posts or voice after 3 days (1 if Onboarding wasn't finished) · 🟡 was active, "
+                         "then quiet 5+ days · 🟢 active on 50% of their days, or 60+ min voice · reaching out clears 🔴 and 🟡")

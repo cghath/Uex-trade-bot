@@ -507,6 +507,9 @@ date - no open item, nothing to record here.
       See PROJECT_CONTEXT.md entries 156 and 157
 - [ ] PRs #155-#157 - `/new-members` activity, flags, timezone/activity breakdowns and the owner-only
       CSV exports (`members_csv`, `report_csv`). See PROJECT_CONTEXT.md entries 157 and 158
+- [ ] PRs #159 and this one - `/new-members` names as profile links (`member_label`), the Who left
+      filter (`LEFT`, `left_text`, `look_up_names`) and the colour guide (`LEGEND`). See
+      PROJECT_CONTEXT.md entry 160
 - [ ] PR #158 - Fixes from the 2026-11-04 audit: system messages aren't posts (`INTRO_TYPES` in
       analytics and welcome-back), the event roles parser reads a trailing count first. Worth
       porting where aiv2 has welcome-back or event cards. See PROJECT_CONTEXT.md entry 159

@@ -36,7 +36,7 @@ PAGE_SIZE = 8
 PICK_GROUPS = ("activity", "timezone", "experience")  # the Onboarding picks shown for each member
 WEEKLY_TEXT_LIMIT = 1900    # under a DM's 2,000 characters
 EMPTY = {"needs-hello": "Nobody needs a hello right now.", "drifting": "Nobody is drifting right now.",
-         "settling": "Nobody is settling in right now."}
+         "settling": "Nobody is settling in right now.", "left": "Nobody who joined in this time has left."}
 
 # The flags' thresholds (the owner's, 2026-11-04): change them here.
 HELLO_AFTER_DAYS = 3        # 🔴 no posts or voice after this many days
@@ -47,6 +47,8 @@ SETTLED_MIN_DAYS = 3        # the share rule waits this many days: 1 post on day
 
 NEEDS_HELLO, DRIFTING, SETTLING = "needs-hello", "drifting", "settling"
 FLAGS = {NEEDS_HELLO: ("🔴", "Needs a hello"), DRIFTING: ("🟡", "Drifting"), SETTLING: ("🟢", "Settling in")}
+LEFT = "left"               # /new-members status: who joined in the window and has gone
+FILTERS = {**FLAGS, LEFT: ("👋", "Who left")}
 
 _GROUPS = {group.key: group for group in GROUPS}
 TIMEZONES = _GROUPS["timezone"].roles       # the Onboarding timezone roles, in panel order
@@ -61,6 +63,12 @@ COMPLETED, DIDNT_FINISH, NOT_STARTED, BEFORE_ONBOARDING = "completed", "didnt_fi
 JOINED_BEFORE_LABEL = "Joined before Onboarding"
 DIDNT_FINISH_LABEL = "Didn't finish Onboarding"
 UNFINISHED_HELLO_DAYS = 1   # 🔴 for a member who didn't finish Onboarding and hasn't posted: after a day
+
+LEGEND = (  # what the colours mean, under the /new-members header: from the thresholds above
+    f"-# 🔴 no posts or voice after {HELLO_AFTER_DAYS} days ({UNFINISHED_HELLO_DAYS} if Onboarding wasn't finished)"
+    f" · 🟡 was active, then quiet {DRIFT_AFTER_DAYS}+ days"
+    f" · 🟢 active on {SETTLED_SHARE:.0%} of their days, or {SETTLED_VOICE_MINUTES}+ min voice"
+    " · reaching out clears 🔴 and 🟡")
 
 
 def is_new(joined_at: datetime | None, now: datetime, days: int = NEW_MEMBER_DAYS) -> bool:
@@ -90,8 +98,10 @@ class NewMember:
     inviter: str | None = None            # who made the invite, for a member referral
     username: str = ""
     display_name: str = ""
-    still_here: bool = True               # False: joined in the window and has left (the CSV only)
+    still_here: bool = True               # False: joined in the window and has left
     onboarding: str | None = None         # COMPLETED, DIDNT_FINISH, NOT_STARTED, BEFORE_ONBOARDING; None unknown
+    left_at: datetime | None = None       # when they left, if the bot saw it
+    removed: str | None = None            # "kicked" or "banned", from the audit log
 
 
 def onboarding_status(joined_at: datetime | None, started: bool, completed: bool) -> str:
@@ -153,9 +163,14 @@ def member_label(member: NewMember) -> str:
     return text
 
 
+def stay_end(member: NewMember, now: datetime) -> datetime:
+    """Now, or when a member who has gone left (now if the bot didn't see them go)."""
+    return member.left_at if not member.still_here and member.left_at is not None else now
+
+
 def days_here(member: NewMember, now: datetime) -> int:
-    """The days "active X of Y days" counts: the join day through today."""
-    return days_since(member.joined_at, now) + 1
+    """The days "active X of Y days" counts: the join day through today, or through the day they left."""
+    return days_since(member.joined_at, stay_end(member, now)) + 1
 
 
 def quiet_days(member: NewMember, now: datetime) -> int | None:
@@ -218,6 +233,16 @@ def activity_line(member: NewMember, now: datetime) -> str:
     return f"🎙️ {member.voice_minutes:,} min voice · 📅 active {min(member.active_days, here)} of {_plural(here, 'day')}"
 
 
+def left_text(member: NewMember) -> str:
+    """How and when a member who has gone left, and how long they stayed."""
+    how = {"kicked": "Kicked", "banned": "Banned"}.get(member.removed, "Left")
+    if member.left_at is None:
+        return f"👋 **{how}** (the day wasn't recorded)"
+    stayed = days_since(member.joined_at, member.left_at)
+    after = f"after {_plural(stayed, 'day')}" if stayed else "the day they joined"
+    return f"👋 **{how}** <t:{int(member.left_at.timestamp())}:d>, {after}"
+
+
 def member_text(member: NewMember, now: datetime) -> str:
     """One member's lines in /new-members."""
     days = days_since(member.joined_at, now)
@@ -226,6 +251,11 @@ def member_text(member: NewMember, now: datetime) -> str:
         head += f" · {member.source}" + (f" ({_md(member.inviter)})" if member.inviter else "")
     else:
         head += " · before join sources were tracked"
+    if not member.still_here:  # their roles went with them: no picks to show, and no flag
+        lines = [head, left_text(member), activity_line(member, now)]
+        if member.reached_by:
+            lines.append(f"✅ Reached out: {_md(member.reached_by)}, {_day(member.reached_at)}")
+        return "\n".join(lines)
     lines = [head, "-# " + (" · ".join(member.picks) if member.picks else "No Onboarding picks"),
              activity_line(member, now)]
     status = []
@@ -291,18 +321,22 @@ def _flag_parts(counts: dict[str, int], *, bold: bool) -> list[str]:
 
 
 def summary_text(members: list[NewMember], now: datetime, days: int, showing: str | None = None) -> str:
-    """The header: how many joined and how many have each flag (all of them, whatever's shown)."""
-    counts = flag_counts(members, now)
-    parts = [f"{len(members)} joined", *_flag_parts(counts, bold=True)]
+    """The header: how many joined, how many of them have left, and how many of those still here
+    have each flag (all of them, whatever's shown)."""
+    here = [member for member in members if member.still_here]
+    counts = flag_counts(here, now)
+    gone = len(members) - len(here)
+    parts = [f"{len(members)} joined", *([f"👋 {gone} left"] if gone else []), *_flag_parts(counts, bold=True)]
     if counts[SETTLING]:
         parts.append(f"{counts[SETTLING]} settling in")
-    unfinished_count = sum(1 for member in members if unfinished(member))
+    unfinished_count = sum(1 for member in here if unfinished(member))
     if unfinished_count:
         parts.append(f"⚠️ {unfinished_count} didn't finish Onboarding")
     text = f"## 🌱 New members: last {_plural(days, 'day')}\n" + " · ".join(parts)
     if showing:
-        emoji, name = FLAGS[showing]
+        emoji, name = FILTERS[showing]
         text += f"\nShowing {emoji} {name} only"
+    text += "\n" + LEGEND
     return text + ("\n-# Newest first. Join dates, sources, Onboarding picks, active days and voice time; "
                    "never what anyone wrote or said.")
 
@@ -331,20 +365,21 @@ def weekly_text(members: list[NewMember], now: datetime) -> str | None:
 CSV_COLUMNS = ("username", "display_name", "user_id", "joined_date", "days_in_server", "source", "inviter",
                "timezone", "activities", "experience", "onboarding_status", "first_active_date", "active_days",
                "voice_minutes",
-               "status", "reached_out_by", "reached_out_date", "still_in_server")
+               "status", "reached_out_by", "reached_out_date", "still_in_server", "left_date")
 _CSV_STATUS = {NEEDS_HELLO: "needs_hello", DRIFTING: "drifting", SETTLING: "settling"}
 
 
 def csv_row(member: NewMember, now: datetime) -> list[str]:
     here = days_here(member, now)
-    status = _CSV_STATUS.get(flag(member, now), "none") if member.still_here else "left"
+    status = _CSV_STATUS.get(flag(member, now), "none") if member.still_here else (member.removed or "left")
+    left = member.left_at.astimezone(EASTERN).date().isoformat() if member.left_at and not member.still_here else ""
     reached = member.reached_at.astimezone(EASTERN).date().isoformat() if member.reached_at else ""
     return [csv_cell(v) for v in (
         member.username, member.display_name, member.user_id, member.joined_at.astimezone(EASTERN).date().isoformat(),
-        days_since(member.joined_at, now), member.source or "before tracking", member.inviter, member.timezone,
+        days_since(member.joined_at, stay_end(member, now)), member.source or "before tracking", member.inviter, member.timezone,
         ";".join(member.activities), member.experience, member.onboarding,
         member.first_active.isoformat() if member.first_active else "", min(member.active_days, here),
-        member.voice_minutes, status, member.reached_by, reached, "yes" if member.still_here else "no")]
+        member.voice_minutes, status, member.reached_by, reached, "yes" if member.still_here else "no", left)]
 
 
 def members_csv(members: list[NewMember], now: datetime) -> str:
