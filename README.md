@@ -291,7 +291,8 @@ bot/
     welcome_back.py       a DM to members back after 30+ days away (activity times only)
     role_picker.py        self-serve role panels (buttons + a dropdown), /rolesetup, /rolepanel post
     event_cards.py        sign-up cards in #events for Discord's scheduled events, /event-roles
-    server_analytics.py   owner-only server stats (counts only) + monthly DM, /server-stats, /invite-label
+    server_analytics.py   owner-only server stats (counts only) + monthly DM, /server-stats, /invite-label,
+                          join and leave cards for staff, /join-cards
     new_members.py        a 🌱 New Member role for each member's first 21 days, /new-members (moderators)
     help.py               /intro (the categorized command guide)
 scripts/

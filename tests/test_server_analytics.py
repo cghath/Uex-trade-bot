@@ -23,6 +23,7 @@ from bot.cogs.anniversaries import ANNIVERSARY_CHANNEL_ID
 from bot.cogs.server_analytics import ServerAnalytics, entry_action, invite_code, invite_list_text, stats_views
 from bot.cogs.voice_ranks import OPS_CATEGORY_ID
 from bot.db.database import Database
+from bot.uex.join_cards import SOURCE_UNKNOWN, STAFF_CHANNEL_ID, account_age, source_text, stay_length
 from bot.discord_ui import LAYOUT_TEXT_LIMIT
 from bot.uex.server_analytics import (
     DEFAULT_INVITE_LABELS, best_windows, csv_cell, ops_card, join_histogram, joins_block, window_label, MEMBER_REFERRAL, NO_INVITE, UNKNOWN_INVITE, EventResult, InviteUse, ModAction, Movement, build_report,
@@ -167,6 +168,14 @@ class FakeGuild:
         self.members = list(members)
         self.invite_list = list(invites)
         self.user_count = 7
+        self.member_count = len(self.members)
+        self.channels: dict[int, object] = {}  # what get_channel finds: the join cards channel in tests
+
+    def get_channel(self, cid):
+        return self.channels.get(cid)
+
+    def get_member(self, uid):
+        return next((m for m in self.members if m.id == uid), None)
 
     async def invites(self):
         return list(self.invite_list)
@@ -175,8 +184,9 @@ class FakeGuild:
         return NS(id=event_id, user_count=self.user_count)
 
 
-def _member(uid, *, joined=T0 - timedelta(days=300), bot=False):
-    return NS(id=uid, bot=bot, joined_at=joined, voice=NS(self_deaf=False, deaf=False))
+def _member(uid, *, joined=T0 - timedelta(days=300), bot=False, created=T0 - timedelta(days=800)):
+    return NS(id=uid, bot=bot, joined_at=joined, voice=NS(self_deaf=False, deaf=False), name=f"user{uid}",
+              display_name=f"User {uid}", created_at=created)
 
 
 def _invite(code, uses, max_uses=0, channel="welcome", inviter=None):
@@ -812,3 +822,101 @@ def test_lapsed_in_a_past_months_report_says_when_it_was_measured():
                           seen_from=T0 - timedelta(days=100), hours=[], channel_counts={}, channel_names={}, ops=[],
                           events=[], labels={}, lapsed_at=T0 + timedelta(days=1))
     assert "**Lapsed (as of Nov 5):** 0 silent 30+ days" in report_blocks(report)[0]
+
+
+# -- join and leave cards ---------------------------------------------------------
+
+class FakeTextChannel:
+    def __init__(self, cid, name):
+        self.id, self.name, self.posts, self.mention = cid, name, [], f"<#{cid}>"
+
+    async def send(self, content=None, *, embed=None, allowed_mentions=None):
+        self.posts.append(embed)
+
+
+def test_card_text_says_where_from_and_never_guesses():
+    assert source_text(None, NO_INVITE, None) == SOURCE_UNKNOWN
+    assert source_text(RSI, "RSI org page", None) == f"RSI org page (`{RSI}`)"
+    assert source_text("sc1abc", MEMBER_REFERRAL, "Kara") == "Member referral (invited by Kara)"
+    assert source_text("vanity", UNKNOWN_INVITE, None) == "Unnamed invite (`vanity`)"
+    assert account_age(T0 - timedelta(days=800), T0) == "2 years old"
+    assert account_age(T0 - timedelta(days=95), T0) == "3 months old"
+    assert account_age(T0 - timedelta(days=20), T0) == "20 days old"
+    assert account_age(T0 - timedelta(days=3), T0) == "⚠️ 3 days old"
+    assert account_age(T0 - timedelta(hours=5), T0) == "⚠️ less than a day old"
+    assert stay_length(T0, T0 + timedelta(minutes=12)) == "12 minutes"
+    assert stay_length(T0, T0 + timedelta(hours=5)) == "5 hours"
+    assert stay_length(T0, T0 + timedelta(days=12, hours=3)) == "12 days"
+
+
+def test_a_join_posts_a_small_card_in_staff_with_the_matched_invite_and_a_leave_one_line(tmp_path):
+    async def run():
+        kara = _member(5)
+        fresh = _member(10, joined=T0, created=T0 - timedelta(days=2))
+        friend = _member(11, joined=T0)
+        two = _member(12, joined=T0)
+        guild = FakeGuild(members=[kara, fresh, friend, two],
+                          invites=[_invite(RSI, 3), _invite(SPECTRUM, 0), _invite("sc1abc", 0, inviter=kara)])
+        staff = FakeTextChannel(STAFF_CHANNEL_ID, "staff")
+        guild.channels[STAFF_CHANNEL_ID] = staff
+        for m in (fresh, friend, two):
+            m.guild = guild
+        cog, _db, clock, _owner = await _make(tmp_path, guild)
+        await cog.minute(T0)
+        guild.invite_list = [_invite(RSI, 4), _invite(SPECTRUM, 0), _invite("sc1abc", 0, inviter=kara)]
+        await cog.on_member_join(fresh)
+        guild.invite_list = [_invite(RSI, 4), _invite(SPECTRUM, 0), _invite("sc1abc", 1, inviter=kara)]
+        await cog.on_member_join(friend)
+        guild.invite_list = [_invite(RSI, 5), _invite(SPECTRUM, 1), _invite("sc1abc", 1, inviter=kara)]
+        await cog.on_member_join(two)  # two counts went up: no single invite matched
+        clock[0] = T0 + timedelta(hours=3)
+        await cog.on_raw_member_remove(NS(guild_id=GUILD_ID, user=NS(id=10, bot=False, name="user10",
+                                                                      display_name="User 10")))
+        await cog.on_raw_member_remove(NS(guild_id=GUILD_ID, user=NS(id=12, bot=False, name="user12",
+                                                                      display_name="User 12")))
+        await cog.on_raw_member_remove(NS(guild_id=GUILD_ID, user=NS(id=99, bot=False, name="old", display_name="Old")))
+        return [e.description for e in staff.posts]
+
+    fresh, friend, two, fresh_left, two_left, old_left = asyncio.run(run())
+    assert fresh == ("📥 **[User 10](https://discord.com/users/10)** (@user10) joined · `10`\n"
+                     f"**Source:** RSI org page (`{RSI}`)\n"
+                     "**Account:** ⚠️ 2 days old · **Members:** 4")
+    assert "**Source:** Member referral (invited by User 5)" in friend
+    assert "**Account:** 2 years old" in friend
+    assert "**Source:** Source unknown" in two, "never a guess between two invites"
+    assert fresh_left == f"📤 **[User 10](https://discord.com/users/10)** (@user10) left after 3 hours · from RSI org page (`{RSI}`)"
+    assert two_left.endswith("left after 3 hours · source unknown")
+    assert old_left.endswith("left · joined before join tracking began"), "no record of their join"
+
+
+def test_join_cards_can_go_elsewhere_or_be_turned_off(tmp_path):
+    async def run():
+        joiner = _member(10, joined=T0)
+        guild = FakeGuild(members=[joiner])
+        joiner.guild = guild
+        staff, other = FakeTextChannel(STAFF_CHANNEL_ID, "staff"), FakeTextChannel(77, "join-log")
+        other.guild = guild
+        other.permissions_for = lambda _me: NS(send_messages=True, embed_links=True)
+        guild.channels.update({STAFF_CHANNEL_ID: staff, 77: other})
+        cog, _db, _clock, _owner = await _make(tmp_path, guild)
+        await cog.minute(T0)
+        replies = []
+
+        async def command(**options):
+            interaction = NS(user=NS(id=OWNER), response=NS(send_message=AsyncMock(
+                side_effect=lambda text, **kw: replies.append(text))))
+            await cog.join_cards.callback(cog, interaction, **options)
+
+        await command()
+        await command(channel=other)
+        await cog.on_member_join(joiner)
+        await command(off=True)
+        await cog.on_member_join(joiner)
+        await command()
+        return replies, len(staff.posts), len(other.posts)
+
+    replies, in_staff, in_other = asyncio.run(run())
+    assert replies[0] == f"Join and leave cards go to <#{STAFF_CHANNEL_ID}> (the default)."
+    assert replies[1] == "Join and leave cards now go to <#77>."
+    assert replies[3] == "Join and leave cards are off."
+    assert (in_staff, in_other) == (0, 1)

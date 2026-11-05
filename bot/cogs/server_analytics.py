@@ -46,6 +46,7 @@ from bot.uex.server_analytics import (
     EventResult, InviteUse, ModAction, Movement, build_report, clean_label, event_running, match_invite, ops_card,
     Report, moderation_kind, previous_month, report_blocks, report_csv, source_of,
 )
+from bot.uex.join_cards import STAFF_CHANNEL_ID, join_card, leave_card, source_text
 from bot.uex.new_members import is_new, member_picks, onboarding_status, timezone_counts, zone_bucket
 from bot.uex.voice_ranks import counts
 
@@ -151,6 +152,7 @@ class ServerAnalytics(commands.Cog):
         self._invite_lock = asyncio.Lock()
         self._invites_warned = False
         self._audit_warned = False
+        self._cards_warned = False
         self._state: dict | None = None
         self._seen: dict[str, set[int]] = {}               # day -> members already marked active
         self._messages: Counter = Counter()                # hour -> posts not yet saved
@@ -241,16 +243,69 @@ class ServerAnalytics(commands.Cog):
                         f", made by {inviter}" if inviter else "")
         except Exception:
             logger.exception("Recording member %s's join failed", member.id)
+        try:
+            source = await self._source(guild, code, inviter)
+            await self._post_card(guild, join_card(member.id, getattr(member, "display_name", ""), member.name, source,
+                                                   member.created_at, self.now(), getattr(guild, "member_count", None)),
+                                  discord.Colour.green())
+        except Exception:
+            logger.exception("Posting member %s's join card failed", member.id)
 
     @commands.Cog.listener()
     async def on_raw_member_remove(self, payload: discord.RawMemberRemoveEvent) -> None:
-        if self._ours(payload.guild_id) is None or payload.user.bot:
+        guild = self._ours(payload.guild_id)
+        if guild is None or payload.user.bot:
+            return
+        user, now = payload.user, self.now()
+        try:
+            joined = await self.bot.db.last_join(guild.id, user.id)
+        except Exception:
+            logger.exception("Reading member %s's join failed", user.id)
+            joined = None
+        try:
+            await self.bot.db.record_member_movement(payload.guild_id, user.id, "leave", _time(now))
+        except Exception:
+            logger.exception("Recording member %s leaving failed", user.id)
+        try:
+            source = None
+            joined_at = getattr(user, "joined_at", None)  # a Member when the cache still had them
+            if joined is not None:
+                source = await self._source(guild, joined["invite_code"], joined["inviter_id"])
+                joined_at = joined_at or _parse(joined["at"])
+            await self._post_card(guild, leave_card(user.id, getattr(user, "display_name", ""), getattr(user, "name", ""),
+                                                    joined_at, now, source), discord.Colour.dark_grey())
+        except Exception:
+            logger.exception("Posting member %s's leave card failed", user.id)
+
+    async def _source(self, guild: discord.Guild, code: str | None, inviter: int | None) -> str:
+        """A join's source for a card: the matched invite's label, who made it, or unknown."""
+        labels = await self.bot.db.get_invite_labels()
+        name = None
+        if inviter is not None:
+            who = guild.get_member(inviter) or self.bot.get_user(inviter)
+            name = (getattr(who, "display_name", None) or who.name) if who is not None else str(inviter)
+        return source_text(code, source_of(code, labels, inviter), name)
+
+    async def _post_card(self, guild: discord.Guild, text: str, colour: discord.Colour) -> None:
+        """A small card in the join cards channel (#staff unless `/join-cards` set another, or off)."""
+        setting = await self.bot.db.get_join_cards_channel(guild.id)
+        if setting == 0:
+            return
+        channel = guild.get_channel(setting or STAFF_CHANNEL_ID)
+        if channel is None:
+            if not self._cards_warned:
+                logger.warning("The join cards channel %s isn't there: set one with /join-cards",
+                               setting or STAFF_CHANNEL_ID)
+            self._cards_warned = True
             return
         try:
-            await self.bot.db.record_member_movement(payload.guild_id, payload.user.id, "leave",
-                                                     _time(self.now()))
-        except Exception:
-            logger.exception("Recording member %s leaving failed", payload.user.id)
+            await channel.send(embed=discord.Embed(description=text, colour=colour),
+                               allowed_mentions=discord.AllowedMentions.none())
+        except discord.HTTPException as exc:
+            if not self._cards_warned:
+                logger.warning("Couldn't post a join card in #%s (the bot needs Send Messages and Embed Links "
+                               "there): %s", getattr(channel, "name", channel.id), exc)
+            self._cards_warned = True
 
     @commands.Cog.listener()
     async def on_invite_create(self, invite: discord.Invite) -> None:
@@ -711,6 +766,40 @@ class ServerAnalytics(commands.Cog):
         note = "" if known else " No invite on the server has that code right now, so check it's right."
         await interaction.followup.send(f"Members who join through `{code}` now show as **{name}**.{note}",
                                         ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+
+    @app_commands.command(name="join-cards",
+                          description="Owner only: where the join and leave cards for staff go (default #staff).")
+    @app_commands.describe(channel="Post the cards here instead", off="Stop posting them")
+    @app_commands.default_permissions(administrator=True)
+    async def join_cards(self, interaction: discord.Interaction, channel: discord.TextChannel | None = None,
+                         off: bool = False) -> None:
+        if not await self.bot.is_owner(interaction.user):
+            await interaction.response.send_message("This command is for the bot's owner.", ephemeral=True)
+            return
+        guild = self._guild()
+        if guild is None:
+            await interaction.response.send_message("I can't find the server right now.", ephemeral=True)
+            return
+        await self._start(guild)
+        if off:
+            await self.bot.db.set_join_cards_channel(guild.id, 0)
+            text = "Join and leave cards are off. Turn them back on with `/join-cards channel:`."
+        elif channel is not None:
+            if channel.guild.id != guild.id:
+                await interaction.response.send_message("Pick a channel in Star Tech Dynamics.", ephemeral=True)
+                return
+            await self.bot.db.set_join_cards_channel(guild.id, channel.id)
+            self._cards_warned = False
+            perms = channel.permissions_for(channel.guild.me)
+            note = "" if perms.send_messages and perms.embed_links else (
+                " I can't post there yet: the bot needs Send Messages and Embed Links in that channel.")
+            text = f"Join and leave cards now go to {channel.mention}.{note}"
+        else:
+            setting = await self.bot.db.get_join_cards_channel(guild.id)
+            text = ("Join and leave cards are off." if setting == 0
+                    else f"Join and leave cards go to <#{setting or STAFF_CHANNEL_ID}>"
+                    + (" (the default)." if setting is None else "."))
+        await interaction.response.send_message(text, ephemeral=True)
 
     @invite_label.autocomplete("invite")
     async def invite_autocomplete(self, interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
