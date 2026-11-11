@@ -26,7 +26,7 @@ from bot.db.database import Database
 from bot.uex.join_cards import SOURCE_UNKNOWN, STAFF_CHANNEL_ID, account_age, source_text, stay_length
 from bot.discord_ui import LAYOUT_TEXT_LIMIT
 from bot.uex.server_analytics import (
-    DEFAULT_INVITE_LABELS, best_windows, csv_cell, ops_card, join_histogram, joins_block, window_label, MEMBER_REFERRAL, NO_INVITE, UNKNOWN_INVITE, EventResult, InviteUse, ModAction, Movement, build_report,
+    DEFAULT_INVITE_LABELS, best_windows, csv_cell, invite_changes, referrer_text, ops_card, join_histogram, joins_block, window_label, MEMBER_REFERRAL, NO_INVITE, UNKNOWN_INVITE, EventResult, InviteUse, ModAction, Movement, build_report,
     event_kinds, event_running, first_hello, kept, lapsed_counts, match_invite, moderation_block, moderation_kind,
     peak_times, previous_month, report_blocks, report_csv, retention_cohort, slot_label, source_of,
 )
@@ -526,7 +526,8 @@ def test_member_referrals_are_one_source_with_the_top_referrers_named(tmp_path):
     assert f"{UNKNOWN_INVITE}: **1** joined" in report, "an invite a bot made isn't a referral"
     assert "Top referrers: Kara\\_ (2) · Vex (1)" in report
     assert f"{MEMBER_REFERRAL}: **2** joined" in labelled and "Star Citizen 2 regulars: **1** joined" in labelled
-    assert "Top referrers: Kara\\_ (2)" in labelled and "Vex (1)" not in labelled
+    assert "Top referrers: Kara\\_ (2) · Vex (1, all through named links)" in labelled, (
+        "a named link counts under its name as a source, and still for the member who made it")
 
 
 def test_the_invite_list_puts_named_invites_first_and_groups_the_ones_members_made():
@@ -920,3 +921,38 @@ def test_join_cards_can_go_elsewhere_or_be_turned_off(tmp_path):
     assert replies[1] == "Join and leave cards now go to <#77>."
     assert replies[3] == "Join and leave cards are off."
     assert (in_staff, in_other) == (0, 1)
+
+
+# -- referrers and unmatched joins ----------------------------------------------------
+
+def test_a_referrer_is_credited_for_named_links_they_made_too():
+    assert referrer_text("Cheeno", 14, 8) == "Cheeno (14, 8 through named links)"
+    assert referrer_text("Kara", 2, 0) == "Kara (2)"
+    joins = [Movement(10 + i, "join", T0, RSI, OWNER) for i in range(3)] + [Movement(20, "join", T0, "mine1", OWNER),
+                                                                           Movement(21, "join", T0, "kara1", 5)]
+    report = build_report(title="t", start=T0 - timedelta(days=1), end=T0 + timedelta(days=1), tracking_since=T0,
+                          chat_from=None, movements=joins, active={}, members={}, last_active={}, seen_from=None,
+                          hours=[], channel_counts={}, channel_names={}, ops=[], events=[],
+                          labels={RSI: "RSI org page"}, referrer_names={OWNER: "Cheeno", 5: "Kara"})
+    assert report.referrers == [("Cheeno", 4, 3), ("Kara", 1, 0)]
+    assert dict((r[0], r[1]) for r in report.sources)["RSI org page"] == 3, "the link still counts as its own source"
+
+
+def test_a_join_no_single_invite_explains_is_logged_with_what_changed(tmp_path, caplog):
+    async def run():
+        guild = FakeGuild(invites=[_invite(RSI, 3), _invite(SPECTRUM, 0), _invite("gone1", 2)])
+        cog, _db, _clock, _owner = await _make(tmp_path, guild)
+        await cog.minute(T0)
+        guild.invite_list = [_invite(RSI, 4), _invite(SPECTRUM, 1)]
+        joiner = _member(10, joined=T0)
+        joiner.guild = guild
+        with caplog.at_level("INFO", logger="uexbot.server_analytics"):
+            await cog.on_member_join(joiner)
+
+    asyncio.run(run())
+    lines = [r.getMessage() for r in caplog.records if "no single invite" in r.getMessage()]
+    assert lines == [f"A join matched no single invite: {SPECTRUM} 0->1; {RSI} 3->4; gone1 gone (was 2 uses)"]
+    assert invite_changes({RSI: InviteUse(3)}, {RSI: InviteUse(3)}) == "no invite changed (1 invites)"
+    expired = InviteUse(0, 1, None, T0 - timedelta(hours=1))
+    assert invite_changes({"x": expired}, {}, now=T0, deleted={"x": T0 - timedelta(seconds=90)}) == (
+        "x gone (was 0/1 uses, expired, deleted 90s before)")

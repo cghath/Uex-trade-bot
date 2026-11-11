@@ -5670,6 +5670,20 @@ they're in sync).
      - **Backfill:** none needed - cards 1-4 had no credit, so the first minute after the deploy
        credits Nov 9's Mining Mondays (7 at 30+ minutes) and tonight's op when it's over (12 so
        far). The Ops-channel session ladder still runs for ops with no card.
+163. **Top referrers count named links, and unmatched joins are logged** (2026-11-11; the owner:
+     "i feel like i recruited more then 6 people"). Of 39 joins since Nov 4, 14 came through
+     invites the owner made, but `build_report` only counted a referral when `source_of` said
+     Member referral, and a label always wins - so the 8 through the owner's named links (RSI org
+     page, Reddit LFG replies, ...) counted under the link, not the owner.
+     - **Referrers:** every join whose invite has a maker (`inviter_id`) counts for them;
+       `report.referrers` is (name, joins, through named links) and `referrer_text` reads
+       "Cheeno (14, 8 through named links)". Sources are unchanged (a named link is still its own
+       source); the CSV adds `referrer/<name>/through_named_links`.
+     - **Unmatched joins:** 12 of 39 matched no single invite, with no vanity URL or Discovery to
+       explain it. `joined_with` now logs `invite_changes` (codes and counts: which grew, which are
+       new, which went and whether expired or deleted and how long before) whenever a join
+       matches none, and says so when the invites hadn't been read yet. Read the next few in the
+       journal (`grep "no single invite"`) before changing `match_invite`.
 
 ## Where to look for what
 

@@ -43,7 +43,8 @@ from bot.discord_ui import LAYOUT_TEXT_LIMIT, BotLayoutView
 from bot.uex.anniversaries import COMMUNITY_NAME, INACTIVE_DAYS
 from bot.uex.server_analytics import (
     MEMBER_REFERRAL, ATTENDED_MINUTES, AUDIT_LOG_DAYS, DAY_FORMAT, EASTERN, HOUR_FORMAT, PERIOD_DAYS, RETENTION_DAYS, TIME_FORMAT, UTC,
-    EventResult, InviteUse, ModAction, Movement, build_report, clean_label, event_running, match_invite, ops_card,
+    EventResult, InviteUse, ModAction, Movement, build_report, clean_label, event_running, invite_changes,
+    match_invite, ops_card,
     Report, moderation_kind, previous_month, report_blocks, report_csv, source_of,
 )
 from bot.uex.join_cards import STAFF_CHANNEL_ID, join_card, leave_card, source_text
@@ -342,8 +343,13 @@ class ServerAnalytics(commands.Cog):
             if after is None:
                 return None, None
             before, self.invites = self.invites, after
-            code = match_invite(before, after, now=self.now(), deleted=self._deleted) if before is not None else None
-            if code is None:
+            if before is None:
+                logger.info("A join's invite isn't known: the invites hadn't been read yet")
+                return None, None
+            code = match_invite(before, after, now=self.now(), deleted=self._deleted)
+            if code is None:  # what the bot saw, so a "not known" source can be explained later
+                logger.info("A join matched no single invite: %s",
+                            invite_changes(before, after, now=self.now(), deleted=self._deleted))
                 return None, None
             used = after.get(code) or before.get(code)
             return code, used.inviter_id if used else None
