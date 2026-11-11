@@ -512,6 +512,8 @@ date - no open item, nothing to record here.
       PROJECT_CONTEXT.md entry 160
 - [ ] Join and leave cards for staff (bot/uex/join_cards.py, `/join-cards`). Needs a staff channel
       of aiv2's own. See PROJECT_CONTEXT.md entry 161
+- [ ] Ops ranks count event cards' attendance (`credit_event_ops`, `record_op(card_id=)`, overlap
+      dedupe). Only where aiv2 has both voice ranks and event cards. See PROJECT_CONTEXT.md entry 162
 - [ ] PR #158 - Fixes from the 2026-11-04 audit: system messages aren't posts (`INTRO_TYPES` in
       analytics and welcome-back), the event roles parser reads a trailing count first. Worth
       porting where aiv2 has welcome-back or event cards. See PROJECT_CONTEXT.md entry 159

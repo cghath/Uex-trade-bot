@@ -5653,6 +5653,23 @@ they're in sync).
        `/join-cards` (owner only) shows, moves or turns them off. A missing channel or a failed
        post (no Send Messages / Embed Links) logs one warning, never stops the join being
        recorded.
+162. **Ops ranks count event cards' attendance** (2026-11-10; the owner: an op running in Star
+     Citizen 1 and "no one has ranked up their op level"). Every op had been held in Star Citizen 1
+     (Main Voice Channels), and the Ops ladder only saw 3+ people in the Ops category, so
+     `voice_ops` was empty - while event attendance (entry 154) had already counted 14 and 15
+     people. Now `VoiceRanks.credit_event_ops` (each minute, after `_step_op`) takes cards that
+     have begun and stopped running (`event_cards_to_credit`, then not `event_running`: ended,
+     past `EVENT_STARTED_HOURS`, or never started past `EVENT_OPEN_HOURS`; cancelled never) and
+     counts an op for everyone with `ATTENDED_MINUTES` (30) or more in `event_attendance`.
+     - **Once:** `event_cards.ops_credited`, set in the same transaction as the op
+       (`record_op(card_id=...)`, `BEGIN IMMEDIATE`); `voice_ops.card_id` says which op came from a
+       card.
+     - **Never twice:** `record_op` skips anyone already in `voice_op_attendance` for an op that
+       overlaps (an Ops session during an event op is the same op); a card's window is its start
+       to now, at most `EVENT_STARTED_HOURS` later.
+     - **Backfill:** none needed - cards 1-4 had no credit, so the first minute after the deploy
+       credits Nov 9's Mining Mondays (7 at 30+ minutes) and tonight's op when it's over (12 so
+       far). The Ops-channel session ladder still runs for ops with no card.
 
 ## Where to look for what
 

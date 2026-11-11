@@ -11,7 +11,9 @@ The owner's decisions:
   (calendar quarters). The ladder: Cadet 1h, Crewman 5h, Specialist 15h, Petty Officer 35h,
   Officer 75h, Lieutenant 150h, Commander 300h, Captain 500h, Admiral 1,000h of ordinary voice.
 - A second ladder for ops attended: an op is 3+ people in the Ops channels together for 30+
-  minutes, and you attended if you were there for at least half of it.
+  minutes, and you attended if you were there for at least half of it - or an event card's op,
+  wherever it's held: 30+ minutes in its voice channel or Ops while it runs (as /server-stats
+  counts attendance), credited when it's over. One op is never counted twice for anyone.
 - Arcane's levels aren't carried over: everyone starts from zero.
 """
 from __future__ import annotations
