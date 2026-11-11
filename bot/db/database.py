@@ -853,7 +853,8 @@ CREATE TABLE IF NOT EXISTS voice_ops (
     guild_id INTEGER NOT NULL,
     started_at TEXT NOT NULL,
     ended_at TEXT NOT NULL,
-    minutes INTEGER NOT NULL
+    minutes INTEGER NOT NULL,
+    card_id INTEGER          -- an op counted from an event card's attendance; NULL: 3+ in Ops
 );
 
 CREATE TABLE IF NOT EXISTS voice_op_attendance (
@@ -939,6 +940,7 @@ CREATE TABLE IF NOT EXISTS event_cards (
     channel_id INTEGER NOT NULL,
     message_id INTEGER,
     state TEXT NOT NULL DEFAULT 'open' CHECK (state IN ('open', 'started', 'ended', 'cancelled')),
+    ops_credited INTEGER NOT NULL DEFAULT 0,  -- its attendees' Ops ranks credited (entry 162)
     reminded INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -1707,6 +1709,10 @@ class Database:
             "ALTER TABLE analytics_state ADD COLUMN system_cleaned_at TEXT",
             # Join and leave cards for staff (entry 161): NULL #staff, 0 off, else that channel.
             "ALTER TABLE analytics_state ADD COLUMN join_cards_channel_id INTEGER",
+            # Ops ranks count event attendance too (entry 162): which op came from which card,
+            # and the cards already credited.
+            "ALTER TABLE voice_ops ADD COLUMN card_id INTEGER",
+            "ALTER TABLE event_cards ADD COLUMN ops_credited INTEGER NOT NULL DEFAULT 0",
         ]
         for statement in migrations:
             try:
@@ -5296,15 +5302,31 @@ class Database:
             await db.commit()
 
     async def record_op(self, guild_id: int, started_at: str, ended_at: str, minutes: int,
-                        attendees: dict[int, int]) -> list[tuple[int, int]]:
+                        attendees: dict[int, int], *, card_id: int | None = None) -> list[tuple[int, int]]:
         """Log an op that ended and count it for each attendee (user_id -> minutes there), in one
-        transaction with clearing the saved session. Returns (user_id, ops attended now)."""
+        transaction with clearing the saved session - or, with `card_id`, with marking that event
+        card credited. Someone already counted for an op that overlaps this one isn't counted
+        again: an op in Ops is often an event card's op too. Returns (user_id, ops attended now)."""
         counted = []
         async with self.connect() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            if card_id is not None:
+                row = await (await db.execute("SELECT ops_credited FROM event_cards WHERE card_id = ?",
+                                              (card_id,))).fetchone()
+                if row is None or row["ops_credited"]:
+                    await db.rollback()
+                    return []
+                await db.execute("UPDATE event_cards SET ops_credited = 1 WHERE card_id = ?", (card_id,))
+            already = {row["user_id"] for row in await (await db.execute(
+                """SELECT a.user_id FROM voice_op_attendance a JOIN voice_ops o ON o.id = a.op_id
+                   WHERE o.guild_id = ? AND o.started_at < ? AND o.ended_at > ?""",
+                (guild_id, ended_at, started_at))).fetchall()}
             cursor = await db.execute(
-                "INSERT INTO voice_ops (guild_id, started_at, ended_at, minutes) VALUES (?, ?, ?, ?)",
-                (guild_id, started_at, ended_at, minutes))
+                "INSERT INTO voice_ops (guild_id, started_at, ended_at, minutes, card_id) VALUES (?, ?, ?, ?, ?)",
+                (guild_id, started_at, ended_at, minutes, card_id))
             for user_id, present in sorted(attendees.items()):
+                if user_id in already:
+                    continue
                 await db.execute("INSERT INTO voice_op_attendance (op_id, user_id, minutes) VALUES (?, ?, ?)",
                                  (cursor.lastrowid, user_id, present))
                 await db.execute(
@@ -5313,9 +5335,27 @@ class Database:
                 row = await (await db.execute(
                     "SELECT ops FROM voice_members WHERE guild_id = ? AND user_id = ?", (guild_id, user_id))).fetchone()
                 counted.append((user_id, row["ops"]))
-            await db.execute("DELETE FROM voice_op_session WHERE guild_id = ?", (guild_id,))
+            if card_id is None:
+                await db.execute("DELETE FROM voice_op_session WHERE guild_id = ?", (guild_id,))
             await db.commit()
         return counted
+
+    async def event_cards_to_credit(self, guild_id: int, now_ts: int) -> list[dict[str, Any]]:
+        """Event cards whose op has begun and whose attendees' Ops ranks aren't credited yet
+        (cancelled ones never are); the caller keeps those no longer running."""
+        async with self.connect() as db:
+            rows = await (await db.execute(
+                """SELECT * FROM event_cards WHERE guild_id = ? AND ops_credited = 0 AND state != 'cancelled'
+                   AND starts_at <= ? ORDER BY starts_at""", (guild_id, now_ts))).fetchall()
+        return [dict(row) for row in rows]
+
+    async def event_attendees(self, card_id: int, min_minutes: int) -> dict[int, int]:
+        """Who came to an event card's op: user_id -> minutes, for those there at least `min_minutes`."""
+        async with self.connect() as db:
+            rows = await (await db.execute(
+                "SELECT user_id, minutes FROM event_attendance WHERE card_id = ? AND minutes >= ?",
+                (card_id, min_minutes))).fetchall()
+        return {row["user_id"]: row["minutes"] for row in rows}
 
     async def get_anniversary_opt_outs(self, guild_id: int) -> set[int]:
         async with self.connect() as db:

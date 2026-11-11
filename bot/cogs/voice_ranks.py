@@ -26,6 +26,7 @@ from discord.ext import commands, tasks
 from bot.cogs.anniversaries import ANNIVERSARY_CHANNEL_ID
 from bot.delivery import home_channel, owner_only_mentions, send_to_channel
 from bot.managed_roles import ManagedRoles
+from bot.uex.server_analytics import ATTENDED_MINUTES, EVENT_STARTED_HOURS, event_running
 from bot.uex.voice_ranks import (
     DAILY_CAP_MINUTES, OP_GRACE_MINUTES, OP_RANKS, OPS_XP_PER_MINUTE, RANKS, OpSession, bar, counted_members,
     counts, hours, op_attendees, op_promotion_text, op_step, progress, promotion_text, rank_index, rank_name,
@@ -114,6 +115,29 @@ class VoiceRanks(commands.Cog):
             if rank_index(after) > rank_index(before):
                 await self._promote(guild, user_id, after)
         await self._step_op(guild, op_people, now)
+        await self.credit_event_ops(guild, now)
+
+    async def credit_event_ops(self, guild: discord.Guild, now: datetime) -> None:
+        """An event card's op that's over counts as an op for everyone there ATTENDED_MINUTES or
+        more (its voice channel or Ops, as /server-stats counts it), wherever it was held - not
+        only 3+ in the Ops channels. Credited once, when it stops running: ended, or past its
+        hours. Someone already counted for an overlapping op in Ops isn't counted twice."""
+        stamp = int(now.timestamp())
+        for card in await self.bot.db.event_cards_to_credit(guild.id, stamp):
+            if event_running(card["state"], card["starts_at"], stamp):
+                continue
+            attendees = await self.bot.db.event_attendees(card["card_id"], ATTENDED_MINUTES)
+            start = datetime.fromtimestamp(card["starts_at"], timezone.utc)
+            end = min(now, start + timedelta(hours=EVENT_STARTED_HOURS))  # credited late after a restart
+            counted = await self.bot.db.record_op(
+                guild.id, start.strftime(_TIME), end.strftime(_TIME), max(attendees.values(), default=0),
+                attendees, card_id=card["card_id"])
+            if attendees:
+                logger.info("Event op %s (%s) over: %d attended, %d counted", card["card_id"], card["name"],
+                            len(attendees), len(counted))
+            for user_id, ops in counted:
+                if rank_index(ops, OP_RANKS) >= 0:
+                    await self._promote(guild, user_id, ops, ops_ladder=True)
 
     async def _step_op(self, guild: discord.Guild, people: set[int], now: datetime) -> None:
         if not self._session_loaded:

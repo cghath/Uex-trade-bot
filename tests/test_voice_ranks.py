@@ -431,3 +431,61 @@ def test_a_busy_database_never_stops_a_claimed_rank_up_being_announced(tmp_path)
 def test_the_leaderboard_says_it_ranks_xp_not_time():  # COMM-9
     description = VoiceRanks.rank_leaderboard.description
     assert "XP" in description and "double in Ops" in description and len(description) <= 100
+
+
+# -- ops from event cards ------------------------------------------------------------
+
+async def _card(db, starts_at, *, state="open", attendance=()):
+    card = await db.create_event_card(guild_id=GUILD_ID, event_id=int(starts_at.timestamp()),
+                                      starts_at=int(starts_at.timestamp()), channel_id=1, repeats=None,
+                                      name="Mining Mondays", voice_channel_id=55)
+    if state != "open":
+        await db.set_event_card_state(card, state, only_from=("open", "started"))
+    for user_id, minutes in attendance:
+        for _ in range(minutes):
+            await db.credit_event_minute(card, [user_id])
+    return card
+
+
+def test_an_event_ops_attendees_get_an_op_once_it_is_over_wherever_it_was_held(tmp_path):
+    async def run():
+        guild = FakeGuild()
+        cog, db, posts = await _make(tmp_path, guild)
+        for user_id in (1, 2, 3):
+            guild.members[user_id] = FakeMember(user_id)
+        _sql(tmp_path, "INSERT INTO voice_members (guild_id, user_id, ops, op_rank_index) VALUES (?, 1, 4, -1)",
+             (GUILD_ID,))
+        start = T0 - timedelta(hours=2)
+        running = await _card(db, start, state="started", attendance=[(1, 40), (2, 35), (3, 20)])
+        await cog.credit_event_ops(guild, T0)
+        during = {r["user_id"]: r["ops"] for r in await db.get_voice_members(GUILD_ID)}
+        await db.set_event_card_state(running, "ended", only_from=("open", "started"))
+        await cog.credit_event_ops(guild, T0 + timedelta(minutes=1))
+        await cog.credit_event_ops(guild, T0 + timedelta(minutes=2))  # once only
+        after = {r["user_id"]: r["ops"] for r in await db.get_voice_members(GUILD_ID)}
+        await _card(db, start - timedelta(days=1), state="cancelled", attendance=[(2, 90)])
+        await _card(db, start - timedelta(days=2), state="started", attendance=[(2, 90)])  # left Started: 6 hours
+        await cog.credit_event_ops(guild, T0 + timedelta(minutes=3))
+        later = {r["user_id"]: r["ops"] for r in await db.get_voice_members(GUILD_ID)}
+        return during, after, later, [p[0] for p in posts if p[0].startswith("🎯")]
+
+    during, after, later, rank_ups = asyncio.run(run())
+    assert during == {1: 4}, "nothing while it's running"
+    assert after == {1: 5, 2: 1}, "30+ minutes attended; 20 isn't"
+    assert later == {1: 5, 2: 2}, "a cancelled op never counts; one left Started counts once its hours are up"
+    assert rank_ups == ["🎯 <@1> has earned **Operator**: 5 ops attended."]
+
+
+def test_an_op_in_ops_that_is_also_an_event_op_counts_once(tmp_path):
+    async def run():
+        guild = FakeGuild()
+        crew = [FakeMember(i) for i in (1, 2, 3)]
+        cog, db, _posts = await _make(tmp_path, guild)
+        card = await _card(db, T0, state="started", attendance=[(1, 36), (2, 36), (4, 36)])
+        await _op_minutes(cog, guild, T0, 31, crew)  # the same op, 3 in Ops: counted for 1, 2, 3
+        await _op_minutes(cog, guild, T0 + timedelta(minutes=31), OP_GRACE_MINUTES, crew[:1])
+        await db.set_event_card_state(card, "ended", only_from=("open", "started"))
+        await cog.credit_event_ops(guild, T0 + timedelta(minutes=40))
+        return {r["user_id"]: r["ops"] for r in await db.get_voice_members(GUILD_ID) if r["ops"]}
+
+    assert asyncio.run(run()) == {1: 1, 2: 1, 3: 1, 4: 1}, "4 was only in the event's channel"

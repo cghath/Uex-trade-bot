@@ -1,7 +1,14 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.88.
+the oldest entry below); the next new entry is 2.89.
+
+---
+
+## 2.88 - 2026-11-10 - Ops count wherever you fly
+
+**Changed**
+- Ops ranks now count every op on the events calendar, wherever it's held: spend 30 minutes or more in the op's voice channel (or Ops) while it's running and it counts as an op attended, once the op is over. Before, only time in the Ops channels counted. Ops already run since Nov 4 are counted too, and nobody gets the same op counted twice.
 
 ---
 
