@@ -119,6 +119,31 @@ def match_invite(before: dict[str, InviteUse], after: dict[str, InviteUse], *, n
     return candidates[0] if len(candidates) == 1 else None
 
 
+def invite_changes(before: dict[str, InviteUse], after: dict[str, InviteUse], *, now: datetime | None = None,
+                   deleted: dict[str, datetime] | None = None) -> str:
+    """For the log, when a join matches no single invite: which invites' use counts moved, which
+    are new and which have gone (and whether they'd expired or were deleted, and how long ago).
+    Codes and numbers only, so the owner can see why a source is "not known"."""
+    parts = []
+    for code, use in sorted(after.items()):
+        was = before.get(code)
+        if was is None:
+            parts.append(f"{code} new ({use.uses} uses)")
+        elif use.uses != was.uses:
+            parts.append(f"{code} {was.uses}->{use.uses}")
+    for code, was in sorted(before.items()):
+        if code in after:
+            continue
+        note = f"was {was.uses}" + (f"/{was.max_uses}" if was.max_uses else "") + " uses"
+        if now is not None and was.expires_at is not None and was.expires_at <= now:
+            note += ", expired"
+        seen = (deleted or {}).get(code)
+        if now is not None and seen is not None:
+            note += f", deleted {int((now - seen).total_seconds())}s before"
+        parts.append(f"{code} gone ({note})")
+    return "; ".join(parts) if parts else f"no invite changed ({len(after)} invites)"
+
+
 def event_running(state: str, starts_at: int, now: int) -> bool:
     """Whether an event card's op is on now, for attendance: from Start (on the card or in
     Discord) until it's ended, at most EVENT_STARTED_HOURS after its start - or, for one nobody
@@ -242,7 +267,7 @@ class Report:
     lapsed: dict[int, int | None] = field(default_factory=dict)
     lapsed_known_from: dict[int, datetime] = field(default_factory=dict)
     sources: list[tuple[str, int, int, int]] = field(default_factory=list)  # label, joined, kept, cohort
-    referrers: list[tuple[str, int]] = field(default_factory=list)
+    referrers: list[tuple[str, int, int]] = field(default_factory=list)  # name, joins, through named links
     peak_voice: list[tuple[str, float]] = field(default_factory=list)
     peak_chat: list[tuple[str, int]] = field(default_factory=list)
     busiest: list[tuple[str, int]] = field(default_factory=list)
@@ -447,20 +472,22 @@ def build_report(*, title: str, start: datetime, end: datetime, tracking_since: 
     stayed = {id(j): kept(j, movements, active, end, present) for j in cohort}
     report.retention = (sum(stayed.values()), len(cohort))
     per_source: dict[str, list[int]] = defaultdict(lambda: [0, 0, 0])
-    referrals: Counter = Counter()
+    referrals: Counter = Counter()   # everyone each member's invites brought in...
+    named: Counter = Counter()       # ...and how many of those came through a named link
     for j in joins:
         if start <= j.at < end:
             source = source_of(j.code, labels, j.inviter_id)
             per_source[source][0] += 1
-            if source == MEMBER_REFERRAL:
+            if j.inviter_id is not None:  # a named link still has a maker: the owner's ads, say
                 referrals[j.inviter_id] += 1
+                named[j.inviter_id] += source != MEMBER_REFERRAL
     for j in cohort:
         row = per_source[source_of(j.code, labels, j.inviter_id)]
         row[1] += stayed[id(j)]
         row[2] += 1
     report.sources = sorted(((name, *row) for name, row in per_source.items()), key=lambda r: (-r[1], -r[3], r[0]))
     names = referrer_names or {}
-    report.referrers = [(names.get(uid, "a member no longer here"), n)
+    report.referrers = [(names.get(uid, "a member no longer here"), n, named[uid])
                         for uid, n in sorted(referrals.items(), key=lambda kv: (-kv[1], names.get(kv[0], "")))[:TOP_REFERRERS]]
 
     last = _last_day(end)
@@ -577,7 +604,7 @@ def report_blocks(report: Report) -> list[str]:
                 line += f" · kept {stayed} of {cohort} after 30 days"
             lines.append(line)
         if report.referrers:
-            lines.append("Top referrers: " + " · ".join(f"{name} ({n})" for name, n in report.referrers))
+            lines.append("Top referrers: " + " · ".join(referrer_text(*r) for r in report.referrers))
         blocks.append("\n".join(lines))
 
     if report.peak_voice or report.peak_chat:
@@ -626,6 +653,14 @@ def _busiest_hours(hours: list[int], n: int = 3) -> str:
 
 def _by_day(days: list[int]) -> str:
     return " · ".join(f"{_WEEKDAYS[d]} {days[d]}" for d in range(7))
+
+
+def referrer_text(name: str, joins: int, through_named: int) -> str:
+    """"Cheeno (14, 8 through named links)": everyone a member's invites brought in, with how
+    many of them came through links that have a name (and count under it as a source)."""
+    if not through_named:
+        return f"{name} ({joins})"
+    return f"{name} ({joins}, {'all' if through_named == joins else through_named} through named links)"
 
 
 def joins_block(report: Report) -> str:
@@ -684,8 +719,9 @@ def report_csv(report: Report) -> str:
         add("source", name, "joined", joins)
         add("source", name, "kept_30d", stayed)
         add("source", name, "cohort_30d", cohort)
-    for name, n in report.referrers:
+    for name, n, through_named in report.referrers:
         add("referrer", name, "joins", n)
+        add("referrer", name, "through_named_links", through_named)
     for name, n in report.timezones:
         add("timezone", name, "members", n)
     for section, (days, hours) in (("joins_all", report.joins_all), ("joins_period", report.joins_recent),

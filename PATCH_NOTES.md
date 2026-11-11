@@ -1,7 +1,14 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.89.
+the oldest entry below); the next new entry is 2.90.
+
+---
+
+## 2.89 - 2026-11-11 - Who brought them in
+
+**Changed**
+- The owner's server stats now credit every member for everyone their invite links brought in, including links that have a name (like the Reddit and Spectrum links), so the top referrers show the full count.
 
 ---
 
