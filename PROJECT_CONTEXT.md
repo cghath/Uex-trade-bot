@@ -5684,6 +5684,29 @@ they're in sync).
        new, which went and whether expired or deleted and how long before) whenever a join
        matches none, and says so when the invites hadn't been read yet. Read the next few in the
        journal (`grep "no single invite"`) before changing `match_invite`.
+164. **A tidy #events** (2026-11-11; the owner: "keep the next event toward the bottom an clean up
+     other stuff"; their picks: clear 6 hours after, other posts once the ops pass). #events had
+     3 finished cards, 7 reminder/start/end replies and the owner's role ping, and the next op
+     (Interdictions, Nov 15) third from the bottom: each weekly card is posted when its last op
+     ends, so post order isn't start order. `EventCards.tidy` runs every SYNC_EVERY minutes,
+     after the syncs; the rules are bot/uex/events_tidy.py.
+     - **Order:** `to_repost` - upcoming cards read furthest at the top to the next op at the
+       bottom; the first out of place and every sooner one are posted again (`send_card(ping=
+       False)`: `AllowedMentions.none()`, the next redraw restores the Org Events mention without
+       notifying), then the old message deleted - post first, so a failed post leaves it in place.
+     - **Clearing:** `due_to_clear` - `TIDY_AFTER` (6h) after `over_at` (set by
+       `set_event_card_state(at=)` on ended/cancelled; before this existed, start + 12h). Every
+       message in `event_card_posts` (cards, reposts, `ping_roster` and ending replies, via
+       `_keep`) plus any bot reply to one of them (older replies) is deleted, then
+       `mark_event_card_cleaned` sets `cleaned_at` and clears `message_id` (no redraw of a deleted
+       card).
+     - **Other posts:** `other_post_due` - anything not the bot's and not pinned goes once every
+       card live when it was posted (`created_at` before it, not over) is cleared; posted with
+       none live, once the next card made after it is. Needs Manage Messages in #events, which
+       the bot didn't have at deploy (one warning in the log until it does).
+     - **First run (dry run on live data):** cards 1-4 cleared (11 bot messages), the owner's
+       Nov 3 ping removed once Manage Messages is granted, Mining Mondays then Interdictions
+       posted again so Interdictions is last.
 
 ## Where to look for what
 
