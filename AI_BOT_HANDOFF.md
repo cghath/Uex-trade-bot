@@ -516,6 +516,8 @@ date - no open item, nothing to record here.
       dedupe). Only where aiv2 has both voice ranks and event cards. See PROJECT_CONTEXT.md entry 162
 - [ ] Top referrers count named links (`referrer_text`) and unmatched joins are logged
       (`invite_changes`). See PROJECT_CONTEXT.md entry 163
+- [ ] A tidy #events: next op last, finished ops cleared after 6 hours (bot/uex/events_tidy.py,
+      `EventCards.tidy`, `event_card_posts`). See PROJECT_CONTEXT.md entry 164
 - [ ] PR #158 - Fixes from the 2026-11-04 audit: system messages aren't posts (`INTRO_TYPES` in
       analytics and welcome-back), the event roles parser reads a trailing count first. Worth
       porting where aiv2 has welcome-back or event cards. See PROJECT_CONTEXT.md entry 159

@@ -942,7 +942,16 @@ CREATE TABLE IF NOT EXISTS event_cards (
     state TEXT NOT NULL DEFAULT 'open' CHECK (state IN ('open', 'started', 'ended', 'cancelled')),
     ops_credited INTEGER NOT NULL DEFAULT 0,  -- its attendees' Ops ranks credited (entry 162)
     reminded INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    over_at INTEGER,     -- when it was ended or cancelled (Unix seconds)
+    cleaned_at INTEGER   -- when its messages were cleared out of #events (entry 164)
+);
+
+-- Every message the bot posted for a card in #events (the card, each repost of it, and its
+-- reminder, start and end replies), so they can all be cleared once the op is over.
+CREATE TABLE IF NOT EXISTS event_card_posts (
+    message_id INTEGER PRIMARY KEY,
+    card_id INTEGER NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_event_cards_event ON event_cards (event_id, starts_at);
@@ -1713,6 +1722,9 @@ class Database:
             # and the cards already credited.
             "ALTER TABLE voice_ops ADD COLUMN card_id INTEGER",
             "ALTER TABLE event_cards ADD COLUMN ops_credited INTEGER NOT NULL DEFAULT 0",
+            # A tidy #events (entry 164): when a card's op was over, and when it was cleared away.
+            "ALTER TABLE event_cards ADD COLUMN over_at INTEGER",
+            "ALTER TABLE event_cards ADD COLUMN cleaned_at INTEGER",
         ]
         for statement in migrations:
             try:
@@ -5069,13 +5081,18 @@ class Database:
             await db.execute("UPDATE event_cards SET starts_at = ?, reminded = 0 WHERE card_id = ?", (starts_at, card_id))
             await db.commit()
 
-    async def set_event_card_state(self, card_id: int, state: str, *, only_from: tuple[str, ...]) -> bool:
+    async def set_event_card_state(self, card_id: int, state: str, *, only_from: tuple[str, ...],
+                                   at: int | None = None) -> bool:
         """Move a card to `state` if it's in one of `only_from`; False when it wasn't (someone
-        else already did), so only one caller ever announces a change."""
+        else already did), so only one caller ever announces a change. Ended or cancelled, `at`
+        (Unix seconds, default now) is kept as when the op was over."""
+        over = state in ("ended", "cancelled")
         async with self.connect() as db:
             cursor = await db.execute(
-                f"UPDATE event_cards SET state = ? WHERE card_id = ? AND state IN ({','.join('?' * len(only_from))})",
-                (state, card_id, *only_from))
+                f"""UPDATE event_cards SET state = ?,
+                       over_at = CASE WHEN ? THEN COALESCE(?, CAST(strftime('%s', 'now') AS INTEGER)) ELSE over_at END
+                   WHERE card_id = ? AND state IN ({','.join('?' * len(only_from))})""",
+                (state, over, at, card_id, *only_from))
             changed = cursor.rowcount == 1
             await db.commit()
         return changed
@@ -5112,6 +5129,32 @@ class Database:
                 "SELECT * FROM event_cards WHERE guild_id = ? AND state IN ('open', 'started')",
                 (guild_id,))).fetchall()
         return [dict(row) for row in rows]
+
+    async def record_event_card_post(self, card_id: int, message_id: int) -> None:
+        async with self.connect() as db:
+            await db.execute("INSERT OR IGNORE INTO event_card_posts (message_id, card_id) VALUES (?, ?)",
+                             (message_id, card_id))
+            await db.commit()
+
+    async def event_card_posts(self, card_id: int) -> list[int]:
+        async with self.connect() as db:
+            rows = await (await db.execute("SELECT message_id FROM event_card_posts WHERE card_id = ?",
+                                           (card_id,))).fetchall()
+        return [row["message_id"] for row in rows]
+
+    async def channel_event_cards(self, channel_id: int) -> list[dict[str, Any]]:
+        """Every card posted in a channel, open or long over, oldest first."""
+        async with self.connect() as db:
+            rows = await (await db.execute("SELECT * FROM event_cards WHERE channel_id = ? ORDER BY card_id",
+                                           (channel_id,))).fetchall()
+        return [dict(row) for row in rows]
+
+    async def mark_event_card_cleaned(self, card_id: int, at: int) -> None:
+        """Its messages are gone from the channel: no message to redraw any more."""
+        async with self.connect() as db:
+            await db.execute("UPDATE event_cards SET cleaned_at = ?, message_id = NULL WHERE card_id = ?",
+                             (at, card_id))
+            await db.commit()
 
     async def stale_event_cards(self, started_before: int) -> list[dict[str, Any]]:
         """Cards still open or under way for an occurrence that started before `started_before`."""

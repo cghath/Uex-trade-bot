@@ -40,8 +40,9 @@ from bot.cogs.event_cards import (
 )
 from bot.db.database import Database
 from bot.discord_ui import LAYOUT_TEXT_LIMIT, UNEXPECTED_ERROR_MESSAGE
+from bot.uex.events_tidy import TIDY_AFTER, due_to_clear, other_post_due, to_repost
 from bot.uex.events import (
-    ENDED, GOING, MAYBE, OPEN, PING_CHARS, PING_USERS, ROSTER_BUDGET, STARTED, WAITING, EventRole, Signup, details_text,
+    CANCELLED, ENDED, GOING, MAYBE, OPEN, PING_CHARS, PING_USERS, ROSTER_BUDGET, STARTED, WAITING, EventRole, Signup, details_text,
     next_in_line, parse_roles, ping_messages, placed_status, repeats_text, roles_text, roster_text, ship_matches,
 )
 
@@ -956,3 +957,146 @@ def test_command_surface_fits_discords_limits():
     cmd = EventCards.event_roles
     assert len(cmd.name) <= 32 and len(str(cmd.description)) <= 100
     assert all(len(str(p.description)) <= 100 for p in cmd.parameters)
+
+
+# -- a tidy #events -------------------------------------------------------------------------------
+
+def _tidy_card(**kw):
+    card = {"card_id": 1, "state": OPEN, "starts_at": 1_000_000, "over_at": None, "cleaned_at": None,
+            "created_at": "1970-01-01 00:00:00"}
+    card.update(kw)
+    return card
+
+
+def _stamp(seconds):
+    return datetime.fromtimestamp(seconds, timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+
+async def _made_at(db, card_id, seconds):
+    async with db.connect() as conn:
+        await conn.execute("UPDATE event_cards SET created_at = ? WHERE card_id = ?", (_stamp(seconds), card_id))
+        await conn.commit()
+
+
+def test_the_next_op_goes_to_the_bottom_and_ops_are_cleared_six_hours_after():
+    # posted Nov 15's card first, then Nov 16's, then Nov 17's: the two sooner ones go again, soonest last
+    assert to_repost([(5, 1500, 100), (6, 1600, 200), (7, 1700, 300)]) == [6, 5]
+    assert to_repost([(7, 1700, 100), (6, 1600, 200), (5, 1500, 300)]) == [], "already in order"
+    assert to_repost([(7, 1700, 100), (5, 1500, 200), (6, 1600, 300)]) == [5]
+    ended = _tidy_card(state=ENDED, over_at=10_000)
+    assert not due_to_clear(ended, 10_000 + TIDY_AFTER - 1) and due_to_clear(ended, 10_000 + TIDY_AFTER)
+    assert due_to_clear(_tidy_card(state=ENDED, starts_at=0), 18 * 3600), "closed before over_at was kept: start + 12h"
+    assert not due_to_clear(_tidy_card(state=STARTED), 10 ** 9) and not due_to_clear(
+        _tidy_card(state=CANCELLED, over_at=0, cleaned_at=5), 10 ** 9)
+
+
+def test_other_posts_go_once_the_ops_they_could_be_about_are_cleared():
+    tuesday = _tidy_card(card_id=2, created_at=_stamp(100), over_at=500, state=ENDED)
+    monday = _tidy_card(card_id=3, created_at=_stamp(200), state=OPEN)
+    assert not other_post_due(300, [tuesday, monday]), "Monday's op hasn't happened"
+    monday.update(state=ENDED, over_at=900)
+    assert not other_post_due(300, [tuesday, monday]), "over, but not cleared yet"
+    tuesday["cleaned_at"] = monday["cleaned_at"] = 1000
+    assert other_post_due(300, [tuesday, monday])
+    later = _tidy_card(card_id=4, created_at=_stamp(2000), state=OPEN)
+    assert not other_post_due(1500, [tuesday, monday, later]), "posted with nothing upcoming: waits for the next op"
+    assert not other_post_due(1500, [tuesday, monday]), "and with none at all, stays"
+
+
+class TidyChannel:
+    """#events with real message order: send appends, delete removes."""
+    def __init__(self, guild, bot_id, manage=True):
+        self.id, self.guild, self.messages, self.sent, self.next_id = EVENTS_CHANNEL_ID, guild, [], [], 1000
+        guild.me = NS(id=bot_id)
+        self.manage = manage
+
+    def add(self, author_id, at, *, reply_to=None, pinned=False):
+        self.next_id += 1
+        message = NS(id=self.next_id, author=NS(id=author_id), pinned=pinned,
+                     created_at=datetime.fromtimestamp(at, timezone.utc),
+                     reference=NS(message_id=reply_to) if reply_to else None)
+        self.messages.append(message)
+        return message.id
+
+    async def send(self, content=None, **kwargs):
+        self.sent.append(kwargs)
+        return NS(id=self.add(self.guild.me.id, 0))
+
+    def history(self, limit=None):
+        async def newest_first():
+            for message in reversed(self.messages[-limit:] if limit else self.messages):
+                yield message
+        return newest_first()
+
+    def permissions_for(self, member):
+        return NS(manage_messages=self.manage)
+
+    def get_partial_message(self, message_id):
+        async def delete():
+            before = len(self.messages)
+            self.messages = [m for m in self.messages if m.id != message_id]
+            if len(self.messages) == before:
+                raise discord.NotFound(NS(status=404, reason="Not Found"), "Unknown Message")
+
+        async def edit(**kwargs):
+            pass
+        return NS(delete=delete, edit=edit)
+
+
+def test_tidy_clears_finished_ops_and_old_posts_and_puts_the_next_op_last(tmp_path):
+    bot_id, now = 4242, START + 3 * 86400
+
+    async def body(db):
+        world = World(db)
+        channel = TidyChannel(world.guild, bot_id)
+        world.bot.get_channel = {EVENTS_CHANNEL_ID: channel}.get
+
+        async def card(event_id, starts_at, created_at):
+            card_id = await db.create_event_card(guild_id=GUILD_ID, event_id=event_id, starts_at=starts_at,
+                                                 channel_id=EVENTS_CHANNEL_ID, repeats=None, name=f"Op {event_id}",
+                                                 voice_channel_id=55)
+            message_id = channel.add(bot_id, created_at)
+            await db.update_event_card(card_id, message_id=message_id)
+            await _made_at(db, card_id, created_at)
+            return card_id, message_id
+
+        done, done_msg = await card(1, START, START - 86400)
+        reminder = channel.add(bot_id, START - 3600, reply_to=done_msg)        # kept from before: found by its reply
+        ping = channel.add(77, START - 1800)                                    # a member's role ping for that op
+        pinned = channel.add(77, START - 1700, pinned=True)
+        sunday, sunday_msg = await card(2, now + 4 * 86400, START + 3600)
+        monday, monday_msg = await card(3, now + 5 * 86400, START + 7200)
+        tuesday, tuesday_msg = await card(4, now + 6 * 86400, START + 10800)
+        await db.set_event_card_state(done, ENDED, only_from=(OPEN,), at=START + 7200)
+        await world.cog.tidy(channel, now)
+        left = [m.id for m in channel.messages]
+        cards = {c["card_id"]: c for c in await db.channel_event_cards(EVENTS_CHANNEL_ID)}
+        assert done_msg not in left and reminder not in left, "the finished op and its reminder are cleared"
+        assert cards[done]["cleaned_at"] == now and cards[done]["message_id"] is None
+        assert ping not in left and pinned in left, "the member's post went with its op; a pinned one stays"
+        assert left[:2] == [pinned, tuesday_msg], "Tuesday was posted last: it stays where it is"
+        assert [cards[c]["message_id"] for c in (monday, sunday)] == left[2:], "Monday, then Sunday at the bottom"
+        assert all(kw["allowed_mentions"].roles is False for kw in channel.sent), "a repost doesn't ping Org Events"
+        assert set(await db.event_card_posts(sunday)) >= {cards[sunday]["message_id"]}
+        again = len(channel.sent)
+        await world.cog.tidy(channel, now + 600)
+        assert len(channel.sent) == again, "in order now: nothing posted again"
+    _run(tmp_path, body)
+
+
+def test_without_manage_messages_other_posts_stay_and_the_bot_still_clears_its_own(tmp_path):
+    bot_id, now = 4242, START + 3 * 86400
+
+    async def body(db):
+        world = World(db)
+        channel = TidyChannel(world.guild, bot_id, manage=False)
+        card_id = await db.create_event_card(guild_id=GUILD_ID, event_id=1, starts_at=START, channel_id=EVENTS_CHANNEL_ID,
+                                             repeats=None, name="Op", voice_channel_id=55)
+        message_id = channel.add(bot_id, START - 86400)
+        await db.update_event_card(card_id, message_id=message_id)
+        await _made_at(db, card_id, START - 86400)
+        member_post = channel.add(77, START - 600)
+        await db.set_event_card_state(card_id, CANCELLED, only_from=(OPEN,), at=START - 300)
+        await world.cog.tidy(channel, now)
+        assert [m.id for m in channel.messages] == [member_post]
+    _run(tmp_path, body)

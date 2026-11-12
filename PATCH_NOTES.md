@@ -1,7 +1,15 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.90.
+the oldest entry below); the next new entry is 2.91.
+
+---
+
+## 2.90 - 2026-11-11 - A tidy events channel
+
+**Changed**
+- The next op is always the last card in #📅events, right where the channel opens, with the later ones above it.
+- Six hours after an op is over, its card and the bot's reminders for it are cleared away, along with other posts about it. Your sign-ups, attendance and Ops ranks are kept.
 
 ---
 
