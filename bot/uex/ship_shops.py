@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
 
 from bot.uex.item_finder import place_and_vendor_text, split_place_and_vendor
+from bot.uex.ships import ship_name_suggestions
 
 UNKNOWN_SYSTEM_LABEL = "Unknown system"
 
@@ -162,13 +163,13 @@ def ship_autocomplete_names(
     vehicles: Iterable[dict[str, Any]], listed_ids: set[int], current: str, *, limit: int = 25,
 ) -> list[str]:
     """Names of ships with at least one buy or rent row (listed_ids), matching `current`
-    as a case-insensitive substring of name or name_full, deduplicated, at most `limit`."""
+    as a case-insensitive substring of name or name_full, deduplicated, at most `limit`. When
+    none does, the listed ships with the closest spellings ("tiberon" offers the Tiburon)."""
     current_lower = current.strip().lower()
+    listed = [vehicle for vehicle in vehicles if _optional_int(vehicle.get("id")) in listed_ids]
     seen: set[str] = set()
     names: list[str] = []
-    for vehicle in vehicles:
-        if _optional_int(vehicle.get("id")) not in listed_ids:
-            continue
+    for vehicle in listed:
         name = vehicle.get("name")
         if not name or name in seen:
             continue
@@ -179,7 +180,9 @@ def ship_autocomplete_names(
         names.append(name)
         if len(names) >= limit:
             break
-    return names
+    if names or not current_lower:
+        return names
+    return ship_name_suggestions(listed, current, limit)
 
 
 def _shop(listing: ShipShopListing) -> str:

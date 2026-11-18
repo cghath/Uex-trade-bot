@@ -518,6 +518,10 @@ date - no open item, nothing to record here.
       (`invite_changes`). See PROJECT_CONTEXT.md entry 163
 - [ ] A tidy #events: next op last, finished ops cleared after 6 hours (bot/uex/events_tidy.py,
       `EventCards.tidy`, `event_card_posts`). See PROJECT_CONTEXT.md entry 164
+- [x] Misspelled ship names resolve and show in the ship autocomplete (`resolve_ship`'s typo step,
+      `ship_name_suggestions`, bot/uex/ships.py, bot/cogs/ships.py, `ship_autocomplete_names`). See
+      PROJECT_CONTEXT.md entry 165 (ported: aiv2 2e81c04, the same day, with the chat asking which of
+      the closest ships when a misspelling is as close to several - `ships_matching`)
 - [ ] PR #158 - Fixes from the 2026-11-04 audit: system messages aren't posts (`INTRO_TYPES` in
       analytics and welcome-back), the event roles parser reads a trailing count first. Worth
       porting where aiv2 has welcome-back or event cards. See PROJECT_CONTEXT.md entry 159

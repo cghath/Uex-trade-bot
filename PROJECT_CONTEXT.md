@@ -5708,6 +5708,26 @@ they're in sync).
        Nov 3 ping removed once Manage Messages is granted, Mining Mondays then Interdictions
        posted again so Interdictions is last.
 
+165. **Misspelled ship names** (2026-11-18; the owner, after "Tiberon" found nothing: "we need to make
+     it adjust for spelling errors"). The ship is the Aegis Tiburon (UEX id 285); `resolve_ship` and
+     the ship autocomplete only took an exact name or a part of one, so every `ship` option missed it.
+     - **Lookup:** `resolve_ship` (bot/uex/ships.py) keeps exact, then a unique part of a name, and a
+       part several names share still returns None. Only when no name contains the query does the
+       typo step run: `_ship_scores` scores each distinct name (difflib ratio, the closer of `name`
+       and `name_full`), and the best resolves at `MIN_SHIP_MATCH_SCORE` 0.75 and
+       `MIN_SHIP_MATCH_MARGIN` 0.1 over the next ship (the commodity lookups' margin).
+     - **Calibration:** UEX's 281 ship names, each with one letter dropped, two adjacent letters
+       swapped or one vowel changed (9,243 typos; ones that are a real name or part of one left out):
+       8,098 resolved right, 1,145 declined ("constelation" is as close to every Constellation),
+       none to a different ship - true of every setting tried (0.75-0.85, margin 0.05-0.1).
+       `tests/fixtures/vehicles.json` holds the real list; `tests/test_ships.py` reruns a slice.
+     - **Autocomplete:** `ship_name_suggestions` - the names containing what's typed, as before;
+       when none does, spellings scoring `MIN_SHIP_SUGGESTION_SCORE` 0.6 or better, scored against
+       each name's start as well (`as_start`, so "tiber" isn't marked down for the letters not
+       typed yet) and names sharing the first letter first. `/where-to-buy-ship`'s own list
+       (`ship_autocomplete_names`, bot/uex/ship_shops.py) falls back to the same close spellings,
+       among the ships with a buy or rent row only.
+
 ## Where to look for what
 
 Seven docs, deliberately scoped so they don't duplicate each other:

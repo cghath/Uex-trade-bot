@@ -11,12 +11,11 @@ import discord
 from discord import app_commands
 
 from bot.autocomplete import fetch_within
+from bot.uex.ships import ship_name_suggestions
 
 
 async def ship_name_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
     vehicles = await fetch_within(interaction.client.uex.get_vehicles())
     if vehicles is None:
         return []
-    current_lower = current.lower()
-    matches = [v for v in vehicles if current_lower in (v.get("name") or "").lower()][:25]
-    return [app_commands.Choice(name=(v.get("name") or "")[:100], value=v.get("name") or "") for v in matches]
+    return [app_commands.Choice(name=name[:100], value=name) for name in ship_name_suggestions(vehicles, current)]

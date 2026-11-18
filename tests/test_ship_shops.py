@@ -261,6 +261,12 @@ def test_ship_autocomplete_names_only_offers_listed_ships_matching_name_or_name_
     assert ship_autocomplete_names(VEHICLES, {27, 50, 52}, "idris") == []
 
 
+def test_ship_autocomplete_names_offers_a_listed_ship_spelled_wrong():
+    # Asked for 2026-11-18: "Tiberon" offered nothing. Only listed ships are offered, the same as a match.
+    assert ship_autocomplete_names(VEHICLES, {27, 50, 52}, "cutlas blak") == ["Cutlass Black"]
+    assert ship_autocomplete_names(VEHICLES, {27, 50}, "cutlas blak") == []
+
+
 def test_ship_autocomplete_names_dedupes_and_caps():
     vehicles = [{"id": i, "name": f"Ship {i % 30}"} for i in range(60)]
     names = ship_autocomplete_names(vehicles, set(range(60)), "ship", limit=25)
