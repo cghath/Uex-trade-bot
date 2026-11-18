@@ -1,0 +1,1142 @@
+[
+{
+"name": "100i",
+"name_full": "Origin 100i"
+},
+{
+"name": "125a",
+"name_full": "Origin 125a"
+},
+{
+"name": "135c",
+"name_full": "Origin 135c"
+},
+{
+"name": "300i",
+"name_full": "Origin 300i"
+},
+{
+"name": "315p",
+"name_full": "Origin 315p"
+},
+{
+"name": "325a",
+"name_full": "Origin 325a"
+},
+{
+"name": "350r",
+"name_full": "Origin 350r"
+},
+{
+"name": "400i",
+"name_full": "Origin 400i"
+},
+{
+"name": "600i Executive Edition",
+"name_full": "Origin 600i Executive Edition"
+},
+{
+"name": "600i Explorer",
+"name_full": "Origin 600i Explorer"
+},
+{
+"name": "600i Touring",
+"name_full": "Origin 600i Touring"
+},
+{
+"name": "85X",
+"name_full": "Origin 85X"
+},
+{
+"name": "890 Jump",
+"name_full": "Origin 890 Jump"
+},
+{
+"name": "A1 Spirit",
+"name_full": "Crusader A1 Spirit"
+},
+{
+"name": "A2 Hercules Starlifter",
+"name_full": "Crusader A2 Hercules Starlifter"
+},
+{
+"name": "Apollo Medivac",
+"name_full": "RSI Apollo Medivac"
+},
+{
+"name": "Apollo Triage",
+"name_full": "RSI Apollo Triage"
+},
+{
+"name": "Ares Star Fighter Inferno",
+"name_full": "Crusader Ares Star Fighter Inferno"
+},
+{
+"name": "Ares Star Fighter Ion",
+"name_full": "Crusader Ares Star Fighter Ion"
+},
+{
+"name": "Arrastra",
+"name_full": "RSI Arrastra"
+},
+{
+"name": "Arrow",
+"name_full": "Anvil Arrow"
+},
+{
+"name": "Asgard",
+"name_full": "Anvil Asgard"
+},
+{
+"name": "ATLS",
+"name_full": "Argo ATLS"
+},
+{
+"name": "ATLS GEO",
+"name_full": "Argo ATLS GEO"
+},
+{
+"name": "ATLS IKTI",
+"name_full": "Argo ATLS IKTI"
+},
+{
+"name": "ATLS IKTI GEO",
+"name_full": "Argo ATLS IKTI GEO"
+},
+{
+"name": "ATLS IKTI GEO Rad",
+"name_full": "Argo ATLS IKTI GEO Rad"
+},
+{
+"name": "ATLS IKTI Rad",
+"name_full": "Argo ATLS IKTI Rad"
+},
+{
+"name": "Aurora Mk I CL",
+"name_full": "RSI Aurora Mk I CL"
+},
+{
+"name": "Aurora Mk I ES",
+"name_full": "RSI Aurora Mk I ES"
+},
+{
+"name": "Aurora Mk I LN",
+"name_full": "RSI Aurora Mk I LN"
+},
+{
+"name": "Aurora Mk I LX",
+"name_full": "RSI Aurora Mk I LX"
+},
+{
+"name": "Aurora Mk I MR",
+"name_full": "RSI Aurora Mk I MR"
+},
+{
+"name": "Aurora Mk I SE",
+"name_full": "RSI Aurora Mk I SE"
+},
+{
+"name": "Aurora Mk II",
+"name_full": "RSI Aurora Mk II"
+},
+{
+"name": "Auxilia",
+"name_full": "Anvil Auxilia"
+},
+{
+"name": "Avenger Stalker",
+"name_full": "Aegis Avenger Stalker"
+},
+{
+"name": "Avenger Titan",
+"name_full": "Aegis Avenger Titan"
+},
+{
+"name": "Avenger Titan Renegade",
+"name_full": "Aegis Avenger Titan Renegade"
+},
+{
+"name": "Avenger Warlock",
+"name_full": "Aegis Avenger Warlock"
+},
+{
+"name": "Ballista Dunestalker",
+"name_full": "Anvil Ballista Dunestalker"
+},
+{
+"name": "Ballista Snowblind",
+"name_full": "Anvil Ballista Snowblind"
+},
+{
+"name": "Basher",
+"name_full": "Grey's Market Basher"
+},
+{
+"name": "Blade",
+"name_full": "Esperia Blade"
+},
+{
+"name": "Buccaneer",
+"name_full": "Drake Buccaneer"
+},
+{
+"name": "C1 Spirit",
+"name_full": "Crusader C1 Spirit"
+},
+{
+"name": "C2 Hercules Starlifter",
+"name_full": "Crusader C2 Hercules Starlifter"
+},
+{
+"name": "C8 Pisces",
+"name_full": "Anvil C8 Pisces"
+},
+{
+"name": "C8R Pisces Rescue",
+"name_full": "Anvil C8R Pisces Rescue"
+},
+{
+"name": "C8X Pisces Expedition",
+"name_full": "Anvil C8X Pisces Expedition"
+},
+{
+"name": "Carrack",
+"name_full": "Anvil Carrack"
+},
+{
+"name": "Carrack Expedition",
+"name_full": "Anvil Carrack Expedition"
+},
+{
+"name": "Caterpillar",
+"name_full": "Drake Caterpillar"
+},
+{
+"name": "Caterpillar Best In Show Edition",
+"name_full": "Drake Caterpillar Best In Show Edition"
+},
+{
+"name": "Caterpillar Pirate Edition",
+"name_full": "Drake Caterpillar Pirate Edition"
+},
+{
+"name": "Clipper",
+"name_full": "Drake Clipper"
+},
+{
+"name": "Constellation Mk IV Andromeda",
+"name_full": "RSI Constellation Mk IV Andromeda"
+},
+{
+"name": "Constellation Mk IV Aquila",
+"name_full": "RSI Constellation Mk IV Aquila"
+},
+{
+"name": "Constellation Mk IV Phoenix",
+"name_full": "RSI Constellation Mk IV Phoenix"
+},
+{
+"name": "Constellation Mk IV Phoenix Emerald",
+"name_full": "RSI Constellation Mk IV Phoenix Emerald"
+},
+{
+"name": "Constellation Mk IV Taurus",
+"name_full": "RSI Constellation Mk IV Taurus"
+},
+{
+"name": "Constellation Mk V Centaurus",
+"name_full": "RSI Constellation Mk V Centaurus"
+},
+{
+"name": "Corsair",
+"name_full": "Drake Corsair"
+},
+{
+"name": "Crucible",
+"name_full": "Anvil Crucible"
+},
+{
+"name": "CSV-FM",
+"name_full": "Argo CSV-FM"
+},
+{
+"name": "CSV-SM",
+"name_full": "Argo CSV-SM"
+},
+{
+"name": "Cutlass Black",
+"name_full": "Drake Cutlass Black"
+},
+{
+"name": "Cutlass Black Best In Show Edition",
+"name_full": "Drake Cutlass Black Best In Show Edition"
+},
+{
+"name": "Cutlass Blue",
+"name_full": "Drake Cutlass Blue"
+},
+{
+"name": "Cutlass Red",
+"name_full": "Drake Cutlass Red"
+},
+{
+"name": "Cutlass Steel",
+"name_full": "Drake Cutlass Steel"
+},
+{
+"name": "Cutter",
+"name_full": "Drake Cutter"
+},
+{
+"name": "Cutter Rambler",
+"name_full": "Drake Cutter Rambler"
+},
+{
+"name": "Cutter Scout",
+"name_full": "Drake Cutter Scout"
+},
+{
+"name": "Cyclone",
+"name_full": "Tumbril Cyclone"
+},
+{
+"name": "Cyclone AA",
+"name_full": "Tumbril Cyclone AA"
+},
+{
+"name": "Cyclone MT",
+"name_full": "Tumbril Cyclone MT"
+},
+{
+"name": "Cyclone RC",
+"name_full": "Tumbril Cyclone RC"
+},
+{
+"name": "Cyclone RN",
+"name_full": "Tumbril Cyclone RN"
+},
+{
+"name": "Cyclone TR",
+"name_full": "Tumbril Cyclone TR"
+},
+{
+"name": "Defender",
+"name_full": "Banu Defender"
+},
+{
+"name": "Dragonfly Black",
+"name_full": "Drake Dragonfly Black"
+},
+{
+"name": "Dragonfly Yellowjacket",
+"name_full": "Drake Dragonfly Yellowjacket"
+},
+{
+"name": "E1 Spirit",
+"name_full": "Crusader E1 Spirit"
+},
+{
+"name": "Eclipse",
+"name_full": "Aegis Eclipse"
+},
+{
+"name": "Endeavor",
+"name_full": "MISC Endeavor"
+},
+{
+"name": "Endeavor Fuel Bay Pod",
+"name_full": "MISC Endeavor Fuel Bay Pod"
+},
+{
+"name": "Endeavor General Research Pod",
+"name_full": "MISC Endeavor General Research Pod"
+},
+{
+"name": "Endeavor Landing Bay Pod",
+"name_full": "MISC Endeavor Landing Bay Pod"
+},
+{
+"name": "Endeavor Medical Bay Pod",
+"name_full": "MISC Endeavor Medical Bay Pod"
+},
+{
+"name": "Endeavor Telescope Array Bay Pod",
+"name_full": "MISC Endeavor Telescope Array Bay Pod"
+},
+{
+"name": "Expanse",
+"name_full": "MISC Expanse"
+},
+{
+"name": "F7A Hornet Mk I",
+"name_full": "Anvil F7A Hornet Mk I"
+},
+{
+"name": "F7A Hornet Mk II",
+"name_full": "Anvil F7A Hornet Mk II"
+},
+{
+"name": "F7C Hornet Mk I",
+"name_full": "Anvil F7C Hornet Mk I"
+},
+{
+"name": "F7C Hornet Mk II",
+"name_full": "Anvil F7C Hornet Mk II"
+},
+{
+"name": "F7C Hornet Wildfire Mk I",
+"name_full": "Anvil F7C Hornet Wildfire Mk I"
+},
+{
+"name": "F7C-M Super Hornet Heartseeker Mk I",
+"name_full": "Anvil F7C-M Super Hornet Heartseeker Mk I"
+},
+{
+"name": "F7C-M Super Hornet Mk I",
+"name_full": "Anvil F7C-M Super Hornet Mk I"
+},
+{
+"name": "F7C-M Super Hornet Mk II",
+"name_full": "Anvil F7C-M Super Hornet Mk II"
+},
+{
+"name": "F7C-R Hornet Tracker Mk I",
+"name_full": "Anvil F7C-R Hornet Tracker Mk I"
+},
+{
+"name": "F7C-R Hornet Tracker Mk II",
+"name_full": "Anvil F7C-R Hornet Tracker Mk II"
+},
+{
+"name": "F7C-S Hornet Ghost Mk I",
+"name_full": "Anvil F7C-S Hornet Ghost Mk I"
+},
+{
+"name": "F7C-S Hornet Ghost Mk II",
+"name_full": "Anvil F7C-S Hornet Ghost Mk II"
+},
+{
+"name": "F8C Lightning",
+"name_full": "Anvil F8C Lightning"
+},
+{
+"name": "F8C Lightning Executive Edition",
+"name_full": "Anvil F8C Lightning Executive Edition"
+},
+{
+"name": "Fortune",
+"name_full": "MISC Fortune"
+},
+{
+"name": "Freelancer",
+"name_full": "MISC Freelancer"
+},
+{
+"name": "Freelancer DUR",
+"name_full": "MISC Freelancer DUR"
+},
+{
+"name": "Freelancer MAX",
+"name_full": "MISC Freelancer MAX"
+},
+{
+"name": "Freelancer MIS",
+"name_full": "MISC Freelancer MIS"
+},
+{
+"name": "Fury",
+"name_full": "Mirai Fury"
+},
+{
+"name": "Fury LX",
+"name_full": "Mirai Fury LX"
+},
+{
+"name": "Fury MX",
+"name_full": "Mirai Fury MX"
+},
+{
+"name": "G12",
+"name_full": "Origin G12"
+},
+{
+"name": "G12-A",
+"name_full": "Origin G12-A"
+},
+{
+"name": "G12-R",
+"name_full": "Origin G12-R"
+},
+{
+"name": "Galaxy",
+"name_full": "RSI Galaxy"
+},
+{
+"name": "Galaxy Cargo Module",
+"name_full": "RSI Galaxy Cargo Module"
+},
+{
+"name": "Galaxy Medical Module",
+"name_full": "RSI Galaxy Medical Module"
+},
+{
+"name": "Galaxy Refinery Module",
+"name_full": "RSI Galaxy Refinery Module"
+},
+{
+"name": "Genesis Starliner",
+"name_full": "Crusader Genesis Starliner"
+},
+{
+"name": "Gladiator",
+"name_full": "Anvil Gladiator"
+},
+{
+"name": "Gladius",
+"name_full": "Aegis Gladius"
+},
+{
+"name": "Gladius Pirate",
+"name_full": "Aegis Gladius Pirate"
+},
+{
+"name": "Gladius Valiant",
+"name_full": "Aegis Gladius Valiant"
+},
+{
+"name": "Glaive",
+"name_full": "Esperia Glaive"
+},
+{
+"name": "Golem",
+"name_full": "Drake Golem"
+},
+{
+"name": "Golem Ox",
+"name_full": "Drake Golem Ox"
+},
+{
+"name": "Guardian",
+"name_full": "Mirai Guardian"
+},
+{
+"name": "Guardian MX",
+"name_full": "Mirai Guardian MX"
+},
+{
+"name": "Guardian QI",
+"name_full": "Mirai Guardian QI"
+},
+{
+"name": "Hammerhead",
+"name_full": "Aegis Hammerhead"
+},
+{
+"name": "Hammerhead Best In Show Edition",
+"name_full": "Aegis Hammerhead Best In Show Edition"
+},
+{
+"name": "Hawk",
+"name_full": "Anvil Hawk"
+},
+{
+"name": "Herald",
+"name_full": "Drake Herald"
+},
+{
+"name": "Hermes",
+"name_full": "RSI Hermes"
+},
+{
+"name": "HM6 Ballista",
+"name_full": "Anvil HM6 Ballista"
+},
+{
+"name": "HM6 Centurion",
+"name_full": "Anvil HM6 Centurion"
+},
+{
+"name": "HM6 Spartan",
+"name_full": "Anvil HM6 Spartan"
+},
+{
+"name": "HoverQuad",
+"name_full": "C.O. HoverQuad"
+},
+{
+"name": "Hull A",
+"name_full": "MISC Hull A"
+},
+{
+"name": "Hull B",
+"name_full": "MISC Hull B"
+},
+{
+"name": "Hull C",
+"name_full": "MISC Hull C"
+},
+{
+"name": "Hull D",
+"name_full": "MISC Hull D"
+},
+{
+"name": "Hull E",
+"name_full": "MISC Hull E"
+},
+{
+"name": "Hurricane",
+"name_full": "Anvil Hurricane"
+},
+{
+"name": "Idris-M",
+"name_full": "Aegis Idris-M"
+},
+{
+"name": "Idris-P",
+"name_full": "Aegis Idris-P"
+},
+{
+"name": "Intrepid",
+"name_full": "Crusader Intrepid"
+},
+{
+"name": "Ironclad",
+"name_full": "Drake Ironclad"
+},
+{
+"name": "Ironclad Assault",
+"name_full": "Drake Ironclad Assault"
+},
+{
+"name": "Javelin",
+"name_full": "Aegis Javelin"
+},
+{
+"name": "Khartu-al",
+"name_full": "Aopoa Khartu-al"
+},
+{
+"name": "Kraken",
+"name_full": "Drake Kraken"
+},
+{
+"name": "Kraken Privateer",
+"name_full": "Drake Kraken Privateer"
+},
+{
+"name": "L-21 Wolf",
+"name_full": "Kruger L-21 Wolf"
+},
+{
+"name": "L-22 Alpha Wolf",
+"name_full": "Kruger L-22 Alpha Wolf"
+},
+{
+"name": "Legionnaire",
+"name_full": "Anvil Legionnaire"
+},
+{
+"name": "Liberator",
+"name_full": "Anvil Liberator"
+},
+{
+"name": "Lynx",
+"name_full": "RSI Lynx"
+},
+{
+"name": "M2 Hercules Starlifter",
+"name_full": "Crusader M2 Hercules Starlifter"
+},
+{
+"name": "M50",
+"name_full": "Origin M50"
+},
+{
+"name": "M80",
+"name_full": "Origin M80"
+},
+{
+"name": "Mantis",
+"name_full": "RSI Mantis"
+},
+{
+"name": "Marauder",
+"name_full": "Drake Marauder"
+},
+{
+"name": "MDC",
+"name_full": "Greycat MDC"
+},
+{
+"name": "Merchantman",
+"name_full": "Banu Merchantman"
+},
+{
+"name": "Mercury Star Runner",
+"name_full": "Crusader Mercury Star Runner"
+},
+{
+"name": "Meteor",
+"name_full": "RSI Meteor"
+},
+{
+"name": "MOLE",
+"name_full": "Argo MOLE"
+},
+{
+"name": "MOLE Carbon Edition",
+"name_full": "Argo MOLE Carbon Edition"
+},
+{
+"name": "MOLE Talus Edition",
+"name_full": "Argo MOLE Talus Edition"
+},
+{
+"name": "MOTH",
+"name_full": "Argo MOTH"
+},
+{
+"name": "MPUV Cargo",
+"name_full": "Argo MPUV Cargo"
+},
+{
+"name": "MPUV Personnel",
+"name_full": "Argo MPUV Personnel"
+},
+{
+"name": "MPUV Tractor",
+"name_full": "Argo MPUV Tractor"
+},
+{
+"name": "MTC",
+"name_full": "Greycat MTC"
+},
+{
+"name": "MULE",
+"name_full": "Drake MULE"
+},
+{
+"name": "Mustang Alpha",
+"name_full": "C.O. Mustang Alpha"
+},
+{
+"name": "Mustang Alpha Vindicator",
+"name_full": "C.O. Mustang Alpha Vindicator"
+},
+{
+"name": "Mustang Beta",
+"name_full": "C.O. Mustang Beta"
+},
+{
+"name": "Mustang Delta",
+"name_full": "C.O. Mustang Delta"
+},
+{
+"name": "Mustang Gamma",
+"name_full": "C.O. Mustang Gamma"
+},
+{
+"name": "Mustang Omega",
+"name_full": "C.O. Mustang Omega"
+},
+{
+"name": "Nautilus",
+"name_full": "Aegis Nautilus"
+},
+{
+"name": "Nautilus Solstice Edition",
+"name_full": "Aegis Nautilus Solstice Edition"
+},
+{
+"name": "Nomad",
+"name_full": "C.O. Nomad"
+},
+{
+"name": "Nova Tank",
+"name_full": "Tumbril Nova Tank"
+},
+{
+"name": "Nox",
+"name_full": "Aopoa Nox"
+},
+{
+"name": "Nox Kue",
+"name_full": "Aopoa Nox Kue"
+},
+{
+"name": "Odin",
+"name_full": "Anvil Odin"
+},
+{
+"name": "Odyssey",
+"name_full": "MISC Odyssey"
+},
+{
+"name": "Orion",
+"name_full": "RSI Orion"
+},
+{
+"name": "P-52 Merlin",
+"name_full": "Kruger P-52 Merlin"
+},
+{
+"name": "P-72 Archimedes",
+"name_full": "Kruger P-72 Archimedes"
+},
+{
+"name": "P-72 Archimedes Emerald",
+"name_full": "Kruger P-72 Archimedes Emerald"
+},
+{
+"name": "Paladin",
+"name_full": "Anvil Paladin"
+},
+{
+"name": "Perseus",
+"name_full": "RSI Perseus"
+},
+{
+"name": "Pioneer",
+"name_full": "C.O. Pioneer"
+},
+{
+"name": "Pitbull",
+"name_full": "Drake Pitbull"
+},
+{
+"name": "Polaris",
+"name_full": "RSI Polaris"
+},
+{
+"name": "Prospector",
+"name_full": "MISC Prospector"
+},
+{
+"name": "Prowler",
+"name_full": "Esperia Prowler"
+},
+{
+"name": "Prowler Utility",
+"name_full": "Esperia Prowler Utility"
+},
+{
+"name": "PTV",
+"name_full": "Greycat PTV"
+},
+{
+"name": "Pulse",
+"name_full": "Mirai Pulse"
+},
+{
+"name": "Pulse LX",
+"name_full": "Mirai Pulse LX"
+},
+{
+"name": "RAFT",
+"name_full": "Argo RAFT"
+},
+{
+"name": "Railen",
+"name_full": "Gatac Railen"
+},
+{
+"name": "Ranger CV",
+"name_full": "Tumbril Ranger CV"
+},
+{
+"name": "Ranger RC",
+"name_full": "Tumbril Ranger RC"
+},
+{
+"name": "Ranger TR",
+"name_full": "Tumbril Ranger TR"
+},
+{
+"name": "Razor",
+"name_full": "Mirai Razor"
+},
+{
+"name": "Razor EX",
+"name_full": "Mirai Razor EX"
+},
+{
+"name": "Razor LX",
+"name_full": "Mirai Razor LX"
+},
+{
+"name": "Reclaimer",
+"name_full": "Aegis Reclaimer"
+},
+{
+"name": "Reclaimer Best In Show Edition",
+"name_full": "Aegis Reclaimer Best In Show Edition"
+},
+{
+"name": "Redeemer",
+"name_full": "Aegis Redeemer"
+},
+{
+"name": "Reliant Kore",
+"name_full": "MISC Reliant Kore"
+},
+{
+"name": "Reliant Mako",
+"name_full": "MISC Reliant Mako"
+},
+{
+"name": "Reliant Sen",
+"name_full": "MISC Reliant Sen"
+},
+{
+"name": "Reliant Tana",
+"name_full": "MISC Reliant Tana"
+},
+{
+"name": "Retaliator",
+"name_full": "Aegis Retaliator"
+},
+{
+"name": "Retaliator Bomber",
+"name_full": "Aegis Retaliator Bomber"
+},
+{
+"name": "Retaliator Cargo Module - Bow",
+"name_full": "Aegis Retaliator Cargo Module - Bow"
+},
+{
+"name": "Retaliator Cargo Module - Stern",
+"name_full": "Aegis Retaliator Cargo Module - Stern"
+},
+{
+"name": "Retaliator Dropship Front Module",
+"name_full": "Aegis Retaliator Dropship Front Module"
+},
+{
+"name": "Retaliator Living Front Module",
+"name_full": "Aegis Retaliator Living Front Module"
+},
+{
+"name": "Retaliator Living Rear Module",
+"name_full": "Aegis Retaliator Living Rear Module"
+},
+{
+"name": "Retaliator Torpedo Module – Bow",
+"name_full": "Aegis Retaliator Torpedo Module – Bow"
+},
+{
+"name": "Retaliator Torpedo Module – Stern",
+"name_full": "Aegis Retaliator Torpedo Module – Stern"
+},
+{
+"name": "ROC",
+"name_full": "Greycat ROC"
+},
+{
+"name": "ROC-DS",
+"name_full": "Greycat ROC-DS"
+},
+{
+"name": "S-65 Stingray",
+"name_full": "Kruger S-65 Stingray"
+},
+{
+"name": "Sabre",
+"name_full": "Aegis Sabre"
+},
+{
+"name": "Sabre Comet",
+"name_full": "Aegis Sabre Comet"
+},
+{
+"name": "Sabre Firebird",
+"name_full": "Aegis Sabre Firebird"
+},
+{
+"name": "Sabre Peregrine",
+"name_full": "Aegis Sabre Peregrine"
+},
+{
+"name": "Sabre Raven",
+"name_full": "Aegis Sabre Raven"
+},
+{
+"name": "Sabre Raven EX",
+"name_full": "Aegis Sabre Raven EX"
+},
+{
+"name": "Sabre Raven EX",
+"name_full": "Aegis Sabre Raven EX"
+},
+{
+"name": "Salvation",
+"name_full": "RSI Salvation"
+},
+{
+"name": "San'tok.yāi",
+"name_full": "Aopoa San'tok.yāi"
+},
+{
+"name": "Scorpius",
+"name_full": "RSI Scorpius"
+},
+{
+"name": "Scorpius Antares",
+"name_full": "RSI Scorpius Antares"
+},
+{
+"name": "Scythe",
+"name_full": "Vanduul Scythe"
+},
+{
+"name": "Shiv",
+"name_full": "Grey's Market Shiv"
+},
+{
+"name": "Skylark",
+"name_full": "Roberts Space Industries Skylark"
+},
+{
+"name": "SRV",
+"name_full": "Argo SRV"
+},
+{
+"name": "Starfarer",
+"name_full": "MISC Starfarer"
+},
+{
+"name": "Starfarer Gemini",
+"name_full": "MISC Starfarer Gemini"
+},
+{
+"name": "Starlancer BLD",
+"name_full": "MISC Starlancer BLD"
+},
+{
+"name": "Starlancer MAX",
+"name_full": "MISC Starlancer MAX"
+},
+{
+"name": "Starlancer TAC",
+"name_full": "MISC Starlancer TAC"
+},
+{
+"name": "Starlite",
+"name_full": "MISC Starlite"
+},
+{
+"name": "Stinger",
+"name_full": "Esperia Stinger"
+},
+{
+"name": "Storm",
+"name_full": "Tumbril Storm"
+},
+{
+"name": "Storm AA",
+"name_full": "Tumbril Storm AA"
+},
+{
+"name": "STV",
+"name_full": "Greycat STV"
+},
+{
+"name": "Syulen",
+"name_full": "Gatac Syulen"
+},
+{
+"name": "Talon",
+"name_full": "Esperia Talon"
+},
+{
+"name": "Talon Shrike",
+"name_full": "Esperia Talon Shrike"
+},
+{
+"name": "Terrapin",
+"name_full": "Anvil Terrapin"
+},
+{
+"name": "Terrapin Medic",
+"name_full": "Anvil Terrapin Medic"
+},
+{
+"name": "Tiburon",
+"name_full": "Aegis Tiburon"
+},
+{
+"name": "Tyilui",
+"name_full": "Gatac Tyilui"
+},
+{
+"name": "Ursa",
+"name_full": "RSI Ursa"
+},
+{
+"name": "Ursa Fortuna",
+"name_full": "RSI Ursa Fortuna"
+},
+{
+"name": "Ursa Medivac",
+"name_full": "RSI Ursa Medivac"
+},
+{
+"name": "UTV",
+"name_full": "Greycat UTV"
+},
+{
+"name": "Valkyrie",
+"name_full": "Anvil Valkyrie"
+},
+{
+"name": "Valkyrie Liberator Edition",
+"name_full": "Anvil Valkyrie Liberator Edition"
+},
+{
+"name": "Vanguard Harbinger",
+"name_full": "Aegis Vanguard Harbinger"
+},
+{
+"name": "Vanguard Hoplite",
+"name_full": "Aegis Vanguard Hoplite"
+},
+{
+"name": "Vanguard Sentinel",
+"name_full": "Aegis Vanguard Sentinel"
+},
+{
+"name": "Vanguard Warden",
+"name_full": "Aegis Vanguard Warden"
+},
+{
+"name": "Vulcan",
+"name_full": "Aegis Vulcan"
+},
+{
+"name": "Vulture",
+"name_full": "Drake Vulture"
+},
+{
+"name": "X1",
+"name_full": "Origin X1"
+},
+{
+"name": "X1 Force",
+"name_full": "Origin X1 Force"
+},
+{
+"name": "X1 Velocity",
+"name_full": "Origin X1 Velocity"
+},
+{
+"name": "Zeus Mk II CL",
+"name_full": "RSI Zeus Mk II CL"
+},
+{
+"name": "Zeus Mk II ES",
+"name_full": "RSI Zeus Mk II ES"
+},
+{
+"name": "Zeus Mk II MR",
+"name_full": "RSI Zeus Mk II MR"
+}
+]

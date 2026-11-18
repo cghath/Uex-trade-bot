@@ -1,7 +1,44 @@
 """Pure helpers for ship cargo capacity and route cargo math. Dependency-free for testing."""
 from __future__ import annotations
 
+import difflib
+
 from dataclasses import dataclass
+
+
+# A ship-name typo's score against the ship it was meant to be (difflib's ratio, against the ship's name or its full
+# name with the maker, whichever is closer), and how far ahead of the next ship it must be. Asked for 2026-11-18 after
+# "Tiberon" (the Aegis Tiburon) found nothing. Calibrated against UEX's 281 ship names: every name with one letter
+# dropped, two adjacent letters swapped or one vowel changed - 9,243 typos - resolved 8,098 to the right ship and
+# declined the rest ("constelation" is as close to every Constellation); none resolved to a different ship. The margin
+# is the commodity lookups' (bot/uex/trading.py MIN_MATCH_MARGIN).
+MIN_SHIP_MATCH_SCORE = 0.75
+MIN_SHIP_MATCH_MARGIN = 0.1
+# How close a spelling must be to be offered in the ship autocomplete when no name contains what was typed - looser
+# than a match, since the player still picks from the list.
+MIN_SHIP_SUGGESTION_SCORE = 0.6
+
+
+def _ship_scores(vehicles: list[dict], query_lower: str, *, as_start: bool = False) -> list[tuple[float, dict]]:
+    """Each distinct ship name's score against `query_lower`, best first: the closer of its name and its full name, so
+    the two never compete, with the first vehicle carrying that name (UEX lists a few names twice). `as_start` also
+    scores the query against each name's first letters - for the autocomplete, where what's typed is usually the
+    start of a name ("tiber" is closer to "Stinger" than to all of "Tiburon", but not to its "tibur")."""
+    best: dict[str, tuple[float, dict]] = {}
+    for vehicle in vehicles:
+        name = (vehicle.get("name") or "").strip()
+        if not name:
+            continue
+        spellings = [s.strip().lower() for s in (name, vehicle.get("name_full") or "") if s.strip()]
+        if as_start:
+            spellings += [spelling[:len(query_lower)] for spelling in spellings]
+        score = max(difflib.SequenceMatcher(None, query_lower, spelling).ratio() for spelling in spellings)
+        key = name.lower()
+        if key not in best:
+            best[key] = (score, vehicle)
+        elif score > best[key][0]:
+            best[key] = (score, best[key][1])
+    return sorted(best.values(), key=lambda pair: pair[0], reverse=True)
 
 
 def resolve_ship(vehicles: list[dict], query: str) -> dict | None:
@@ -9,7 +46,9 @@ def resolve_ship(vehicles: list[dict], query: str) -> dict | None:
 
     Prefers an exact (case-insensitive) match against `name` or `name_full`; falls back to
     a substring match only if it's unique, so e.g. "cutlass" doesn't silently pick one of
-    several Cutlass variants.
+    several Cutlass variants. When no name contains the query at all, a typo of one ship's
+    name resolves to it ("tiberon" is the Tiburon) - only when it clearly beats every other
+    ship (MIN_SHIP_MATCH_SCORE, MIN_SHIP_MATCH_MARGIN), never a guess.
     """
     query_lower = query.strip().lower()
     if not query_lower:
@@ -27,7 +66,28 @@ def resolve_ship(vehicles: list[dict], query: str) -> dict | None:
     ]
     if len(substring_matches) == 1:
         return substring_matches[0]
-    return None
+    if substring_matches:
+        return None
+    scored = _ship_scores(vehicles, query_lower)
+    if not scored or scored[0][0] < MIN_SHIP_MATCH_SCORE:
+        return None
+    second = scored[1][0] if len(scored) > 1 else 0.0
+    return scored[0][1] if scored[0][0] - second >= MIN_SHIP_MATCH_MARGIN else None
+
+
+def ship_name_suggestions(vehicles: list[dict], typed: str, limit: int = 25) -> list[str]:
+    """The ship autocomplete's choices for what's been typed so far: every name containing it, and when none does, the
+    closest spellings ("tiber" offers the Tiburon) - so a misspelled ship still shows up to pick."""
+    typed_lower = typed.strip().lower()
+    names = list(dict.fromkeys((v.get("name") or "").strip() for v in vehicles if (v.get("name") or "").strip()))
+    containing = [name for name in names if typed_lower in name.lower()]
+    if containing or not typed_lower:
+        return containing[:limit]
+    close = [pair for pair in _ship_scores(vehicles, typed_lower, as_start=True) if pair[0] >= MIN_SHIP_SUGGESTION_SCORE]
+    # A tie goes to the name starting with the same letter - a typo rarely gets the first one wrong ("tiber" scores
+    # "Liberator" as high as "Tiburon").
+    close.sort(key=lambda pair: (-pair[0], not pair[1]["name"].strip().lower().startswith(typed_lower[0])))
+    return [vehicle["name"].strip() for _score, vehicle in close][:limit]
 
 
 @dataclass

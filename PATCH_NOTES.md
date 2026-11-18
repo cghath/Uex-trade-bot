@@ -1,7 +1,14 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.91.
+the oldest entry below); the next new entry is 2.92.
+
+---
+
+## 2.91 - 2026-11-18 - Misspelled ship names
+
+**Fixed**
+- A misspelled ship name now finds the ship: "Tiberon" is the Aegis Tiburon, "Cutlas Black" the Cutlass Black, in every command with a ship option. The ship list you pick from offers it too. When a misspelling is as close to several ships (like "Constelation"), the bot still asks rather than guessing.
 
 ---
 
