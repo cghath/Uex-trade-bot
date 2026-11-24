@@ -112,6 +112,24 @@ def hours(minutes_or_xp: int) -> str:
     return f"{h:,}h {m}m" if h else f"{m}m"
 
 
+RECAP_LINES = 30  # people listed in an event's recap; the rest are counted
+
+
+def event_recap_text(name: str, present: dict[int, int], xp: dict[int, int]) -> str:
+    """The reply on an event's card once it's over: everyone there (user_id -> minutes), most XP
+    first, with the voice XP they earned there and their time at the op."""
+    order = sorted(present, key=lambda uid: (-xp.get(uid, 0), -present[uid], uid))
+    total = sum(xp.get(uid, 0) for uid in present)
+    there = f"{len(present)} {'person' if len(present) == 1 else 'people'} there"
+    lines = [f"📊 **{name}** recap: {there}, {total:,} XP earned"]
+    lines += [f"<@{uid}> · +{xp.get(uid, 0):,} XP · {hours(present[uid])} at the op" for uid in order[:RECAP_LINES]]
+    if len(order) > RECAP_LINES:
+        lines.append(f"…and {len(order) - RECAP_LINES} more")
+    lines.append(f"-# Voice XP: 1 a minute in voice with others, {OPS_XP_PER_MINUTE} in Ops, up to "
+                 f"{DAILY_CAP_MINUTES // 60}h a day. Time at the op counts toward Ops ranks. `/rank` shows yours.")
+    return "\n".join(lines)
+
+
 def week_start(day: date) -> date:
     return day - timedelta(days=day.weekday())
 

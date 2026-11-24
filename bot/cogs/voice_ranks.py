@@ -26,10 +26,10 @@ from discord.ext import commands, tasks
 from bot.cogs.anniversaries import ANNIVERSARY_CHANNEL_ID
 from bot.delivery import home_channel, owner_only_mentions, send_to_channel
 from bot.managed_roles import ManagedRoles
-from bot.uex.server_analytics import ATTENDED_MINUTES, EVENT_STARTED_HOURS, event_running
+from bot.uex.server_analytics import ATTENDED_MINUTES, EVENT_STARTED_HOURS, event_channels, event_running
 from bot.uex.voice_ranks import (
     DAILY_CAP_MINUTES, OP_GRACE_MINUTES, OP_RANKS, OPS_XP_PER_MINUTE, RANKS, OpSession, bar, counted_members,
-    counts, hours, op_attendees, op_promotion_text, op_step, progress, promotion_text, rank_index, rank_name,
+    counts, event_recap_text, hours, op_attendees, op_promotion_text, op_step, progress, promotion_text, rank_index, rank_name,
     season_name, season_start, week_start,
 )
 
@@ -102,11 +102,12 @@ class VoiceRanks(commands.Cog):
         if guild is None:
             return
         afk_id = guild.afk_channel.id if guild.afk_channel else None
-        credits, op_people = [], set()
+        credits, op_people, channel_of = [], set(), {}
         for channel in list(guild.voice_channels) + list(guild.stage_channels):
             ops = channel.category_id == OPS_CATEGORY_ID
             for member in counted_members(channel, afk_id):
                 credits.append((member.id, OPS_XP_PER_MINUTE if ops else 1))
+                channel_of[member.id] = channel.id
             if ops:
                 op_people.update(m.id for m in channel.members if counts(m))
         credited = await self.bot.db.credit_voice_minute(guild.id, now.strftime("%Y-%m-%d"), credits,
@@ -114,8 +115,44 @@ class VoiceRanks(commands.Cog):
         for user_id, before, after in credited:
             if rank_index(after) > rank_index(before):
                 await self._promote(guild, user_id, after)
+        try:
+            await self._event_xp(guild, channel_of, {uid: after - before for uid, before, after in credited}, now)
+        except Exception:  # the recap's numbers never hold up the minute
+            logger.exception("Counting event XP failed")
         await self._step_op(guild, op_people, now)
         await self.credit_event_ops(guild, now)
+
+    async def _event_xp(self, guild: discord.Guild, channel_of: dict[int, int], gained: dict[int, int],
+                        now: datetime) -> None:
+        """The XP each person earned this minute in a running event's channels (as attendance
+        counts them), for the event's recap."""
+        if not any(gained.values()):
+            return
+        channels = list(guild.voice_channels) + list(guild.stage_channels)
+        ops = {c.id for c in channels if c.category_id == OPS_CATEGORY_ID}
+        where_for = event_channels(await self.bot.db.open_event_cards(guild.id), ops, int(now.timestamp()))
+        for card_id, where in where_for.items():
+            earned = [(uid, xp) for uid, xp in gained.items() if xp and channel_of.get(uid) in where]
+            if earned:
+                await self.bot.db.add_event_xp(card_id, earned)
+
+    async def _recap(self, card: dict, present: dict[int, int]) -> None:
+        """Once an event is over, a reply on its card: what everyone there earned. Names, no
+        pings; it's cleared with the card (#events' tidy)."""
+        if not present or not card["message_id"]:
+            return
+        channel = self.bot.get_channel(card["channel_id"])
+        if channel is None or not await self.bot.db.claim_event_recap(card["card_id"]):
+            return
+        text = event_recap_text(card["name"], present, await self.bot.db.event_xp(card["card_id"]))
+        try:
+            sent = await channel.send(text, reference=discord.MessageReference(
+                message_id=card["message_id"], channel_id=card["channel_id"], fail_if_not_exists=False),
+                allowed_mentions=discord.AllowedMentions.none())
+        except discord.HTTPException as exc:
+            logger.warning("Couldn't post event card %s's recap: %s", card["card_id"], exc)
+            return
+        await self.bot.db.record_event_card_post(card["card_id"], sent.id)
 
     async def credit_event_ops(self, guild: discord.Guild, now: datetime) -> None:
         """An event card's op that's over counts as an op for everyone there ATTENDED_MINUTES or
@@ -136,6 +173,10 @@ class VoiceRanks(commands.Cog):
             if present:
                 logger.info("Event op %s (%s) over: %d there, %d attended, %d credited", card["card_id"],
                             card["name"], len(present), len(attendees), len(counted))
+            try:
+                await self._recap(card, present)
+            except Exception:  # never stops the rank-ups
+                logger.exception("Event card %s's recap failed", card["card_id"])
             await self._op_rank_ups(guild, counted)
 
     async def _op_rank_ups(self, guild: discord.Guild, counted: list[tuple[int, int]]) -> None:

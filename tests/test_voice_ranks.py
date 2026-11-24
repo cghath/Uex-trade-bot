@@ -4,7 +4,8 @@ Guarantees under test: a minute counts only with 2+ members who aren't bots or d
 the AFK channel, double in the Ops category, up to the daily cap; a rank-up is announced once and
 gives the one rank role; an op is 3+ people for 30+ minutes, attended by those there for half of
 it, and survives a restart; roles are put right by the check; /rank and the leaderboard read
-right, escape names and say audio is never read.
+right, escape names and say audio is never read; an event's XP is counted where its attendance
+is, and its recap is one reply on its card, with no pings.
 """
 from __future__ import annotations
 
@@ -22,7 +23,7 @@ from bot.cogs.voice_ranks import (
 )
 from bot.db.database import Database
 from bot.uex.voice_ranks import (
-    OP_GRACE_MINUTES, OpSession, counted_members, hours, op_attendees, op_step, progress, rank_index, season_name,
+    OP_GRACE_MINUTES, RECAP_LINES, OpSession, counted_members, event_recap_text, hours, op_attendees, op_step, progress, rank_index, season_name,
     season_start, week_start,
 )
 
@@ -520,6 +521,89 @@ def test_op_time_already_credited_is_filled_in_at_startup_and_a_rank_it_earns_is
     assert members == {1: (1, 320), 2: (0, 20)}, "the 20 minutes the 30-minute rule left out count as op time"
     assert rank_ups == ["🎯 <@1> has earned **Operator**: 5h 20m at ops."], "announced once"
     assert roles == ["Operator"]
+
+
+def test_an_events_recap_lists_everyone_there_most_xp_first():
+    text = event_recap_text("Mining Mondays", {1: 30, 2: 95, 3: 95, 4: 12}, {2: 95, 3: 120, 1: 30})
+    assert text.splitlines() == [
+        "📊 **Mining Mondays** recap: 4 people there, 245 XP earned",
+        "<@3> · +120 XP · 1h 35m at the op",
+        "<@2> · +95 XP · 1h 35m at the op",
+        "<@1> · +30 XP · 30m at the op",
+        "<@4> · +0 XP · 12m at the op",
+        "-# Voice XP: 1 a minute in voice with others, 2 in Ops, up to 5h a day. "
+        "Time at the op counts toward Ops ranks. `/rank` shows yours.",
+    ]
+    assert "1 person there" in event_recap_text("Solo", {1: 5}, {})
+    crowd = event_recap_text("Big Op", {uid: 600 for uid in range(1, 101)}, {uid: 1000 for uid in range(1, 101)})
+    assert len(crowd) <= 2000 and f"…and {100 - RECAP_LINES} more" in crowd
+
+
+def test_an_event_gets_one_recap_reply_on_its_card_with_the_xp_earned_there(tmp_path):
+    async def run():
+        guild = FakeGuild()
+        a, b, c, d, e, f = (FakeMember(i) for i in range(1, 7))
+        guild.put(55, [a, b])                                # the event's voice channel
+        guild.put(20, [c, d], category_id=OPS_CATEGORY_ID)   # Ops: double XP
+        guild.put(30, [e, f])                                # not at the event
+        cog, db, posts = await _make(tmp_path, guild)
+        replies = []
+
+        async def send(content=None, **kwargs):
+            replies.append((content, kwargs))
+            return NS(id=900 + len(replies))
+
+        events = NS(id=1, send=send)
+        announce = cog.bot.get_channel
+        cog.bot.get_channel = lambda cid: events if cid == 1 else announce(cid)
+        card = await _card(db, T0, state="started")
+        _sql(tmp_path, "UPDATE event_cards SET message_id = 500 WHERE card_id = ?", (card,))
+        for minute in range(2):
+            await cog.count_minute(T0 + timedelta(minutes=minute))
+            await db.credit_event_minute(card, [1, 2, 3, 4])
+        await db.credit_event_minute(card, [7])              # there a minute, alone: no XP
+        await db.set_event_card_state(card, "ended", only_from=("open", "started"))
+        await cog.count_minute(T0 + timedelta(minutes=2))    # over: no more event XP, and the recap
+        await cog.credit_event_ops(guild, T0 + timedelta(minutes=3))
+        return replies, await db.event_xp(card), await db.event_card_posts(card)
+
+    replies, xp, kept = asyncio.run(run())
+    assert xp == {1: 2, 2: 2, 3: 4, 4: 4}, "2 a minute in Ops, 1 in the event's channel, nothing elsewhere"
+    assert len(replies) == 1, "posted once"
+    content, kwargs = replies[0]
+    assert content.splitlines()[:6] == [
+        "📊 **Mining Mondays** recap: 5 people there, 12 XP earned",
+        "<@3> · +4 XP · 2m at the op",
+        "<@4> · +4 XP · 2m at the op",
+        "<@1> · +2 XP · 2m at the op",
+        "<@2> · +2 XP · 2m at the op",
+        "<@7> · +0 XP · 1m at the op",
+    ]
+    assert kwargs["reference"].message_id == 500, "a reply on the card"
+    mentions = kwargs["allowed_mentions"]
+    assert (mentions.users, mentions.roles, mentions.everyone) == (False, False, False), "names, no pings"
+    assert 901 in kept, "cleared from #events with the card"
+
+
+def test_no_recap_for_a_card_already_cleared_or_with_nobody_there(tmp_path):
+    async def run():
+        guild = FakeGuild()
+        cog, db, _posts = await _make(tmp_path, guild)
+        sent = []
+
+        async def send(content=None, **kwargs):
+            sent.append(content)
+            return NS(id=1)
+
+        cog.bot.get_channel = lambda cid: NS(id=cid, send=send)
+        cleared = await _card(db, T0, state="ended", attendance=[(1, 40)])        # message_id NULL
+        empty = await _card(db, T0 + timedelta(hours=1), state="ended")
+        _sql(tmp_path, "UPDATE event_cards SET message_id = 500 WHERE card_id = ?", (empty,))
+        await cog.credit_event_ops(guild, T0 + timedelta(hours=2))
+        return sent, cleared
+
+    sent, _ = asyncio.run(run())
+    assert [s for s in sent if s and s.startswith("📊")] == []
 
 
 def test_ranks_lists_both_ladders_and_marks_where_you_are():

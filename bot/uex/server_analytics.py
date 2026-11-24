@@ -163,6 +163,16 @@ def ops_card(cards: list[tuple[int, int]], now: int) -> int | None:
     return (max(begun, key=lambda c: c[1]) if begun else min(cards, key=lambda c: c[1]))[0]
 
 
+def event_channels(cards: list[dict], ops_channel_ids: set[int], now: int) -> dict[int, set[int]]:
+    """The voice channels each running event card counts this minute (card_id -> channel ids):
+    its own voice channel, and the Ops channels for the one op that holds them (`ops_card`).
+    Attendance and the XP for an event's recap both count from here."""
+    running = [c for c in cards if event_running(c["state"], c["starts_at"], now)]
+    ops_for = ops_card([(c["card_id"], c["starts_at"]) for c in running], now)
+    return {c["card_id"]: (set(ops_channel_ids) if c["card_id"] == ops_for else set())
+            | ({c["voice_channel_id"]} if c["voice_channel_id"] else set()) for c in running}
+
+
 def source_of(code: str | None, labels: dict[str, str], inviter_id: int | None = None) -> str:
     """Where a join came from: its invite's label, else a member referral when a member made the
     invite, else unknown. A label always wins, so naming a member's invite moves its joins there."""

@@ -5764,6 +5764,22 @@ they're in sync).
      - **`/ranks`** (the owner's ask, same PR): `ladder_text` lists both ladders from `RANKS` and
        `OP_RANKS` (✅ earned, ➡️ next with what's left, ▫️ the rest), ephemeral; in /intro beside
        /rank.
+168. **Event XP recaps** (2026-11-23; the owner: "after every event show people how much xp they
+     got from the event", then picked a reply on the event card over the rank-up channel or DMs).
+     - **Counting:** voice XP was only kept per day (`voice_daily`), so nothing said what an event
+       earned. `VoiceRanks._event_xp` adds each minute's XP (what `credit_voice_minute` actually
+       gave: the 2+ rule, double in Ops, the daily cap) to `event_xp` for each running card whose
+       channels the person is in. Which channels a card counts is `event_channels` (bot/uex/
+       server_analytics.py), shared with `count_attendance` so the two always agree: its voice
+       channel, plus Ops for the card `ops_card` picks.
+     - **The recap:** when `credit_event_ops` credits a card, `_recap` replies on its card
+       (`event_recap_text`): everyone in `event_attendance`, most XP first, "+XP · time at the op",
+       30 listed then "…and N more", `AllowedMentions.none()`. Once per card
+       (`event_cards.xp_recapped`, `claim_event_recap`); none when the card was already cleared
+       (`message_id` NULL) or nobody came. Kept in `event_card_posts`, so the tidy clears it with
+       the card 6 hours after the op.
+     - Ops from before this have no `event_xp`; an op running when it was deployed shows only the
+       XP from then on.
 
 ## Where to look for what
 
