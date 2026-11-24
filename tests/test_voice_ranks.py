@@ -18,11 +18,11 @@ import discord
 from cryptography.fernet import Fernet
 
 from bot.cogs.voice_ranks import (
-    ANNOUNCE_CHANNEL_ID, OPS_CATEGORY_ID, PRIVACY_NOTE, VoiceRanks, leaderboard_text, rank_text,
+    ANNOUNCE_CHANNEL_ID, OPS_CATEGORY_ID, PRIVACY_NOTE, VoiceRanks, ladder_text, leaderboard_text, rank_text,
 )
 from bot.db.database import Database
 from bot.uex.voice_ranks import (
-    OP_GRACE_MINUTES, OpSession, counted_members, op_attendees, op_step, progress, rank_index, season_name,
+    OP_GRACE_MINUTES, OpSession, counted_members, hours, op_attendees, op_step, progress, rank_index, season_name,
     season_start, week_start,
 )
 
@@ -237,25 +237,27 @@ def _op_minutes(cog, guild, start, count, people):
     return run()
 
 
-def test_an_op_is_counted_for_who_attended_and_a_fifth_op_earns_operator(tmp_path):
+def test_an_op_is_counted_for_who_attended_and_five_hours_at_ops_earns_operator(tmp_path):
     async def run():
         guild = FakeGuild()
         crew = [FakeMember(i) for i in (1, 2, 3)]
         cog, db, posts = await _make(tmp_path, guild)
-        await cog.count_minute(T0)  # creates nobody's row; seed person 1 at 4 ops
-        _sql(tmp_path, "INSERT INTO voice_members (guild_id, user_id, ops, op_rank_index) VALUES (?, 1, 4, -1)",
-             (GUILD_ID,))
+        await cog.count_minute(T0)  # creates nobody's row; seed person 1 at 4 ops, 4h 40m at them
+        _sql(tmp_path, "INSERT INTO voice_members (guild_id, user_id, ops, op_rank_index, op_minutes) "
+             "VALUES (?, 1, 4, -1, 280)", (GUILD_ID,))
         await _op_minutes(cog, guild, T0, 31, crew)
         await _op_minutes(cog, guild, T0 + timedelta(minutes=31), OP_GRACE_MINUTES, crew[:1])
-        members = {r["user_id"]: r["ops"] for r in await db.get_voice_members(GUILD_ID)}
+        members = {r["user_id"]: (r["ops"], r["op_minutes"]) for r in await db.get_voice_members(GUILD_ID)}
         ops = _sql(tmp_path, "SELECT minutes FROM voice_ops")
         attended = _sql(tmp_path, "SELECT user_id FROM voice_op_attendance ORDER BY user_id")
         return members, ops, attended, posts, [r.name for r in crew[0].roles], await db.load_op_session(GUILD_ID)
 
     members, ops, attended, posts, roles, saved = asyncio.run(run())
     assert ops == [(31,)] and attended == [(1,), (2,), (3,)]
-    assert (members[1], members[2], members[3]) == (5, 1, 1)
-    assert [p[0] for p in posts if p[0].startswith("🎯")] == ["🎯 <@1> has earned **Operator**: 5 ops attended."]
+    assert [members[i][0] for i in (1, 2, 3)] == [5, 1, 1]
+    assert [members[i][1] for i in (2, 3)] == [31, 31] and members[1][1] >= 311, "every minute of the op"
+    rank_ups = [p[0] for p in posts if p[0].startswith("🎯")]
+    assert rank_ups == [f"🎯 <@1> has earned **Operator**: {hours(members[1][1])} at ops."]
     assert sum("**Cadet**" in p[0] for p in posts) == 3, "31 minutes at double XP is 62: Cadet too"
     assert sorted(roles) == ["Cadet", "Operator"], "one role from each ladder"
     assert saved is None
@@ -301,12 +303,12 @@ def test_the_role_check_puts_wrong_roles_right(tmp_path):
 
 def test_rank_text():
     assert rank_text("Nova", None, 0) == f"🎖️ **Nova** has no voice time yet.\n{PRIVACY_NOTE}"
-    text = rank_text("Nova", {"xp": 600, "minutes": 480, "ops": 7}, 95)
+    text = rank_text("Nova", {"xp": 600, "minutes": 480, "ops": 7, "op_minutes": 720}, 95)
     assert text.splitlines()[:4] == [
         "🎖️ **Nova** · **Crewman**",
         "`▰▰▰▰▰▱▱▱▱▱` 300 XP to **Specialist**",
         "600 XP · 8h 0m in voice · this week 1h 35m",
-        "🎯 7 ops attended · **Operator** (8 more to Veteran Operator)",
+        "🎯 12h 0m at ops · 7 ops attended · **Operator** (3h 0m more to Veteran Operator)",
     ]
     assert "never audio" in text
 
@@ -337,12 +339,13 @@ def test_the_weekly_board_counts_only_this_week(tmp_path):
 
 
 def test_a_rank_already_announced_is_never_announced_again(tmp_path):
-    """Each op after the fifth leaves you an Operator: only the fifth announces it."""
+    """Each op after five hours leaves you an Operator: only the one that got you there announces it."""
     async def run():
         guild = FakeGuild()
         crew = [FakeMember(i) for i in (1, 2, 3)]
         cog, db, posts = await _make(tmp_path, guild)
-        _sql(tmp_path, "INSERT INTO voice_members (guild_id, user_id, ops) VALUES (?, 1, 4)", (GUILD_ID,))
+        _sql(tmp_path, "INSERT INTO voice_members (guild_id, user_id, ops, op_minutes) VALUES (?, 1, 4, 280)",
+             (GUILD_ID,))
         for op in range(2):
             start = T0 + timedelta(hours=op)
             await _op_minutes(cog, guild, start, 30, crew)
@@ -351,7 +354,7 @@ def test_a_rank_already_announced_is_never_announced_again(tmp_path):
         return [p[0] for p in posts if p[0].startswith("🎯")], claims
 
     op_posts, claims = asyncio.run(run())
-    assert op_posts == ["🎯 <@1> has earned **Operator**: 5 ops attended."]
+    assert len(op_posts) == 1 and op_posts[0].startswith("🎯 <@1> has earned **Operator**: 5h ")
     assert claims == [False, False, True, False], "person 2 already announced Cadet (index 0)"
 
 
@@ -453,27 +456,28 @@ def test_an_event_ops_attendees_get_an_op_once_it_is_over_wherever_it_was_held(t
         cog, db, posts = await _make(tmp_path, guild)
         for user_id in (1, 2, 3):
             guild.members[user_id] = FakeMember(user_id)
-        _sql(tmp_path, "INSERT INTO voice_members (guild_id, user_id, ops, op_rank_index) VALUES (?, 1, 4, -1)",
-             (GUILD_ID,))
+        _sql(tmp_path, "INSERT INTO voice_members (guild_id, user_id, ops, op_rank_index, op_minutes) "
+             "VALUES (?, 1, 4, -1, 280)", (GUILD_ID,))
         start = T0 - timedelta(hours=2)
         running = await _card(db, start, state="started", attendance=[(1, 40), (2, 35), (3, 20)])
         await cog.credit_event_ops(guild, T0)
-        during = {r["user_id"]: r["ops"] for r in await db.get_voice_members(GUILD_ID)}
+        during = {r["user_id"]: (r["ops"], r["op_minutes"]) for r in await db.get_voice_members(GUILD_ID)}
         await db.set_event_card_state(running, "ended", only_from=("open", "started"))
         await cog.credit_event_ops(guild, T0 + timedelta(minutes=1))
         await cog.credit_event_ops(guild, T0 + timedelta(minutes=2))  # once only
-        after = {r["user_id"]: r["ops"] for r in await db.get_voice_members(GUILD_ID)}
+        after = {r["user_id"]: (r["ops"], r["op_minutes"]) for r in await db.get_voice_members(GUILD_ID)}
         await _card(db, start - timedelta(days=1), state="cancelled", attendance=[(2, 90)])
         await _card(db, start - timedelta(days=2), state="started", attendance=[(2, 90)])  # left Started: 6 hours
         await cog.credit_event_ops(guild, T0 + timedelta(minutes=3))
-        later = {r["user_id"]: r["ops"] for r in await db.get_voice_members(GUILD_ID)}
+        later = {r["user_id"]: (r["ops"], r["op_minutes"]) for r in await db.get_voice_members(GUILD_ID)}
         return during, after, later, [p[0] for p in posts if p[0].startswith("🎯")]
 
     during, after, later, rank_ups = asyncio.run(run())
-    assert during == {1: 4}, "nothing while it's running"
-    assert after == {1: 5, 2: 1}, "30+ minutes attended; 20 isn't"
-    assert later == {1: 5, 2: 2}, "a cancelled op never counts; one left Started counts once its hours are up"
-    assert rank_ups == ["🎯 <@1> has earned **Operator**: 5 ops attended."]
+    assert during == {1: (4, 280)}, "nothing while it's running"
+    assert after == {1: (5, 320), 2: (1, 35), 3: (0, 20)}, "every minute counts; 30+ is also an op attended"
+    assert later == {1: (5, 320), 2: (2, 125), 3: (0, 20)}, (
+        "a cancelled op never counts; one left Started counts once its hours are up")
+    assert rank_ups == ["🎯 <@1> has earned **Operator**: 5h 20m at ops."]
 
 
 def test_an_op_in_ops_that_is_also_an_event_op_counts_once(tmp_path):
@@ -486,6 +490,45 @@ def test_an_op_in_ops_that_is_also_an_event_op_counts_once(tmp_path):
         await _op_minutes(cog, guild, T0 + timedelta(minutes=31), OP_GRACE_MINUTES, crew[:1])
         await db.set_event_card_state(card, "ended", only_from=("open", "started"))
         await cog.credit_event_ops(guild, T0 + timedelta(minutes=40))
-        return {r["user_id"]: r["ops"] for r in await db.get_voice_members(GUILD_ID) if r["ops"]}
+        return {r["user_id"]: (r["ops"], r["op_minutes"]) for r in await db.get_voice_members(GUILD_ID) if r["ops"]}
 
-    assert asyncio.run(run()) == {1: 1, 2: 1, 3: 1, 4: 1}, "4 was only in the event's channel"
+    got = asyncio.run(run())
+    assert {uid: ops for uid, (ops, _) in got.items()} == {1: 1, 2: 1, 3: 1, 4: 1}, "4 was only in the event's channel"
+    assert (got[2][1], got[3][1], got[4][1]) == (36, 31, 36), (
+        "the same op's time once: the Ops session's 31 minutes, topped up to the card's 36")
+
+
+def test_op_time_already_credited_is_filled_in_at_startup_and_a_rank_it_earns_is_announced(tmp_path):
+    async def run():
+        guild = FakeGuild()
+        guild.members[1] = FakeMember(1)
+        cog, db, posts = await _make(tmp_path, guild)
+        card = await _card(db, T0, state="ended", attendance=[(1, 320), (2, 20)])
+        # credited before op time existed: only the 30+ minute attendee, as an op
+        _sql(tmp_path, "INSERT INTO voice_ops (id, guild_id, started_at, ended_at, minutes, card_id) "
+             "VALUES (1, ?, '2026-10-26 18:00:00', '2026-10-27 00:00:00', 320, ?)", (GUILD_ID, card))
+        _sql(tmp_path, "INSERT INTO voice_op_attendance (op_id, user_id, minutes) VALUES (1, 1, 320)")
+        _sql(tmp_path, "INSERT INTO voice_members (guild_id, user_id, ops) VALUES (?, 1, 1)", (GUILD_ID,))
+        _sql(tmp_path, "UPDATE event_cards SET ops_credited = 1 WHERE card_id = ?", (card,))
+        await db.init()  # the next start-up
+        members = {r["user_id"]: (r["ops"], r["op_minutes"]) for r in await db.get_voice_members(GUILD_ID)}
+        await VoiceRanks.reconcile.coro(cog)
+        await VoiceRanks.reconcile.coro(cog)
+        return members, [p[0] for p in posts if p[0].startswith("🎯")], [r.name for r in guild.members[1].roles]
+
+    members, rank_ups, roles = asyncio.run(run())
+    assert members == {1: (1, 320), 2: (0, 20)}, "the 20 minutes the 30-minute rule left out count as op time"
+    assert rank_ups == ["🎯 <@1> has earned **Operator**: 5h 20m at ops."], "announced once"
+    assert roles == ["Operator"]
+
+
+def test_ranks_lists_both_ladders_and_marks_where_you_are():
+    text = ladder_text({"xp": 520, "op_minutes": 650})
+    lines = text.splitlines()
+    assert lines[1:4] == ["✅ Cadet · 60 XP", "✅ Crewman · 300 XP", "➡️ **Specialist** · 900 XP · 380 XP to go"]
+    assert "✅ Operator · 5h" in lines and "➡️ **Veteran Operator** · 15h · 4h 10m to go" in lines
+    assert "▫️ Wing Commander · 100h" in lines
+    fresh = ladder_text(None).splitlines()
+    assert fresh[1] == "➡️ **Cadet** · 60 XP · 60 XP to go" and "➡️ **Operator** · 5h · 5h 0m to go" in fresh
+    top = ladder_text({"xp": 10**7, "op_minutes": 10**7})
+    assert "➡️" not in top and len(top) < 2000

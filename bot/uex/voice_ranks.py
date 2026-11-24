@@ -10,10 +10,12 @@ The owner's decisions:
 - Ranks are lifetime and never reset; the leaderboards are weekly (from Monday) and seasonal
   (calendar quarters). The ladder: Cadet 1h, Crewman 5h, Specialist 15h, Petty Officer 35h,
   Officer 75h, Lieutenant 150h, Commander 300h, Captain 500h, Admiral 1,000h of ordinary voice.
-- A second ladder for ops attended: an op is 3+ people in the Ops channels together for 30+
-  minutes, and you attended if you were there for at least half of it - or an event card's op,
-  wherever it's held: 30+ minutes in its voice channel or Ops while it runs (as /server-stats
-  counts attendance), credited when it's over. One op is never counted twice for anyone.
+- A second ladder for ops, by time at them (the owner, 2026-11-23: "voice time during an op should
+  count toward op xp"): every minute in an op's voice channel or Ops while it runs is a minute of
+  op time, credited when the op is over - Operator 5h, Veteran Operator 15h, Op Specialist 40h,
+  Wing Commander 100h. An op is an event card's op wherever it's held, or 3+ people in the Ops
+  channels together for 30+ minutes. Ops attended (30+ minutes at an event op, or half of an Ops
+  one) are still counted and shown. One op's time is never counted twice for anyone.
 - Arcane's levels aren't carried over: everyone starts from zero.
 """
 from __future__ import annotations
@@ -37,11 +39,11 @@ RANKS: tuple[tuple[str, int], ...] = (
     ("Admiral", 1000 * 60),
 )
 
-OP_RANKS: tuple[tuple[str, int], ...] = (
-    ("Operator", 5),
-    ("Veteran Operator", 15),
-    ("Op Specialist", 40),
-    ("Wing Commander", 100),
+OP_RANKS: tuple[tuple[str, int], ...] = (  # minutes of op time
+    ("Operator", 5 * 60),
+    ("Veteran Operator", 15 * 60),
+    ("Op Specialist", 40 * 60),
+    ("Wing Commander", 100 * 60),
 )
 
 OP_MIN_PEOPLE = 3
@@ -127,8 +129,8 @@ def promotion_text(mention: str, rank: str, xp: int) -> str:
     return f"🎖️ {mention} has been promoted to **{rank}**! ({xp:,} XP)"
 
 
-def op_promotion_text(mention: str, rank: str, ops: int) -> str:
-    return f"🎯 {mention} has earned **{rank}**: {ops} ops attended."
+def op_promotion_text(mention: str, rank: str, op_minutes: int) -> str:
+    return f"🎯 {mention} has earned **{rank}**: {hours(op_minutes)} at ops."
 
 
 @dataclass

@@ -126,18 +126,22 @@ class VoiceRanks(commands.Cog):
         for card in await self.bot.db.event_cards_to_credit(guild.id, stamp):
             if event_running(card["state"], card["starts_at"], stamp):
                 continue
-            attendees = await self.bot.db.event_attendees(card["card_id"], ATTENDED_MINUTES)
+            present = await self.bot.db.event_attendees(card["card_id"], 1)
+            attendees = {uid: m for uid, m in present.items() if m >= ATTENDED_MINUTES}
             start = datetime.fromtimestamp(card["starts_at"], timezone.utc)
             end = min(now, start + timedelta(hours=EVENT_STARTED_HOURS))  # credited late after a restart
             counted = await self.bot.db.record_op(
-                guild.id, start.strftime(_TIME), end.strftime(_TIME), max(attendees.values(), default=0),
-                attendees, card_id=card["card_id"])
-            if attendees:
-                logger.info("Event op %s (%s) over: %d attended, %d counted", card["card_id"], card["name"],
-                            len(attendees), len(counted))
-            for user_id, ops in counted:
-                if rank_index(ops, OP_RANKS) >= 0:
-                    await self._promote(guild, user_id, ops, ops_ladder=True)
+                guild.id, start.strftime(_TIME), end.strftime(_TIME), max(present.values(), default=0),
+                attendees, card_id=card["card_id"], present=present)
+            if present:
+                logger.info("Event op %s (%s) over: %d there, %d attended, %d credited", card["card_id"],
+                            card["name"], len(present), len(attendees), len(counted))
+            await self._op_rank_ups(guild, counted)
+
+    async def _op_rank_ups(self, guild: discord.Guild, counted: list[tuple[int, int]]) -> None:
+        for user_id, op_minutes in counted:
+            if rank_index(op_minutes, OP_RANKS) >= 0:
+                await self._promote(guild, user_id, op_minutes, ops_ladder=True)
 
     async def _step_op(self, guild: discord.Guild, people: set[int], now: datetime) -> None:
         if not self._session_loaded:
@@ -164,11 +168,9 @@ class VoiceRanks(commands.Cog):
             return
         counted = await self.bot.db.record_op(
             guild.id, session.started_at.strftime(_TIME), ended_at.strftime(_TIME),
-            session.minutes, {uid: session.present[uid] for uid in attendees})
+            session.minutes, {uid: session.present[uid] for uid in attendees}, present=dict(session.present))
         logger.info("Op over: %d minutes, %d attended", session.minutes, len(attendees))
-        for user_id, ops in counted:
-            if rank_index(ops, OP_RANKS) >= 0:
-                await self._promote(guild, user_id, ops, ops_ladder=True)
+        await self._op_rank_ups(guild, counted)
 
     # -- rank-ups and roles ---------------------------------------------------
 
@@ -234,7 +236,11 @@ class VoiceRanks(commands.Cog):
                 member = guild.get_member(row["user_id"])
                 if member is not None:
                     await self._set_rank_role(guild, member, RANKS, rank_index(row["xp"]))
-                    await self._set_rank_role(guild, member, OP_RANKS, rank_index(row["ops"], OP_RANKS))
+                    op_rank = rank_index(row["op_minutes"], OP_RANKS)
+                    if op_rank > row["op_rank_index"]:  # earned and never announced (op time counted later)
+                        await self._promote(guild, row["user_id"], row["op_minutes"], ops_ladder=True)
+                    else:
+                        await self._set_rank_role(guild, member, OP_RANKS, op_rank)
         except Exception:
             logger.exception("Voice rank role check failed")
 
@@ -244,7 +250,7 @@ class VoiceRanks(commands.Cog):
 
     # -- commands -------------------------------------------------------------
 
-    @app_commands.command(name="rank", description="Your voice rank, or another member's: time in voice and ops attended.")
+    @app_commands.command(name="rank", description="Your voice rank, or another member's: time in voice and at ops.")
     @app_commands.describe(member="Whose rank to show (yours if left empty)")
     async def rank(self, interaction: discord.Interaction, member: discord.Member | None = None) -> None:
         member = member or interaction.user
@@ -256,6 +262,13 @@ class VoiceRanks(commands.Cog):
             rank_text(_name(member), row, next((r["minutes"] for r in week if r["user_id"] == member.id), 0)),
             allowed_mentions=discord.AllowedMentions.none())
 
+    @app_commands.command(name="ranks", description="Every voice rank and Ops rank, what each takes, and where you are.")
+    async def ranks(self, interaction: discord.Interaction) -> None:
+        guild = self._guild()
+        row = await self.bot.db.get_voice_member(guild.id, interaction.user.id) if guild else None
+        await interaction.response.send_message(ladder_text(row), ephemeral=True,
+                                                allowed_mentions=discord.AllowedMentions.none())
+
     @app_commands.command(name="rank-leaderboard",
                           description="The most voice XP (time with others, double in Ops): this week, this season or all time.")
     @app_commands.describe(period="Which standings to show")
@@ -263,7 +276,7 @@ class VoiceRanks(commands.Cog):
         app_commands.Choice(name="This week", value="week"),
         app_commands.Choice(name="This season", value="season"),
         app_commands.Choice(name="All time", value="all"),
-        app_commands.Choice(name="Ops attended", value="ops"),
+        app_commands.Choice(name="Time at ops", value="ops"),
     ])
     async def rank_leaderboard(self, interaction: discord.Interaction,
                                period: app_commands.Choice[str] | None = None) -> None:
@@ -274,32 +287,62 @@ class VoiceRanks(commands.Cog):
         key = period.value if period else "week"
         today = datetime.now(timezone.utc).date()
         if key == "ops":
-            rows = sorted((r for r in await self.bot.db.get_voice_members(guild.id) if r["ops"] > 0),
-                          key=lambda r: (-r["ops"], r["user_id"]))
+            rows = sorted((r for r in await self.bot.db.get_voice_members(guild.id) if r["op_minutes"] > 0),
+                          key=lambda r: (-r["op_minutes"], -r["ops"], r["user_id"]))
         else:
             since = {"week": week_start(today), "season": season_start(today), "all": None}[key]
             rows = await self.bot.db.voice_totals_since(guild.id, since.isoformat() if since else None)
         title = {"week": f"This week (since {week_start(today):%a %d %b})", "season": f"Season {season_name(today)}",
-                 "all": "All time", "ops": "Ops attended (all time)"}[key]
+                 "all": "All time", "ops": "Time at ops (all time)"}[key]
         await interaction.response.send_message(
             leaderboard_text(title, rows, key, guild.get_member, interaction.user.id),
             allowed_mentions=discord.AllowedMentions.none())
 
 
+def _whole_hours(minutes: int) -> str:
+    return f"{minutes // 60:,}h"
+
+
+def _ladder_lines(ladder: tuple[tuple[str, int], ...], value: int, need, left) -> list[str]:
+    """One line a rank: ✅ earned, ➡️ the next (with what's left), ▫️ the rest."""
+    current = rank_index(value, ladder)
+    lines = []
+    for index, (name, threshold) in enumerate(ladder):
+        if index <= current:
+            lines.append(f"✅ {name} · {need(threshold)}")
+        elif index == current + 1:
+            lines.append(f"➡️ **{name}** · {need(threshold)} · {left(threshold - value)} to go")
+        else:
+            lines.append(f"▫️ {name} · {need(threshold)}")
+    return lines
+
+
+def ladder_text(row: dict | None) -> str:
+    """/ranks: both ladders, what each rank takes, and where this member is on them."""
+    xp = row["xp"] if row else 0
+    op_minutes = row["op_minutes"] if row else 0
+    lines = ["**🎖️ Voice ranks** · XP: 1 a minute in voice with others, 2 in Ops"]
+    lines += _ladder_lines(RANKS, xp, lambda v: f"{v:,} XP", lambda v: f"{v:,} XP")
+    lines += ["", "**🎯 Ops ranks** · every minute at an op, in its voice channel or Ops"]
+    lines += _ladder_lines(OP_RANKS, op_minutes, _whole_hours, hours)
+    lines.append("-# `/rank` shows your progress, `/rank-leaderboard` the standings.")
+    return "\n".join(lines)
+
+
 def rank_text(name: str, row: dict | None, week_minutes: int) -> str:
-    if row is None or (row["xp"] <= 0 and row["ops"] <= 0):
+    if row is None or (row["xp"] <= 0 and row["ops"] <= 0 and row["op_minutes"] <= 0):
         return f"🎖️ **{name}** has no voice time yet.\n{PRIVACY_NOTE}"
     main = progress(row["xp"])
     lines = [f"🎖️ **{name}** · **{main.rank or 'Unranked'}**"]
     if main.next_rank:
         lines.append(f"`{bar(main.fraction)}` {main.needed:,} XP to **{main.next_rank}**")
     lines.append(f"{row['xp']:,} XP · {hours(row['minutes'])} in voice · this week {hours(week_minutes)}")
-    ops = progress(row["ops"], OP_RANKS)
-    op_line = f"🎯 {row['ops']:,} op{'s' if row['ops'] != 1 else ''} attended"
+    ops = progress(row["op_minutes"], OP_RANKS)
+    op_line = f"🎯 {hours(row['op_minutes'])} at ops · {row['ops']:,} op{'s' if row['ops'] != 1 else ''} attended"
     if ops.rank:
         op_line += f" · **{ops.rank}**"
     if ops.next_rank:
-        op_line += f" ({ops.needed} more to {ops.next_rank})"
+        op_line += f" ({hours(ops.needed)} more to {ops.next_rank})"
     lines += [op_line, PRIVACY_NOTE]
     return "\n".join(lines)
 
@@ -313,7 +356,7 @@ def leaderboard_text(title: str, rows: list[dict], key: str, get_member, viewer_
         lines.append("Nobody yet - hop in voice with someone.")
 
     def entry(place: int, row: dict, member) -> str:
-        figure = (f"{row['ops']:,} op{'s' if row['ops'] != 1 else ''}" if key == "ops"
+        figure = (f"{hours(row['op_minutes'])} · {row['ops']:,} op{'s' if row['ops'] != 1 else ''}" if key == "ops"
                   else f"{row['xp']:,} XP · {hours(row['minutes'])}")
         return f"{place}. {_name(member)} · {figure}"
 
