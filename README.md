@@ -287,7 +287,7 @@ bot/
     diagnostics.py        /test-dm, /command-usage
     anniversaries.py      server-anniversary DMs and posts + loop, /anniversary-preview
     welcome.py            the welcome DM new members get + retry loop, /welcome-preview
-    voice_ranks.py        voice-activity ranks + 1-minute loop, /rank, /rank-leaderboard
+    voice_ranks.py        voice-activity ranks + 1-minute loop, /rank, /ranks, /rank-leaderboard
     welcome_back.py       a DM to members back after 30+ days away (activity times only)
     role_picker.py        self-serve role panels (buttons + a dropdown), /rolesetup, /rolepanel post
     event_cards.py        sign-up cards in #events for Discord's scheduled events, /event-roles

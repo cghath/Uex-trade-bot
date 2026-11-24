@@ -524,6 +524,8 @@ date - no open item, nothing to record here.
       the closest ships when a misspelling is as close to several - `ships_matching`)
 - [ ] An op whose Discord event is cancelled after its start is ended, not called off
       (`EventCards.call_off`). See PROJECT_CONTEXT.md entry 166
+- [ ] Ops ranks by time at ops (`op_minutes`, `record_op(present=)`, OP_RANKS in minutes, reconcile
+      announces). See PROJECT_CONTEXT.md entry 167
 - [ ] PR #158 - Fixes from the 2026-11-04 audit: system messages aren't posts (`INTRO_TYPES` in
       analytics and welcome-back), the event roles parser reads a trailing count first. Worth
       porting where aiv2 has welcome-back or event cards. See PROJECT_CONTEXT.md entry 159

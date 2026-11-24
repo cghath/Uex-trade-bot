@@ -5740,6 +5740,30 @@ they're in sync).
      - **The fix for card 5:** a statement in `_run_migrations` turns a cancelled card whose
        `over_at` >= `starts_at` into ended; `credit_event_ops` then credits it on the next minute.
        Matched only card 5 on live data; nothing matches afterwards, so it's harmless each start.
+167. **Ops ranks by time at ops** (2026-11-23; the owner: "voice time during an op should also
+     count toward op xp", then picked op XP from minutes). The Ops ladder counted ops attended
+     (5/15/40/100), so a 3-hour op counted the same as 30 minutes.
+     - **The ladder:** `OP_RANKS` is minutes now - Operator 5h, Veteran Operator 15h, Op Specialist
+       40h, Wing Commander 100h - of `voice_members.op_minutes`. Ops attended (`ops`) are still
+       counted and shown.
+     - **Op time:** `record_op(present=...)` gives everyone present their minutes (an event card:
+       every `event_attendance` minute, its channel or Ops while running; an Ops session: each
+       person's minutes in it, for a session of 30+), and each 30+ attendee an op. An overlapping
+       op already logged (an Ops session during an event op) counts only the minutes past what was
+       credited there, and never a second op: `voice_op_attendance.counted` says which rows were
+       an op.
+     - **Backfill, each start (idempotent):** credited cards' attendees under 30 minutes get rows
+       (`counted` 0), and `op_minutes` is set to the sum of a member's `voice_op_attendance`
+       minutes - which is what `record_op` keeps adding, so the two always agree.
+     - **Rank-ups:** `reconcile` announces an Ops rank earned but never announced (`_promote`'s
+       claim, once) instead of setting the role quietly. Dry run on a copy of the live database:
+       48 members with op time; on the first role check 10 announced - 1 Veteran Operator (18h)
+       and 9 new Operators (5h 10m to 10h 51m); the two existing Operators had 14h and 18h.
+     - `/rank`: "12h 0m at ops · 7 ops attended · **Operator** (3h 0m more to Veteran
+       Operator)"; the leaderboard's "Time at ops" board.
+     - **`/ranks`** (the owner's ask, same PR): `ladder_text` lists both ladders from `RANKS` and
+       `OP_RANKS` (✅ earned, ➡️ next with what's left, ▫️ the rest), ephemeral; in /intro beside
+       /rank.
 
 ## Where to look for what
 

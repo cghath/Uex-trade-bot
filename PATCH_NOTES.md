@@ -1,7 +1,18 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.93.
+the oldest entry below); the next new entry is 2.94.
+
+---
+
+## 2.93 - 2026-11-23 - Ops ranks by time at ops
+
+**Changed**
+- Ops ranks now go by how much time you spend at ops, not just how many you show up to: every minute in an op's voice channel (or Ops) while it's running counts. Operator takes 5 hours at ops, Veteran Operator 15, Op Specialist 40 and Wing Commander 100. Time from ops you've already flown counts, so some of you rank up straight away.
+- `/rank` shows your time at ops as well as how many you've attended, and the leaderboard's ops board ranks by time at ops.
+
+**New**
+- `/ranks` lists every voice rank and Ops rank, what each one takes, and where you are on both.
 
 ---
 

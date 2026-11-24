@@ -824,6 +824,7 @@ CREATE TABLE IF NOT EXISTS voice_members (
     rank_index INTEGER NOT NULL DEFAULT -1,
     ops INTEGER NOT NULL DEFAULT 0,
     op_rank_index INTEGER NOT NULL DEFAULT -1,
+    op_minutes INTEGER NOT NULL DEFAULT 0,   -- time at ops: the Ops ladder (entry 167)
     PRIMARY KEY (guild_id, user_id)
 );
 
@@ -860,7 +861,8 @@ CREATE TABLE IF NOT EXISTS voice_ops (
 CREATE TABLE IF NOT EXISTS voice_op_attendance (
     op_id INTEGER NOT NULL,
     user_id INTEGER NOT NULL,
-    minutes INTEGER NOT NULL,
+    minutes INTEGER NOT NULL,        -- op time credited for this op
+    counted INTEGER NOT NULL DEFAULT 1,  -- also counted as an op attended
     PRIMARY KEY (op_id, user_id)
 );
 
@@ -1729,6 +1731,19 @@ class Database:
             # not called off: its attendance counts for Ops ranks. Nothing matches once fixed.
             """UPDATE event_cards SET state = 'ended'
                WHERE state = 'cancelled' AND over_at IS NOT NULL AND over_at >= starts_at""",
+            # Ops ranks by time at ops (entry 167). Ops already credited get everyone's minutes,
+            # not only the 30+ minute attendees', and op_minutes is always the sum of a member's
+            # op time - so each start-up agrees with what record_op adds.
+            "ALTER TABLE voice_members ADD COLUMN op_minutes INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE voice_op_attendance ADD COLUMN counted INTEGER NOT NULL DEFAULT 1",
+            """INSERT OR IGNORE INTO voice_op_attendance (op_id, user_id, minutes, counted)
+               SELECT o.id, e.user_id, e.minutes, 0 FROM voice_ops o JOIN event_attendance e ON e.card_id = o.card_id
+               WHERE e.minutes > 0""",
+            """INSERT OR IGNORE INTO voice_members (guild_id, user_id)
+               SELECT DISTINCT o.guild_id, a.user_id FROM voice_op_attendance a JOIN voice_ops o ON o.id = a.op_id""",
+            """UPDATE voice_members SET op_minutes = COALESCE((
+                   SELECT SUM(a.minutes) FROM voice_op_attendance a JOIN voice_ops o ON o.id = a.op_id
+                   WHERE o.guild_id = voice_members.guild_id AND a.user_id = voice_members.user_id), 0)""",
         ]
         for statement in migrations:
             try:
@@ -5349,11 +5364,16 @@ class Database:
             await db.commit()
 
     async def record_op(self, guild_id: int, started_at: str, ended_at: str, minutes: int,
-                        attendees: dict[int, int], *, card_id: int | None = None) -> list[tuple[int, int]]:
-        """Log an op that ended and count it for each attendee (user_id -> minutes there), in one
-        transaction with clearing the saved session - or, with `card_id`, with marking that event
-        card credited. Someone already counted for an op that overlaps this one isn't counted
-        again: an op in Ops is often an event card's op too. Returns (user_id, ops attended now)."""
+                        attendees: dict[int, int], *, card_id: int | None = None,
+                        present: dict[int, int] | None = None) -> list[tuple[int, int]]:
+        """Log an op that ended, in one transaction with clearing the saved session - or, with
+        `card_id`, with marking that event card credited. Everyone `present` (user_id -> minutes
+        there; default the attendees) gets those minutes of op time; each of `attendees` also
+        gets an op attended. An op that overlaps one already logged is often the same op (an op in
+        Ops is often an event card's op too): its time counts only past what they were credited
+        there, and it isn't counted as a second op. Returns (user_id, op minutes now) for everyone
+        credited anything."""
+        present = dict(attendees) if present is None else present
         counted = []
         async with self.connect() as db:
             await db.execute("BEGIN IMMEDIATE")
@@ -5364,24 +5384,31 @@ class Database:
                     await db.rollback()
                     return []
                 await db.execute("UPDATE event_cards SET ops_credited = 1 WHERE card_id = ?", (card_id,))
-            already = {row["user_id"] for row in await (await db.execute(
-                """SELECT a.user_id FROM voice_op_attendance a JOIN voice_ops o ON o.id = a.op_id
-                   WHERE o.guild_id = ? AND o.started_at < ? AND o.ended_at > ?""",
+            already = {row["user_id"]: (row["minutes"], row["counted"]) for row in await (await db.execute(
+                """SELECT a.user_id, SUM(a.minutes) AS minutes, MAX(a.counted) AS counted
+                   FROM voice_op_attendance a JOIN voice_ops o ON o.id = a.op_id
+                   WHERE o.guild_id = ? AND o.started_at < ? AND o.ended_at > ? GROUP BY a.user_id""",
                 (guild_id, ended_at, started_at))).fetchall()}
             cursor = await db.execute(
                 "INSERT INTO voice_ops (guild_id, started_at, ended_at, minutes, card_id) VALUES (?, ?, ?, ?, ?)",
                 (guild_id, started_at, ended_at, minutes, card_id))
-            for user_id, present in sorted(attendees.items()):
-                if user_id in already:
+            for user_id, there in sorted(present.items()):
+                had_minutes, had_op = already.get(user_id, (0, 0))
+                gained = max(0, there - had_minutes)
+                op = int(user_id in attendees and not had_op)
+                if not gained and not op:
                     continue
-                await db.execute("INSERT INTO voice_op_attendance (op_id, user_id, minutes) VALUES (?, ?, ?)",
-                                 (cursor.lastrowid, user_id, present))
                 await db.execute(
-                    """INSERT INTO voice_members (guild_id, user_id, ops) VALUES (?, ?, 1)
-                       ON CONFLICT(guild_id, user_id) DO UPDATE SET ops = ops + 1""", (guild_id, user_id))
+                    "INSERT INTO voice_op_attendance (op_id, user_id, minutes, counted) VALUES (?, ?, ?, ?)",
+                    (cursor.lastrowid, user_id, gained, op))
+                await db.execute(
+                    """INSERT INTO voice_members (guild_id, user_id, ops, op_minutes) VALUES (?, ?, ?, ?)
+                       ON CONFLICT(guild_id, user_id) DO UPDATE SET ops = ops + excluded.ops,
+                           op_minutes = op_minutes + excluded.op_minutes""", (guild_id, user_id, op, gained))
                 row = await (await db.execute(
-                    "SELECT ops FROM voice_members WHERE guild_id = ? AND user_id = ?", (guild_id, user_id))).fetchone()
-                counted.append((user_id, row["ops"]))
+                    "SELECT op_minutes FROM voice_members WHERE guild_id = ? AND user_id = ?",
+                    (guild_id, user_id))).fetchone()
+                counted.append((user_id, row["op_minutes"]))
             if card_id is None:
                 await db.execute("DELETE FROM voice_op_session WHERE guild_id = ?", (guild_id,))
             await db.commit()
