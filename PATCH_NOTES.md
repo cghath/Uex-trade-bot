@@ -1,7 +1,14 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.92.
+the oldest entry below); the next new entry is 2.93.
+
+---
+
+## 2.92 - 2026-11-23 - Every op you fly counts
+
+**Fixed**
+- An op whose Discord event is cancelled or deleted after it has started now counts as flown, so everyone who was there gets it toward their Ops rank, and nobody gets a "cancelled" ping for an op they just flew. Interdictions and boarding party's on Nov 15 now counts for the 17 people who were there for 30 minutes or more.
 
 ---
 

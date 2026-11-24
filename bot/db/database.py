@@ -1725,6 +1725,10 @@ class Database:
             # A tidy #events (entry 164): when a card's op was over, and when it was cleared away.
             "ALTER TABLE event_cards ADD COLUMN over_at INTEGER",
             "ALTER TABLE event_cards ADD COLUMN cleaned_at INTEGER",
+            # An op whose Discord event was cancelled after it had started (entry 166) was ended,
+            # not called off: its attendance counts for Ops ranks. Nothing matches once fixed.
+            """UPDATE event_cards SET state = 'ended'
+               WHERE state = 'cancelled' AND over_at IS NOT NULL AND over_at >= starts_at""",
         ]
         for statement in migrations:
             try:
