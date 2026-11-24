@@ -375,6 +375,39 @@ def test_a_cancelled_event_says_so_to_everyone_on_it(tmp_path):
     _run(tmp_path, body)
 
 
+def test_an_event_cancelled_or_deleted_after_its_start_was_an_op_that_happened(tmp_path, monkeypatch):
+    async def body(db):
+        deleted, cancelled = _event(42), _event(43, name="Interdictions")
+        world = World(db, [deleted, cancelled])
+        first, second = await _posted(world, deleted), await _posted(world, cancelled)
+        await db.save_event_signup(second["card_id"], 3, status=GOING, role=None, queued=1)
+        posts = len(world.channel.sent)
+        monkeypatch.setattr("bot.cogs.event_cards.time.time", lambda: START + 3 * 3600 + 41 * 60)  # after the op
+        await world.cog.on_scheduled_event_delete(deleted)
+        cancelled.status = discord.EventStatus.cancelled
+        await world.cog.sync(cancelled)
+        states = [(await db.get_event_card(c["card_id"]))["state"] for c in (first, second)]
+        assert states == [ENDED, ENDED], "the ops happened: ended, so their attendance counts"
+        assert len(world.channel.sent) == posts, "nobody is told an op they flew was cancelled"
+    _run(tmp_path, body)
+
+
+def test_a_card_cancelled_after_its_start_before_this_fix_is_put_right_at_startup(tmp_path):
+    async def go():
+        db = Database(tmp_path / "ev.sqlite3", Fernet(Fernet.generate_key()))
+        await db.init()
+        late = await db.create_event_card(guild_id=GUILD_ID, event_id=5, starts_at=START, channel_id=1, repeats=None,
+                                          name="Interdictions", voice_channel_id=55)
+        early = await db.create_event_card(guild_id=GUILD_ID, event_id=6, starts_at=START, channel_id=1, repeats=None,
+                                           name="Called off", voice_channel_id=55)
+        await db.set_event_card_state(late, CANCELLED, only_from=(OPEN,), at=START + 13256)
+        await db.set_event_card_state(early, CANCELLED, only_from=(OPEN,), at=START - 3600)
+        await db.init()  # the next start-up
+        return [(await db.get_event_card(c))["state"] for c in (late, early)]
+
+    assert asyncio.run(go()) == [ENDED, CANCELLED]
+
+
 # -- 4. members ------------------------------------------------------------------------------------
 
 def test_joining_a_full_role_waits_and_leaving_moves_the_line_up_with_a_dm(tmp_path):

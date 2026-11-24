@@ -710,6 +710,15 @@ class EventCards(commands.Cog):
     async def on_scheduled_event_delete(self, event: discord.ScheduledEvent) -> None:
         card = await self.bot.db.current_event_card(event.id)
         if card is not None:
+            await self.call_off(card)
+
+    async def call_off(self, card: dict) -> None:
+        """The Discord event was cancelled or deleted. Before its start, the op is called off and
+        the roster told; once its start has passed, the op happened (organizers cancel or delete the
+        event to clear it away afterwards), so it's ended quietly and its attendance still counts."""
+        if card["starts_at"] <= time.time():
+            await self.close(card, ENDED, announce=False)
+        else:
             await self.close(card, CANCELLED, announce=True)
 
     async def sync(self, event: discord.ScheduledEvent) -> None:
@@ -726,9 +735,12 @@ class EventCards(commands.Cog):
     async def _sync(self, event: discord.ScheduledEvent, channel) -> None:
         card = await self.bot.db.current_event_card(event.id)
         if event.status in (discord.EventStatus.cancelled, discord.EventStatus.completed):
-            if card is not None:
-                await self.close(card, CANCELLED if event.status == discord.EventStatus.cancelled else ENDED,
-                                 announce=event.status == discord.EventStatus.cancelled)
+            if card is None:
+                return
+            if event.status == discord.EventStatus.cancelled:
+                await self.call_off(card)
+            else:
+                await self.close(card, ENDED, announce=False)
             return
         now = time.time()
         if card is not None and card["starts_at"] <= now - CLOSE_AFTER:

@@ -5727,6 +5727,19 @@ they're in sync).
        typed yet) and names sharing the first letter first. `/where-to-buy-ship`'s own list
        (`ship_autocomplete_names`, bot/uex/ship_shops.py) falls back to the same close spellings,
        among the ships with a buy or rent row only.
+166. **An op cancelled after it started counts** (2026-11-23; the owner asked whether ops give XP).
+     Voice XP was right at every op since Nov 9 (no attendee with 0; Star Citizen 1 is 1 XP a
+     minute, Ops double; many hit the 5-hour cap). But Interdictions (card 5, Nov 15): nobody
+     pressed Start, and 3h41m after its start the Discord event was cancelled, not ended - so the
+     card was cancelled, its roster pinged "was cancelled", and its 17 attendees at 30+ minutes
+     got no Ops credit (`credit_event_ops` skips cancelled cards).
+     - **The rule:** `EventCards.call_off` - a cancelled or deleted Discord event (on delete, or
+       `_sync` seeing cancelled) before its start calls the op off and tells the roster, as before;
+       at or after its start it's ENDED quietly, so attendance counts (`close_missing` already
+       did this for an event gone while the bot was down).
+     - **The fix for card 5:** a statement in `_run_migrations` turns a cancelled card whose
+       `over_at` >= `starts_at` into ended; `credit_event_ops` then credits it on the next minute.
+       Matched only card 5 on live data; nothing matches afterwards, so it's harmless each start.
 
 ## Where to look for what
 
