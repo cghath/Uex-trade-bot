@@ -946,7 +946,8 @@ CREATE TABLE IF NOT EXISTS event_cards (
     reminded INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     over_at INTEGER,     -- when it was ended or cancelled (Unix seconds)
-    cleaned_at INTEGER   -- when its messages were cleared out of #events (entry 164)
+    cleaned_at INTEGER,  -- when its messages were cleared out of #events (entry 164)
+    xp_recapped INTEGER NOT NULL DEFAULT 0  -- its XP recap was posted (entry 168)
 );
 
 -- Every message the bot posted for a card in #events (the card, each repost of it, and its
@@ -1168,6 +1169,13 @@ CREATE TABLE IF NOT EXISTS event_attendance (
     card_id INTEGER NOT NULL,
     user_id INTEGER NOT NULL,
     minutes INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (card_id, user_id)
+);
+-- The voice XP each member earned in a running event's channels, for its recap (entry 168).
+CREATE TABLE IF NOT EXISTS event_xp (
+    card_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    xp INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (card_id, user_id)
 );
 CREATE TABLE IF NOT EXISTS event_interest (
@@ -1736,6 +1744,8 @@ class Database:
             # op time - so each start-up agrees with what record_op adds.
             "ALTER TABLE voice_members ADD COLUMN op_minutes INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE voice_op_attendance ADD COLUMN counted INTEGER NOT NULL DEFAULT 1",
+            # Each event's XP recap (entry 168), posted once.
+            "ALTER TABLE event_cards ADD COLUMN xp_recapped INTEGER NOT NULL DEFAULT 0",
             """INSERT OR IGNORE INTO voice_op_attendance (op_id, user_id, minutes, counted)
                SELECT o.id, e.user_id, e.minutes, 0 FROM voice_ops o JOIN event_attendance e ON e.card_id = o.card_id
                WHERE e.minutes > 0""",
@@ -5952,6 +5962,29 @@ class Database:
                    ON CONFLICT(card_id, user_id) DO UPDATE SET minutes = minutes + 1""",
                 [(card_id, uid) for uid in user_ids])
             await db.commit()
+
+    async def add_event_xp(self, card_id: int, earned: list[tuple[int, int]]) -> None:
+        """Add each (user_id, xp) earned this minute at an event to its recap's totals."""
+        async with self.connect() as db:
+            await db.executemany(
+                """INSERT INTO event_xp (card_id, user_id, xp) VALUES (?, ?, ?)
+                   ON CONFLICT(card_id, user_id) DO UPDATE SET xp = xp + excluded.xp""",
+                [(card_id, uid, xp) for uid, xp in earned])
+            await db.commit()
+
+    async def event_xp(self, card_id: int) -> dict[int, int]:
+        async with self.connect() as db:
+            rows = await (await db.execute("SELECT user_id, xp FROM event_xp WHERE card_id = ?",
+                                           (card_id,))).fetchall()
+        return {row["user_id"]: row["xp"] for row in rows}
+
+    async def claim_event_recap(self, card_id: int) -> bool:
+        """True once per card: the caller posts its XP recap."""
+        async with self.connect() as db:
+            cursor = await db.execute("UPDATE event_cards SET xp_recapped = 1 WHERE card_id = ? AND xp_recapped = 0",
+                                      (card_id,))
+            await db.commit()
+        return cursor.rowcount > 0
 
     async def record_event_interest(self, card_id: int, interested: int) -> None:
         async with self.connect() as db:

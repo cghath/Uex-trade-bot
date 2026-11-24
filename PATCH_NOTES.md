@@ -1,7 +1,14 @@
 # Patch Notes
 
 What changed for players, newest first. Each entry bumps the minor version by one (2.0 is
-the oldest entry below); the next new entry is 2.94.
+the oldest entry below); the next new entry is 2.95.
+
+---
+
+## 2.94 - 2026-11-23 - Event XP recaps
+
+**New**
+- When an event ends, the bot replies on its card in #events with everyone who was there, the voice XP each of you earned during it and your time at the op. Names only, no pings, and it's cleared away with the card a few hours later.
 
 ---
 

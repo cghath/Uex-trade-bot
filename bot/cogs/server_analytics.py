@@ -43,8 +43,8 @@ from bot.discord_ui import LAYOUT_TEXT_LIMIT, BotLayoutView
 from bot.uex.anniversaries import COMMUNITY_NAME, INACTIVE_DAYS
 from bot.uex.server_analytics import (
     MEMBER_REFERRAL, ATTENDED_MINUTES, AUDIT_LOG_DAYS, DAY_FORMAT, EASTERN, HOUR_FORMAT, PERIOD_DAYS, RETENTION_DAYS, TIME_FORMAT, UTC,
-    EventResult, InviteUse, ModAction, Movement, build_report, clean_label, event_running, invite_changes,
-    match_invite, ops_card,
+    EventResult, InviteUse, ModAction, Movement, build_report, clean_label, event_channels, event_running,
+    invite_changes, match_invite,
     Report, moderation_kind, previous_month, report_blocks, report_csv, source_of,
 )
 from bot.uex.join_cards import STAFF_CHANNEL_ID, join_card, leave_card, source_text
@@ -425,11 +425,9 @@ class ServerAnalytics(commands.Cog):
         if not cards:
             return
         channels = list(guild.voice_channels) + list(guild.stage_channels)
-        ops = {c.id for c in channels if c.category_id == OPS_CATEGORY_ID}
-        ops_for = ops_card([(c["card_id"], c["starts_at"]) for c in cards], stamp)  # one op holds Ops at a time
+        where_for = event_channels(cards, {c.id for c in channels if c.category_id == OPS_CATEGORY_ID}, stamp)
         for card in cards:
-            where = (ops if card["card_id"] == ops_for else set()) | (
-                {card["voice_channel_id"]} if card["voice_channel_id"] else set())
+            where = where_for[card["card_id"]]
             present = sorted({m.id for c in channels if c.id in where for m in c.members if counts(m)})
             if present:
                 await self.bot.db.credit_event_minute(card["card_id"], present)
